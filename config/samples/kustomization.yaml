@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- instance_v1alpha1_falco.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

@@ -7,4 +7,15 @@ layout:
 - go.kubebuilder.io/v4
 projectName: falco-operator
 repo: github.com/alacuku/falco-operator
+resources:
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: falco.org
+  group: instance
+  kind: Falco
+  path: github.com/alacuku/falco-operator/api/v1alpha1
+  plural: falcos
+  version: v1alpha1
 version: "3"
