@@ -1,4 +1,4 @@
-apiVersion: instance.falco.org/v1alpha1
+apiVersion: instance.falcosecurity.dev/v1alpha1
 kind: Falco
 metadata:
   labels:
