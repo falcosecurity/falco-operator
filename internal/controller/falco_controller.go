@@ -33,9 +33,9 @@ type FalcoReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=instance.falco.org,resources=falcos,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=instance.falco.org,resources=falcos/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=instance.falco.org,resources=falcos/finalizers,verbs=update
+// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
