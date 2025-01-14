@@ -17,19 +17,30 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
-// FalcoSpec defines the desired state of Falco.
+// FalcoSpec defines the desired state of Falco
 type FalcoSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Type specifies the type of Kubernetes resource to deploy Falco.
+	// Allowed values: "daemonset" or "deployment".
+	// +kubebuilder:validation:Enum=daemonset;deployment
+	Type string `json:"type"`
 
-	// Foo is an example field of Falco. Edit falco_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Replicas defines the number of replicas for the Deployment.
+	// Required only when 'type' is "deployment".
+	// Default is 1.
+	// +kubebuilder:validation:Minimum=1
+	// +optional
+	Replicas *int32 `json:"replicas,omitempty"`
+
+	// PodTemplate contains the pod template specification for the Falco instance.
+	// Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
+	// +optional
+	PodTemplate corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
 }
 
 // FalcoStatus defines the observed state of Falco.
