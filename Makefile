@@ -50,8 +50,12 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 	$(CONTROLLER_GEN) object:headerFile="hack/boilerplate.go.txt" paths="./..."
 
 .PHONY: fmt
-fmt: ## Run go fmt against code.
+fmt: gci addlicense ## Run go fmt against code.
+	go mod tidy
 	go fmt ./...
+	find . -type f -name '*.go' -a -exec $(GCI) write -s standard -s default -s "prefix(github.com/alacuku/falco-operator)" {} \;
+	find . -type f -name '*.go' -exec $(ADD_LICENSE) -l apache -s -c "(C) The Falco Authors" {} \;
+	find . -type f -name '*.go' -exec sed -i -E 's|// Copyright ([0-9]{4}) \(C\) The Falco Authors|// Copyright (C) \1 The Falco Authors|' {} +
 
 .PHONY: vet
 vet: ## Run go vet against code.
@@ -169,7 +173,9 @@ KUBECTL ?= kubectl
 KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
-GOLANGCI_LINT = $(LOCALBIN)/golangci-lint
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+GCI ?= $(LOCALBIN)/gci
+ADD_LICENSE ?= $(LOCALBIN)/addlicense
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.5.0
@@ -179,6 +185,8 @@ ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller
 #ENVTEST_K8S_VERSION is the version of Kubernetes to use for setting up ENVTEST binaries (i.e. 1.31)
 ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -F'[v.]' '{printf "1.%d", $$3}')
 GOLANGCI_LINT_VERSION ?= v1.62.2
+GCI_VERSION ?= v0.13.5
+ADD_LICENSE_VERSION ?= v1.1.1
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -208,6 +216,15 @@ golangci-lint: $(GOLANGCI_LINT) ## Download golangci-lint locally if necessary.
 $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 
+.PHONY: gci
+gci: $(GCI) ## Download gci locally if necessary.
+$(GCI): $(LOCALBIN)
+	$(call go-install-tool,$(GCI),github.com/daixiang0/gci,$(GCI_VERSION))
+
+.PHONY: addlicense
+addlicense: $(ADD_LICENSE) ## Download addlicense locally if necessary
+$(ADD_LICENSE): $(LOCALBIN)
+	$(call go-install-tool,$(ADD_LICENSE),github.com/google/addlicense,$(ADD_LICENSE_VERSION))
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed
