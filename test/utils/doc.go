@@ -14,4 +14,5 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
+// Package utils defines helper functions used to write tests.
+package utils
