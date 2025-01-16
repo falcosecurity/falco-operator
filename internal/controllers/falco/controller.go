@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package controller
+package falco
 
 import (
 	"context"
@@ -27,8 +27,8 @@ import (
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
 )
 
-// FalcoReconciler reconciles a Falco object.
-type FalcoReconciler struct {
+// Reconciler reconciles a Falco object.
+type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
@@ -46,7 +46,7 @@ type FalcoReconciler struct {
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.4/pkg/reconcile
-func (r *FalcoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	_ = log.FromContext(ctx)
 
 	// TODO(user): your logic here
@@ -55,7 +55,7 @@ func (r *FalcoReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *FalcoReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&instancev1alpha1.Falco{}).
 		Named("falco").

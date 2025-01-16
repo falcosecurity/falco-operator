@@ -35,7 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/controller"
+	"github.com/alacuku/falco-operator/internal/controllers/falco"
 )
 
 var (
@@ -197,7 +197,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.FalcoReconciler{
+	if err = (&falco.Reconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
