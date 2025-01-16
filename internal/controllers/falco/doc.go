@@ -14,5 +14,5 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
-package controller
+// Package falco defines falco's controllers logic.
+package falco
