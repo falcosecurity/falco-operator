@@ -41,7 +41,7 @@ spec:
             properties:
               podTemplate:
                 description: |-
-                  PodTemplate contains the pod template specification for the Falco instance.
+                  PodTemplateSpec contains the pod template specification for the Falco instance.
                   Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
                 properties:
                   metadata:
