@@ -50,7 +50,11 @@ var _ = Describe("Falco Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: instancev1alpha1.FalcoSpec{
+						Type:            "daemonset",
+						Replicas:        nil,
+						PodTemplateSpec: nil,
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
