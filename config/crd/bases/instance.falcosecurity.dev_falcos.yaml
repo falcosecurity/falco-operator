@@ -37,7 +37,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: FalcoSpec defines the desired state of Falco
+            description: FalcoSpec defines the desired state of Falco.
             properties:
               podTemplate:
                 description: |-
