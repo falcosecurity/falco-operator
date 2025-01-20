@@ -37,6 +37,17 @@ type FalcoSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
+	// Version specifies the version of Falco to deploy.
+	// - If specified, the operator will deploy the given version of Falco.
+	//   Example: "0.39.2".
+	// - If omitted, the operator will default to the latest upstream version of Falco
+	//   available at the time the operator was released.
+	// - The version string should match the format of Falco's official
+	//   tags (https://github.com/falcosecurity/falco/releases), typically
+	//   "major.minor.patch" (e.g., "0.39.2").
+	// +optional
+	Version string `json:"version,omitempty"`
+
 	// PodTemplateSpec contains the pod template specification for the Falco instance.
 	// Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
 	// +optional
