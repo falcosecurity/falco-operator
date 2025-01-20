@@ -8106,9 +8106,10 @@ spec:
                 minimum: 1
                 type: integer
               type:
+                default: daemonset
                 description: |-
                   Type specifies the type of Kubernetes resource to deploy Falco.
-                  Allowed values: "daemonset" or "deployment".
+                  Allowed values: "daemonset" or "deployment". Default value is daemonset.
                 enum:
                 - daemonset
                 - deployment
@@ -8124,8 +8125,6 @@ spec:
                     tags (https://github.com/falcosecurity/falco/releases), typically
                     "major.minor.patch" (e.g., "0.39.2").
                 type: string
-            required:
-            - type
             type: object
           status:
             description: FalcoStatus defines the observed state of Falco.
