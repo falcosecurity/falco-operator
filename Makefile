@@ -94,6 +94,9 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 lint-config: golangci-lint ## Verify golangci-lint linter configuration
 	$(GOLANGCI_LINT) config verify
 
+.PHONY: update-kube-static-scheme-parser
+update-kube-static-scheme-parser: ## Update the kube-static-structs parser
+	hack/update-kube-static-scheme-parser.sh
 ##@ Build
 
 .PHONY: build
