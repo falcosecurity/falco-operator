@@ -19,12 +19,18 @@ package falco
 import (
 	"context"
 
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
+)
+
+const (
+	finalizer = "falco.falcosecurity.dev/finalizer"
 )
 
 // Reconciler reconciles a Falco object.
@@ -39,17 +45,48 @@ type Reconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Falco object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.4/pkg/reconcile
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	var err error
+	logger := log.FromContext(ctx)
+	falco := &instancev1alpha1.Falco{}
 
-	// TODO(user): your logic here
+	// Fetch the Falco instance
+	logger.Info("Fetching Falco instance")
+
+	if err = r.Get(ctx, req.NamespacedName, falco); err != nil {
+		logger.Error(err, "unable to fetch Falco instance")
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Handle deletion.
+	if ok, err := r.handleDeletion(ctx, falco); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Set the finalizer if needed.
+	if ok, err := r.ensureFinalizer(ctx, falco); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("Generating apply configuration from user input")
+	applyConfig, err := GenerateDaemonsetApplyConfiguration(ctx, r.Client, falco)
+	if err != nil {
+		logger.Error(err, "unable to generate apply configuration")
+		return ctrl.Result{}, err
+	}
+
+	// Set owner reference.
+	if err = ctrl.SetControllerReference(falco, applyConfig, r.Scheme); err != nil {
+		logger.Error(err, "unable to set owner reference")
+		return ctrl.Result{}, err
+	}
+
+	// apply the patch
+	err = r.Patch(ctx, applyConfig, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller"))
+	if err != nil {
+		logger.Error(err, "unable to apply patch")
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -58,6 +95,43 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&instancev1alpha1.Falco{}).
+		Owns(&appsv1.DaemonSet{}).
 		Named("falco").
 		Complete(r)
+}
+
+// ensureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
+func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
+	if !controllerutil.ContainsFinalizer(falco, finalizer) {
+		log.FromContext(ctx).Info("Setting finalizer")
+		controllerutil.AddFinalizer(falco, finalizer)
+
+		if err := r.Update(ctx, falco); err != nil {
+			log.FromContext(ctx).Error(err, "unable to set finalizer")
+			return false, err
+		}
+		log.FromContext(ctx).V(3).Info("Finalizer set")
+		return true, nil
+	}
+	return false, nil
+}
+
+// handleDeletion handles the deletion of the Falco instance.
+func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
+	if falco.DeletionTimestamp != nil {
+		log.FromContext(ctx).Info("Falco instance marked for deletion")
+		if controllerutil.ContainsFinalizer(falco, finalizer) {
+			log.FromContext(ctx).Info("Deleting Falco instance")
+
+			// Remove the finalizer.
+			if controllerutil.RemoveFinalizer(falco, finalizer) {
+				if err := r.Update(ctx, falco); err != nil {
+					log.FromContext(ctx).Error(err, "unable to update Falco instance")
+					return false, err
+				}
+			}
+		}
+		return true, nil
+	}
+	return false, nil
 }
