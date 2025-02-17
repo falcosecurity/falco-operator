@@ -8098,21 +8098,22 @@ spec:
                     type: object
                 type: object
               replicas:
+                default: 1
                 description: |-
                   Replicas defines the number of replicas for the Deployment.
-                  Required only when 'type' is "deployment".
+                  Required only when 'type' is "Deployment".
                   Default is 1.
                 format: int32
                 minimum: 1
                 type: integer
               type:
-                default: daemonset
+                default: DaemonSet
                 description: |-
                   Type specifies the type of Kubernetes resource to deploy Falco.
                   Allowed values: "daemonset" or "deployment". Default value is daemonset.
                 enum:
-                - daemonset
-                - deployment
+                - DaemonSet
+                - Deployment
                 type: string
               version:
                 description: |-
