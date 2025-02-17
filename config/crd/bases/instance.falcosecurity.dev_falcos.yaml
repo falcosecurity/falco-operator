@@ -39,7 +39,7 @@ spec:
           spec:
             description: FalcoSpec defines the desired state of Falco.
             properties:
-              podTemplate:
+              podTemplateSpec:
                 description: |-
                   PodTemplateSpec contains the pod template specification for the Falco instance.
                   Users can customize metadata, initContainers, containers, volumes, tolerations, etc.

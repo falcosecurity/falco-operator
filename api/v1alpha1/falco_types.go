@@ -52,7 +52,7 @@ type FalcoSpec struct {
 	// PodTemplateSpec contains the pod template specification for the Falco instance.
 	// Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
 	// +optional
-	PodTemplateSpec *corev1.PodTemplateSpec `json:"podTemplate,omitempty"`
+	PodTemplateSpec *corev1.PodTemplateSpec `json:"podTemplateSpec,omitempty"`
 }
 
 // FalcoStatus defines the observed state of Falco.
