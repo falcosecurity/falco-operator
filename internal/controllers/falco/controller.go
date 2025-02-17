@@ -69,7 +69,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	logger.Info("Generating apply configuration from user input")
-	applyConfig, err := GenerateDaemonsetApplyConfiguration(ctx, r.Client, falco)
+	applyConfig, err := generateApplyConfiguration(ctx, r.Client, falco)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
 		return ctrl.Result{}, err

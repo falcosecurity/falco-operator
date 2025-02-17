@@ -34,32 +34,50 @@ import (
 	"github.com/alacuku/falco-operator/internal/pkg/scheme"
 )
 
-func GenerateDaemonsetApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
-	// Build the default daemonset.
-	baseDs := baseDaemonset(falco)
+const (
+	resourceTypeDeployment = "Deployment"
+	resourceTypeDaemonSet  = "DaemonSet"
+)
 
-	// Create a parser to merge the base daemonset with the user defined one.
+// generateApplyConfiguration generates the apply configuration for the given Kubernetes resource.
+func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
+	// Determine the resource type from the Falco object.
+	resourceType := falco.Spec.Type
+
+	// Build the default resource.
+	var baseResource interface{}
+	switch resourceType {
+	case resourceTypeDeployment:
+		baseResource = baseDeployment(falco)
+	case resourceTypeDaemonSet:
+		baseResource = baseDaemonSet(falco)
+	default:
+		// Should never happen, since the type is validated by the CRD.
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+
+	// Create a parser to merge the base resource with the user defined one.
 	parser := scheme.Parser()
 
-	// Parse the base daemonset.
-	baseTyped, err := parser.Type("io.k8s.api.apps.v1.DaemonSet").FromStructured(baseDs)
+	// Parse the base resource.
+	baseTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromStructured(baseResource)
 	if err != nil {
 		return nil, err
 	}
 
-	// Generate the user defined daemonset.
-	userUnstructured, err := generateUserDefinedDaemonset(falco)
+	// Generate the user defined resource.
+	userUnstructured, err := generateUserDefinedResource(falco)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse the user defined daemonset.
-	userTyped, err := parser.Type("io.k8s.api.apps.v1.DaemonSet").FromUnstructured(userUnstructured.Object)
+	// Parse the user defined resource.
+	userTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(userUnstructured.Object)
 	if err != nil {
 		return nil, err
 	}
 
-	// Merge the base and user defined daemonsets.
+	// Merge the base and user defined resources.
 	desiredTyped, err := baseTyped.Merge(userTyped)
 	if err != nil {
 		return nil, err
@@ -67,31 +85,81 @@ func GenerateDaemonsetApplyConfiguration(ctx context.Context, cl client.Client, 
 
 	mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
 
-	desiredDsUnstructured := &unstructured.Unstructured{
+	desiredResourceUnstructured := &unstructured.Unstructured{
 		Object: mergedUnstructured,
 	}
 
-	if err := setDefaultValues(ctx, cl, desiredDsUnstructured, schema.GroupVersionKind{
+	if err := setDefaultValues(ctx, cl, desiredResourceUnstructured, schema.GroupVersionKind{
 		Group:   appsv1.GroupName,
-		Version: "v1",
-		Kind:    "DaemonSet",
+		Version: appsv1.SchemeGroupVersion.Version,
+		Kind:    resourceType,
 	}); err != nil {
 		return nil, err
 	}
 
-	// Set the name of the daemonset to the name of the falco CR.
-	if err := unstructured.SetNestedField(desiredDsUnstructured.Object, falco.Name, "metadata", "name"); err != nil {
+	// Set the name of the resource to the name of the falco CR.
+	if err := unstructured.SetNestedField(desiredResourceUnstructured.Object, falco.Name, "metadata", "name"); err != nil {
 		return nil, fmt.Errorf("failed to set name field: %w", err)
 	}
 
 	// Remove unwanted fields.
-	removeUnwantedFields(desiredDsUnstructured)
+	removeUnwantedFields(desiredResourceUnstructured)
 
-	return desiredDsUnstructured, nil
+	return desiredResourceUnstructured, nil
 }
 
-// baseDaemonset returns the base daemonset for Falco with default values + metadata coming from the Falco CR.
-func baseDaemonset(falco *v1alpha1.Falco) *appsv1.DaemonSet {
+// baseDeployment returns the base deployment for Falco with default values + metadata coming from the Falco CR.
+func baseDeployment(falco *v1alpha1.Falco) *appsv1.Deployment {
+	return &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+			Labels:    falco.Labels,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					"app.kubernetes.io/name":     falco.Name,
+					"app.kubernetes.io/instance": falco.Name,
+				},
+			},
+			Replicas: falco.Spec.Replicas,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: podTemplateSpecLabels(falco.Name, falco.Labels),
+				},
+				Spec: corev1.PodSpec{
+					Tolerations: []corev1.Toleration{
+						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
+						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
+					},
+					Volumes: DefaultFalcoVolumes,
+					Containers: []corev1.Container{
+						{
+							Name:            "falco",
+							Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
+							ImagePullPolicy: DefaultFalcoImagePullPolicy,
+							Resources:       DefaultFalcoResources,
+							Ports:           DefaultFalcoPorts,
+							Args:            DefaultFalcoArgs,
+							Env:             DefaultFalcoEnv,
+							VolumeMounts:    DefaultFalcoVolumeMounts,
+							LivenessProbe:   DefaultFalcoLivenessProbe,
+							ReadinessProbe:  DefaultFalcoReadinessProbe,
+							SecurityContext: DefaultFalcoSecurityContext,
+						},
+					},
+				},
+			},
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
+			},
+		},
+	}
+}
+
+// baseDaemonSet returns the base daemonset for Falco with default values + metadata coming from the Falco CR.
+func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 	return &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      falco.Name,
@@ -132,45 +200,62 @@ func baseDaemonset(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 					},
 				},
 			},
-			UpdateStrategy: appsv1.DaemonSetUpdateStrategy{
-				Type: appsv1.RollingUpdateDaemonSetStrategyType,
-			},
 		},
 	}
 }
 
-// generateUserDefinedDaemonset generates a user defined daemonset from the falco CR.
-func generateUserDefinedDaemonset(falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
-	// Build the default daemonset from the base one.
+// generateUserDefinedResource generates a user defined resource from the falco CR.
+func generateUserDefinedResource(falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
+	// Build the default resource from the base one.
 	// We use the base one as a starting point to have the same structure and, then we override the user defined fields.
-	userDs := baseDaemonset(falco)
+	var userResource interface{}
+	// Determine the resource type from the Falco object.
+	resourceType := falco.Spec.Type
 
-	// Set the PodTemplateSpec to the user define one if present, otherwise set it to an empty one.
-	if falco.Spec.PodTemplateSpec != nil {
-		userDs.Spec.Template = *falco.Spec.PodTemplateSpec
-	} else {
-		userDs.Spec.Template = corev1.PodTemplateSpec{}
+	switch resourceType {
+	case resourceTypeDeployment:
+		userResource = baseDeployment(falco)
+	case resourceTypeDaemonSet:
+		userResource = baseDaemonSet(falco)
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+
+	// Set the PodTemplateSpec to the user defined one if present, otherwise set it to an empty one.
+	switch res := userResource.(type) {
+	case *appsv1.Deployment:
+		if falco.Spec.PodTemplateSpec != nil {
+			res.Spec.Template = *falco.Spec.PodTemplateSpec
+		} else {
+			res.Spec.Template = corev1.PodTemplateSpec{}
+		}
+	case *appsv1.DaemonSet:
+		if falco.Spec.PodTemplateSpec != nil {
+			res.Spec.Template = *falco.Spec.PodTemplateSpec
+		} else {
+			res.Spec.Template = corev1.PodTemplateSpec{}
+		}
 	}
 
 	// Convert to unstructured and remove the fields we don't want to compare.
-	unUserDs, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&userDs)
+	unUserResource, err := runtime.DefaultUnstructuredConverter.ToUnstructured(userResource)
 	if err != nil {
 		return nil, err
 	}
 
-	ds := &unstructured.Unstructured{
-		Object: unUserDs,
+	resource := &unstructured.Unstructured{
+		Object: unUserResource,
 	}
 
 	// Remove the empty containers field if it exists.
-	if removeEmptyContainers(ds) != nil {
+	if removeEmptyContainers(resource) != nil {
 		return nil, err
 	}
 
 	// Remove unwanted fields.
-	removeUnwantedFields(ds)
+	removeUnwantedFields(resource)
 
-	return ds, nil
+	return resource, nil
 }
 
 // removeEmptyContainers removes the empty containers field from the unstructured DaemonSet if it exists.
