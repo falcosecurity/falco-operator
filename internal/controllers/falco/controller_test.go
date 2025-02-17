@@ -122,20 +122,20 @@ var _ = Describe("Falco Controller", Ordered, func() {
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 
-		It("type should be set to daemonset", func() {
+		It("type should be set to DaemonSet", func() {
 			resource := &instancev1alpha1.Falco{}
 			By("Getting the created resource")
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resource.Spec.Type).To(BeEquivalentTo("daemonset"))
+			Expect(resource.Spec.Type).To(BeEquivalentTo("DaemonSet"))
 		})
 
-		It("replicas should be set to nil", func() {
+		It("replicas should be set to 1", func() {
 			resource := &instancev1alpha1.Falco{}
 			By("Getting the created resource")
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(resource.Spec.Replicas).To(BeNil())
+			Expect(*resource.Spec.Replicas).To(BeEquivalentTo(1))
 		})
 
 		It("version should be set to empty string", func() {
