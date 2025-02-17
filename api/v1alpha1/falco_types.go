@@ -27,13 +27,14 @@ import (
 type FalcoSpec struct {
 	// Type specifies the type of Kubernetes resource to deploy Falco.
 	// Allowed values: "daemonset" or "deployment". Default value is daemonset.
-	// +kubebuilder:default=daemonset
-	// +kubebuilder:validation:Enum=daemonset;deployment
+	// +kubebuilder:default=DaemonSet
+	// +kubebuilder:validation:Enum=DaemonSet;Deployment
 	Type string `json:"type,omitempty"`
 
 	// Replicas defines the number of replicas for the Deployment.
-	// Required only when 'type' is "deployment".
+	// Required only when 'type' is "Deployment".
 	// Default is 1.
+	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
