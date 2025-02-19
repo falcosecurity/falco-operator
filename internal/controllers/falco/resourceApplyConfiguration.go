@@ -290,6 +290,8 @@ func removeUnwantedFields(obj *unstructured.Unstructured) {
 	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
 	// Remove the revision field from the annotations.
 	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
+	// Remove the deprecated field from the annotations.
+	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deprecated.daemonset.template.generation")
 	// If the annotations field is empty, remove it.
 	if metadata, ok := obj.Object["metadata"].(map[string]interface{}); ok {
 		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
