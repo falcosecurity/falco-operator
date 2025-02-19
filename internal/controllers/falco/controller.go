@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
+	"github.com/alacuku/falco-operator/internal/pkg/image"
 )
 
 const (
@@ -81,6 +82,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the Falco version is set.
+	if ok, err := r.ensureVersion(ctx, falco); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure the deployment/daemonset is created.
 	if err := r.ensureDeployment(ctx, falco); err != nil {
 		return ctrl.Result{}, err
@@ -109,6 +115,23 @@ func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha
 			return false, err
 		}
 		log.FromContext(ctx).V(3).Info("Finalizer set", "finalizer", finalizer)
+		return true, nil
+	}
+	return false, nil
+}
+
+// ensureVersion ensures the Falco version is set on the object and returns true if the object was updated.
+// If the version is not set, it will default to the latest Falco version otherwise it will use the provided version.
+func (r *Reconciler) ensureVersion(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
+	if falco.Spec.Version == "" {
+		log.FromContext(ctx).V(3).Info("Setting default Falco version", "version", image.FalcoVersion())
+		falco.Spec.Version = image.FalcoVersion()
+
+		if err := r.Update(ctx, falco); err != nil {
+			log.FromContext(ctx).Error(err, "unable to set default Falco version", "version", image.FalcoVersion())
+			return false, err
+		}
+		log.FromContext(ctx).V(3).Info("Default Falco version set")
 		return true, nil
 	}
 	return false, nil

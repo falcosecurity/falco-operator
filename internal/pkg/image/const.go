@@ -20,6 +20,6 @@ const (
 	Registry               = "docker.io"
 	Repository             = "falcosecurity"
 	FalcoImage             = "falco"
-	FalcoTag               = "0.40.0-rc1-debian"
+	FalcoTag               = "0.40.0-debian"
 	FalcoDebianImageSuffix = "-debian"
 )
