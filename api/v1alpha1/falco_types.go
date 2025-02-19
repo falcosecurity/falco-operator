@@ -26,7 +26,7 @@ import (
 // FalcoSpec defines the desired state of Falco.
 type FalcoSpec struct {
 	// Type specifies the type of Kubernetes resource to deploy Falco.
-	// Allowed values: "daemonset" or "deployment". Default value is daemonset.
+	// Allowed values: "DaemonSet" or "Deployment". Default value is DaemonSet.
 	// +kubebuilder:default=DaemonSet
 	// +kubebuilder:validation:Enum=DaemonSet;Deployment
 	Type string `json:"type,omitempty"`
