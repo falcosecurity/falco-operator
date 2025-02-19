@@ -288,6 +288,16 @@ func removeUnwantedFields(obj *unstructured.Unstructured) {
 	unstructured.RemoveNestedField(obj.Object, "spec", "revisionHistoryLimit")
 	unstructured.RemoveNestedField(obj.Object, "metadata", "generateName")
 	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
+	// Remove the revision field from the annotations.
+	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
+	// If the annotations field is empty, remove it.
+	if metadata, ok := obj.Object["metadata"].(map[string]interface{}); ok {
+		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
+			if len(annotations) == 0 {
+				unstructured.RemoveNestedField(obj.Object, "metadata", "annotations")
+			}
+		}
+	}
 }
 
 // podTemplateSpecLabels returns the labels for the pod template spec.
