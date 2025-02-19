@@ -57,10 +57,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	falco := &instancev1alpha1.Falco{}
 
 	// Fetch the Falco instance
-	logger.Info("Fetching Falco instance")
+	logger.V(2).Info("Fetching falco instance")
 
-	if err = r.Get(ctx, req.NamespacedName, falco); err != nil {
-		logger.Error(err, "unable to fetch Falco instance")
+	if err = r.Get(ctx, req.NamespacedName, falco); err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "unable to fetch falco instance")
+		return ctrl.Result{}, err
+	} else if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -99,14 +101,14 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 // ensureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
 	if !controllerutil.ContainsFinalizer(falco, finalizer) {
-		log.FromContext(ctx).Info("Setting finalizer")
+		log.FromContext(ctx).V(3).Info("Setting finalizer", "finalizer", finalizer)
 		controllerutil.AddFinalizer(falco, finalizer)
 
 		if err := r.Update(ctx, falco); err != nil {
-			log.FromContext(ctx).Error(err, "unable to set finalizer")
+			log.FromContext(ctx).Error(err, "unable to set finalizer", "finalizer", finalizer)
 			return false, err
 		}
-		log.FromContext(ctx).V(3).Info("Finalizer set")
+		log.FromContext(ctx).V(3).Info("Finalizer set", "finalizer", finalizer)
 		return true, nil
 	}
 	return false, nil
@@ -117,7 +119,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 	if falco.DeletionTimestamp != nil {
 		log.FromContext(ctx).Info("Falco instance marked for deletion")
 		if controllerutil.ContainsFinalizer(falco, finalizer) {
-			log.FromContext(ctx).Info("Deleting Falco instance")
+			log.FromContext(ctx).Info("Removing finalizer", "finalizer", finalizer)
 
 			// Remove the finalizer.
 			if controllerutil.RemoveFinalizer(falco, finalizer) {
@@ -137,7 +139,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	logger := log.FromContext(ctx)
 
-	logger.Info("Generating apply configuration from user input")
+	logger.V(2).Info("Generating apply configuration from user input")
 	applyConfig, err := generateApplyConfiguration(ctx, r.Client, falco)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
@@ -151,7 +153,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		return err
 	}
 
-	logger.V(3).Info("Generated apply configuration", "yaml", string(applyConfigYaml))
+	logger.V(4).Info("Generated apply configuration", "yaml", string(applyConfigYaml))
 
 	// Set owner reference.
 	if err = ctrl.SetControllerReference(falco, applyConfig, r.Scheme); err != nil {
@@ -193,7 +195,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	}
 
 	if cmp.IsSame() {
-		logger.Info("Falco resource is up to date", "kind", falco.Spec.Type)
+		logger.V(2).Info("Falco resource is up to date", "kind", falco.Spec.Type)
 		return nil
 	}
 
