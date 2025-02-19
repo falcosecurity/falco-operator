@@ -67,6 +67,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Cleanup dual deployments.
+	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Set the finalizer if needed.
 	if ok, err := r.ensureFinalizer(ctx, falco); ok || err != nil {
 		return ctrl.Result{}, err
@@ -194,6 +199,44 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	if err = r.Patch(ctx, applyConfig, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller")); err != nil {
 		logger.Error(err, "unable to apply patch", "kind", falco.Spec.Type, "patch", applyConfig)
 		return err
+	}
+
+	return nil
+}
+
+// cleanupDualDeployments ensures there is no dual deployment for the given Falco instance.
+func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	logger := log.FromContext(ctx)
+
+	for _, t := range []string{resourceTypeDeployment, resourceTypeDaemonSet} {
+		// Skip the current type of the Falco instance.
+		if t == falco.Spec.Type {
+			continue
+		}
+
+		// Create an unstructured object for the resource type.
+		existingResource := &unstructured.Unstructured{}
+		existingResource.SetGroupVersionKind(schema.GroupVersionKind{
+			Group:   "apps",
+			Version: "v1",
+			Kind:    t,
+		})
+
+		// Try to get the existing resource.
+		err := r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource)
+		if err != nil && !apierrors.IsNotFound(err) {
+			logger.Error(err, "unable to fetch existing resource", "kind", t)
+			return err
+		}
+
+		// If the resource exists, delete it.
+		if err == nil {
+			logger.Info("Deleting dual deployment resource", "kind", t)
+			if err := r.Delete(ctx, existingResource); err != nil {
+				logger.Error(err, "unable to delete dual deployment resource", "kind", t)
+				return err
+			}
+		}
 	}
 
 	return nil
