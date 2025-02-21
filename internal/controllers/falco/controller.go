@@ -222,8 +222,8 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	// Get existing Falco deployment/daemonset
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "apps",
-		Version: "v1",
+		Group:   appsv1.GroupName,
+		Version: appsv1.SchemeGroupVersion.Version,
 		Kind:    falco.Spec.Type, // "Deployment" or "DaemonSet"
 	})
 
@@ -300,8 +300,8 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 		// Create an unstructured object for the resource type.
 		existingResource := &unstructured.Unstructured{}
 		existingResource.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "apps",
-			Version: "v1",
+			Group:   appsv1.GroupName,
+			Version: appsv1.SchemeGroupVersion.Version,
 			Kind:    t,
 		})
 
