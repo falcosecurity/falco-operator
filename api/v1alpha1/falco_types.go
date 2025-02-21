@@ -58,10 +58,58 @@ type FalcoSpec struct {
 
 // FalcoStatus defines the observed state of Falco.
 type FalcoStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// Desired number of instances for the Falco deployment.
+	// The total number of nodes that should be running the daemon pod (including nodes correctly running the daemon pod).
+	// +optional
+	DesiredReplicas int32 `json:"desiredReplicas,omitempty" protobuf:"varint,1,opt,name=desiredReplicas"`
+	// Total number of available pods (ready for at least minReadySeconds) targeted by the deployment.
+	// Or the number of nodes that should be running the  daemon pod and have one or more of the daemon pod running and
+	// available (ready for at least spec.minReadySeconds)
+	// +optional
+	AvailableReplicas int32 `json:"availableReplicas" protobuf:"varint,11,opt,name=availableReplicas"`
+
+	// Total number of unavailable pods targeted by falco deployment/daemonset. This is the total number of
+	// pods that are still required for the deployment to have 100% available capacity or the number of nodes
+	// that should be running the daemon pod and have none of the daemon pod running and available. They may
+	// either be pods that are running but not yet available or pods that still have not been created.
+	// +optional
+	UnavailableReplicas int32 `json:"unavailableReplicas,omitempty" protobuf:"varint,5,opt,name=unavailableReplicas"`
+
+	// The current status of the Falco instance
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// ConditionType represents a Falco condition type.
+// +kubebuilder:validation:MinLength=1
+type ConditionType string
+
+const (
+	// Available indicates whether enough pods are ready to provide the
+	// service.
+	// The possible status values for this condition type are:
+	// - True: all pods are running and ready, the service is fully available.
+	// - Degraded: some pods aren't ready, the service is partially available.
+	// - False: no pods are running, the service is totally unavailable.
+	// - Unknown: the operator couldn't determine the condition status.
+	Available ConditionType = "Available"
+	// Reconciled indicates whether the operator has reconciled the state of
+	// the underlying resources with the object's spec.
+	// The possible status values for this condition type are:
+	// - True: the reconciliation was successful.
+	// - False: the reconciliation failed.
+	// - Unknown: the operator couldn't determine the condition status.
+	Reconciled ConditionType = "Reconciled"
+)
+
+// +kubebuilder:resource:categories="prometheus-operator",shortName="prom"
+// +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type",description="The type of Kubernetes resource to deploy Falco"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.version",description="The version of Falco"
+// +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredReplicas",description="The desired number of replicas"
+// +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.availableReplicas",description="The number of ready replicas"
+// +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
+// +kubebuilder:printcolumn:name="Available",type="string",JSONPath=".status.conditions[?(@.type == 'Available')].status"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=falcos
