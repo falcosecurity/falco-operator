@@ -63,13 +63,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	logger := log.FromContext(ctx)
 	falco := &instancev1alpha1.Falco{}
 
-	// Update the status.
-	defer func() {
-		if err := r.updateStatus(ctx, falco); err != nil {
-			logger.Error(err, "unable to update Falco status")
-		}
-	}()
-
 	// Fetch the Falco instance
 	logger.V(2).Info("Fetching falco instance")
 
@@ -84,6 +77,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if ok, err := r.handleDeletion(ctx, falco); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Update the status.
+	defer func() {
+		if err := r.updateStatus(ctx, falco); err != nil {
+			logger.Error(err, "unable to update Falco status")
+		}
+	}()
 
 	// Cleanup dual deployments.
 	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
@@ -400,5 +400,9 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 		falco.Status.Conditions = updateConditions(falco.Status.Conditions, availableCondition)
 	}
 
-	return r.Status().Update(ctx, falco)
+	if err := r.Status().Update(ctx, falco); err != nil && !apierrors.IsConflict(err) {
+		return fmt.Errorf("unable to update status: %w", err)
+	}
+
+	return nil
 }
