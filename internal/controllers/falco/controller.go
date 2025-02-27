@@ -355,7 +355,7 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 		falco.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 		falco.Status.UnavailableReplicas = deployment.Status.UnavailableReplicas
 
-		if deployment.Status.UnavailableReplicas == 0 {
+		if *falco.Spec.Replicas == deployment.Status.ReadyReplicas {
 			availableCondition.Status = metav1.ConditionTrue
 			availableCondition.Reason = "DeploymentAvailable"
 			availableCondition.Message = "Deployment is available"
@@ -381,7 +381,7 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 		falco.Status.AvailableReplicas = daemonset.Status.NumberAvailable
 		falco.Status.UnavailableReplicas = daemonset.Status.NumberUnavailable
 
-		if daemonset.Status.NumberUnavailable == 0 {
+		if daemonset.Status.DesiredNumberScheduled == daemonset.Status.NumberAvailable {
 			availableCondition.Status = metav1.ConditionTrue
 			availableCondition.Reason = "DaemonSetAvailable"
 			availableCondition.Message = "DaemonSet is available"
