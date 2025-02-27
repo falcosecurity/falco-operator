@@ -113,6 +113,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&instancev1alpha1.Falco{}).
 		Owns(&appsv1.DaemonSet{}).
+		Owns(&appsv1.Deployment{}).
 		Named("falco").
 		Complete(r)
 }
