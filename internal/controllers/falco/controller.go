@@ -135,19 +135,41 @@ func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha
 }
 
 // ensureVersion ensures the Falco version is set on the object and returns true if the object was updated.
-// If the version is not set, it will default to the latest Falco version otherwise it will use the provided version.
+// Version can be provided by the user in three ways:
+// 1. Extracted from the container image.
+// 2. Specified in the Falco CRD.
+// 3. Default Falco version.
+// Priority is in the order mentioned above.
 func (r *Reconciler) ensureVersion(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
-	if falco.Spec.Version == "" {
-		log.FromContext(ctx).V(3).Info("Setting default Falco version", "version", image.FalcoVersion())
-		falco.Spec.Version = image.FalcoVersion()
+	// Start with the default Falco version.
+	version := image.FalcoVersion()
 
+	// Check if the version is already set in the Falco CRD.
+	if falco.Spec.Version != "" {
+		version = falco.Spec.Version
+	}
+
+	// Check if the version can be extracted from the container image
+	if falco.Spec.PodTemplateSpec != nil {
+		for i := range falco.Spec.PodTemplateSpec.Spec.Containers {
+			if falco.Spec.PodTemplateSpec.Spec.Containers[i].Name == "falco" {
+				version = image.VersionFromImage(falco.Spec.PodTemplateSpec.Spec.Containers[i].Image)
+				break
+			}
+		}
+	}
+
+	// Set the version in the Falco CRD if it differs from the desired version.
+	if version != falco.Spec.Version {
+		falco.Spec.Version = version
+		log.FromContext(ctx).V(3).Info("Setting Falco version", "version", version)
 		if err := r.Update(ctx, falco); err != nil {
 			log.FromContext(ctx).Error(err, "unable to set default Falco version", "version", image.FalcoVersion())
 			return false, err
 		}
-		log.FromContext(ctx).V(3).Info("Default Falco version set")
 		return true, nil
 	}
+
 	return false, nil
 }
 
