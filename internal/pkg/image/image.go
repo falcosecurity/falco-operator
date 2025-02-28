@@ -39,3 +39,12 @@ func BuildFalcoImageStringFromVersion(version string) string {
 func FalcoVersion() string {
 	return strings.Split(FalcoTag, "-")[0]
 }
+
+// VersionFromImage returns the version from the image string.
+func VersionFromImage(image string) string {
+	parts := strings.Split(image, ":")
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return ""
+}
