@@ -17,31 +17,102 @@
 package falco
 
 import (
+	"fmt"
+	"strings"
+
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/structured-merge-diff/v4/typed"
 
 	"github.com/alacuku/falco-operator/internal/pkg/scheme"
 )
 
-// diff calculates the difference between the current and desired unstructured objects.
-func diff(current, desired *unstructured.Unstructured) (*typed.Comparison, error) {
-	// Make diff between the current resource and the desired one.
-	// Create a parser to compare the resources.
+// diff calculates the difference between the current and desired objects.
+// It accepts either unstructured.Unstructured objects or typed objects that can be converted to unstructured.
+func diff(current, desired interface{}) (*typed.Comparison, error) {
+	// Convert inputs to unstructured if needed
+	currentUnstructured, err := toUnstructured(current)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert current object to unstructured: %w", err)
+	}
+
+	desiredUnstructured, err := toUnstructured(desired)
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert desired object to unstructured: %w", err)
+	}
+
+	// Create a parser to compare the resources
 	parser := scheme.Parser()
 
-	resourceType := current.GetKind()
+	typePath := getTypePath(currentUnstructured)
 
-	// Parse the base resource.
-	currentTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(current.Object)
+	// Parse the base resource
+	currentTyped, err := parser.Type(typePath).FromUnstructured(currentUnstructured.Object)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse the user defined resource.
-	desiredTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(desired.Object)
+	// Parse the user defined resource
+	desiredTyped, err := parser.Type(typePath).FromUnstructured(desiredUnstructured.Object)
 	if err != nil {
 		return nil, err
 	}
 
 	return currentTyped.Compare(desiredTyped)
+}
+
+// getTypePath returns the schema type path for an unstructured object.
+func getTypePath(obj *unstructured.Unstructured) string {
+	apiVersion := obj.GetAPIVersion()
+	resourceType := obj.GetKind()
+	gv := strings.Split(apiVersion, "/")
+
+	// Build the schema path based on whether it's a core resource or not
+	var typePath string
+	if len(gv) == 1 {
+		// Core resources like v1 have no group
+		typePath = fmt.Sprintf("io.k8s.api.core.%s.%s", gv[0], resourceType)
+	} else {
+		// Other resources have group and version
+		typePath = fmt.Sprintf("io.k8s.api.%s.%s.%s", apiGroupToSchemaGroup(gv[0]), gv[1], resourceType)
+	}
+
+	return typePath
+}
+
+func apiGroupToSchemaGroup(apiGroup string) string {
+	mappings := map[string]string{
+		"rbac.authorization.k8s.io":    "rbac",
+		"networking.k8s.io":            "networking",
+		"certificates.k8s.io":          "certificates",
+		"storage.k8s.io":               "storage",
+		"admissionregistration.k8s.io": "admissionregistration",
+		"scheduling.k8s.io":            "scheduling",
+		"coordination.k8s.io":          "coordination",
+		"discovery.k8s.io":             "discovery",
+	}
+
+	if mapped, ok := mappings[apiGroup]; ok {
+		return mapped
+	}
+
+	return apiGroup
+}
+
+// toUnstructured converts an object to an unstructured.Unstructured.
+func toUnstructured(obj interface{}) (*unstructured.Unstructured, error) {
+	// If it's already unstructured, just return it
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		return u, nil
+	}
+
+	// Convert the typed object to unstructured
+	unstructuredObj := &unstructured.Unstructured{}
+	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	unstructuredObj.SetUnstructuredContent(data)
+
+	return unstructuredObj, nil
 }
