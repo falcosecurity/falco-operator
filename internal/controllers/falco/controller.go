@@ -23,6 +23,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -105,6 +107,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the service account is created.
+	if err := r.ensureServiceAccount(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the role is created.
+	if err := r.ensureRole(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the role binding is created.
+	if err := r.ensureRoleBinding(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -114,6 +131,9 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&instancev1alpha1.Falco{}).
 		Owns(&appsv1.DaemonSet{}).
 		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&rbacv1.Role{}).
+		Owns(&rbacv1.RoleBinding{}).
 		Named("falco").
 		Complete(r)
 }
@@ -427,4 +447,79 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 	}
 
 	return nil
+}
+
+// ensureResource is a generic function to ensure a resource exists and is up to date.
+func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1.Falco,
+	resourceType string, generateFunc func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
+	logger := log.FromContext(ctx)
+	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", falco.Name)
+
+	// Generate the desired resource
+	desiredResource, err := generateFunc(ctx, r.Client, falco)
+	if err != nil {
+		return fmt.Errorf("unable to generate desired %s: %w", resourceType, err)
+	}
+
+	// Get existing resource
+	existingResource := &unstructured.Unstructured{}
+	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
+	existingResource.SetName(falco.Name)
+	existingResource.SetNamespace(falco.Namespace)
+
+	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
+	}
+
+	// Create if not found
+	if apierrors.IsNotFound(err) {
+		if err := r.Create(ctx, desiredResource); err != nil {
+			return fmt.Errorf("unable to create %s: %w", resourceType, err)
+		}
+		logger.V(3).Info(resourceType+" created", "name", falco.Name)
+		return nil
+	}
+
+	// Remove unwanted fields
+	removeUnwantedFields(existingResource)
+
+	// Compare and update if needed
+	cmp, err := diff(existingResource, desiredResource)
+	if err != nil {
+		return fmt.Errorf("unable to compare existing and desired %s: %w", resourceType, err)
+	}
+
+	if cmp.IsSame() {
+		logger.V(3).Info(resourceType+" is up to date", "name", falco.Name)
+		return nil
+	}
+
+	logger.V(3).Info("Updating "+resourceType, "name", falco.Name, "diff", cmp.String())
+	if err := r.Patch(ctx, desiredResource, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller")); err != nil {
+		return fmt.Errorf("unable to apply patch to %s: %w", resourceType, err)
+	}
+
+	logger.V(3).Info(resourceType+" updated", "name", falco.Name)
+	return nil
+}
+
+// ensureServiceAccount ensures the Falco service account is created or updated.
+func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "ServiceAccount", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+		return generateServiceAccount(ctx, r.Client, falco)
+	})
+}
+
+// ensureRole ensures the Falco role is created or updated.
+func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "ServiceAccount", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+		return generateRole(ctx, r.Client, falco)
+	})
+}
+
+// ensureRoleBinding ensures the Falco role binding is created or updated.
+func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "RoleBinding", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+		return generateRoleBinding(ctx, r.Client, falco)
+	})
 }
