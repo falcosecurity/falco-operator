@@ -122,6 +122,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the service is created.
+	if err := r.ensureService(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -134,6 +139,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Owns(&corev1.ServiceAccount{}).
 		Named("falco").
 		Complete(r)
 }
@@ -521,5 +527,12 @@ func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Fal
 func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "RoleBinding", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
 		return generateRoleBinding(ctx, r.Client, falco)
+	})
+}
+
+// ensureService ensures the Falco service is created or updated.
+func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "Service", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+		return generateService(ctx, r.Client, falco)
 	})
 }

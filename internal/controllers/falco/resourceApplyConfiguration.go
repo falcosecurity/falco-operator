@@ -300,6 +300,11 @@ func removeUnwantedFields(obj *unstructured.Unstructured) {
 			}
 		}
 	}
+	// Only for services, remove the clusterIP and clusterIPs fields.
+	if obj.GetKind() == "Service" {
+		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIP")
+		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIPs")
+	}
 }
 
 // podTemplateSpecLabels returns the labels for the pod template spec.
