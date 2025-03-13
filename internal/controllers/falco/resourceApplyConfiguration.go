@@ -183,7 +183,7 @@ func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
 						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
 					},
-					Volumes: DefaultFalcoVolumes,
+					Volumes: falcoVolumes(falco),
 					Containers: []corev1.Container{
 						{
 							Name:            "falco",
@@ -193,7 +193,7 @@ func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 							Ports:           DefaultFalcoPorts,
 							Args:            DefaultFalcoArgs,
 							Env:             DefaultFalcoEnv,
-							VolumeMounts:    DefaultFalcoVolumeMounts,
+							VolumeMounts:    falcoVolumeMounts(),
 							LivenessProbe:   DefaultFalcoLivenessProbe,
 							ReadinessProbe:  DefaultFalcoReadinessProbe,
 							SecurityContext: DefaultFalcoSecurityContext,
@@ -314,6 +314,37 @@ func podTemplateSpecLabels(appName string, baseLabels map[string]string) map[str
 		"app.kubernetes.io/name":     appName,
 		"app.kubernetes.io/instance": appName,
 	})
+}
+
+// falcoVolumes returns the volumes for the Falco container.
+func falcoVolumes(falco *v1alpha1.Falco) []corev1.Volume {
+	volumes := append([]corev1.Volume{}, DefaultFalcoVolumes...)
+
+	// Add ConfigMap volume for Falco configuration.
+	configVolume := corev1.Volume{
+		Name: "falco-config-default",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: falco.Name,
+				},
+			},
+		},
+	}
+
+	return append(volumes, configVolume)
+}
+
+func falcoVolumeMounts() []corev1.VolumeMount {
+	volumeMounts := append([]corev1.VolumeMount{}, DefaultFalcoVolumeMounts...)
+
+	configVolumeMount := corev1.VolumeMount{
+		Name:      "falco-config-default",
+		MountPath: "/etc/falco/falco.yaml",
+		SubPath:   "falco.yaml",
+	}
+
+	return append(volumeMounts, configVolumeMount)
 }
 
 // setDefaultValues sets the default values for the unstructured object by dry-run creating it.

@@ -125,4 +125,139 @@ var (
 		{Name: "crio-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/crio"}}},
 		{Name: "proc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc"}}},
 	}
+
+	// DefaultFalcoConfig default Falco configuration.
+	defaultFalcoConfig = `append_output: []
+base_syscalls:
+  custom_set: []
+  repair: false
+buffered_outputs: false
+config_files:
+- /etc/falco/config.d
+container_engines:
+  bpm:
+    enabled: false
+  cri:
+    enabled: true
+    sockets:
+    - /run/k3s/containerd/containerd.sock
+    - /run/crio/crio.sock
+  docker:
+    enabled: true
+  libvirt_lxc:
+    enabled: false
+  lxc:
+    enabled: false
+  podman:
+    enabled: false
+engine:
+  ebpf:
+    buf_size_preset: 4
+    drop_failed_exit: false
+    probe: ${HOME}/.falco/falco-bpf.o
+  kind: modern_ebpf
+  kmod:
+    buf_size_preset: 4
+    drop_failed_exit: false
+  modern_ebpf:
+    buf_size_preset: 4
+    cpus_for_each_buffer: 2
+    drop_failed_exit: false
+falco_libs:
+  thread_table_size: 262144
+file_output:
+  enabled: false
+  filename: ./events.txt
+  keep_alive: false
+grpc:
+  bind_address: unix:///run/falco/falco.sock
+  enabled: false
+  threadiness: 0
+grpc_output:
+  enabled: false
+http_output:
+  ca_bundle: ""
+  ca_cert: ""
+  ca_path: /etc/falco/certs/
+  client_cert: /etc/falco/certs/client/client.crt
+  client_key: /etc/falco/certs/client/client.key
+  compress_uploads: false
+  echo: false
+  enabled: false
+  insecure: false
+  keep_alive: false
+  mtls: false
+  url: ""
+  user_agent: falcosecurity/falco
+json_include_message_property: false
+json_include_output_property: true
+json_include_tags_property: true
+json_output: false
+libs_logger:
+  enabled: false
+  severity: debug
+load_plugins: []
+log_level: info
+log_stderr: true
+log_syslog: true
+metrics:
+  convert_memory_to_mb: true
+  enabled: true
+  include_empty_values: false
+  interval: 1h
+  kernel_event_counters_enabled: true
+  kernel_event_counters_per_cpu_enabled: false
+  libbpf_stats_enabled: true
+  output_rule: false
+  resource_utilization_enabled: true
+  rules_counters_enabled: true
+  state_counters_enabled: true
+output_timeout: 2000
+outputs_queue:
+  capacity: 0
+plugins:
+- init_config: null
+  library_path: libk8saudit.so
+  name: k8saudit
+  open_params: http://:9765/k8s-audit
+- library_path: libcloudtrail.so
+  name: cloudtrail
+- init_config: ""
+  library_path: libjson.so
+  name: json
+priority: debug
+program_output:
+  enabled: false
+  keep_alive: false
+  program: 'jq ''{text: .output}'' | curl -d @- -X POST https://hooks.slack.com/services/XXX'
+rule_matching: first
+rules_files:
+- /etc/falco/falco_rules.yaml
+- /etc/falco/falco_rules.local.yaml
+- /etc/falco/rules.d
+stdout_output:
+  enabled: true
+syscall_event_drops:
+  actions:
+  - log
+  - alert
+  max_burst: 1
+  rate: 0.03333
+  simulate_drops: false
+  threshold: 0.1
+syscall_event_timeouts:
+  max_consecutives: 1000
+syslog_output:
+  enabled: true
+time_format_iso_8601: false
+watch_config_files: true
+webserver:
+  enabled: true
+  k8s_healthz_endpoint: /healthz
+  listen_port: 8765
+  prometheus_metrics_enabled: true
+  ssl_certificate: /etc/falco/falco.pem
+  ssl_enabled: false
+  threadiness: 0
+`
 )
