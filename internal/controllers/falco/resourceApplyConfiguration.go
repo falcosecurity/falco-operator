@@ -178,6 +178,7 @@ func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 					Labels: podTemplateSpecLabels(falco.Name, falco.Labels),
 				},
 				Spec: corev1.PodSpec{
+					ServiceAccountName: falco.Name,
 					Tolerations: []corev1.Toleration{
 						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
 						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
