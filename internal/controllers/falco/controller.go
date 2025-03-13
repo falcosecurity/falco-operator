@@ -87,26 +87,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}()
 
-	// Cleanup dual deployments.
-	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Set the finalizer if needed.
-	if ok, err := r.ensureFinalizer(ctx, falco); ok || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Ensure the Falco version is set.
-	if ok, err := r.ensureVersion(ctx, falco); ok || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Ensure the deployment/daemonset is created.
-	if err := r.ensureDeployment(ctx, falco); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Ensure the service account is created.
 	if err := r.ensureServiceAccount(ctx, falco); err != nil {
 		return ctrl.Result{}, err
@@ -127,6 +107,31 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the configmap is created
+	if err := r.ensureConfigMap(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Cleanup dual deployments.
+	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Set the finalizer if needed.
+	if ok, err := r.ensureFinalizer(ctx, falco); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the Falco version is set.
+	if ok, err := r.ensureVersion(ctx, falco); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the deployment/daemonset is created.
+	if err := r.ensureDeployment(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -140,6 +145,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&corev1.ServiceAccount{}).
+		Owns(&corev1.ConfigMap{}).
 		Named("falco").
 		Complete(r)
 }
@@ -534,5 +540,12 @@ func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alp
 func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "Service", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
 		return generateService(ctx, r.Client, falco)
+	})
+}
+
+// ensureConfigmap ensures the Falco configmap is created or updated.
+func (r *Reconciler) ensureConfigMap(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "ConfigMap", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+		return generateConfigmap(ctx, r.Client, falco)
 	})
 }
