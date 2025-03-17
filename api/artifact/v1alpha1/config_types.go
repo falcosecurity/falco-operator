@@ -14,30 +14,22 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
-
 package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
 // ConfigSpec defines the desired state of Config.
 type ConfigSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// Foo is an example field of Config. Edit config_types.go to remove/update
-	Foo string `json:"foo,omitempty"`
+	// Config is the configuration for Falco deployment.
+	Config string `json:"config,omitempty"`
 }
 
 // ConfigStatus defines the observed state of Config.
 type ConfigStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// The current status of the config resource.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // +kubebuilder:object:root=true
