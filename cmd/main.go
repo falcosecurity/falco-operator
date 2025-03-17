@@ -35,7 +35,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
+	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 	"github.com/alacuku/falco-operator/internal/controllers/falco"
 )
 

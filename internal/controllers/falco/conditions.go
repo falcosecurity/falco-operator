@@ -19,7 +19,7 @@ package falco
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/v1alpha1"
+	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 )
 
 // findCondition searches for a condition of the specified type in the given slice of conditions.
