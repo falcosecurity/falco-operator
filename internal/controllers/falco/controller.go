@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	commonv1alpha1 "github.com/alacuku/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 	"github.com/alacuku/falco-operator/internal/pkg/image"
 )
@@ -230,7 +231,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	logger := log.FromContext(ctx)
 	reconcileCondition := metav1.Condition{
-		Type:               string(instancev1alpha1.Reconciled),
+		Type:               string(commonv1alpha1.Reconciled),
 		Status:             metav1.ConditionTrue,
 		ObservedGeneration: falco.GetGeneration(),
 		LastTransitionTime: metav1.Time{
@@ -384,7 +385,7 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	var err error
 	availableCondition := metav1.Condition{
-		Type:               string(instancev1alpha1.Available),
+		Type:               string(commonv1alpha1.Available),
 		Status:             metav1.ConditionUnknown,
 		ObservedGeneration: falco.GetGeneration(),
 		LastTransitionTime: metav1.Time{

@@ -80,28 +80,6 @@ type FalcoStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
-// ConditionType represents a Falco condition type.
-// +kubebuilder:validation:MinLength=1
-type ConditionType string
-
-const (
-	// Available indicates whether enough pods are ready to provide the
-	// service.
-	// The possible status values for this condition type are:
-	// - True: all pods are running and ready, the service is fully available.
-	// - Degraded: some pods aren't ready, the service is partially available.
-	// - False: no pods are running, the service is totally unavailable.
-	// - Unknown: the operator couldn't determine the condition status.
-	Available ConditionType = "Available"
-	// Reconciled indicates whether the operator has reconciled the state of
-	// the underlying resources with the object's spec.
-	// The possible status values for this condition type are:
-	// - True: the reconciliation was successful.
-	// - False: the reconciliation failed.
-	// - Unknown: the operator couldn't determine the condition status.
-	Reconciled ConditionType = "Reconciled"
-)
-
 // +kubebuilder:resource:categories="prometheus-operator",shortName="prom"
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type",description="The type of Kubernetes resource to deploy Falco"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.version",description="The version of Falco"

@@ -19,12 +19,12 @@ package falco
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
+	commonv1alpha1 "github.com/alacuku/falco-operator/api/common/v1alpha1"
 )
 
 // findCondition searches for a condition of the specified type in the given slice of conditions.
 // It returns a pointer to the condition if found, otherwise it returns nil.
-func findCondition(conditions []metav1.Condition, conditionType instancev1alpha1.ConditionType) *metav1.Condition {
+func findCondition(conditions []metav1.Condition, conditionType commonv1alpha1.ConditionType) *metav1.Condition {
 	for i := range conditions {
 		if conditions[i].Type == string(conditionType) {
 			return &conditions[i]
@@ -40,7 +40,7 @@ func updateConditions(conditions []metav1.Condition, newConditions ...metav1.Con
 	ret := make([]metav1.Condition, 0, len(conditions))
 
 	for _, nc := range newConditions {
-		c := findCondition(conditions, instancev1alpha1.ConditionType(nc.Type))
+		c := findCondition(conditions, commonv1alpha1.ConditionType(nc.Type))
 		if c == nil {
 			ret = append(ret, nc)
 			continue

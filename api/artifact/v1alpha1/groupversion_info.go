@@ -14,8 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
-
 // Package v1alpha1 contains API Schema definitions for the artifact v1alpha1 API group.
 // +kubebuilder:object:generate=true
 // +groupName=artifact.falcosecurity.dev
