@@ -1,5 +1,10 @@
 # Image URL to use all building/pushing image targets
 IMG ?= controller:latest
+RELEASE ?= v0.0.1
+COMMIT ?= $(shell git rev-parse HEAD)
+BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
+OPERATOR ?= falco
+PROJECT ?= github.com/alacuku/falco-operator
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -112,7 +117,13 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: ## Build docker image with the manager.
-	$(CONTAINER_TOOL) build -t ${IMG} .
+	$(CONTAINER_TOOL) build \
+		--build-arg RELEASE=$(RELEASE) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		--build-arg OPERATOR=$(OPERATOR) \
+		-t ${IMG} \
+		-f build/Dockerfile .
 
 .PHONY: docker-push
 docker-push: ## Push docker image with the manager.
@@ -124,14 +135,22 @@ docker-push: ## Push docker image with the manager.
 # - have enabled BuildKit. More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 # - be able to push the image to your registry (i.e. if you do not set a valid value via IMG=<myregistry/image:<tag>> then the export will fail)
 # To adequately provide solutions that are compatible with multiple platforms, you should consider using this option.
-PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
+PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
+	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name falco-operator-builder
 	$(CONTAINER_TOOL) buildx use falco-operator-builder
-	- $(CONTAINER_TOOL) buildx build --push --platform=$(PLATFORMS) --tag ${IMG} -f Dockerfile.cross .
+	- $(CONTAINER_TOOL) buildx build \
+ 		--push \
+ 		--platform=$(PLATFORMS) \
+ 		--tag ${IMG} \
+ 		--build-arg RELEASE=$(RELEASE) \
+ 		--build-arg COMMIT=$(COMMIT) \
+ 		--build-arg BUILD_DATE=$(BUILD_DATE) \
+ 		--build-arg OPERATOR=$(OPERATOR) \
+ 		-f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm falco-operator-builder
 	rm Dockerfile.cross
 
