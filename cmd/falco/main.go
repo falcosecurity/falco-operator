@@ -37,6 +37,7 @@ import (
 
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 	"github.com/alacuku/falco-operator/internal/controllers/falco"
+	"github.com/alacuku/falco-operator/internal/pkg/version"
 )
 
 var (
@@ -85,6 +86,8 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	setupLog.Info("Starting falco operator", "version", version.SemVersion, "commit", version.GitCommit,
+		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform)
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and

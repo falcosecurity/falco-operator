@@ -36,6 +36,7 @@ import (
 
 	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
 	"github.com/alacuku/falco-operator/internal/controllers/artifact"
+	"github.com/alacuku/falco-operator/internal/pkg/version"
 )
 
 var (
@@ -83,6 +84,9 @@ func main() {
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	setupLog.Info("Starting artifact operator", "version", version.SemVersion, "commit", version.GitCommit,
+		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform)
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
