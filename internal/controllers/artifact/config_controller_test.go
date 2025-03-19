@@ -52,7 +52,33 @@ var _ = Describe("Config Controller", func() {
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: artifactv1alpha1.ConfigSpec{
+						Config: `
+	engine:
+      ebpf:
+        buf_size_preset: 4
+        drop_failed_exit: false
+        probe: ${HOME}/.falco/falco-bpf.o
+      kind: modern_ebpf
+      kmod:
+        buf_size_preset: 4
+        drop_failed_exit: false
+      modern_ebpf:
+        buf_size_preset: 4
+        cpus_for_each_buffer: 2
+        drop_failed_exit: false
+      falco_libs:
+        thread_table_size: 262144
+      file_output:
+        enabled: false
+        filename: ./events.txt
+        keep_alive: false
+      grpc:
+        bind_address: unix:///run/falco/falco.sock
+        enabled: false
+        threadiness: 1
+`,
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
