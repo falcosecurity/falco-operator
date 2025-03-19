@@ -42,6 +42,8 @@ spec:
               config:
                 description: Config is the configuration for Falco deployment.
                 type: string
+            required:
+            - config
             type: object
           status:
             description: ConfigStatus defines the observed state of Config.
