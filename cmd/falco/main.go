@@ -37,6 +37,7 @@ import (
 
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 	"github.com/alacuku/falco-operator/internal/controllers/falco"
+	"github.com/alacuku/falco-operator/internal/pkg/common"
 	"github.com/alacuku/falco-operator/internal/pkg/version"
 )
 
@@ -177,6 +178,12 @@ func main() {
 		})
 	}
 
+	// Get the rest config to check if the SidecarContainers feature is enabled
+	sidecarEnabled, err := common.IsSidecarContainersFeatureEnabled(ctrl.GetConfigOrDie())
+	if err != nil {
+		setupLog.Error(err, "Failed to determine if sidecar containers are enabled. Defaulting to false")
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -205,6 +212,7 @@ func main() {
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
 		ReconciledConditions: map[string]metav1.Condition{},
+		NativeSidecar:        sidecarEnabled,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)

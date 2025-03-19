@@ -21,6 +21,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
+
+	"github.com/alacuku/falco-operator/internal/pkg/mounts"
 )
 
 var (
@@ -109,6 +111,7 @@ var (
 		{Name: "docker-socket", MountPath: "/host/var/run/"},
 		{Name: "containerd-socket", MountPath: "/host/run/containerd/"},
 		{Name: "crio-socket", MountPath: "/host/run/crio/"},
+		{Name: "falco-configs-crd", MountPath: mounts.ConfigDirPath},
 	}
 
 	// DefaultFalcoVolumes are the default volumes for the Falco container.
@@ -124,6 +127,7 @@ var (
 		{Name: "containerd-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
 		{Name: "crio-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/crio"}}},
 		{Name: "proc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc"}}},
+		{Name: "falco-configs-crd", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 
 	// DefaultFalcoConfig default Falco configuration.
@@ -260,4 +264,57 @@ webserver:
   ssl_enabled: false
   threadiness: 0
 `
+	restartPolicy = corev1.ContainerRestartPolicyAlways
+
+	artifactOperatorName    = "artifact-operator"
+	artifactOperatorSidecar = corev1.Container{
+		Name: artifactOperatorName,
+		// TODO: Change the image repository to the official one.
+		Image:           "docker.io/aldokcl/artifact-operator:fix-config-dir",
+		ImagePullPolicy: corev1.PullAlways,
+		RestartPolicy:   &restartPolicy,
+		EnvFrom:         []corev1.EnvFromSource{},
+		Env: []corev1.EnvVar{
+			{
+				Name: "POD_NAMESPACE",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "metadata.namespace",
+					},
+				},
+			},
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "falco-configs-crd",
+				MountPath: mounts.ConfigDirPath,
+			},
+		},
+		ReadinessProbe: &corev1.Probe{
+			InitialDelaySeconds: 5,
+			TimeoutSeconds:      5,
+			PeriodSeconds:       10,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/healthz",
+					Port: intstr.FromInt32(8081),
+				},
+			},
+		},
+		LivenessProbe: &corev1.Probe{
+			InitialDelaySeconds: 15,
+			TimeoutSeconds:      5,
+			PeriodSeconds:       10,
+			FailureThreshold:    3,
+			SuccessThreshold:    1,
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/healthz",
+					Port: intstr.FromInt32(8081),
+				},
+			},
+		},
+	}
 )
