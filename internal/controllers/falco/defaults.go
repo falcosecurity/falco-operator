@@ -283,6 +283,14 @@ webserver:
 					},
 				},
 			},
+			{
+				Name: "NODE_NAME",
+				ValueFrom: &corev1.EnvVarSource{
+					FieldRef: &corev1.ObjectFieldSelector{
+						FieldPath: "spec.nodeName",
+					},
+				},
+			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{

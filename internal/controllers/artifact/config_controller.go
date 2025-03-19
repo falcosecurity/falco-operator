@@ -20,6 +20,7 @@ package artifact
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -35,13 +36,14 @@ import (
 )
 
 const (
-	configFinalizer = "config.artifact.falcosecurity.dev/finalizer"
+	configFinalizerPrefix = "config.artifact.falcosecurity.dev/finalizer"
 )
 
 // ConfigReconciler reconciles a Config object.
 type ConfigReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	NodeName string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -89,17 +91,21 @@ func (r *ConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ensureFinalizer ensures the finalizer is set.
 func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
-	if !controllerutil.ContainsFinalizer(config, configFinalizer) {
+	if !controllerutil.ContainsFinalizer(config, r.getFinalizer()) {
 		logger := log.FromContext(ctx)
-		logger.V(3).Info("Setting finalizer", "finalizer", configFinalizer)
-		controllerutil.AddFinalizer(config, configFinalizer)
+		logger.V(3).Info("Setting finalizer", "finalizer", r.getFinalizer())
+		controllerutil.AddFinalizer(config, r.getFinalizer())
 
-		if err := r.Update(ctx, config); err != nil {
-			logger.Error(err, "unable to set finalizer", "finalizer", configFinalizer)
+		if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
+			logger.Error(err, "unable to set finalizer", "finalizer", r.getFinalizer())
 			return false, err
+		} else if apierrors.IsConflict(err) {
+			logger.V(3).Info("Conflict while setting finalizer, retrying")
+			// It has alreayd been to the queue, so we return nil.
+			return false, nil
 		}
 
-		logger.V(3).Info("Finalizer set", "finalizer", configFinalizer)
+		logger.V(3).Info("Finalizer set", "finalizer", r.getFinalizer())
 		return true, nil
 	}
 
@@ -145,7 +151,7 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 	logger := log.FromContext(ctx)
 	if !config.DeletionTimestamp.IsZero() {
 		logger.Info("Config instance marked for deletion")
-		if controllerutil.ContainsFinalizer(config, configFinalizer) {
+		if controllerutil.ContainsFinalizer(config, r.getFinalizer()) {
 			// Remove the configuration file.
 			configFile := filepath.Clean(filepath.Join(mounts.ConfigDirPath, config.Name+".yaml"))
 			if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
@@ -156,13 +162,18 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 			}
 
 			logger.Info("Config file correctly removed", "file", configFile)
-			controllerutil.RemoveFinalizer(config, configFinalizer)
+			controllerutil.RemoveFinalizer(config, r.getFinalizer())
 			if err := r.Update(ctx, config); err != nil {
-				logger.Error(err, "unable to remove finalizer", "finalizer", configFinalizer)
+				logger.Error(err, "unable to remove finalizer", "finalizer", r.getFinalizer())
 				return false, err
 			}
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// getFinalizer returns the finalizer name based on the NodeName.
+func (r *ConfigReconciler) getFinalizer() string {
+	return fmt.Sprintf("%s-%s", configFinalizerPrefix, r.NodeName)
 }
