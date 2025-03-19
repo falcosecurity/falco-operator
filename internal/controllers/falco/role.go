@@ -27,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
 )
 
@@ -47,6 +48,11 @@ func generateRole(ctx context.Context, cl client.Client, falco *instancev1alpha1
 				APIGroups: []string{""},
 				Resources: []string{"configmaps"},
 				Verbs:     []string{"get", "list"},
+			},
+			{
+				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+				Resources: []string{"configs"},
+				Verbs:     []string{"get", "update", "list", "watch"},
 			},
 		},
 	}

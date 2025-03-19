@@ -51,6 +51,8 @@ type Reconciler struct {
 	// Last reconciled conditions for Falco instances.
 	// This is used to update the status of the Falco instance in the defer function.
 	ReconciledConditions map[string]metav1.Condition
+	// NativeSidecar is a flag to enable the native sidecar.
+	NativeSidecar bool
 }
 
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch;create;update;patch;delete
@@ -245,7 +247,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	}()
 
 	logger.V(2).Info("Generating apply configuration from user input")
-	applyConfig, err := generateApplyConfiguration(ctx, r.Client, falco)
+	applyConfig, err := generateApplyConfiguration(ctx, r.Client, falco, r.NativeSidecar)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
 		reconcileCondition.Status = metav1.ConditionFalse

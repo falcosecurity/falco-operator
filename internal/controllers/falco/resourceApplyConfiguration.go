@@ -40,7 +40,7 @@ const (
 )
 
 // generateApplyConfiguration generates the apply configuration for the given Kubernetes resource.
-func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
+func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco, nativeSidecar bool) (*unstructured.Unstructured, error) {
 	// Determine the resource type from the Falco object.
 	resourceType := falco.Spec.Type
 
@@ -48,9 +48,9 @@ func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1
 	var baseResource interface{}
 	switch resourceType {
 	case resourceTypeDeployment:
-		baseResource = baseDeployment(falco)
+		baseResource = baseDeployment(nativeSidecar, falco)
 	case resourceTypeDaemonSet:
-		baseResource = baseDaemonSet(falco)
+		baseResource = baseDaemonSet(nativeSidecar, falco)
 	default:
 		// Should never happen, since the type is validated by the CRD.
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
@@ -66,7 +66,7 @@ func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1
 	}
 
 	// Generate the user defined resource.
-	userUnstructured, err := generateUserDefinedResource(falco)
+	userUnstructured, err := generateUserDefinedResource(nativeSidecar, falco)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +109,8 @@ func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1
 }
 
 // baseDeployment returns the base deployment for Falco with default values + metadata coming from the Falco CR.
-func baseDeployment(falco *v1alpha1.Falco) *appsv1.Deployment {
-	return &appsv1.Deployment{
+func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deployment {
+	dpl := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      falco.Name,
 			Namespace: falco.Namespace,
@@ -149,6 +149,9 @@ func baseDeployment(falco *v1alpha1.Falco) *appsv1.Deployment {
 							SecurityContext: DefaultFalcoSecurityContext,
 						},
 					},
+					InitContainers: []corev1.Container{
+						artifactOperatorSidecar,
+					},
 				},
 			},
 			Strategy: appsv1.DeploymentStrategy{
@@ -156,11 +159,19 @@ func baseDeployment(falco *v1alpha1.Falco) *appsv1.Deployment {
 			},
 		},
 	}
+
+	if nativeSidecar {
+		dpl.Spec.Template.Spec.InitContainers = append(dpl.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
+	} else {
+		dpl.Spec.Template.Spec.Containers = append(dpl.Spec.Template.Spec.Containers, artifactOperatorSidecar)
+	}
+
+	return dpl
 }
 
 // baseDaemonSet returns the base daemonset for Falco with default values + metadata coming from the Falco CR.
-func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
-	return &appsv1.DaemonSet{
+func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet {
+	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      falco.Name,
 			Namespace: falco.Namespace,
@@ -203,10 +214,18 @@ func baseDaemonSet(falco *v1alpha1.Falco) *appsv1.DaemonSet {
 			},
 		},
 	}
+
+	if nativeSidecar {
+		ds.Spec.Template.Spec.InitContainers = append(ds.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
+	} else {
+		ds.Spec.Template.Spec.Containers = append(ds.Spec.Template.Spec.Containers, artifactOperatorSidecar)
+	}
+
+	return ds
 }
 
 // generateUserDefinedResource generates a user defined resource from the falco CR.
-func generateUserDefinedResource(falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
+func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
 	// Build the default resource from the base one.
 	// We use the base one as a starting point to have the same structure and, then we override the user defined fields.
 	var userResource interface{}
@@ -215,9 +234,9 @@ func generateUserDefinedResource(falco *v1alpha1.Falco) (*unstructured.Unstructu
 
 	switch resourceType {
 	case resourceTypeDeployment:
-		userResource = baseDeployment(falco)
+		userResource = baseDeployment(nativeSidecar, falco)
 	case resourceTypeDaemonSet:
-		userResource = baseDaemonSet(falco)
+		userResource = baseDaemonSet(nativeSidecar, falco)
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
 	}
