@@ -96,6 +96,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Get the node name from environment variable.
+	nodeName, ok := os.LookupEnv("NODE_NAME")
+	if !ok {
+		setupLog.Error(nil, "unable to get NODE_NAME environment variable")
+		os.Exit(1)
+	}
+
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -215,8 +222,9 @@ func main() {
 	}
 
 	if err = (&artifact.ConfigReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Artifact")
 		os.Exit(1)
