@@ -23,6 +23,7 @@ import (
 // ConfigSpec defines the desired state of Config.
 type ConfigSpec struct {
 	// Config is the configuration for Falco deployment.
+	// +kubebuilder:validation:Required
 	Config string `json:"config,omitempty"`
 }
 
