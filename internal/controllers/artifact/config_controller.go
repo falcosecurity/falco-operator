@@ -101,7 +101,7 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 			return false, err
 		} else if apierrors.IsConflict(err) {
 			logger.V(3).Info("Conflict while setting finalizer, retrying")
-			// It has alreayd been to the queue, so we return nil.
+			// It has already been added to the queue, so we return nil.
 			return false, nil
 		}
 
@@ -150,8 +150,8 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
 	logger := log.FromContext(ctx)
 	if !config.DeletionTimestamp.IsZero() {
-		logger.Info("Config instance marked for deletion")
 		if controllerutil.ContainsFinalizer(config, r.getFinalizer()) {
+			logger.Info("Config instance marked for deletion, cleaning up")
 			// Remove the configuration file.
 			configFile := filepath.Clean(filepath.Join(mounts.ConfigDirPath, config.Name+".yaml"))
 			if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
@@ -159,16 +159,22 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 				return false, err
 			} else if os.IsNotExist(err) {
 				logger.Info("Config file does not exist, nothing to be done", "file", configFile)
+			} else {
+				logger.Info("Config file correctly removed", "file", configFile)
 			}
 
-			logger.Info("Config file correctly removed", "file", configFile)
 			controllerutil.RemoveFinalizer(config, r.getFinalizer())
-			if err := r.Update(ctx, config); err != nil {
+			if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
 				logger.Error(err, "unable to remove finalizer", "finalizer", r.getFinalizer())
 				return false, err
+			} else if apierrors.IsConflict(err) {
+				logger.Info("Conflict while removing finalizer, retrying")
+				// It has already been added to the queue, so we return nil.
+				return true, nil
 			}
 			return true, nil
 		}
+		return true, nil
 	}
 	return false, nil
 }
