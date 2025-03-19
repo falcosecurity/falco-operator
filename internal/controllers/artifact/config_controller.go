@@ -20,13 +20,22 @@ package artifact
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
+	"github.com/alacuku/falco-operator/internal/pkg/mounts"
+)
+
+const (
+	configFinalizer = "config.artifact.falcosecurity.dev/finalizer"
 )
 
 // ConfigReconciler reconciles a Config object.
@@ -35,23 +44,37 @@ type ConfigReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/finalizers,verbs=update
-
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Config object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.19.4/pkg/reconcile
 func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	_ = log.FromContext(ctx)
+	var err error
+	logger := log.FromContext(ctx)
+	config := &artifactv1alpha1.Config{}
 
-	// TODO(user): your logic here
+	// Fetch the Config instance.
+	logger.V(2).Info("Fetching Config instance")
+
+	if err = r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
+		logger.Error(err, "unable to fetch Config instance")
+		return ctrl.Result{}, err
+	} else if apierrors.IsNotFound(err) {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+
+	// Handle deletion.
+	if ok, err := r.handleDeletion(ctx, config); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the finalizer is set.
+	if ok, err := r.ensureFinalizer(ctx, config); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the configuration is written to the filesystem.
+	if err := r.ensureConfig(ctx, config); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -62,4 +85,84 @@ func (r *ConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&artifactv1alpha1.Config{}).
 		Named("artifact-config").
 		Complete(r)
+}
+
+// ensureFinalizer ensures the finalizer is set.
+func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
+	if !controllerutil.ContainsFinalizer(config, configFinalizer) {
+		logger := log.FromContext(ctx)
+		logger.V(3).Info("Setting finalizer", "finalizer", configFinalizer)
+		controllerutil.AddFinalizer(config, configFinalizer)
+
+		if err := r.Update(ctx, config); err != nil {
+			logger.Error(err, "unable to set finalizer", "finalizer", configFinalizer)
+			return false, err
+		}
+
+		logger.V(3).Info("Finalizer set", "finalizer", configFinalizer)
+		return true, nil
+	}
+
+	return false, nil
+}
+
+// ensureConfig ensures the configuration is written to the filesystem.
+func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config) error {
+	logger := log.FromContext(ctx)
+	var err error
+	// Check if the file exists.
+	configFile := filepath.Clean(filepath.Join(mounts.ConfigDirPath, config.Name+".yaml"))
+	if _, err = os.Stat(configFile); err == nil {
+		// Read the file.
+		content, err := os.ReadFile(configFile)
+		if err != nil {
+			logger.Error(err, "unable to read config file", "file", configFile)
+			return err
+		}
+		// Check if the content is the same.
+		if string(content) == config.Spec.Config {
+			logger.V(3).Info("Config file is up to date", "file", configFile)
+			return nil
+		}
+	} else if !os.IsNotExist(err) {
+		logger.Error(err, "unable to check if file exists", "file", configFile)
+		return err
+	}
+
+	// Write the configuration to the filesystem.
+	if err := os.WriteFile(configFile, []byte(config.Spec.Config), 0o600); err != nil {
+		logger.Error(err, "unable to write config file", "file", configFile)
+		return err
+	}
+
+	logger.Info("Config file correctly written to filesystem", "file", configFile)
+	return nil
+}
+
+// handleDeletion handles the deletion of the Config instance.
+// It removes the configuration file and the finalizer.
+func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
+	logger := log.FromContext(ctx)
+	if !config.DeletionTimestamp.IsZero() {
+		logger.Info("Config instance marked for deletion")
+		if controllerutil.ContainsFinalizer(config, configFinalizer) {
+			// Remove the configuration file.
+			configFile := filepath.Clean(filepath.Join(mounts.ConfigDirPath, config.Name+".yaml"))
+			if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
+				logger.Error(err, "unable to remove config file", "file", configFile)
+				return false, err
+			} else if os.IsNotExist(err) {
+				logger.Info("Config file does not exist, nothing to be done", "file", configFile)
+			}
+
+			logger.Info("Config file correctly removed", "file", configFile)
+			controllerutil.RemoveFinalizer(config, configFinalizer)
+			if err := r.Update(ctx, config); err != nil {
+				logger.Error(err, "unable to remove finalizer", "finalizer", configFinalizer)
+				return false, err
+			}
+			return true, nil
+		}
+	}
+	return false, nil
 }
