@@ -152,6 +152,13 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 			logger.V(3).Info("Config file is up to date", "file", configFile)
 			return nil
 		}
+		// The content is different, remove the file.
+		// Overlayfs's support for inotify mechanisms is not complete yet.
+		// Events like IN_CLOSE_WRITE cannot be notified to listening process.
+		if err := os.Remove(configFile); err != nil {
+			logger.Error(err, "unable to remove config file", "file", configFile)
+			return err
+		}
 	} else if !os.IsNotExist(err) {
 		logger.Error(err, "unable to check if file exists", "file", configFile)
 		return err
