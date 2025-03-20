@@ -96,9 +96,10 @@ var _ = Describe("Config Controller", func() {
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
 			controllerReconciler := &ConfigReconciler{
-				Client:   k8sClient,
-				Scheme:   k8sClient.Scheme(),
-				NodeName: "test-node",
+				Client:           k8sClient,
+				Scheme:           k8sClient.Scheme(),
+				NodeName:         "test-node",
+				ConfigPriorities: map[string]string{},
 			}
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
