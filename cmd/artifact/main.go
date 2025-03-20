@@ -222,9 +222,10 @@ func main() {
 	}
 
 	if err = (&artifact.ConfigReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		NodeName: nodeName,
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		NodeName:         nodeName,
+		ConfigPriorities: map[string]string{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Artifact")
 		os.Exit(1)
