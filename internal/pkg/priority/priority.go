@@ -27,25 +27,30 @@ const (
 	// The higher the value, the higher the priority meaning that Falco will use the values of the
 	// artifact with the highest priority.
 	AnnotationKey   = "artifact.falcosecurity.dev/priority"
-	DefaultPriority = "0"
+	DefaultPriority = "50"
 )
 
 // validate validates the priority annotation.
 // It takes a map of annotations and returns an error if the priority annotation is invalid.
 // If the priority annotation is not present in the map, it returns nil. In that case,
 // a default priority will be used.
-func validate(priority string) error {
-	if _, err := strconv.Atoi(priority); err != nil {
-		return fmt.Errorf("invalid priority annotation %q, value %q: %w", AnnotationKey, priority, err)
+func validate(priority string) (int, error) {
+	p, err := strconv.Atoi(priority)
+	if err != nil {
+		return 0, fmt.Errorf("invalid priority annotation %q, value %q: %w", AnnotationKey, priority, err)
 	}
 
-	return nil
+	if p < 0 || p > 99 {
+		return 0, fmt.Errorf("priority value %d out of range: must be between 0 and 99", p)
+	}
+
+	return p, nil
 }
 
-// Extract returns the priority of the artifact.
+// ExtractRaw returns the priority of the artifact.
 // It takes a map of annotations and returns the priority of the artifact as string
 // if valid priority is present otherwise it returns the default priority.
-func Extract(annotations map[string]string) string {
+func ExtractRaw(annotations map[string]string) string {
 	// Check if the priority annotation exists.
 	priority, ok := annotations[AnnotationKey]
 	if !ok {
@@ -60,11 +65,11 @@ func Extract(annotations map[string]string) string {
 // It takes a map of annotations and returns the priority of the artifact as string if valid priority is present.
 // If the priority annotation is not present in the map, it returns the default priority.
 func ValidateAndExtract(annotations map[string]string) (string, error) {
-	priority := Extract(annotations)
-	if err := validate(priority); err != nil {
+	priority := ExtractRaw(annotations)
+	if p, err := validate(priority); err != nil {
 		return "", err
 	} else {
-		return priority, nil
+		return fmt.Sprintf("%0*d", 2, p), nil
 	}
 }
 
