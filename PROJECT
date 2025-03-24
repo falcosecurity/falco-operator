@@ -5,6 +5,7 @@
 domain: falcosecurity.dev
 layout:
 - go.kubebuilder.io/v4
+multigroup: true
 projectName: falco-operator
 repo: github.com/alacuku/falco-operator
 resources:
@@ -17,5 +18,14 @@ resources:
   kind: Falco
   path: github.com/alacuku/falco-operator/api/v1alpha1
   plural: falcos
+  version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: falcosecurity.dev
+  group: artifact
+  kind: Config
+  path: github.com/alacuku/falco-operator/api/artifact/v1alpha1
   version: v1alpha1
 version: "3"
