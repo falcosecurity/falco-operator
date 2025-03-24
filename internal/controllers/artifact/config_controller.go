@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
+	"github.com/alacuku/falco-operator/internal/pkg/common"
 	"github.com/alacuku/falco-operator/internal/pkg/mounts"
 	"github.com/alacuku/falco-operator/internal/pkg/priority"
 )
@@ -40,13 +41,23 @@ const (
 	configFinalizerPrefix = "config.artifact.falcosecurity.dev/finalizer"
 )
 
+// NewConfigReconciler returns a new ConfigReconciler.
+func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName string) *ConfigReconciler {
+	return &ConfigReconciler{
+		Client:           cl,
+		Scheme:           scheme,
+		finalizer:        common.FormatFinalizerName(configFinalizerPrefix, nodeName),
+		configPriorities: make(map[string]string),
+	}
+}
+
 // ConfigReconciler reconciles a Config object.
 type ConfigReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	NodeName string
-	// ConfigPriorities is a map of configuration names and their priorities.
-	ConfigPriorities map[string]string
+	Scheme    *runtime.Scheme
+	finalizer string
+	// configPriorities is a map of configuration names and their priorities.
+	configPriorities map[string]string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -98,13 +109,13 @@ func (r *ConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ensureFinalizer ensures the finalizer is set.
 func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
-	if !controllerutil.ContainsFinalizer(config, r.getFinalizer()) {
+	if !controllerutil.ContainsFinalizer(config, r.finalizer) {
 		logger := log.FromContext(ctx)
-		logger.V(3).Info("Setting finalizer", "finalizer", r.getFinalizer())
-		controllerutil.AddFinalizer(config, r.getFinalizer())
+		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
+		controllerutil.AddFinalizer(config, r.finalizer)
 
 		if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
-			logger.Error(err, "unable to set finalizer", "finalizer", r.getFinalizer())
+			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
 		} else if apierrors.IsConflict(err) {
 			logger.V(3).Info("Conflict while setting finalizer, retrying")
@@ -112,7 +123,7 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 			return false, nil
 		}
 
-		logger.V(3).Info("Finalizer set", "finalizer", r.getFinalizer())
+		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
 		return true, nil
 	}
 
@@ -179,7 +190,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
 	logger := log.FromContext(ctx)
 	if !config.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(config, r.getFinalizer()) {
+		if controllerutil.ContainsFinalizer(config, r.finalizer) {
 			logger.Info("Config instance marked for deletion, cleaning up")
 			// Get name of the configuration file.
 			configFile, err := r.getConfigFilePath(ctx, config, "")
@@ -197,9 +208,9 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 			}
 
 			// Remove the finalizer.
-			controllerutil.RemoveFinalizer(config, r.getFinalizer())
+			controllerutil.RemoveFinalizer(config, r.finalizer)
 			if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
-				logger.Error(err, "unable to remove finalizer", "finalizer", r.getFinalizer())
+				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
 				return false, err
 			} else if apierrors.IsConflict(err) {
 				logger.Info("Conflict while removing finalizer, retrying")
@@ -211,11 +222,6 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 		return true, nil
 	}
 	return false, nil
-}
-
-// getFinalizer returns the finalizer name based on the NodeName.
-func (r *ConfigReconciler) getFinalizer() string {
-	return fmt.Sprintf("%s-%s", configFinalizerPrefix, r.NodeName)
 }
 
 // cleanupOldConfigFile removes the old configuration file if the priority has changed.
@@ -230,7 +236,7 @@ func (r *ConfigReconciler) cleanupOldConfigFile(ctx context.Context, config *art
 	}
 
 	// Get the old priority (if any).
-	oldPriority, exists := r.ConfigPriorities[config.Name]
+	oldPriority, exists := r.configPriorities[config.Name]
 
 	// If the priority hasn't changed or there was no old priority, nothing to do.
 	if !exists || oldPriority == currentPriority {
@@ -260,19 +266,19 @@ func (r *ConfigReconciler) cleanupOldConfigFile(ctx context.Context, config *art
 	}
 
 	// Update the stored priority
-	r.ConfigPriorities[config.Name] = currentPriority
+	r.configPriorities[config.Name] = currentPriority
 
 	return nil
 }
 
-// initConfigPriority checks if a priority exists for the config in the ConfigPriorities map.
+// initConfigPriority checks if a priority exists for the config in the configPriorities map.
 // If it doesn't exist, it extracts the priority from annotations and adds it to the map.
 // If it already exists, it does nothing (even if the priority differs from the current one).
 func (r *ConfigReconciler) initConfigPriority(ctx context.Context, config *artifactv1alpha1.Config) error {
 	logger := log.FromContext(ctx)
 
 	// If there's already a priority for this config, do nothing
-	if _, exists := r.ConfigPriorities[config.Name]; exists {
+	if _, exists := r.configPriorities[config.Name]; exists {
 		logger.V(3).Info("Priority already exists in the map, not changing it", "config", config.Name)
 		return nil
 	}
@@ -285,7 +291,7 @@ func (r *ConfigReconciler) initConfigPriority(ctx context.Context, config *artif
 	}
 
 	// Store the priority in the map
-	r.ConfigPriorities[config.Name] = p
+	r.configPriorities[config.Name] = p
 	logger.V(3).Info("Priority initialized for config", "config", config.Name, "priority", p)
 	return nil
 }

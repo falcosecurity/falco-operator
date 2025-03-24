@@ -221,16 +221,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&artifact.ConfigReconciler{
-		Client:           mgr.GetClient(),
-		Scheme:           mgr.GetScheme(),
-		NodeName:         nodeName,
-		ConfigPriorities: map[string]string{},
-	}).SetupWithManager(mgr); err != nil {
+	if err = artifact.NewConfigReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName).
+		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Artifact")
 		os.Exit(1)
 	}
-	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
