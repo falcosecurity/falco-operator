@@ -111,7 +111,7 @@ var (
 		{Name: "docker-socket", MountPath: "/host/var/run/"},
 		{Name: "containerd-socket", MountPath: "/host/run/containerd/"},
 		{Name: "crio-socket", MountPath: "/host/run/crio/"},
-		{Name: "falco-configs-crd", MountPath: mounts.ConfigDirPath},
+		{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
 		{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
 	}
 
@@ -128,7 +128,7 @@ var (
 		{Name: "containerd-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
 		{Name: "crio-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/crio"}}},
 		{Name: "proc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc"}}},
-		{Name: "falco-configs-crd", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: mounts.ConfigMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: mounts.RulesfileMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 
@@ -295,10 +295,7 @@ webserver:
 			},
 		},
 		VolumeMounts: []corev1.VolumeMount{
-			{
-				Name:      "falco-configs-crd",
-				MountPath: mounts.ConfigDirPath,
-			},
+			{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
 			{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileMountName},
 		},
 		ReadinessProbe: &corev1.Probe{

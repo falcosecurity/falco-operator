@@ -20,6 +20,8 @@ const (
 	// ConfigDirPath mount path for empty dir where Falco's configuration files are store by
 	// the artifact-operator.
 	ConfigDirPath = "/etc/falco/config.d"
+	// ConfigMountName is the name of the volume mount for Falco's configuration files.
+	ConfigMountName = "falco-configs"
 	// RulesfileDirPath mount path for empty dir where Falco's rules files are stored by the
 	// artifact-operator.
 	RulesfileDirPath = "/etc/falco/rules.d"
