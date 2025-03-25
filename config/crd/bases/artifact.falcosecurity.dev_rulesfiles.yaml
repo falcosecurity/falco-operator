@@ -42,13 +42,32 @@ spec:
               ociArtifact:
                 description: OCIArtifact specifies the reference to an OCI artifact.
                 properties:
-                  imagePullSecret:
-                    description: ImagePullSecret is the name of the secret used to
+                  pullSecret:
+                    description: PullSecret contains authentication details used to
                       pull the OCI artifact.
-                    type: string
+                    properties:
+                      passwordKey:
+                        default: password
+                        description: PasswordKey is the key in the secret that contains
+                          the password.
+                        type: string
+                      secretName:
+                        description: SecretName is the name of the secret containing
+                          credentials.
+                        type: string
+                      usernameKey:
+                        default: username
+                        description: UsernameKey is the key in the secret that contains
+                          the username.
+                        type: string
+                    required:
+                    - secretName
+                    type: object
                   reference:
                     description: Reference is the OCI artifact reference.
                     type: string
+                required:
+                - reference
                 type: object
               rulesString:
                 description: RulesString specifies the rules as a string.
