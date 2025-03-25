@@ -6,4 +6,7 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: rulesfile-sample
 spec:
-  # TODO(user): Add fields here
+ ociArtifact:
+   reference: ghcr.io/falcosecurity/falco-rules:latest
+   pullSecret:
+        secretName: my-pull-secret

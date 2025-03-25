@@ -42,8 +42,24 @@ const (
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
 type OCIArtifact struct {
 	// Reference is the OCI artifact reference.
+	// +kubebuilder:validation:Required
 	Reference string `json:"reference,omitempty"`
 
-	// ImagePullSecret is the name of the secret used to pull the OCI artifact.
-	ImagePullSecret string `json:"imagePullSecret,omitempty"`
+	// PullSecret contains authentication details used to pull the OCI artifact.
+	PullSecret OCIPullSecret `json:"pullSecret,omitempty"`
+}
+
+// OCIPullSecret defines the structure for specifying authentication details for an OCI artifact.
+type OCIPullSecret struct {
+	// SecretName is the name of the secret containing credentials.
+	// +kubebuilder:validation:Required
+	SecretName string `json:"secretName,omitempty"`
+
+	// UsernameKey is the key in the secret that contains the username.
+	// +kubebuilder:default=username
+	UsernameKey string `json:"usernameKey,omitempty"`
+
+	// PasswordKey is the key in the secret that contains the password.
+	// +kubebuilder:default=password
+	PasswordKey string `json:"passwordKey,omitempty"`
 }
