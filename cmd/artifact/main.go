@@ -227,6 +227,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := artifact.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName).
+		SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
+		os.Exit(1)
+	}
+
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
 		if err := mgr.Add(metricsCertWatcher); err != nil {
