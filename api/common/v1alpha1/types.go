@@ -38,3 +38,12 @@ const (
 	// - Unknown: the operator couldn't determine the condition status.
 	Reconciled ConditionType = "Reconciled"
 )
+
+// OCIArtifact defines the structure for specifying an OCI artifact reference.
+type OCIArtifact struct {
+	// Reference is the OCI artifact reference.
+	Reference string `json:"reference,omitempty"`
+
+	// ImagePullSecret is the name of the secret used to pull the OCI artifact.
+	ImagePullSecret string `json:"imagePullSecret,omitempty"`
+}
