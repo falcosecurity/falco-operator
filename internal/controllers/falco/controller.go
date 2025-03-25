@@ -395,7 +395,8 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 		},
 	}
 
-	if falco.Spec.Type == "Deployment" {
+	switch falco.Spec.Type {
+	case resourceTypeDeployment:
 		deployment := &appsv1.Deployment{}
 		err = r.Get(ctx, client.ObjectKeyFromObject(falco), deployment)
 		if err != nil {
@@ -421,7 +422,7 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 			availableCondition.Reason = "DeploymentUnavailable"
 			availableCondition.Message = "Deployment is unavailable"
 		}
-	} else if falco.Spec.Type == "DaemonSet" {
+	case resourceTypeDaemonSet:
 		daemonset := &appsv1.DaemonSet{}
 		err = r.Get(ctx, client.ObjectKeyFromObject(falco), daemonset)
 		if err != nil {
