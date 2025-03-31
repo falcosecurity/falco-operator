@@ -1,5 +1,11 @@
 # Falco Operator
 
+[![Falco Ecosystem Repository](https://raw.githubusercontent.com/falcosecurity/evolution/refs/heads/main/repos/badges/falco-ecosystem-blue.svg)](https://github.com/falcosecurity/evolution/blob/main/REPOSITORIES.md#ecosystem-scope) [![Incubating](https://img.shields.io/badge/status-incubating-orange?style=for-the-badge)](https://github.com/falcosecurity/evolution/blob/main/REPOSITORIES.md#incubating)
+[![Last Release](https://img.shields.io/github/v/release/falcosecurity/falco-operator?style=for-the-badge)](https://github.com/falcosecurity/falco-operator/releases/latest)
+
+![licence](https://img.shields.io/github/license/falcosecurity/falco-operator?style=for-the-badge
+)
+
 > **Note:** This project is a work in progress.
 
 The Falco Operator is a Kubernetes operator that manages the lifecycle of Falco, a cloud-native runtime security tool. It automates the deployment, configuration, and management of Falco instances within a Kubernetes cluster.
@@ -42,3 +48,8 @@ To build the project, run:
 
 ```sh
 make build
+```
+
+## License
+
+Falco Kubernetes Operator is licensed to you under the [Apache 2.0](./LICENSE) open source license.
