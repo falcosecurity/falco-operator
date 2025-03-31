@@ -28,8 +28,8 @@ import (
 type RulesfileSpec struct {
 	// OCIArtifact specifies the reference to an OCI artifact.
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
-	// RulesString specifies the rules as a string.
-	RulesString string `json:"rulesString,omitempty"`
+	// InlineRules specifies the rules as a string.
+	InlineRules *string `json:"inlineRules,omitempty"`
 }
 
 // RulesfileStatus defines the observed state of Rulesfile.
