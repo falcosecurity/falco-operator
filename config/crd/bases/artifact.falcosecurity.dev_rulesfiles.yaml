@@ -39,6 +39,9 @@ spec:
           spec:
             description: RulesfileSpec defines the desired state of Rulesfile.
             properties:
+              inlineRules:
+                description: InlineRules specifies the rules as a string.
+                type: string
               ociArtifact:
                 description: OCIArtifact specifies the reference to an OCI artifact.
                 properties:
@@ -69,9 +72,6 @@ spec:
                 required:
                 - reference
                 type: object
-              rulesString:
-                description: RulesString specifies the rules as a string.
-                type: string
             type: object
           status:
             description: RulesfileStatus defines the observed state of Rulesfile.
