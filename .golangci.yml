@@ -81,7 +81,19 @@ linters:
       allow-unused: false
     revive:
       rules:
+        - name: optimize-operands-order
+        - name: identical-branches
         - name: comment-spacings
+        - name: package-comments
+        - name: range
+        - name: range-val-address
+        - name: receiver-naming
+        - name: range-val-in-closure
+        - name: superfluous-else
+        - name: unhandled-error
+        - name: exported
+          arguments:
+            - disableStutteringCheck
   exclusions:
     generated: lax
     rules:
