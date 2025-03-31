@@ -227,7 +227,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := artifact.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName).
+	if err := artifact.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
 		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
