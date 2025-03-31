@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
+	"github.com/alacuku/falco-operator/internal/pkg/artifact"
 	"github.com/alacuku/falco-operator/internal/pkg/common"
 	"github.com/alacuku/falco-operator/internal/pkg/priority"
 )
@@ -39,21 +40,21 @@ const (
 )
 
 // NewRulesfileReconciler returns a new RulesfileReconciler.
-func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName string) *RulesfileReconciler {
+func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, namespace string) *RulesfileReconciler {
 	return &RulesfileReconciler{
-		Client:              cl,
-		Scheme:              scheme,
-		finalizer:           common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
-		rulesfilePriorities: make(map[string]string),
+		Client:          cl,
+		Scheme:          scheme,
+		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
+		artifactManager: artifact.NewManager(cl, namespace),
 	}
 }
 
 // RulesfileReconciler reconciles a Rulesfile object.
 type RulesfileReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	finalizer           string
-	rulesfilePriorities map[string]string
+	Scheme          *runtime.Scheme
+	finalizer       string
+	artifactManager *artifact.ArtifactManager
 }
 
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles,verbs=get;list;watch;create;update;patch;delete
@@ -77,13 +78,18 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Initialize the rulesfile priority.
-	if err := r.initRulesfilesPriority(ctx, rulesfile); err != nil {
+	// Handle deletion.
+	if ok, err := r.handleDeletion(ctx, rulesfile); ok || err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Ensure the finalizer is set.
 	if ok, err := r.ensureFinalizer(ctx, rulesfile); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the rulesfile.
+	if err := r.ensureRulesfile(ctx, rulesfile); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -121,27 +127,49 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 	return false, nil
 }
 
-// initRulesfilePriority checks if a priority exists for the rulesfile in the rulesfilePriority map.
-// If it doesn't exist, it extracts the priority from annotations and adds it to the map.
-// If it already exists, it does nothing (even if the priority differs from the current one).
-func (r *RulesfileReconciler) initRulesfilesPriority(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
+func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
+	var err error
 	logger := log.FromContext(ctx)
 
-	// If there's already a priority for this config, do nothing
-	if _, exists := r.rulesfilePriorities[rulesfile.Name]; exists {
-		logger.V(3).Info("Priority already exists in the map, not changing it")
-		return nil
-	}
-
-	// Extract priority from annotations
+	// Get the priority of the configuration.
 	p, err := priority.ValidateAndExtract(rulesfile.Annotations)
 	if err != nil {
-		logger.Error(err, "unable to extract priority from config annotations")
+		logger.Error(err, "unable to extract priority from rulesfile annotations")
 		return err
 	}
 
-	// Store the priority in the map
-	r.rulesfilePriorities[rulesfile.Name] = p
-	logger.V(3).Info("Priority initialized for config", "priority", p)
+	if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.ArtifactTypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
+		return err
+	}
+
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.ArtifactTypeRulesfile); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (r *RulesfileReconciler) handleDeletion(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if !rulesfile.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(rulesfile, r.finalizer) {
+			logger.Info("Rulesfile instance marked for deletion, cleaning up")
+			if err := r.artifactManager.RemoveAll(ctx, rulesfile.Name); err != nil {
+				return false, err
+			}
+
+			// Remove the finalizer
+			controllerutil.RemoveFinalizer(rulesfile, r.finalizer)
+			if err := r.Update(ctx, rulesfile); err != nil {
+				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
+				return false, err
+			} else if apierrors.IsConflict(err) {
+				logger.Info("Conflict while removing finalizer, retrying")
+				return true, nil
+			}
+		}
+		return true, nil
+	}
+	return false, nil
 }
