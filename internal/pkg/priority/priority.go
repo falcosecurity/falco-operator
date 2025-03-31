@@ -28,6 +28,12 @@ const (
 	// artifact with the highest priority.
 	AnnotationKey   = "artifact.falcosecurity.dev/priority"
 	DefaultPriority = "50"
+	// OCISubPriority is the sub-priority value for OCI-based artifacts.
+	OCISubPriority = "01"
+	// CMSubPriority is the sub-priority value for ConfigMap-based artifacts.
+	CMSubPriority = "02"
+	// InLineRulesSubPriority is the sub-priority value for raw YAML-based artifacts.
+	InLineRulesSubPriority = "03"
 )
 
 // validate validates the priority annotation.
@@ -75,4 +81,10 @@ func ValidateAndExtract(annotations map[string]string) (string, error) {
 
 func NameFromPriority(priority, originalName string) string {
 	return fmt.Sprintf("%s-%s", priority, originalName)
+}
+
+// NameFromPriorityAndSubPriority generates a name by combining the priority, sub-priority, and original name.
+// It takes priority, subPriority and originalName as inputs and returns a string formatted as "priority-subPriority-originalName".
+func NameFromPriorityAndSubPriority(priority, subPriority, originalName string) string {
+	return fmt.Sprintf("%s-%s-%s", priority, subPriority, originalName)
 }

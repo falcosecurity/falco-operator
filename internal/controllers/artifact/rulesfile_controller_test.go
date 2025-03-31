@@ -69,7 +69,7 @@ var _ = Describe("Rulesfile Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := NewRulesfileReconciler(k8sClient, k8sClient.Scheme(), "test-node")
+			controllerReconciler := NewRulesfileReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
