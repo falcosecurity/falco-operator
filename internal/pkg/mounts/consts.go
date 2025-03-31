@@ -25,6 +25,6 @@ const (
 	// RulesfileDirPath mount path for empty dir where Falco's rules files are stored by the
 	// artifact-operator.
 	RulesfileDirPath = "/etc/falco/rules.d"
-	// RulefileMountName is the name of the volume mount for Falco's rules files.
+	// RulesfileMountName is the name of the volume mount for Falco's rules files.
 	RulesfileMountName = "falco-rulesfiles"
 )

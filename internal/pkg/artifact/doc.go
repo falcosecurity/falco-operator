@@ -14,17 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package image
-
-const (
-	// Registry the default registry used for Falco images.
-	Registry = "docker.io"
-	// Repository the default repository used for Falco images.
-	Repository = "falcosecurity"
-	// FalcoImage the default image name used for Falco.
-	FalcoImage = "falco"
-	// FalcoTag the default tag used for Falco.
-	FalcoTag = "0.40.0-debian"
-	// FalcoDebianImageSuffix suffix used for Falco Debian images.
-	FalcoDebianImageSuffix = "-debian"
-)
+// Package artifact provides the logic to store artifacts to the local filesystem.
+// It manages their lifecycle based on the CR instances.
+package artifact

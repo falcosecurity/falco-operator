@@ -26,7 +26,8 @@ const (
 	// The value of the annotation is the priority of the artifact expressed as an integer.
 	// The higher the value, the higher the priority meaning that Falco will use the values of the
 	// artifact with the highest priority.
-	AnnotationKey   = "artifact.falcosecurity.dev/priority"
+	AnnotationKey = "artifact.falcosecurity.dev/priority"
+	// DefaultPriority is the default priority value used when the priority annotation is not present in the artifact.
 	DefaultPriority = "50"
 	// OCISubPriority is the sub-priority value for OCI-based artifacts.
 	OCISubPriority = "01"
@@ -79,6 +80,7 @@ func ValidateAndExtract(annotations map[string]string) (string, error) {
 	}
 }
 
+// NameFromPriority generates a name by combining the priority and original name.
 func NameFromPriority(priority, originalName string) string {
 	return fmt.Sprintf("%s-%s", priority, originalName)
 }
