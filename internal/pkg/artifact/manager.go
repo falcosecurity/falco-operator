@@ -381,10 +381,19 @@ func (am *ArtifactManager) removeArtifactFile(name string, medium ArtifactMedium
 func path(name, artifactPriority string, medium ArtifactMedium, artifactType ArtifactType) string {
 	switch artifactType {
 	case ArtifactTypeRulesfile:
+		var subPriority string
+		switch medium {
+		case artifactMediumOCI:
+			subPriority = priority.OCISubPriority
+		case artifactMediumInline:
+			subPriority = priority.InLineRulesSubPriority
+		default:
+			subPriority = ""
+		}
 		return filepath.Clean(
 			filepath.Join(
 				mounts.RulesfileDirPath,
-				priority.NameFromPriorityAndSubPriority(artifactPriority, priority.OCISubPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
+				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
 			),
 		)
 	default:
