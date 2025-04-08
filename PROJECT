@@ -7,7 +7,7 @@ layout:
 - go.kubebuilder.io/v4
 multigroup: true
 projectName: falco-operator
-repo: github.com/alacuku/falco-operator
+repo: github.com/falcosecurity/falco-operator
 resources:
 - api:
     crdVersion: v1
@@ -16,7 +16,7 @@ resources:
   domain: falcosecurity.dev
   group: instance
   kind: Falco
-  path: github.com/alacuku/falco-operator/api/v1alpha1
+  path: github.com/falcosecurity/falco-operator/api/v1alpha1
   plural: falcos
   version: v1alpha1
 - api:
@@ -26,7 +26,7 @@ resources:
   domain: falcosecurity.dev
   group: artifact
   kind: Config
-  path: github.com/alacuku/falco-operator/api/artifact/v1alpha1
+  path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
   version: v1alpha1
 - api:
     crdVersion: v1
@@ -35,6 +35,6 @@ resources:
   domain: falcosecurity.dev
   group: artifact
   kind: Rulesfile
-  path: github.com/alacuku/falco-operator/api/artifact/v1alpha1
+  path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
   version: v1alpha1
 version: "3"

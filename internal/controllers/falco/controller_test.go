@@ -26,7 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 var _ = Describe("Falco Controller", Ordered, func() {

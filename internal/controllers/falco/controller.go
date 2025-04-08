@@ -35,9 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	commonv1alpha1 "github.com/alacuku/falco-operator/api/common/v1alpha1"
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/pkg/image"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 )
 
 const (

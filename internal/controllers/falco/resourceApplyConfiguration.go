@@ -29,9 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/alacuku/falco-operator/api/instance/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/pkg/image"
-	"github.com/alacuku/falco-operator/internal/pkg/scheme"
+	"github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
 )
 
 const (

@@ -31,10 +31,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/pkg/common"
-	"github.com/alacuku/falco-operator/internal/pkg/mounts"
-	"github.com/alacuku/falco-operator/internal/pkg/priority"
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 const (

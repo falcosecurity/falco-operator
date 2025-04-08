@@ -4,7 +4,7 @@ RELEASE ?= v0.0.1
 COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= falco
-PROJECT ?= github.com/alacuku/falco-operator
+PROJECT ?= github.com/falcosecurity/falco-operator
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -58,7 +58,7 @@ generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and
 fmt: gci addlicense ## Run go fmt against code.
 	go mod tidy
 	go fmt ./...
-	find . -type f -name '*.go' -a -exec $(GCI) write -s standard -s default -s "prefix(github.com/alacuku/falco-operator)" {} \;
+	find . -type f -name '*.go' -a -exec $(GCI) write -s standard -s default -s "prefix(github.com/falcosecurity/falco-operator)" {} \;
 	find . -type f -name '*.go' -exec $(ADD_LICENSE) -l apache -s -c "(C) The Falco Authors" {} \;
 	find . -type f -name '*.go' -exec sed -i -E 's|// Copyright ([0-9]{4}) \(C\) The Falco Authors|// Copyright (C) \1 The Falco Authors|' {} +
 

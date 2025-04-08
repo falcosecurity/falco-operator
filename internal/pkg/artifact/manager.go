@@ -25,13 +25,13 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	commonv1alpha1 "github.com/alacuku/falco-operator/api/common/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/pkg/common"
-	"github.com/alacuku/falco-operator/internal/pkg/credentials"
-	"github.com/alacuku/falco-operator/internal/pkg/mounts"
-	ociClient "github.com/alacuku/falco-operator/internal/pkg/oci/client"
-	ocipuller "github.com/alacuku/falco-operator/internal/pkg/oci/puller"
-	"github.com/alacuku/falco-operator/internal/pkg/priority"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/credentials"
+	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
+	ociClient "github.com/falcosecurity/falco-operator/internal/pkg/oci/client"
+	ocipuller "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 // ArtifactType represents different types of artifacts.

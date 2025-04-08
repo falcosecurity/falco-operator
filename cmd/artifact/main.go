@@ -35,9 +35,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
-	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
-	"github.com/alacuku/falco-operator/internal/controllers/artifact"
-	"github.com/alacuku/falco-operator/internal/pkg/version"
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/controllers/artifact"
+	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
 var (
