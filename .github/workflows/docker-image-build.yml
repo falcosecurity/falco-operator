@@ -1,0 +1,46 @@
+name: Docker Image Build
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  docker-configure:
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-22.04
+    outputs:
+      release: ${{ steps.vars.outputs.release }}
+      commit: ${{ steps.vars.outputs.commit }}
+      build_date: ${{ steps.vars.outputs.build_date }}
+    steps:
+      - name: Set version fields
+        id: vars
+        run: |
+          echo "release=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
+
+  falco-operator:
+    if: ${{ github.event_name == 'push' }}
+    needs: docker-configure
+    uses: ./.github/workflows/docker-image.yml
+    secrets: inherit
+    with:
+      release: ${{ needs.docker-configure.outputs.release }}
+      commit: ${{ needs.docker-configure.outputs.commit }}
+      build_date: ${{ needs.docker-configure.outputs.build_date }}
+      image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
+      component_name: "falco"
+
+  artifact-operator:
+    if: ${{ github.event_name == 'push' }}
+    needs: docker-configure
+    uses: ./.github/workflows/docker-image.yml
+    secrets: inherit
+    with:
+      release: ${{ needs.docker-configure.outputs.release }}
+      commit: ${{ needs.docker-configure.outputs.commit }}
+      build_date: ${{ needs.docker-configure.outputs.build_date }}
+      image_name: ${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}
+      component_name: "artifact"
