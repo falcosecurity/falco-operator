@@ -121,7 +121,7 @@ docker-build: ## Build docker image with the manager.
 		--build-arg RELEASE=$(RELEASE) \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		--build-arg OPERATOR=$(OPERATOR) \
+		--build-arg COMPONENT=$(OPERATOR) \
 		-t ${IMG} \
 		-f build/Dockerfile .
 
@@ -149,7 +149,7 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
  		--build-arg RELEASE=$(RELEASE) \
  		--build-arg COMMIT=$(COMMIT) \
  		--build-arg BUILD_DATE=$(BUILD_DATE) \
- 		--build-arg OPERATOR=$(OPERATOR) \
+ 		--build-arg COMPONENT=$(OPERATOR) \
  		-f Dockerfile.cross .
 	- $(CONTAINER_TOOL) buildx rm falco-operator-builder
 	rm Dockerfile.cross
