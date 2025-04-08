@@ -25,7 +25,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/alacuku/falco-operator/test/utils"
+	"github.com/falcosecurity/falco-operator/test/utils"
 )
 
 const (

@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
-	"github.com/alacuku/falco-operator/internal/pkg/mounts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
 )
 
 var (

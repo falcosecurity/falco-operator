@@ -28,7 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	artifactv1alpha1 "github.com/alacuku/falco-operator/api/artifact/v1alpha1"
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 )
 
 var _ = Describe("Config Controller", func() {

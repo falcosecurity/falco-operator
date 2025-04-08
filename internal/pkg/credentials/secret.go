@@ -25,7 +25,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	commonv1alpha1 "github.com/alacuku/falco-operator/api/common/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
 func credentialFuncFromCredentials(creds auth.Credential) auth.CredentialFunc {

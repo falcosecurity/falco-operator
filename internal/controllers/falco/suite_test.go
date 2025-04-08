@@ -31,7 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to

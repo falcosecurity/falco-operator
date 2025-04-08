@@ -1,4 +1,4 @@
-module github.com/alacuku/falco-operator
+module github.com/falcosecurity/falco-operator
 
 go 1.23.0
 

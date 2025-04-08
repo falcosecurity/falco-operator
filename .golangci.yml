@@ -130,10 +130,10 @@ formatters:
       sections:
         - standard
         - default
-        - prefix(github.com/alacuku/falco-operator)
+        - prefix(github.com/falcosecurity/falco-operator)
     goimports:
       local-prefixes:
-        - github.com/alacuku/falco-operator
+        - github.com/falcosecurity/falco-operator
   exclusions:
     generated: lax
     paths:

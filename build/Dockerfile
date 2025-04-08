@@ -4,7 +4,7 @@ WORKDIR /tmp/builder
 ARG RELEASE
 ARG COMMIT
 ARG BUILD_DATE
-ARG PROJECT=github.com/alacuku/falco-operator
+ARG PROJECT=github.com/falcosecurity/falco-operator
 ARG OPERATOR
 
 RUN test -n "$RELEASE" || ( echo "The RELEASE argument is unset. Aborting" && false )

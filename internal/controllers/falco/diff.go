@@ -24,7 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/structured-merge-diff/v4/typed"
 
-	"github.com/alacuku/falco-operator/internal/pkg/scheme"
+	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
 )
 
 // diff calculates the difference between the current and desired objects.

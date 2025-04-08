@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	instancev1alpha1 "github.com/alacuku/falco-operator/api/instance/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // generateServiceAccount returns a ServiceAccount for Falco.
