@@ -8,7 +8,7 @@ on:
 
 jobs:
   test-e2e:
-    name: Run on Ubuntu
+    name: tests-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
