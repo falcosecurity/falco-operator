@@ -34,6 +34,10 @@ func IsSidecarContainersFeatureEnabled(cfg *rest.Config) (bool, error) {
 	}
 
 	req := clSet.RESTClient().Get().AbsPath("/metrics").RequestURI("/metrics").Do(context.Background())
+	if req.Error() != nil {
+		return false, fmt.Errorf("unable to get metrics: %w", req.Error())
+	}
+
 	rawMetrics, err := req.Raw()
 	if err != nil {
 		return false, fmt.Errorf("unable to get metrics: %w", err)

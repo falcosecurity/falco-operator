@@ -163,6 +163,9 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 	if nativeSidecar {
 		dpl.Spec.Template.Spec.InitContainers = append(dpl.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
 	} else {
+		// If the native sidecar is not enabled, we add the artifact operator sidecar to the containers list.
+		// And we set the restart policy to nil otherwise we get a validation error.
+		artifactOperatorSidecar.RestartPolicy = nil
 		dpl.Spec.Template.Spec.Containers = append(dpl.Spec.Template.Spec.Containers, artifactOperatorSidecar)
 	}
 
@@ -218,6 +221,9 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 	if nativeSidecar {
 		ds.Spec.Template.Spec.InitContainers = append(ds.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
 	} else {
+		// If the native sidecar is not enabled, we add the artifact operator sidecar to the containers list.
+		// And we set the restart policy to nil otherwise we get a validation error.
+		artifactOperatorSidecar.RestartPolicy = nil
 		ds.Spec.Template.Spec.Containers = append(ds.Spec.Template.Spec.Containers, artifactOperatorSidecar)
 	}
 
