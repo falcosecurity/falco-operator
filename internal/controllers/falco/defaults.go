@@ -272,8 +272,8 @@ webserver:
 	artifactOperatorSidecar = corev1.Container{
 		Name: artifactOperatorName,
 		// TODO: Change the image repository to the official one.
-		Image:           "docker.io/aldokcl/artifact-operator:fix-config-dir",
-		ImagePullPolicy: corev1.PullAlways,
+		Image:           "docker.io/falcosecurity/artifact-operator:latest",
+		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &restartPolicy,
 		EnvFrom:         []corev1.EnvFromSource{},
 		Env: []corev1.EnvVar{
