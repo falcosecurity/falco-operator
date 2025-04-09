@@ -184,6 +184,8 @@ func main() {
 		setupLog.Error(err, "Failed to determine if sidecar containers are enabled. Defaulting to false")
 	}
 
+	setupLog.Info("SidecarContainers feature", "enabled", sidecarEnabled)
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
