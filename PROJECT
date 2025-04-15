@@ -37,4 +37,14 @@ resources:
   kind: Rulesfile
   path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: falcosecurity.dev
+  group: artifact
+  kind: Plugin
+  path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
+  plural: plugin
+  version: v1alpha1
 version: "3"
