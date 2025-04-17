@@ -1,0 +1,10 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: plugin-sample
+spec:
+  ociArtifact:
+    reference: ghcr.io/falcosecurity/plugins/plugin/container:main

@@ -113,6 +113,7 @@ var (
 		{Name: "crio-socket", MountPath: "/host/run/crio/"},
 		{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
 		{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
+		{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
 	}
 
 	// DefaultFalcoVolumes are the default volumes for the Falco container.
@@ -130,6 +131,7 @@ var (
 		{Name: "proc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc"}}},
 		{Name: mounts.ConfigMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: mounts.RulesfileMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+		{Name: mounts.PluginMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 	}
 
 	// DefaultFalcoConfig default Falco configuration.
@@ -297,6 +299,7 @@ webserver:
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
 			{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileMountName},
+			{Name: mounts.PluginMountName, MountPath: mounts.PluginMountName},
 		},
 		ReadinessProbe: &corev1.Probe{
 			InitialDelaySeconds: 5,
