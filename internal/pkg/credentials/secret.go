@@ -39,7 +39,7 @@ func credentialFuncFromCredentials(creds auth.Credential) auth.CredentialFunc {
 func GetCredentialsFromSecret(ctx context.Context, k8sClient client.Client, namespace string, pullSecret *commonv1alpha1.OCIPullSecret) (auth.CredentialFunc, error) {
 	var creds = auth.EmptyCredential
 
-	if pullSecret.SecretName == "" {
+	if pullSecret == nil {
 		return credentialFuncFromCredentials(creds), nil
 	}
 

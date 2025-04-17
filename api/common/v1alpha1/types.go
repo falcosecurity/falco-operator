@@ -40,16 +40,18 @@ const (
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
+// +kubebuilder:object:generate=true
 type OCIArtifact struct {
 	// Reference is the OCI artifact reference.
 	// +kubebuilder:validation:Required
 	Reference string `json:"reference,omitempty"`
 
 	// PullSecret contains authentication details used to pull the OCI artifact.
-	PullSecret OCIPullSecret `json:"pullSecret,omitempty"`
+	PullSecret *OCIPullSecret `json:"pullSecret,omitempty"`
 }
 
 // OCIPullSecret defines the structure for specifying authentication details for an OCI artifact.
+// +kubebuilder:object:generate=true
 type OCIPullSecret struct {
 	// SecretName is the name of the secret containing credentials.
 	// +kubebuilder:validation:Required

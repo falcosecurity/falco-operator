@@ -227,7 +227,7 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 	logger.V(4).Info("Getting credentials from pull secret", "pullSecret", artifact.PullSecret)
 	// File does not exist on the filesystem, we store it.
 	// Retrieve registry credentials.
-	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, &artifact.PullSecret)
+	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, artifact.PullSecret)
 	if err != nil {
 		logger.Error(err, "unable to get credentials for the OCI artifact", "pullSecret", artifact.PullSecret)
 		return err
