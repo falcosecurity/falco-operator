@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -220,6 +221,8 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 	switch artifactType {
 	case ArtifactTypeRulesfile:
 		dstDir = mounts.RulesfileDirPath
+	case ArtifactTypePlugin:
+		dstDir = mounts.PluginDirPath
 	default:
 		dstDir = ""
 	}
@@ -235,7 +238,7 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 
 	puller := ocipuller.NewPuller(ociClient.NewClient(ociClient.WithCredentialFunc(creds)), false)
 	logger.Info("Pulling OCI artifact", "reference", artifact.Reference)
-	res, err := puller.Pull(ctx, artifact.Reference, dstDir, "", "")
+	res, err := puller.Pull(ctx, artifact.Reference, dstDir, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		logger.Error(err, "unable to pull artifact", "reference", artifact.Reference)
 		return err
@@ -396,6 +399,13 @@ func path(name, artifactPriority string, medium ArtifactMedium, artifactType Art
 				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
 			),
 		)
+	case ArtifactTypePlugin:
+		return filepath.Clean(
+			filepath.Join(
+				mounts.PluginDirPath,
+				fmt.Sprintf("%s.so", name)),
+		)
+
 	default:
 		return priority.NameFromPriority(artifactPriority, name)
 	}

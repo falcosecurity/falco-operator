@@ -233,6 +233,12 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := artifact.NewPluginReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
+		SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
+		os.Exit(1)
+	}
+
 	if metricsCertWatcher != nil {
 		setupLog.Info("Adding metrics certificate watcher to manager")
 		if err := mgr.Add(metricsCertWatcher); err != nil {
