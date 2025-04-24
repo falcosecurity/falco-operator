@@ -27,6 +27,10 @@ const (
 	// The higher the value, the higher the priority meaning that Falco will use the values of the
 	// artifact with the highest priority.
 	AnnotationKey = "artifact.falcosecurity.dev/priority"
+	// MaxPriority is the maximum value for the priority annotation.
+	MaxPriority = "99"
+	// MinPriority is the minimum value for the priority annotation.
+	MinPriority = "0"
 	// DefaultPriority is the default priority value used when the priority annotation is not present in the artifact.
 	DefaultPriority = "50"
 	// OCISubPriority is the sub-priority value for OCI-based artifacts.
@@ -46,8 +50,9 @@ func validate(priority string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid priority annotation %q, value %q: %w", AnnotationKey, priority, err)
 	}
-
-	if p < 0 || p > 99 {
+	maxP, _ := strconv.Atoi(MaxPriority)
+	minP, _ := strconv.Atoi(MinPriority)
+	if p < minP || p > maxP {
 		return 0, fmt.Errorf("priority value %d out of range: must be between 0 and 99", p)
 	}
 

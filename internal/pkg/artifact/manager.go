@@ -405,6 +405,12 @@ func path(name, artifactPriority string, medium ArtifactMedium, artifactType Art
 				mounts.PluginDirPath,
 				fmt.Sprintf("%s.so", name)),
 		)
+	case ArtifactTypeConfig:
+		return filepath.Clean(
+			filepath.Join(
+				mounts.ConfigDirPath,
+				priority.NameFromPriority(artifactPriority, fmt.Sprintf("%s.yaml", name))),
+		)
 
 	default:
 		return priority.NameFromPriority(artifactPriority, name)
