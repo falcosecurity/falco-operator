@@ -41,7 +41,27 @@ spec:
             properties:
               config:
                 description: Config specifies the configuration for the plugin.
-                type: string
+                properties:
+                  initConfig:
+                    additionalProperties:
+                      type: string
+                    description: InitConfig is the initialization configuration for
+                      the plugin.
+                    type: object
+                  libraryPath:
+                    description: |-
+                      LibraryPath is the path to the plugin library, e.g., /usr/share/falco/plugins/myplugin.so.
+                      If omitted, it is set to /usr/share/falco/plugins/plugin-name.so.
+                    type: string
+                  name:
+                    description: |-
+                      Name is the name of the plugin.
+                      If omitted, the name of the CRD will be used.
+                    type: string
+                  openParams:
+                    description: OpenParams is the open parameters for the plugin.
+                    type: string
+                type: object
               ociArtifact:
                 description: OCIArtifact specifies the reference to an OCI artifact.
                 properties:
