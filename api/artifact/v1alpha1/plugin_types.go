@@ -29,7 +29,21 @@ type PluginSpec struct {
 	// OCIArtifact specifies the reference to an OCI artifact.
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
 	// Config specifies the configuration for the plugin.
-	Config *string `json:"config,omitempty"`
+	Config *PluginConfig `json:"config,omitempty"`
+}
+
+// PluginConfig defines the configuration for the plugin.
+type PluginConfig struct {
+	// Name is the name of the plugin.
+	// If omitted, the name of the CRD will be used.
+	Name string `json:"name,omitempty"`
+	// LibraryPath is the path to the plugin library, e.g., /usr/share/falco/plugins/myplugin.so.
+	// If omitted, it is set to /usr/share/falco/plugins/plugin-name.so.
+	LibraryPath string `json:"libraryPath,omitempty"`
+	// InitConfig is the initialization configuration for the plugin.
+	InitConfig map[string]string `json:"initConfig,omitempty"`
+	// OpenParams is the open parameters for the plugin.
+	OpenParams string `json:"openParams,omitempty"`
 }
 
 // PluginStatus defines the observed state of Plugin.
