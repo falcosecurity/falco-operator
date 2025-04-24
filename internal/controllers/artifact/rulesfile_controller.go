@@ -161,7 +161,7 @@ func (r *RulesfileReconciler) handleDeletion(ctx context.Context, rulesfile *art
 
 			// Remove the finalizer
 			controllerutil.RemoveFinalizer(rulesfile, r.finalizer)
-			if err := r.Update(ctx, rulesfile); err != nil {
+			if err := r.Update(ctx, rulesfile); err != nil && !apierrors.IsConflict(err) {
 				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
 				return false, err
 			} else if apierrors.IsConflict(err) {
