@@ -21,6 +21,7 @@ package artifact
 import (
 	"context"
 
+	"gopkg.in/yaml.v3"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -37,6 +38,8 @@ import (
 const (
 	// pluginFinalizerPrefix is the prefix for the finalizer name.
 	pluginFinalizerPrefix = "plugin.artifact.falcosecurity.dev/finalizer"
+	// pluginConfigFileName is the name of the plugin configuration file.
+	pluginConfigFileName = "plugins-config"
 )
 
 // NewPluginReconciler creates a new PluginReconciler instance.
@@ -46,6 +49,7 @@ func NewPluginReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 		Scheme:          scheme,
 		finalizer:       common.FormatFinalizerName(pluginFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
+		PluginsConfig:   &PluginsConfig{},
 	}
 }
 
@@ -55,6 +59,7 @@ type PluginReconciler struct {
 	Scheme          *runtime.Scheme
 	finalizer       string
 	artifactManager *artifact.ArtifactManager
+	PluginsConfig   *PluginsConfig
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -85,6 +90,11 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Ensure the Plugin instance is created and configured correctly.
 	if err := r.ensurePlugin(ctx, plugin); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the plugin configuration is set correctly.
+	if err := r.ensurePluginConfig(ctx, plugin); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -141,7 +151,16 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 				return false, err
 			}
 
+			// Remove the plugin configuration.
+			r.PluginsConfig.removeConfig(plugin)
+
+			// Write the updated configuration to the file.
+			if err := r.removePluginConfig(ctx, plugin); err != nil {
+				logger.Error(err, "unable to remove plugin config")
+				return false, err
+			}
 			// Remove the finalizer.
+			logger.V(3).Info("Removing finalizer", "finalizer", r.finalizer)
 			controllerutil.RemoveFinalizer(plugin, r.finalizer)
 			if err := r.Update(ctx, plugin); err != nil && !apierrors.IsConflict(err) {
 				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
@@ -156,4 +175,183 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 	}
 
 	return false, nil
+}
+
+// Ensure plugin configuration is set correctly.
+func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Ensuring plugin configuration")
+	r.PluginsConfig.addConfig(plugin)
+	// Convert the struct to string.
+	pluginConfigString, err := r.PluginsConfig.toString()
+	if err != nil {
+		logger.Error(err, "unable to convert plugin config to string")
+		return err
+	}
+
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.ArtifactTypeConfig); err != nil {
+		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
+		return err
+	}
+
+	return nil
+}
+
+// removePluginConfig removes the plugin configuration from the configuration file.
+func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Removing plugin configuration")
+	r.PluginsConfig.removeConfig(plugin)
+
+	if r.PluginsConfig.isEmpty() {
+		logger.Info("Plugin configuration is empty, removing file")
+		if err := r.artifactManager.RemoveAll(ctx, pluginConfigFileName); err != nil {
+			logger.Error(err, "unable to remove plugin config", "filename", pluginConfigFileName)
+			return err
+		}
+		return nil
+	}
+
+	// Convert the struct to string.
+	pluginConfigString, err := r.PluginsConfig.toString()
+	if err != nil {
+		logger.Error(err, "unable to convert plugin config to string")
+		return err
+	}
+
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.ArtifactTypeConfig); err != nil {
+		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
+		return err
+	}
+
+	return nil
+}
+
+// PluginConfig is the configuration for a plugin.
+type PluginConfig struct {
+	InitConfig  map[string]string `yaml:"init_config,omitempty"`
+	LibraryPath string            `yaml:"library_path"`
+	Name        string            `yaml:"name"`
+	OpenParams  string            `yaml:"open_params,omitempty"`
+}
+
+func (p *PluginConfig) isSame(other *PluginConfig) bool {
+	if p.Name != other.Name {
+		return false
+	}
+	// Check if the maps are equal.
+	if len(p.InitConfig) != len(other.InitConfig) {
+		return false
+	}
+	// Check if the keys and values are equal.
+	for key, value := range p.InitConfig {
+		if otherValue, ok := other.InitConfig[key]; !ok || value != otherValue {
+			return false
+		}
+	}
+	if p.LibraryPath != other.LibraryPath {
+		return false
+	}
+	if p.OpenParams != other.OpenParams {
+		return false
+	}
+	return true
+}
+
+// PluginsConfig is the configuration for the plugins.
+type PluginsConfig struct {
+	Configs     []PluginConfig `yaml:"plugins"`
+	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
+}
+
+func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
+	var config PluginConfig
+	// If nil, return nil.
+	if plugin.Spec.Config == nil {
+		config = PluginConfig{
+			// TODO: use the full path same as we do when we persist the plugin in the filesystem.
+			LibraryPath: plugin.Name + ".so",
+			Name:        plugin.Name,
+		}
+	} else {
+		config = PluginConfig{
+			InitConfig:  plugin.Spec.Config.InitConfig,
+			LibraryPath: plugin.Spec.Config.LibraryPath,
+			Name:        plugin.Spec.Config.Name,
+			OpenParams:  plugin.Spec.Config.OpenParams,
+		}
+	}
+
+	// Check if the pluginConfig already exists in the list.
+	for i, c := range pc.Configs {
+		if !c.isSame(&config) {
+			// Remove the plugin from the list and add the current plugin.
+			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
+			break
+		}
+	}
+
+	// Add the plugin to the list if it doesn't exist.
+	if len(pc.Configs) == 0 {
+		pc.Configs = append(pc.Configs, config)
+	} else {
+		found := false
+		for _, c := range pc.Configs {
+			if c.Name == plugin.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			pc.Configs = append(pc.Configs, config)
+		}
+	}
+
+	// Check if the plugin is already in the list.
+	for _, c := range pc.LoadPlugins {
+		if c == plugin.Name {
+			return
+		}
+	}
+	pc.LoadPlugins = append(pc.LoadPlugins, plugin.Name)
+}
+
+func (pc *PluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
+	// Check if the pluginConfig already exists in the list.
+	for i, c := range pc.Configs {
+		if c.Name == plugin.Name {
+			// Remove the plugin from the list.
+			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
+			break
+		}
+	}
+
+	// Check if the plugin is already in the list.
+	for i, c := range pc.LoadPlugins {
+		if c == plugin.Name {
+			// Remove the plugin from the list.
+			pc.LoadPlugins = append(pc.LoadPlugins[:i], pc.LoadPlugins[i+1:]...)
+			break
+		}
+	}
+}
+
+func (pc *PluginsConfig) toString() (string, error) {
+	// Convert the struct to YAML.
+	data, err := yaml.Marshal(pc)
+	if err != nil {
+		return "", err
+	}
+
+	// Convert the YAML to a string.
+	yamlString := string(data)
+
+	return yamlString, nil
+}
+
+func (pc *PluginsConfig) isEmpty() bool {
+	if len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0 {
+		return true
+	}
+	return false
 }
