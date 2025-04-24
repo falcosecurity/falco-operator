@@ -73,6 +73,11 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Handle deletion of the Plugin instance.
+	if ok, err := r.handleDeletion(ctx, plugin); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure the finalizer is set on the Plugin instance.
 	if ok, err := r.ensureFinalizers(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
@@ -123,4 +128,32 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	}
 
 	return nil
+}
+
+// handleDeletion handles the deletion of the Plugin instance.
+func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv1alpha1.Plugin) (bool, error) {
+	logger := log.FromContext(ctx)
+
+	if !plugin.DeletionTimestamp.IsZero() {
+		if controllerutil.ContainsFinalizer(plugin, r.finalizer) {
+			logger.Info("Plugin instance marked for deletion, cleaning up")
+			if err := r.artifactManager.RemoveAll(ctx, plugin.Name); err != nil {
+				return false, err
+			}
+
+			// Remove the finalizer.
+			controllerutil.RemoveFinalizer(plugin, r.finalizer)
+			if err := r.Update(ctx, plugin); err != nil && !apierrors.IsConflict(err) {
+				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
+				return false, err
+			} else if apierrors.IsConflict(err) {
+				logger.Info("Conflict while removing finalizer, retrying")
+				return true, nil
+			}
+		}
+
+		return true, nil
+	}
+
+	return false, nil
 }
