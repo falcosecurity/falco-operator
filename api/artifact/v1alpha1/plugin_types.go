@@ -54,7 +54,7 @@ type PluginStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:path=plugin
+// +kubebuilder:resource:path=plugins
 
 // Plugin is the Schema for the plugin API.
 type Plugin struct {

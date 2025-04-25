@@ -45,6 +45,6 @@ resources:
   group: artifact
   kind: Plugin
   path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
-  plural: plugin
+  plural: plugins
   version: v1alpha1
 version: "3"

@@ -4,13 +4,13 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.0
-  name: plugin.artifact.falcosecurity.dev
+  name: plugins.artifact.falcosecurity.dev
 spec:
   group: artifact.falcosecurity.dev
   names:
     kind: Plugin
     listKind: PluginList
-    plural: plugin
+    plural: plugins
     singular: plugin
   scope: Namespaced
   versions:
