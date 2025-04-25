@@ -215,6 +215,8 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 			logger.Error(err, "Failed to find file on filesystem", "file", newFile.Path)
 			return err
 		}
+
+		return nil
 	}
 
 	var dstDir string
