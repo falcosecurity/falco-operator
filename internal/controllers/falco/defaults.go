@@ -298,8 +298,8 @@ webserver:
 		},
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
-			{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileMountName},
-			{Name: mounts.PluginMountName, MountPath: mounts.PluginMountName},
+			{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
+			{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
 		},
 		ReadinessProbe: &corev1.Probe{
 			InitialDelaySeconds: 5,
