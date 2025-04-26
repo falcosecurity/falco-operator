@@ -240,8 +240,6 @@ program_output:
   program: 'jq ''{text: .output}'' | curl -d @- -X POST https://hooks.slack.com/services/XXX'
 rule_matching: first
 rules_files:
-- /etc/falco/falco_rules.yaml
-- /etc/falco/falco_rules.local.yaml
 - /etc/falco/rules.d
 stdout_output:
   enabled: true
