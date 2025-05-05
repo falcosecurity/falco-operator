@@ -58,7 +58,7 @@ type PluginReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	finalizer       string
-	artifactManager *artifact.ArtifactManager
+	artifactManager *artifact.Manager
 	PluginsConfig   *PluginsConfig
 }
 
@@ -133,7 +133,7 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 
 // ensurePlugin ensures that the Plugin instance is created and configured correctly.
 func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	if err := r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.ArtifactTypePlugin, plugin.Spec.OCIArtifact); err != nil {
+	if err := r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact); err != nil {
 		return err
 	}
 
@@ -189,7 +189,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.ArtifactTypeConfig); err != nil {
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		return err
 	}
@@ -219,7 +219,7 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.ArtifactTypeConfig); err != nil {
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		return err
 	}

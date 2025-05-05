@@ -54,7 +54,7 @@ type RulesfileReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	finalizer       string
-	artifactManager *artifact.ArtifactManager
+	artifactManager *artifact.Manager
 }
 
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles,verbs=get;list;watch;create;update;patch;delete
@@ -138,11 +138,11 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.ArtifactTypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
+	if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.ArtifactTypeRulesfile); err != nil {
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
 		return err
 	}
 
