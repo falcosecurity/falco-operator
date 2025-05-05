@@ -35,35 +35,37 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// ArtifactType represents different types of artifacts.
-type ArtifactType string
+// Type represents different types of artifacts.
+type Type string
 
 const (
-	// ArtifactTypeRulesfile represents a rulesFile artifact.
-	ArtifactTypeRulesfile ArtifactType = "rulesfile"
-	// ArtifactTypePlugin represents a plugin artifact.
-	ArtifactTypePlugin ArtifactType = "plugin"
-	// ArtifactTypeConfig represents a config artifact.
-	ArtifactTypeConfig ArtifactType = "config"
+	// TypeRulesfile represents a rulesFile artifact.
+	TypeRulesfile Type = "rulesfile"
+	// TypePlugin represents a plugin artifact.
+	TypePlugin Type = "plugin"
+	// TypeConfig represents a config artifact.
+	TypeConfig Type = "config"
 )
 
-// ArtifactMedium represents how the artifact is distributed.
-type ArtifactMedium string
+// Medium represents how the artifact is distributed.
+type Medium string
 
 const (
-	artifactMediumInline ArtifactMedium = "inline"
-	artifactMediumOCI    ArtifactMedium = "oci"
+	// MediumInline represents an inline artifact.
+	MediumInline Medium = "inline"
+	// MediumOCI represents an OCI artifact.
+	MediumOCI Medium = "oci"
 )
 
-// ArtifactFile represents a tracked file for any artifact type.
-type ArtifactFile struct {
-	Path     string         // Full path on filesystem
-	Medium   ArtifactMedium // How the artifact is stored/distributed
-	Priority string         // Priority when created
+// File represents a tracked file for any artifact type.
+type File struct {
+	Path     string // Full Path on filesystem
+	Medium   Medium // How the artifact is stored/distributed
+	Priority string // Priority when created
 }
 
 // Exists checks if the artifact file exists on the filesystem.
-func (af *ArtifactFile) Exists() (bool, error) {
+func (af *File) Exists() (bool, error) {
 	// Check if the file exists on the filesystem
 	if _, err := os.Stat(af.Path); err != nil && !os.IsNotExist(err) {
 		return false, err
@@ -74,33 +76,33 @@ func (af *ArtifactFile) Exists() (bool, error) {
 	return true, nil
 }
 
-// ArtifactManager manages the lifecycle of artifacts on the filesystem.
-type ArtifactManager struct {
-	files     map[string][]ArtifactFile
+// Manager manages the lifecycle of artifacts on the filesystem.
+type Manager struct {
+	files     map[string][]File
 	client    client.Client
 	namespace string
 }
 
 // NewManager creates a new manager.
-func NewManager(client client.Client, namespace string) *ArtifactManager {
-	return &ArtifactManager{
+func NewManager(client client.Client, namespace string) *Manager {
+	return &Manager{
 		client:    client,
 		namespace: namespace,
-		files:     make(map[string][]ArtifactFile),
+		files:     make(map[string][]File),
 	}
 }
 
 // StoreFromInLineYaml stores an artifact from an inline YAML to the local filesystem.
-func (am *ArtifactManager) StoreFromInLineYaml(ctx context.Context, name, artifactPriority string, data *string, artifactType ArtifactType) error {
+func (am *Manager) StoreFromInLineYaml(ctx context.Context, name, artifactPriority string, data *string, artifactType Type) error {
 	logger := log.FromContext(ctx)
 
 	// If the data is nil, we remove the artifact from the manager and from filesystem.
 	// It means that the instance has been updated and the artifact has been removed from the spec.
 	if data == nil {
 		// Get artifact from the manager.
-		if file := am.getArtifactFile(name, artifactMediumInline); file != nil {
+		if file := am.getArtifactFile(name, MediumInline); file != nil {
 			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
-			if err := am.removeArtifact(ctx, name, artifactMediumInline); err != nil {
+			if err := am.removeArtifact(ctx, name, MediumInline); err != nil {
 				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
 				return err
 			}
@@ -108,14 +110,14 @@ func (am *ArtifactManager) StoreFromInLineYaml(ctx context.Context, name, artifa
 		return nil
 	}
 
-	newFile := ArtifactFile{
-		Path:     path(name, artifactPriority, artifactMediumInline, artifactType),
-		Medium:   artifactMediumInline,
+	newFile := File{
+		Path:     Path(name, artifactPriority, MediumInline, artifactType),
+		Medium:   MediumInline,
 		Priority: artifactPriority,
 	}
 
 	// Check if the artifact is already stored.
-	if file := am.getArtifactFile(name, artifactMediumInline); file != nil {
+	if file := am.getArtifactFile(name, MediumInline); file != nil {
 		logger.V(4).Info("Artifact already stored", "artifact", file)
 		// Check if the file already exists on the filesystem.
 		ok, err := file.Exists()
@@ -150,7 +152,7 @@ func (am *ArtifactManager) StoreFromInLineYaml(ctx context.Context, name, artifa
 				return err
 			}
 			// Remove the file from the manager.
-			am.removeArtifactFile(name, artifactMediumInline)
+			am.removeArtifactFile(name, MediumInline)
 		}
 	}
 
@@ -167,30 +169,30 @@ func (am *ArtifactManager) StoreFromInLineYaml(ctx context.Context, name, artifa
 }
 
 // StoreFromOCI stores an artifact from an OCI registry to the local filesystem.
-func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPriority string, artifactType ArtifactType, artifact *commonv1alpha1.OCIArtifact) error {
+func (am *Manager) StoreFromOCI(ctx context.Context, name, artifactPriority string, artifactType Type, artifact *commonv1alpha1.OCIArtifact) error {
 	logger := log.FromContext(ctx)
 
 	// If the artifact is nil, we remove the artifact from the manager and from filesystem.
 	// It means that the instance has been updated and the artifact has been removed from the spec.
 	if artifact == nil {
 		// Get artifact from the manager.
-		if file := am.getArtifactFile(name, artifactMediumOCI); file != nil {
+		if file := am.getArtifactFile(name, MediumOCI); file != nil {
 			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
-			if err := am.removeArtifact(ctx, name, artifactMediumOCI); err != nil {
+			if err := am.removeArtifact(ctx, name, MediumOCI); err != nil {
 				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
 				return err
 			}
 		}
 		return nil
 	}
-	newFile := ArtifactFile{
-		Path:     path(name, artifactPriority, artifactMediumOCI, artifactType),
-		Medium:   artifactMediumOCI,
+	newFile := File{
+		Path:     Path(name, artifactPriority, MediumOCI, artifactType),
+		Medium:   MediumOCI,
 		Priority: artifactPriority,
 	}
 
 	// Check if the artifact is already stored.
-	if file := am.getArtifactFile(name, artifactMediumOCI); file != nil {
+	if file := am.getArtifactFile(name, MediumOCI); file != nil {
 		logger.V(4).Info("Artifact already stored", "artifact", file)
 		// Check if the file already exists on the filesystem.
 		ok, err := file.Exists()
@@ -210,7 +212,7 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 		// If the file does not exist on the filesystem, we remove it from the manager and return an error.
 		// Next time the artifact is requested, it will be fetched from the OCI registry.
 		if !ok {
-			am.removeArtifactFile(name, artifactMediumOCI)
+			am.removeArtifactFile(name, MediumOCI)
 			err := fmt.Errorf("artifact %q not found on filesystem", file.Path)
 			logger.Error(err, "Failed to find file on filesystem", "file", newFile.Path)
 			return err
@@ -221,9 +223,9 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 
 	var dstDir string
 	switch artifactType {
-	case ArtifactTypeRulesfile:
+	case TypeRulesfile:
 		dstDir = mounts.RulesfileDirPath
-	case ArtifactTypePlugin:
+	case TypePlugin:
 		dstDir = mounts.PluginDirPath
 	default:
 		dstDir = ""
@@ -283,7 +285,7 @@ func (am *ArtifactManager) StoreFromOCI(ctx context.Context, name, artifactPrior
 	return nil
 }
 
-func (am *ArtifactManager) removeArtifact(ctx context.Context, name string, medium ArtifactMedium) error {
+func (am *Manager) removeArtifact(ctx context.Context, name string, medium Medium) error {
 	logger := log.FromContext(ctx)
 
 	// Check if there are artifacts for the given instance name.
@@ -308,7 +310,7 @@ func (am *ArtifactManager) removeArtifact(ctx context.Context, name string, medi
 }
 
 // RemoveAll removes all artifacts for a given instance name.
-func (am *ArtifactManager) RemoveAll(ctx context.Context, name string) error {
+func (am *Manager) RemoveAll(ctx context.Context, name string) error {
 	logger := log.FromContext(ctx)
 
 	// Check if there are artifacts for the given instance name.
@@ -334,7 +336,7 @@ func (am *ArtifactManager) RemoveAll(ctx context.Context, name string) error {
 	return nil
 }
 
-func (am *ArtifactManager) getArtifactFile(name string, medium ArtifactMedium) *ArtifactFile {
+func (am *Manager) getArtifactFile(name string, medium Medium) *File {
 	// Check if there are artifacts for the given instance name.
 	files, ok := am.files[name]
 	if !ok {
@@ -353,11 +355,11 @@ func (am *ArtifactManager) getArtifactFile(name string, medium ArtifactMedium) *
 }
 
 // addArtifactFile adds an artifact file to the manager.
-func (am *ArtifactManager) addArtifactFile(name string, file ArtifactFile) {
+func (am *Manager) addArtifactFile(name string, file File) {
 	// Check if there are artifacts for the given instance name.
 	files, ok := am.files[name]
 	if !ok {
-		am.files[name] = []ArtifactFile{file}
+		am.files[name] = []File{file}
 		return
 	}
 
@@ -366,7 +368,7 @@ func (am *ArtifactManager) addArtifactFile(name string, file ArtifactFile) {
 }
 
 // removeArtifactFile removes an artifact file from the manager.
-func (am *ArtifactManager) removeArtifactFile(name string, medium ArtifactMedium) {
+func (am *Manager) removeArtifactFile(name string, medium Medium) {
 	// Check if there are artifacts for the given instance name.
 	files, ok := am.files[name]
 	if !ok {
@@ -382,15 +384,15 @@ func (am *ArtifactManager) removeArtifactFile(name string, medium ArtifactMedium
 	}
 }
 
-// path returns the full path for an artifact file based on its name, priority, and type.
-func path(name, artifactPriority string, medium ArtifactMedium, artifactType ArtifactType) string {
+// Path returns the full Path for an artifact file based on its name, priority, and type.
+func Path(name, artifactPriority string, medium Medium, artifactType Type) string {
 	switch artifactType {
-	case ArtifactTypeRulesfile:
+	case TypeRulesfile:
 		var subPriority string
 		switch medium {
-		case artifactMediumOCI:
+		case MediumOCI:
 			subPriority = priority.OCISubPriority
-		case artifactMediumInline:
+		case MediumInline:
 			subPriority = priority.InLineRulesSubPriority
 		default:
 			subPriority = ""
@@ -401,13 +403,13 @@ func path(name, artifactPriority string, medium ArtifactMedium, artifactType Art
 				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
 			),
 		)
-	case ArtifactTypePlugin:
+	case TypePlugin:
 		return filepath.Clean(
 			filepath.Join(
 				mounts.PluginDirPath,
 				fmt.Sprintf("%s.so", name)),
 		)
-	case ArtifactTypeConfig:
+	case TypeConfig:
 		return filepath.Clean(
 			filepath.Join(
 				mounts.ConfigDirPath,
