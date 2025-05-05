@@ -95,7 +95,7 @@ var _ = Describe("Config Controller", func() {
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := NewConfigReconciler(k8sClient, k8sClient.Scheme(), "test-node")
+			controllerReconciler := NewConfigReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,
