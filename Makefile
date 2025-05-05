@@ -1,5 +1,5 @@
 # Image URL to use all building/pushing image targets
-IMG ?= controller:latest
+IMG ?= controller:main
 RELEASE ?= v0.0.1
 COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
@@ -48,7 +48,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:generateEmbeddedObjectMeta=true webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) crd:generateEmbeddedObjectMeta=true paths="./..." output:crd:artifacts:config=config/crd/bases
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -176,7 +176,7 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 
 .PHONY: deploy
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image falcosecurity/falco-operator=${IMG}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply --server-side=true -f -
 
 .PHONY: undeploy
