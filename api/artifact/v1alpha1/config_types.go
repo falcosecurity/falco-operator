@@ -25,6 +25,12 @@ type ConfigSpec struct {
 	// Config is the configuration for Falco deployment.
 	// +kubebuilder:validation:Required
 	Config string `json:"config,omitempty"`
+	// Priority specifies the priority of the rulesfile.\
+	// The higher the value, the higher the priority.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=99
+	// +kubebuilder:default=50
+	Priority int32 `json:"priority,omitempty"`
 }
 
 // ConfigStatus defines the observed state of Config.

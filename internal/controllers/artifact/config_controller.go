@@ -20,7 +20,6 @@ package artifact
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -47,7 +46,7 @@ func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName stri
 		Client:           cl,
 		Scheme:           scheme,
 		finalizer:        common.FormatFinalizerName(configFinalizerPrefix, nodeName),
-		configPriorities: make(map[string]string),
+		configPriorities: make(map[string]int32),
 	}
 }
 
@@ -57,7 +56,7 @@ type ConfigReconciler struct {
 	Scheme    *runtime.Scheme
 	finalizer string
 	// configPriorities is a map of configuration names and their priorities.
-	configPriorities map[string]string
+	configPriorities map[string]int32
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -82,9 +81,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Initialize the priority of the configuration.
-	if err := r.initConfigPriority(ctx, config); err != nil {
-		return ctrl.Result{}, err
-	}
+	r.initConfigPriority(ctx, config)
 
 	// Ensure the finalizer is set.
 	if ok, err := r.ensureFinalizer(ctx, config); ok || err != nil {
@@ -141,11 +138,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	}
 
 	// Get the priority of the configuration.
-	p, err := priority.ValidateAndExtract(config.Annotations)
-	if err != nil {
-		logger.Error(err, "unable to get the priority of the configuration")
-		return err
-	}
+	p := config.Spec.Priority
 
 	baseName := priority.NameFromPriority(p, config.Name+".yaml")
 	configFile := filepath.Clean(filepath.Join(mounts.ConfigDirPath, baseName))
@@ -193,10 +186,7 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv
 		if controllerutil.ContainsFinalizer(config, r.finalizer) {
 			logger.Info("Config instance marked for deletion, cleaning up")
 			// Get name of the configuration file.
-			configFile, err := r.getConfigFilePath(ctx, config, "")
-			if err != nil {
-				return false, err
-			}
+			configFile := r.getConfigFilePath(config, config.Spec.Priority)
 			// Check if the file exists and remove it.
 			if err := os.Remove(configFile); err != nil && !os.IsNotExist(err) {
 				logger.Error(err, "unable to remove config file", "file", configFile)
@@ -229,11 +219,7 @@ func (r *ConfigReconciler) cleanupOldConfigFile(ctx context.Context, config *art
 	logger := log.FromContext(ctx)
 
 	// Get the current priority.
-	currentPriority, err := priority.ValidateAndExtract(config.Annotations)
-	if err != nil {
-		logger.Error(err, "unable to get the current priority of the configuration")
-		return err
-	}
+	currentPriority := config.Spec.Priority
 
 	// Get the old priority (if any).
 	oldPriority, exists := r.configPriorities[config.Name]
@@ -244,13 +230,10 @@ func (r *ConfigReconciler) cleanupOldConfigFile(ctx context.Context, config *art
 	}
 
 	// The priority has changed, so we need to remove the old configuration file
-	oldConfigFile, err := r.getConfigFilePath(ctx, config, oldPriority)
-	if err != nil {
-		return err
-	}
+	oldConfigFile := r.getConfigFilePath(config, oldPriority)
 
 	// Check if the old file exists
-	if _, err = os.Stat(oldConfigFile); err == nil {
+	if _, err := os.Stat(oldConfigFile); err == nil {
 		// File exists, remove it
 		if err := os.Remove(oldConfigFile); err != nil {
 			logger.Error(err, "unable to remove old config file", "file", oldConfigFile)
@@ -274,45 +257,22 @@ func (r *ConfigReconciler) cleanupOldConfigFile(ctx context.Context, config *art
 // initConfigPriority checks if a priority exists for the config in the configPriorities map.
 // If it doesn't exist, it extracts the priority from annotations and adds it to the map.
 // If it already exists, it does nothing (even if the priority differs from the current one).
-func (r *ConfigReconciler) initConfigPriority(ctx context.Context, config *artifactv1alpha1.Config) error {
+func (r *ConfigReconciler) initConfigPriority(ctx context.Context, config *artifactv1alpha1.Config) {
 	logger := log.FromContext(ctx)
 
 	// If there's already a priority for this config, do nothing
 	if _, exists := r.configPriorities[config.Name]; exists {
 		logger.V(3).Info("Priority already exists in the map, not changing it", "config", config.Name)
-		return nil
-	}
-
-	// Extract priority from annotations
-	p, err := priority.ValidateAndExtract(config.Annotations)
-	if err != nil {
-		logger.Error(err, "unable to extract priority from config annotations")
-		return err
+		return
 	}
 
 	// Store the priority in the map
-	r.configPriorities[config.Name] = p
-	logger.V(3).Info("Priority initialized for config", "config", config.Name, "priority", p)
-	return nil
+	r.configPriorities[config.Name] = config.Spec.Priority
+	logger.V(3).Info("Priority initialized for config", "config", config.Name, "priority", config.Spec.Priority)
 }
 
 // getConfigFilePath returns the full file path for a Config resource.
-func (r *ConfigReconciler) getConfigFilePath(ctx context.Context, config *artifactv1alpha1.Config, configPriority string) (string, error) {
-	var p string
-	var err error
-	logger := log.FromContext(ctx)
-
-	if configPriority != "" {
-		p = configPriority
-	} else {
-		// Extract priority from the config
-		p, err = priority.ValidateAndExtract(config.Annotations)
-		if err != nil {
-			logger.Error(err, "unable to extract priority from config")
-			return "", fmt.Errorf("unable to extract priority from config %s: %w", config.Name, err)
-		}
-	}
-
+func (r *ConfigReconciler) getConfigFilePath(config *artifactv1alpha1.Config, configPriority int32) string {
 	// Get the full file path and return it.
-	return filepath.Clean(filepath.Join(mounts.ConfigDirPath, priority.NameFromPriority(p, config.Name+".yaml"))), nil
+	return filepath.Clean(filepath.Join(mounts.ConfigDirPath, priority.NameFromPriority(configPriority, config.Name+".yaml")))
 }

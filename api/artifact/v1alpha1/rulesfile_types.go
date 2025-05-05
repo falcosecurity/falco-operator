@@ -30,6 +30,12 @@ type RulesfileSpec struct {
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
 	// InlineRules specifies the rules as a string.
 	InlineRules *string `json:"inlineRules,omitempty"`
+	// Priority specifies the priority of the rulesfile.\
+	// The higher the value, the higher the priority.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=99
+	// +kubebuilder:default=50
+	Priority int32 `json:"priority,omitempty"`
 }
 
 // RulesfileStatus defines the observed state of Rulesfile.
