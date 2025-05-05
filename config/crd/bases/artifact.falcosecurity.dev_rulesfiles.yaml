@@ -72,6 +72,15 @@ spec:
                 required:
                 - reference
                 type: object
+              priority:
+                default: 50
+                description: |-
+                  Priority specifies the priority of the rulesfile.\
+                  The higher the value, the higher the priority.
+                format: int32
+                maximum: 99
+                minimum: 0
+                type: integer
             type: object
           status:
             description: RulesfileStatus defines the observed state of Rulesfile.

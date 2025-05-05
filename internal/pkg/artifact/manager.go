@@ -61,7 +61,7 @@ const (
 type File struct {
 	Path     string // Full Path on filesystem
 	Medium   Medium // How the artifact is stored/distributed
-	Priority string // Priority when created
+	Priority int32  // Priority when created
 }
 
 // Exists checks if the artifact file exists on the filesystem.
@@ -93,7 +93,7 @@ func NewManager(client client.Client, namespace string) *Manager {
 }
 
 // StoreFromInLineYaml stores an artifact from an inline YAML to the local filesystem.
-func (am *Manager) StoreFromInLineYaml(ctx context.Context, name, artifactPriority string, data *string, artifactType Type) error {
+func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifactPriority int32, data *string, artifactType Type) error {
 	logger := log.FromContext(ctx)
 
 	// If the data is nil, we remove the artifact from the manager and from filesystem.
@@ -169,7 +169,7 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name, artifactPriori
 }
 
 // StoreFromOCI stores an artifact from an OCI registry to the local filesystem.
-func (am *Manager) StoreFromOCI(ctx context.Context, name, artifactPriority string, artifactType Type, artifact *commonv1alpha1.OCIArtifact) error {
+func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriority int32, artifactType Type, artifact *commonv1alpha1.OCIArtifact) error {
 	logger := log.FromContext(ctx)
 
 	// If the artifact is nil, we remove the artifact from the manager and from filesystem.
@@ -385,17 +385,18 @@ func (am *Manager) removeArtifactFile(name string, medium Medium) {
 }
 
 // Path returns the full Path for an artifact file based on its name, priority, and type.
-func Path(name, artifactPriority string, medium Medium, artifactType Type) string {
+func Path(name string, artifactPriority int32, medium Medium, artifactType Type) string {
 	switch artifactType {
 	case TypeRulesfile:
-		var subPriority string
+		var subPriority int32
 		switch medium {
 		case MediumOCI:
 			subPriority = priority.OCISubPriority
 		case MediumInline:
 			subPriority = priority.InLineRulesSubPriority
 		default:
-			subPriority = ""
+			// Default to 0 if medium is not OCI or Inline.
+			subPriority = priority.MaxPriority
 		}
 		return filepath.Clean(
 			filepath.Join(

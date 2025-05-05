@@ -42,6 +42,15 @@ spec:
               config:
                 description: Config is the configuration for Falco deployment.
                 type: string
+              priority:
+                default: 50
+                description: |-
+                  Priority specifies the priority of the rulesfile.\
+                  The higher the value, the higher the priority.
+                format: int32
+                maximum: 99
+                minimum: 0
+                type: integer
             required:
             - config
             type: object

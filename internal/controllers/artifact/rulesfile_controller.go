@@ -31,7 +31,6 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 const (
@@ -128,15 +127,8 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 }
 
 func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
-	var err error
-	logger := log.FromContext(ctx)
-
 	// Get the priority of the configuration.
-	p, err := priority.ValidateAndExtract(rulesfile.Annotations)
-	if err != nil {
-		logger.Error(err, "unable to extract priority from rulesfile annotations")
-		return err
-	}
+	p := rulesfile.Spec.Priority
 
 	if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
 		return err
