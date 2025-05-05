@@ -5,6 +5,7 @@ resources:
 - bases/instance.falcosecurity.dev_falcos.yaml
 - bases/artifact.falcosecurity.dev_configs.yaml
 - bases/artifact.falcosecurity.dev_rulesfiles.yaml
+- bases/artifact.falcosecurity.dev_plugins.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

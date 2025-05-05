@@ -3,4 +3,5 @@ resources:
 - instance_v1alpha1_falco.yaml
 - artifact_v1alpha1_config.yaml
 - artifact_v1alpha1_rulesfile.yaml
+- artifact_v1alpha1_plugin.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
