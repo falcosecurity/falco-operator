@@ -265,20 +265,24 @@ type PluginsConfig struct {
 }
 
 func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
-	var config PluginConfig
-	// If nil, return nil.
-	if plugin.Spec.Config == nil {
-		config = PluginConfig{
-			// TODO: use the full path same as we do when we persist the plugin in the filesystem.
-			LibraryPath: plugin.Name + ".so",
-			Name:        plugin.Name,
+	var config = PluginConfig{
+		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
+		Name:        plugin.Name,
+	}
+
+	// If not nil, set the values that are not empty.
+	if plugin.Spec.Config != nil {
+		if plugin.Spec.Config.InitConfig != nil {
+			config.InitConfig = plugin.Spec.Config.InitConfig
 		}
-	} else {
-		config = PluginConfig{
-			InitConfig:  plugin.Spec.Config.InitConfig,
-			LibraryPath: plugin.Spec.Config.LibraryPath,
-			Name:        plugin.Spec.Config.Name,
-			OpenParams:  plugin.Spec.Config.OpenParams,
+		if plugin.Spec.Config.LibraryPath != "" {
+			config.LibraryPath = plugin.Spec.Config.LibraryPath
+		}
+		if plugin.Spec.Config.Name != "" {
+			config.Name = plugin.Spec.Config.Name
+		}
+		if plugin.Spec.Config.OpenParams != "" {
+			config.OpenParams = plugin.Spec.Config.OpenParams
 		}
 	}
 
