@@ -288,7 +288,7 @@ func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 
 	// Check if the pluginConfig already exists in the list.
 	for i, c := range pc.Configs {
-		if !c.isSame(&config) {
+		if c.isSame(&config) {
 			// Remove the plugin from the list and add the current plugin.
 			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
 			break
