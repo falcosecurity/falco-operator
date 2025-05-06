@@ -84,9 +84,9 @@ type Manager struct {
 }
 
 // NewManager creates a new manager.
-func NewManager(client client.Client, namespace string) *Manager {
+func NewManager(cl client.Client, namespace string) *Manager {
 	return &Manager{
-		client:    client,
+		client:    cl,
 		namespace: namespace,
 		files:     make(map[string][]File),
 	}
