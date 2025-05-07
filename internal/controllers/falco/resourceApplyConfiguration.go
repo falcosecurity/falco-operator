@@ -133,7 +133,8 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
 						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
 					},
-					Volumes: falcoVolumes(falco),
+					ServiceAccountName: falco.Name,
+					Volumes:            falcoVolumes(falco),
 					Containers: []corev1.Container{
 						{
 							Name:            "falco",
