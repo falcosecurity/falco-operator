@@ -30,7 +30,7 @@ var (
 	DefaultFalcoImagePullPolicy = corev1.PullIfNotPresent
 
 	// DefaultFalcoArgs are the default arguments for the Falco container.
-	DefaultFalcoArgs = []string{"/usr/bin/falco", "-pk"}
+	DefaultFalcoArgs = []string{"/usr/bin/falco"}
 
 	// DefaultFalcoSecurityContext is the default security context for the Falco pod.
 	DefaultFalcoSecurityContext = &corev1.SecurityContext{
