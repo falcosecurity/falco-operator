@@ -149,9 +149,6 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 							SecurityContext: DefaultFalcoSecurityContext,
 						},
 					},
-					InitContainers: []corev1.Container{
-						artifactOperatorSidecar,
-					},
 				},
 			},
 			Strategy: appsv1.DeploymentStrategy{
