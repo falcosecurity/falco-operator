@@ -32,6 +32,17 @@ import (
 
 // generateRoleBinding returns a RoleBinding for Falco.
 func generateConfigmap(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	var config string
+
+	switch falco.Spec.Type {
+	case resourceTypeDeployment:
+		config = deploymentFalcoConfig
+	case resourceTypeDaemonSet:
+		config = daemonsetFalcoConfig
+	default:
+		return nil, fmt.Errorf("unsupported falco type: %s", falco.Spec.Type)
+	}
+
 	cm := &corev1.ConfigMap{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ConfigMap",
@@ -43,7 +54,7 @@ func generateConfigmap(ctx context.Context, cl client.Client, falco *instancev1a
 			GenerateName: fmt.Sprintf("%s-", falco.Name),
 		},
 		Data: map[string]string{
-			"falco.yaml": defaultFalcoConfig,
+			"falco.yaml": config,
 		},
 	}
 
