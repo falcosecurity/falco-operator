@@ -133,7 +133,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
 						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
 					},
-					Volumes: DefaultFalcoVolumes,
+					Volumes: falcoVolumes(falco),
 					Containers: []corev1.Container{
 						{
 							Name:            "falco",
@@ -143,7 +143,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 							Ports:           DefaultFalcoPorts,
 							Args:            DefaultFalcoArgs,
 							Env:             DefaultFalcoEnv,
-							VolumeMounts:    DefaultFalcoVolumeMounts,
+							VolumeMounts:    falcoVolumeMounts(),
 							LivenessProbe:   DefaultFalcoLivenessProbe,
 							ReadinessProbe:  DefaultFalcoReadinessProbe,
 							SecurityContext: DefaultFalcoSecurityContext,
