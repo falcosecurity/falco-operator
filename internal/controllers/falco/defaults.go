@@ -223,16 +223,7 @@ metrics:
 output_timeout: 2000
 outputs_queue:
   capacity: 0
-plugins:
-- init_config: null
-  library_path: libk8saudit.so
-  name: k8saudit
-  open_params: http://:9765/k8s-audit
-- library_path: libcloudtrail.so
-  name: cloudtrail
-- init_config: ""
-  library_path: libjson.so
-  name: json
+plugins: []
 priority: debug
 program_output:
   enabled: false
@@ -356,16 +347,7 @@ metrics:
 output_timeout: 2000
 outputs_queue:
   capacity: 0
-plugins:
-- init_config: null
-  library_path: libk8saudit.so
-  name: k8saudit
-  open_params: http://:9765/k8s-audit
-- library_path: libcloudtrail.so
-  name: cloudtrail
-- init_config: ""
-  library_path: libjson.so
-  name: json
+plugins: []
 priority: debug
 program_output:
   enabled: false
