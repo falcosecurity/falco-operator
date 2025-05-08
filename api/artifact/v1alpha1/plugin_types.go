@@ -30,6 +30,8 @@ type PluginSpec struct {
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
 	// Config specifies the configuration for the plugin.
 	Config *PluginConfig `json:"config,omitempty"`
+	// Selector is used to select the nodes where the plugin should be applied.
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 }
 
 // PluginConfig defines the configuration for the plugin.
