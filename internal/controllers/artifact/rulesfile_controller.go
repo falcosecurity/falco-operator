@@ -31,6 +31,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
 
 const (
@@ -45,6 +46,7 @@ func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, 
 		Scheme:          scheme,
 		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
+		nodeName:        nodeName,
 	}
 }
 
@@ -54,6 +56,7 @@ type RulesfileReconciler struct {
 	Scheme          *runtime.Scheme
 	finalizer       string
 	artifactManager *artifact.Manager
+	nodeName        string
 }
 
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles,verbs=get;list;watch;create;update;patch;delete
@@ -77,11 +80,23 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion.
-	if ok, err := r.handleDeletion(ctx, rulesfile); ok || err != nil {
+	// Check if the Rulesfile instance is for the current node.
+	if ok, err := common.NodeMatchesSelector(ctx, r.Client, r.nodeName, rulesfile.Spec.Selector); err != nil {
 		return ctrl.Result{}, err
+	} else if !ok {
+		logger.Info("Rulesfile instance does not match node selector, will remove local resources if any")
+
+		// Here we handle the case where the rulesfile was created with a selector that matched the node, but now it doesn't.
+		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, rulesfile); ok || err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
 	}
 
+	// Handle deletion.
+	if ok, err := controllerhelper.HandleObjectDeletion(ctx, r.Client, r.artifactManager, r.finalizer, rulesfile); ok || err != nil {
+		return ctrl.Result{}, err
+	}
 	// Ensure the finalizer is set.
 	if ok, err := r.ensureFinalizer(ctx, rulesfile); ok || err != nil {
 		return ctrl.Result{}, err
@@ -139,29 +154,4 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	}
 
 	return nil
-}
-
-func (r *RulesfileReconciler) handleDeletion(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) (bool, error) {
-	logger := log.FromContext(ctx)
-
-	if !rulesfile.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(rulesfile, r.finalizer) {
-			logger.Info("Rulesfile instance marked for deletion, cleaning up")
-			if err := r.artifactManager.RemoveAll(ctx, rulesfile.Name); err != nil {
-				return false, err
-			}
-
-			// Remove the finalizer
-			controllerutil.RemoveFinalizer(rulesfile, r.finalizer)
-			if err := r.Update(ctx, rulesfile); err != nil && !apierrors.IsConflict(err) {
-				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
-				return false, err
-			} else if apierrors.IsConflict(err) {
-				logger.Info("Conflict while removing finalizer, retrying")
-				return true, nil
-			}
-		}
-		return true, nil
-	}
-	return false, nil
 }
