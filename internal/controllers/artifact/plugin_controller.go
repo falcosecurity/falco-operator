@@ -32,6 +32,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
@@ -50,6 +51,7 @@ func NewPluginReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 		finalizer:       common.FormatFinalizerName(pluginFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		PluginsConfig:   &PluginsConfig{},
+		nodeName:        nodeName,
 	}
 }
 
@@ -60,6 +62,7 @@ type PluginReconciler struct {
 	finalizer       string
 	artifactManager *artifact.Manager
 	PluginsConfig   *PluginsConfig
+	nodeName        string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -78,11 +81,22 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
+	// Check if the Plugin instance is for the current node.
+	if ok, err := common.NodeMatchesSelector(ctx, r.Client, r.nodeName, plugin.Spec.Selector); err != nil {
+		return ctrl.Result{}, err
+	} else if !ok {
+		logger.Info("Plugin instance does not match node selector, will remove local resources if any")
+
+		// Here we handle the case where the plugin was created with a selector that matched the node, but now it doesn't.
+		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, plugin); ok || err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
 	// Handle deletion of the Plugin instance.
 	if ok, err := r.handleDeletion(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
 	}
-
 	// Ensure the finalizer is set on the Plugin instance.
 	if ok, err := r.ensureFinalizers(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
