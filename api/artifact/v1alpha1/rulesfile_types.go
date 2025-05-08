@@ -36,6 +36,8 @@ type RulesfileSpec struct {
 	// +kubebuilder:validation:Maximum=99
 	// +kubebuilder:default=50
 	Priority int32 `json:"priority,omitempty"`
+	// Selector is used to select the nodes where the rulesfile should be applied.
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 }
 
 // RulesfileStatus defines the observed state of Rulesfile.
