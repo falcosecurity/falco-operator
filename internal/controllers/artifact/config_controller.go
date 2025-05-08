@@ -76,7 +76,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	// Check if the Config instance is for the current node.
-	if ok, err := common.NodeMatchesSelector(ctx, r.Client, r.nodeName, config.Spec.Selector); err != nil {
+	if ok, err := controllerhelper.NodeMatchesSelector(ctx, r.Client, r.nodeName, config.Spec.Selector); err != nil {
 		return ctrl.Result{}, err
 	} else if !ok {
 		logger.Info("Config instance does not match node selector, will remove local resources if any")
