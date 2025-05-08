@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package common_test
+package controllerhelper_test
 
 import (
 	"context"
@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
 
 func TestNodeMatchesSelector(t *testing.T) {
@@ -126,7 +126,7 @@ func TestNodeMatchesSelector(t *testing.T) {
 				fakeClient = fake.NewClientBuilder().WithScheme(scheme).Build()
 			}
 
-			match, err := common.NodeMatchesSelector(context.TODO(), fakeClient, tt.nodeName, tt.labelSelector)
+			match, err := controllerhelper.NodeMatchesSelector(context.TODO(), fakeClient, tt.nodeName, tt.labelSelector)
 
 			if tt.expectedError {
 				assert.Error(t, err)
