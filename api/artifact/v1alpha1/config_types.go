@@ -31,6 +31,8 @@ type ConfigSpec struct {
 	// +kubebuilder:validation:Maximum=99
 	// +kubebuilder:default=50
 	Priority int32 `json:"priority,omitempty"`
+	// Selector is used to select the nodes where the config should be applied.
+	Selector *metav1.LabelSelector `json:"selector,omitempty"`
 }
 
 // ConfigStatus defines the observed state of Config.
