@@ -31,6 +31,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
 
 const (
@@ -44,6 +45,7 @@ func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 		Scheme:          scheme,
 		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
+		nodeName:        nodeName,
 	}
 }
 
@@ -53,6 +55,7 @@ type ConfigReconciler struct {
 	Scheme          *runtime.Scheme
 	finalizer       string
 	artifactManager *artifact.Manager
+	nodeName        string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -71,8 +74,22 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	} else if apierrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+
+	// Check if the Config instance is for the current node.
+	if ok, err := common.NodeMatchesSelector(ctx, r.Client, r.nodeName, config.Spec.Selector); err != nil {
+		return ctrl.Result{}, err
+	} else if !ok {
+		logger.Info("Config instance does not match node selector, will remove local resources if any")
+
+		// Here we handle the case where the config was created with a selector that matched the node, but now it doesn't.
+		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, config); ok || err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, nil
+	}
+
 	// Handle deletion.
-	if ok, err := r.handleDeletion(ctx, config); ok || err != nil {
+	if ok, err := controllerhelper.HandleObjectDeletion(ctx, r.Client, r.artifactManager, r.finalizer, config); ok || err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -123,32 +140,4 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 // ensureConfig ensures the configuration is written to the filesystem.
 func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config) error {
 	return r.artifactManager.StoreFromInLineYaml(ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig)
-}
-
-// handleDeletion handles the deletion of the Config instance.
-// It removes the configuration file and the finalizer.
-func (r *ConfigReconciler) handleDeletion(ctx context.Context, config *artifactv1alpha1.Config) (bool, error) {
-	logger := log.FromContext(ctx)
-
-	if !config.DeletionTimestamp.IsZero() {
-		if controllerutil.ContainsFinalizer(config, r.finalizer) {
-			logger.Info("Config instance marked for deletion, cleaning up")
-			if err := r.artifactManager.RemoveAll(ctx, config.Name); err != nil {
-				return false, err
-			}
-
-			// Remove the finalizer.
-			controllerutil.RemoveFinalizer(config, r.finalizer)
-			if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
-				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
-				return false, err
-			} else if apierrors.IsConflict(err) {
-				logger.Info("Conflict while removing finalizer, retrying")
-				// It has already been added to the queue, so we return nil.
-				return true, nil
-			}
-		}
-		return true, nil
-	}
-	return false, nil
 }
