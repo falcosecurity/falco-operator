@@ -16,7 +16,7 @@
 
 // Package controller defines controllers' logic.
 
-package artifact
+package rulesfile
 
 import (
 	"context"
@@ -31,7 +31,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 )
 
-var _ = Describe("Config Controller", func() {
+var _ = Describe("Rulesfile Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -41,44 +41,18 @@ var _ = Describe("Config Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		config := &artifactv1alpha1.Config{}
+		rulesfile := &artifactv1alpha1.Rulesfile{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind Config")
-			err := k8sClient.Get(ctx, typeNamespacedName, config)
+			By("creating the custom resource for the Kind Rulesfile")
+			err := k8sClient.Get(ctx, typeNamespacedName, rulesfile)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &artifactv1alpha1.Config{
+				resource := &artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
 					},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Config: `
-	engine:
-      ebpf:
-        buf_size_preset: 4
-        drop_failed_exit: false
-        probe: ${HOME}/.falco/falco-bpf.o
-      kind: modern_ebpf
-      kmod:
-        buf_size_preset: 4
-        drop_failed_exit: false
-      modern_ebpf:
-        buf_size_preset: 4
-        cpus_for_each_buffer: 2
-        drop_failed_exit: false
-      falco_libs:
-        thread_table_size: 262144
-      file_output:
-        enabled: false
-        filename: ./events.txt
-        keep_alive: false
-      grpc:
-        bind_address: unix:///run/falco/falco.sock
-        enabled: false
-        threadiness: 1
-`,
-					},
+					// TODO(user): Specify other spec details if needed.
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
@@ -86,16 +60,16 @@ var _ = Describe("Config Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &artifactv1alpha1.Config{}
+			resource := &artifactv1alpha1.Rulesfile{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance Config")
+			By("Cleanup the specific resource instance Rulesfile")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := NewConfigReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
+			controllerReconciler := NewRulesfileReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,

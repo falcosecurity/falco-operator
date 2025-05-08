@@ -14,7 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+// Package controller defines controllers' logic.
+
+package plugin
 
 import (
 	"context"
@@ -31,7 +33,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
@@ -57,7 +59,7 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error
-	err = instancev1alpha1.AddToScheme(scheme.Scheme)
+	err = artifactv1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme

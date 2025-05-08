@@ -6,3 +6,6 @@ images:
 - name: falcosecurity/artifact-operator
   newName: falcosecurity/falco-operator
   newTag: main
+- name: falcosecurity/falco-operator
+  newName: falcosecurity/falco-operator
+  newTag: latest

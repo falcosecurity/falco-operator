@@ -14,5 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package artifact implements controllers for artifact.falcosecurity.dev resources.
-package artifact
+// Package plugin defines the plugin controller logic.
+// It handles the lifecycle of the Plugin resource.
+package plugin

@@ -14,9 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
-
-package artifact
+package falco
 
 import (
 	"context"
@@ -33,7 +31,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
-	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // These tests use Ginkgo (BDD-style Go testing framework). Refer to
@@ -59,14 +57,14 @@ var _ = BeforeSuite(func() {
 	ctx, cancel = context.WithCancel(context.TODO())
 
 	var err error
-	err = artifactv1alpha1.AddToScheme(scheme.Scheme)
+	err = instancev1alpha1.AddToScheme(scheme.Scheme)
 	Expect(err).NotTo(HaveOccurred())
 
 	// +kubebuilder:scaffold:scheme
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
 
