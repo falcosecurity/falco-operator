@@ -461,7 +461,8 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 
 // ensureResource is a generic function to ensure a resource exists and is up to date.
 func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1.Falco,
-	resourceType string, generateFunc func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
+	resourceType string,
+	generateFunc func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
 	logger := log.FromContext(ctx)
 	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", falco.Name)
 
@@ -515,35 +516,40 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 
 // ensureServiceAccount ensures the Falco service account is created or updated.
 func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ServiceAccount", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return generateServiceAccount(ctx, r.Client, falco)
-	})
+	return r.ensureResource(ctx, falco, "ServiceAccount",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateServiceAccount(ctx, r.Client, falco)
+		})
 }
 
 // ensureRole ensures the Falco role is created or updated.
 func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ServiceAccount", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return generateRole(ctx, r.Client, falco)
-	})
+	return r.ensureResource(ctx, falco, "ServiceAccount",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateRole(ctx, r.Client, falco)
+		})
 }
 
 // ensureRoleBinding ensures the Falco role binding is created or updated.
 func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "RoleBinding", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return generateRoleBinding(ctx, r.Client, falco)
-	})
+	return r.ensureResource(ctx, falco, "RoleBinding",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateRoleBinding(ctx, r.Client, falco)
+		})
 }
 
 // ensureService ensures the Falco service is created or updated.
 func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "Service", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return generateService(ctx, r.Client, falco)
-	})
+	return r.ensureResource(ctx, falco, "Service",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateService(ctx, r.Client, falco)
+		})
 }
 
 // ensureConfigmap ensures the Falco configmap is created or updated.
 func (r *Reconciler) ensureConfigMap(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ConfigMap", func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return generateConfigmap(ctx, r.Client, falco)
-	})
+	return r.ensureResource(ctx, falco, "ConfigMap",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateConfigmap(ctx, r.Client, falco)
+		})
 }

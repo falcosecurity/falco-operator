@@ -20,6 +20,7 @@ RUN  go mod download
 COPY cmd/${COMPONENT}/main.go cmd/${COMPONENT}/main.go
 COPY api/ api/
 COPY internal/ internal/
+COPY controllers/ controllers/
 
 RUN CGO_ENABLED=0 \
     GOOS=$(go env GOOS) \

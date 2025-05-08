@@ -36,7 +36,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/controllers/artifact"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/config"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -221,19 +223,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = artifact.NewConfigReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
+	if err = config.NewConfigReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
 		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Artifact")
 		os.Exit(1)
 	}
 
-	if err := artifact.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
+	if err := rulesfile.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
 		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
 	}
 
-	if err := artifact.NewPluginReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
+	if err := plugin.NewPluginReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
 		SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
 		os.Exit(1)

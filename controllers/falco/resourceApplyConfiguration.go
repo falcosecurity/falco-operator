@@ -40,7 +40,8 @@ const (
 )
 
 // generateApplyConfiguration generates the apply configuration for the given Kubernetes resource.
-func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco, nativeSidecar bool) (*unstructured.Unstructured, error) {
+func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco,
+	nativeSidecar bool) (*unstructured.Unstructured, error) {
 	// Determine the resource type from the Falco object.
 	resourceType := falco.Spec.Type
 

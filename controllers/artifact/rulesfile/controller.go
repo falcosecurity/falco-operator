@@ -16,7 +16,7 @@
 
 // Package controller defines controllers' logic.
 
-package artifact
+package rulesfile
 
 import (
 	"context"

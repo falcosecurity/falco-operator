@@ -16,7 +16,7 @@
 
 // Package controller defines controllers' logic.
 
-package artifact
+package plugin
 
 import (
 	"context"
@@ -31,7 +31,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 )
 
-var _ = Describe("Rulesfile Controller", func() {
+var _ = Describe("Plugin Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -41,13 +41,13 @@ var _ = Describe("Rulesfile Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		rulesfile := &artifactv1alpha1.Rulesfile{}
+		plugin := &artifactv1alpha1.Plugin{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind Rulesfile")
-			err := k8sClient.Get(ctx, typeNamespacedName, rulesfile)
+			By("creating the custom resource for the Kind Plugin")
+			err := k8sClient.Get(ctx, typeNamespacedName, plugin)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &artifactv1alpha1.Rulesfile{
+				resource := &artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -60,16 +60,16 @@ var _ = Describe("Rulesfile Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &artifactv1alpha1.Rulesfile{}
+			resource := &artifactv1alpha1.Plugin{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance Rulesfile")
+			By("Cleanup the specific resource instance Plugin")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := NewRulesfileReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
+			controllerReconciler := NewPluginReconciler(k8sClient, k8sClient.Scheme(), "test-node", "test-namespace")
 
 			_, err := controllerReconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: typeNamespacedName,

@@ -16,7 +16,7 @@
 
 // Package controller defines controllers' logic.
 
-package artifact
+package plugin
 
 import (
 	"context"
@@ -203,7 +203,8 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.TypeConfig); err != nil {
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
+		&pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		return err
 	}
@@ -233,7 +234,8 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority, &pluginConfigString, artifact.TypeConfig); err != nil {
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
+		&pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		return err
 	}
