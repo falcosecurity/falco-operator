@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -72,11 +71,7 @@ func generateService(ctx context.Context, cl client.Client, falco *instancev1alp
 	}
 
 	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj, schema.GroupVersionKind{
-		Group:   corev1.GroupName,
-		Version: corev1.SchemeGroupVersion.Version,
-		Kind:    unstructuredObj.GetKind(),
-	}); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
 		return nil, err
 	}
 

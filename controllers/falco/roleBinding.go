@@ -23,7 +23,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -33,6 +32,10 @@ import (
 // generateRoleBinding returns a RoleBinding for Falco.
 func generateRoleBinding(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
 	rb := &rbacv1.RoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "RoleBinding",
+			APIVersion: "rbac.authorization.k8s.io/v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:    falco.Namespace,
 			Labels:       falco.Labels,
@@ -63,11 +66,7 @@ func generateRoleBinding(ctx context.Context, cl client.Client, falco *instancev
 		return nil, err
 	}
 
-	if err := setDefaultValues(ctx, cl, unstructuredObj, schema.GroupVersionKind{
-		Group:   rbacv1.GroupName,
-		Version: rbacv1.SchemeGroupVersion.Version,
-		Kind:    "RoleBinding",
-	}); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
 		return nil, err
 	}
 

@@ -90,7 +90,7 @@ func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1
 		Object: mergedUnstructured,
 	}
 
-	if err := setDefaultValues(ctx, cl, desiredResourceUnstructured, schema.GroupVersionKind{
+	if err := setDefaultValues(ctx, cl, desiredResourceUnstructured, &schema.GroupVersionKind{
 		Group:   appsv1.GroupName,
 		Version: appsv1.SchemeGroupVersion.Version,
 		Kind:    resourceType,
@@ -372,7 +372,7 @@ func falcoVolumeMounts() []corev1.VolumeMount {
 }
 
 // setDefaultValues sets the default values for the unstructured object by dry-run creating it.
-func setDefaultValues(ctx context.Context, cl client.Client, obj *unstructured.Unstructured, gvk schema.GroupVersionKind) error {
+func setDefaultValues(ctx context.Context, cl client.Client, obj *unstructured.Unstructured, gvk *schema.GroupVersionKind) error {
 	if err := unstructured.SetNestedField(obj.Object, "dry-run", "metadata", "generateName"); err != nil {
 		return fmt.Errorf("failed to set generateName field: %w", err)
 	}
@@ -381,12 +381,14 @@ func setDefaultValues(ctx context.Context, cl client.Client, obj *unstructured.U
 		return fmt.Errorf("failed to set name field: %w", err)
 	}
 
-	obj.SetKind(gvk.Kind)
-	obj.SetAPIVersion(gvk.GroupVersion().String())
+	if gvk != nil {
+		obj.SetKind(gvk.Kind)
+		obj.SetAPIVersion(gvk.GroupVersion().String())
+	}
 
 	err := cl.Create(ctx, obj, &client.CreateOptions{DryRun: []string{metav1.DryRunAll}})
 	if err != nil {
-		return fmt.Errorf("failed to set default values by dry-run creating the object %s: %w", gvk.Kind, err)
+		return fmt.Errorf("failed to set default values by dry-run creating the object %s: %w", obj.GetKind(), err)
 	}
 
 	return nil
