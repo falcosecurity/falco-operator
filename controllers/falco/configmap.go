@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -69,11 +68,7 @@ func generateConfigmap(ctx context.Context, cl client.Client, falco *instancev1a
 		return nil, err
 	}
 
-	if err := setDefaultValues(ctx, cl, unstructuredObj, schema.GroupVersionKind{
-		Group:   corev1.GroupName,
-		Version: cm.APIVersion,
-		Kind:    cm.Kind,
-	}); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
 		return nil, err
 	}
 

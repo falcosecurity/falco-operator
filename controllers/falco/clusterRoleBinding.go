@@ -22,7 +22,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -35,6 +34,10 @@ func generateClusterRoleBinding(ctx context.Context, cl client.Client, falco *in
 	resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
 
 	clusterRoleBinding := &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ClusterRoleBinding",
+			APIVersion: "rbac.authorization.k8s.io/v1",
+		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:   resourceName,
 			Labels: falco.Labels,
@@ -58,11 +61,7 @@ func generateClusterRoleBinding(ctx context.Context, cl client.Client, falco *in
 		return nil, err
 	}
 
-	if err := setDefaultValues(ctx, cl, unstructuredObj, schema.GroupVersionKind{
-		Group:   rbacv1.GroupName,
-		Version: rbacv1.SchemeGroupVersion.Version,
-		Kind:    "ClusterRoleBinding",
-	}); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
 		return nil, err
 	}
 

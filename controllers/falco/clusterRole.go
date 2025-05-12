@@ -22,7 +22,6 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -63,11 +62,7 @@ func generateClusterRole(ctx context.Context, cl client.Client, falco *instancev
 	}
 
 	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj, schema.GroupVersionKind{
-		Group:   rbacv1.GroupName,
-		Version: rbacv1.SchemeGroupVersion.Version,
-		Kind:    "ClusterRole",
-	}); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
 		return nil, err
 	}
 
