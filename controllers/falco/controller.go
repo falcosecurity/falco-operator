@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -99,6 +100,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the clusterrole is created.
+	if err := r.ensureClusterRole(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Ensure the clusterrolebinding is created.
+	if err := r.ensureClusterRoleBinding(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure the service is created.
 	if err := r.ensureService(ctx, falco); err != nil {
 		return ctrl.Result{}, err
@@ -143,6 +154,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&rbacv1.RoleBinding{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(clusterScopedResourceHandler)).
+		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(clusterScopedResourceHandler)).
 		Named("falco").
 		Complete(r)
 }
@@ -208,6 +221,28 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		log.FromContext(ctx).Info("Falco instance marked for deletion")
 		if controllerutil.ContainsFinalizer(falco, finalizer) {
 			log.FromContext(ctx).Info("Removing finalizer", "finalizer", finalizer)
+
+			// Remove clusterrolebinding.
+			clb, err := generateClusterRoleBinding(ctx, r.Client, falco)
+			if err != nil {
+				log.FromContext(ctx).Error(err, "unablet to cleanup clusterrolebinding")
+				return false, err
+			}
+			if err := r.Delete(ctx, clb); err != nil && !apierrors.IsNotFound(err) {
+				log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
+				return false, err
+			}
+
+			// Remove clusterrole.
+			cr, err := generateClusterRole(ctx, r.Client, falco)
+			if err != nil {
+				log.FromContext(ctx).Error(err, "unable to cleanup clusterrole")
+				return false, err
+			}
+			if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
+				log.FromContext(ctx).Error(err, "unable to delete clusterrole")
+				return false, err
+			}
 
 			// Remove the finalizer.
 			if controllerutil.RemoveFinalizer(falco, finalizer) {
@@ -464,7 +499,6 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	resourceType string,
 	generateFunc func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
 	logger := log.FromContext(ctx)
-	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", falco.Name)
 
 	// Generate the desired resource
 	desiredResource, err := generateFunc(ctx, r.Client, falco)
@@ -472,13 +506,13 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 		return fmt.Errorf("unable to generate desired %s: %w", resourceType, err)
 	}
 
+	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", desiredResource.GetName())
+
 	// Get existing resource
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
-	existingResource.SetName(falco.Name)
-	existingResource.SetNamespace(falco.Namespace)
 
-	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil && !apierrors.IsNotFound(err) {
+	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
 	}
 
@@ -487,7 +521,7 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 		if err := r.Create(ctx, desiredResource); err != nil {
 			return fmt.Errorf("unable to create %s: %w", resourceType, err)
 		}
-		logger.V(3).Info(resourceType+" created", "name", falco.Name)
+		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
 		return nil
 	}
 
@@ -501,16 +535,16 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	}
 
 	if cmp.IsSame() {
-		logger.V(3).Info(resourceType+" is up to date", "name", falco.Name)
+		logger.V(3).Info(resourceType+" is up to date", "name", desiredResource.GetName())
 		return nil
 	}
 
-	logger.V(3).Info("Updating "+resourceType, "name", falco.Name, "diff", cmp.String())
+	logger.V(3).Info("Updating "+resourceType, "name", desiredResource.GetName(), "diff", cmp.String())
 	if err := r.Patch(ctx, desiredResource, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller")); err != nil {
 		return fmt.Errorf("unable to apply patch to %s: %w", resourceType, err)
 	}
 
-	logger.V(3).Info(resourceType+" updated", "name", falco.Name)
+	logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName())
 	return nil
 }
 
@@ -535,6 +569,22 @@ func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alp
 	return r.ensureResource(ctx, falco, "RoleBinding",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
 			return generateRoleBinding(ctx, r.Client, falco)
+		})
+}
+
+// ensureClusterRole ensures the Falco cluster role is created or updated.
+func (r *Reconciler) ensureClusterRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "ClusterRole",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateClusterRole(ctx, r.Client, falco)
+		})
+}
+
+// ensureClusterRoleBinding ensures the Falco cluster role binding is created or updated.
+func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return r.ensureResource(ctx, falco, "ClusterRoleBinding",
+		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+			return generateClusterRoleBinding(ctx, r.Client, falco)
 		})
 }
 
