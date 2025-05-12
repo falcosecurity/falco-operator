@@ -524,7 +524,7 @@ func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1
 
 // ensureRole ensures the Falco role is created or updated.
 func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ServiceAccount",
+	return r.ensureResource(ctx, falco, "Role",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
 			return generateRole(ctx, r.Client, falco)
 		})
