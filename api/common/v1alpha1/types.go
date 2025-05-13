@@ -22,21 +22,21 @@ package v1alpha1
 type ConditionType string
 
 const (
-	// Available indicates whether enough pods are ready to provide the
+	// ConditionAvailable indicates whether enough pods are ready to provide the
 	// service.
 	// The possible status values for this condition type are:
 	// - True: all pods are running and ready, the service is fully available.
 	// - Degraded: some pods aren't ready, the service is partially available.
 	// - False: no pods are running, the service is totally unavailable.
 	// - Unknown: the operator couldn't determine the condition status.
-	Available ConditionType = "Available"
-	// Reconciled indicates whether the operator has reconciled the state of
+	ConditionAvailable ConditionType = "ConditionAvailable"
+	// ConditionReconciled indicates whether the operator has reconciled the state of
 	// the underlying resources with the object's spec.
 	// The possible status values for this condition type are:
 	// - True: the reconciliation was successful.
 	// - False: the reconciliation failed.
 	// - Unknown: the operator couldn't determine the condition status.
-	Reconciled ConditionType = "Reconciled"
+	ConditionReconciled ConditionType = "ConditionReconciled"
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
