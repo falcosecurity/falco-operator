@@ -61,7 +61,7 @@ func generateClusterRoleBinding(ctx context.Context, cl client.Client, falco *in
 		return nil, err
 	}
 
-	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
 		return nil, err
 	}
 

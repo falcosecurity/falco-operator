@@ -71,7 +71,7 @@ func generateService(ctx context.Context, cl client.Client, falco *instancev1alp
 	}
 
 	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
 		return nil, err
 	}
 
