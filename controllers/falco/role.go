@@ -32,6 +32,11 @@ import (
 
 // generateRole returns a Role for Falco.
 func generateRole(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	// If falco is nil, return an error.
+	if falco == nil {
+		return nil, fmt.Errorf("unable to generate role: falco is nil")
+	}
+
 	role := &rbacv1.Role{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Role",
@@ -68,7 +73,7 @@ func generateRole(ctx context.Context, cl client.Client, falco *instancev1alpha1
 	}
 
 	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj, nil); err != nil {
+	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
 		return nil, err
 	}
 

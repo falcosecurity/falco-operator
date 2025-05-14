@@ -18,7 +18,6 @@ package falco
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,7 +26,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -146,17 +144,4 @@ func TestGenerateClusterRoleErrors(t *testing.T) {
 
 	_, err := generateClusterRole(context.Background(), failingClient, falco)
 	assert.Error(t, err)
-}
-
-// mockFailingClient implements client.Client and always returns errors.
-type mockFailingClient struct {
-	client.Client
-}
-
-func (m *mockFailingClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
-	return fmt.Errorf("mock error")
-}
-
-func (m *mockFailingClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	return fmt.Errorf("mock error")
 }

@@ -39,74 +39,78 @@ const (
 	resourceTypeDaemonSet  = "DaemonSet"
 )
 
-// generateApplyConfiguration generates the apply configuration for the given Kubernetes resource.
+// generateApplyConfiguration generates apply configuration for falco resources.
+// It creates a resource based on the falco CR and merges it with the user-defined one.
+// The resource type is determined by the falco CR spec, and it can be either a Deployment or a DaemonSet.
 func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco,
 	nativeSidecar bool) (*unstructured.Unstructured, error) {
-	// Determine the resource type from the Falco object.
-	resourceType := falco.Spec.Type
+	return generateResourceFromFalcoInstance(
+		ctx,
+		cl,
+		falco,
+		func(falco *v1alpha1.Falco) (runtime.Object, error) {
+			// Determine the resource type from the Falco object.
+			resourceType := falco.Spec.Type
 
-	// Build the default resource.
-	var baseResource interface{}
-	switch resourceType {
-	case resourceTypeDeployment:
-		baseResource = baseDeployment(nativeSidecar, falco)
-	case resourceTypeDaemonSet:
-		baseResource = baseDaemonSet(nativeSidecar, falco)
-	default:
-		// Should never happen, since the type is validated by the CRD.
-		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
-	}
+			// Build the default resource.
+			var baseResource interface{}
+			switch resourceType {
+			case resourceTypeDeployment:
+				baseResource = baseDeployment(nativeSidecar, falco)
+			case resourceTypeDaemonSet:
+				baseResource = baseDaemonSet(nativeSidecar, falco)
+			default:
+				// Should never happen, since the type is validated by the CRD.
+				return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+			}
 
-	// Create a parser to merge the base resource with the user defined one.
-	parser := scheme.Parser()
+			// Create a parser to merge the base resource with the user-defined one.
+			parser := scheme.Parser()
 
-	// Parse the base resource.
-	baseTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromStructured(baseResource)
-	if err != nil {
-		return nil, err
-	}
+			// Parse the base resource.
+			baseTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromStructured(baseResource)
+			if err != nil {
+				return nil, err
+			}
 
-	// Generate the user defined resource.
-	userUnstructured, err := generateUserDefinedResource(nativeSidecar, falco)
-	if err != nil {
-		return nil, err
-	}
+			// Generate the user-defined resource.
+			userUnstructured, err := generateUserDefinedResource(nativeSidecar, falco)
+			if err != nil {
+				return nil, err
+			}
 
-	// Parse the user defined resource.
-	userTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(userUnstructured.Object)
-	if err != nil {
-		return nil, err
-	}
+			// Parse the user-defined resource.
+			userTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(userUnstructured.Object)
+			if err != nil {
+				return nil, err
+			}
 
-	// Merge the base and user defined resources.
-	desiredTyped, err := baseTyped.Merge(userTyped)
-	if err != nil {
-		return nil, err
-	}
+			// Merge the base and user-defined resources.
+			desiredTyped, err := baseTyped.Merge(userTyped)
+			if err != nil {
+				return nil, err
+			}
 
-	mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
+			mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
 
-	desiredResourceUnstructured := &unstructured.Unstructured{
-		Object: mergedUnstructured,
-	}
+			desiredResourceUnstructured := &unstructured.Unstructured{
+				Object: mergedUnstructured,
+			}
 
-	if err := setDefaultValues(ctx, cl, desiredResourceUnstructured, &schema.GroupVersionKind{
-		Group:   appsv1.GroupName,
-		Version: appsv1.SchemeGroupVersion.Version,
-		Kind:    resourceType,
-	}); err != nil {
-		return nil, err
-	}
+			// Set the group version kind for the resource.
+			desiredResourceUnstructured.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   appsv1.GroupName,
+				Version: appsv1.SchemeGroupVersion.Version,
+				Kind:    resourceType,
+			})
 
-	// Set the name of the resource to the name of the falco CR.
-	if err := unstructured.SetNestedField(desiredResourceUnstructured.Object, falco.Name, "metadata", "name"); err != nil {
-		return nil, fmt.Errorf("failed to set name field: %w", err)
-	}
-
-	// Remove unwanted fields.
-	removeUnwantedFields(desiredResourceUnstructured)
-
-	return desiredResourceUnstructured, nil
+			return desiredResourceUnstructured, nil
+		},
+		generateOptions{
+			setControllerRef: true,
+			isClusterScoped:  false,
+		},
+	)
 }
 
 // baseDeployment returns the base deployment for Falco with default values + metadata coming from the Falco CR.
@@ -162,8 +166,8 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 	if nativeSidecar {
 		dpl.Spec.Template.Spec.InitContainers = append(dpl.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
 	} else {
-		// If the native sidecar is not enabled, we add the artifact operator sidecar to the containers list.
-		// And we set the restart policy to nil otherwise we get a validation error.
+		// If the native sidecar is not enabled, we add the artifact operator sidecar to the container list.
+		// And we set the restart policy to nil, otherwise we get a validation error.
 		artifactOperatorSidecar.RestartPolicy = nil
 		dpl.Spec.Template.Spec.Containers = append(dpl.Spec.Template.Spec.Containers, artifactOperatorSidecar)
 	}
@@ -171,7 +175,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 	return dpl
 }
 
-// baseDaemonSet returns the base daemonset for Falco with default values + metadata coming from the Falco CR.
+// baseDaemonSet returns the base daemonset for Falco with default values and metadata coming from the Falco CR.
 func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet {
 	ds := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -229,7 +233,7 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 	return ds
 }
 
-// generateUserDefinedResource generates a user defined resource from the falco CR.
+// generateUserDefinedResource generates a user-defined resource from the falco CR.
 func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
 	// Build the default resource from the base one.
 	// We use the base one as a starting point to have the same structure and, then we override the user defined fields.
@@ -302,36 +306,6 @@ func removeEmptyContainers(obj *unstructured.Unstructured) error {
 	return nil
 }
 
-// removeUnwantedFields removes unwanted fields from the unstructured object.
-func removeUnwantedFields(obj *unstructured.Unstructured) {
-	unstructured.RemoveNestedField(obj.Object, "metadata", "uid")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "resourceVersion")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-	unstructured.RemoveNestedField(obj.Object, "status")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "creationTimestamp")
-	unstructured.RemoveNestedField(obj.Object, "spec", "template", "metadata", "creationTimestamp")
-	unstructured.RemoveNestedField(obj.Object, "spec", "revisionHistoryLimit")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generateName")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
-	// Remove the revision field from the annotations.
-	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
-	// Remove the deprecated field from the annotations.
-	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deprecated.daemonset.template.generation")
-	// If the annotations field is empty, remove it.
-	if metadata, ok := obj.Object["metadata"].(map[string]interface{}); ok {
-		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
-			if len(annotations) == 0 {
-				unstructured.RemoveNestedField(obj.Object, "metadata", "annotations")
-			}
-		}
-	}
-	// Only for services, remove the clusterIP and clusterIPs fields.
-	if obj.GetKind() == "Service" {
-		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIP")
-		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIPs")
-	}
-}
-
 // podTemplateSpecLabels returns the labels for the pod template spec.
 func podTemplateSpecLabels(appName string, baseLabels map[string]string) map[string]string {
 	return labels.Merge(baseLabels, map[string]string{
@@ -369,27 +343,4 @@ func falcoVolumeMounts() []corev1.VolumeMount {
 	}
 
 	return append(volumeMounts, configVolumeMount)
-}
-
-// setDefaultValues sets the default values for the unstructured object by dry-run creating it.
-func setDefaultValues(ctx context.Context, cl client.Client, obj *unstructured.Unstructured, gvk *schema.GroupVersionKind) error {
-	if err := unstructured.SetNestedField(obj.Object, "dry-run", "metadata", "generateName"); err != nil {
-		return fmt.Errorf("failed to set generateName field: %w", err)
-	}
-
-	if err := unstructured.SetNestedField(obj.Object, "", "metadata", "name"); err != nil {
-		return fmt.Errorf("failed to set name field: %w", err)
-	}
-
-	if gvk != nil {
-		obj.SetKind(gvk.Kind)
-		obj.SetAPIVersion(gvk.GroupVersion().String())
-	}
-
-	err := cl.Create(ctx, obj, &client.CreateOptions{DryRun: []string{metav1.DryRunAll}})
-	if err != nil {
-		return fmt.Errorf("failed to set default values by dry-run creating the object %s: %w", obj.GetKind(), err)
-	}
-
-	return nil
 }
