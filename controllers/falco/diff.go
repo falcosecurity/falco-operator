@@ -44,16 +44,17 @@ func diff(current, desired interface{}) (*typed.Comparison, error) {
 	// Create a parser to compare the resources
 	parser := scheme.Parser()
 
-	typePath := getTypePath(currentUnstructured)
+	currentTypePath := getTypePath(currentUnstructured)
 
 	// Parse the base resource
-	currentTyped, err := parser.Type(typePath).FromUnstructured(currentUnstructured.Object)
+	currentTyped, err := parser.Type(currentTypePath).FromUnstructured(currentUnstructured.Object)
 	if err != nil {
 		return nil, err
 	}
 
+	desiredTypePath := getTypePath(desiredUnstructured)
 	// Parse the user defined resource
-	desiredTyped, err := parser.Type(typePath).FromUnstructured(desiredUnstructured.Object)
+	desiredTyped, err := parser.Type(desiredTypePath).FromUnstructured(desiredUnstructured.Object)
 	if err != nil {
 		return nil, err
 	}
