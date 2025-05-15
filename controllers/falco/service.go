@@ -18,69 +18,53 @@ package falco
 
 import (
 	"context"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // generateService returns a service for Falco.
 func generateService(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	svc := &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "web",
-					Protocol:   corev1.ProtocolTCP,
-					Port:       8765,
-					TargetPort: intstr.FromInt32(8765),
+	return generateResourceFromFalcoInstance(ctx, cl, falco,
+		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			svc := &corev1.Service{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "Service",
+					APIVersion: "v1",
 				},
-			},
-			Selector: map[string]string{
-				"app.kubernetes.io/name":     falco.Name,
-				"app.kubernetes.io/instance": falco.Name,
-			},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      falco.Name,
+					Namespace: falco.Namespace,
+					Labels:    falco.Labels,
+				},
+				Spec: corev1.ServiceSpec{
+					Type: corev1.ServiceTypeClusterIP,
+					Ports: []corev1.ServicePort{
+						{
+							Name:       "web",
+							Protocol:   corev1.ProtocolTCP,
+							Port:       8765,
+							TargetPort: intstr.FromInt32(8765),
+						},
+					},
+					Selector: map[string]string{
+						"app.kubernetes.io/name":     falco.Name,
+						"app.kubernetes.io/instance": falco.Name,
+					},
+				},
+			}
+
+			return svc, nil
 		},
-	}
-
-	// Set the controller as the owner of the Role
-	if err := controllerutil.SetControllerReference(falco, svc, cl.Scheme()); err != nil {
-		return nil, err
-	}
-
-	// Convert to unstructured object.
-	unstructuredObj, err := toUnstructured(svc)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
-		return nil, err
-	}
-
-	// Set the name of the resource to the name of the falco CR.
-	if err := unstructured.SetNestedField(unstructuredObj.Object, falco.Name, "metadata", "name"); err != nil {
-		return nil, fmt.Errorf("failed to set name field: %w", err)
-	}
-
-	removeUnwantedFields(unstructuredObj)
-
-	return unstructuredObj, nil
+		generateOptions{
+			setControllerRef: true,
+			isClusterScoped:  false,
+		},
+	)
 }
