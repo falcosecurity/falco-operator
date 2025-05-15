@@ -61,6 +61,24 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 			expectedError: "falco instance cannot be nil",
 		},
 		{
+			name:  "nil client",
+			falco: &instancev1alpha1.Falco{},
+			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+				return nil, nil
+			},
+			options:       generateOptions{},
+			mockClient:    nil,
+			expectedError: "client cannot be nil",
+		},
+		{
+			name:          "nil generator function",
+			falco:         &instancev1alpha1.Falco{},
+			generator:     nil,
+			options:       generateOptions{},
+			mockClient:    fake.NewClientBuilder().WithScheme(scheme).Build(),
+			expectedError: "generator function cannot be nil",
+		},
+		{
 			name: "generator error",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{

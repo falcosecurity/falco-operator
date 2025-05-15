@@ -44,6 +44,13 @@ func generateResourceFromFalcoInstance(
 		return nil, fmt.Errorf("falco instance cannot be nil")
 	}
 
+	if cl == nil {
+		return nil, fmt.Errorf("client cannot be nil")
+	}
+
+	if generator == nil {
+		return nil, fmt.Errorf("generator function cannot be nil")
+	}
 	// Generate the resource using the provided generator function
 	obj, err := generator(falco)
 	if err != nil {
