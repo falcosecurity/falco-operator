@@ -18,53 +18,35 @@ package falco
 
 import (
 	"context"
-	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // generateServiceAccount returns a ServiceAccount for Falco.
 func generateServiceAccount(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	sa := &corev1.ServiceAccount{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ServiceAccount",
-			APIVersion: "v1",
+	return generateResourceFromFalcoInstance(ctx, cl, falco,
+		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			sa := &corev1.ServiceAccount{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ServiceAccount",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      falco.Name,
+					Namespace: falco.Namespace,
+					Labels:    falco.Labels,
+				},
+			}
+			return sa, nil
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-	}
-
-	// Set the controller as the owner of the ServiceAccount
-	if err := controllerutil.SetControllerReference(falco, sa, cl.Scheme()); err != nil {
-		return nil, err
-	}
-
-	// Convert to unstructured object.
-	unstructuredObj, err := toUnstructured(sa)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
-		return nil, err
-	}
-
-	// Set the name of the resource to the name of the falco CR.
-	if err := unstructured.SetNestedField(unstructuredObj.Object, falco.Name, "metadata", "name"); err != nil {
-		return nil, fmt.Errorf("failed to set name field: %w", err)
-	}
-
-	removeUnwantedFields(unstructuredObj)
-
-	return unstructuredObj, nil
+		generateOptions{
+			setControllerRef: true,
+			isClusterScoped:  false,
+		})
 }
