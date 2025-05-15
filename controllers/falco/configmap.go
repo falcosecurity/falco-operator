@@ -23,61 +23,47 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // generateRoleBinding returns a RoleBinding for Falco.
 func generateConfigmap(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	var config string
+	return generateResourceFromFalcoInstance(ctx, cl, falco,
+		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			var config string
 
-	switch falco.Spec.Type {
-	case resourceTypeDeployment:
-		config = deploymentFalcoConfig
-	case resourceTypeDaemonSet:
-		config = daemonsetFalcoConfig
-	default:
-		return nil, fmt.Errorf("unsupported falco type: %s", falco.Spec.Type)
-	}
+			switch falco.Spec.Type {
+			case resourceTypeDeployment:
+				config = deploymentFalcoConfig
+			case resourceTypeDaemonSet:
+				config = daemonsetFalcoConfig
+			default:
+				return nil, fmt.Errorf("unsupported falco type: %s", falco.Spec.Type)
+			}
 
-	cm := &corev1.ConfigMap{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ConfigMap",
-			APIVersion: "v1",
+			cm := &corev1.ConfigMap{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ConfigMap",
+					APIVersion: "v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      falco.Name,
+					Namespace: falco.Namespace,
+					Labels:    falco.Labels,
+				},
+				Data: map[string]string{
+					"falco.yaml": config,
+				},
+			}
+
+			return cm, nil
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    falco.Namespace,
-			Labels:       falco.Labels,
-			GenerateName: fmt.Sprintf("%s-", falco.Name),
+		generateOptions{
+			setControllerRef: true,
+			isClusterScoped:  false,
 		},
-		Data: map[string]string{
-			"falco.yaml": config,
-		},
-	}
-
-	// Set the controller as the owner of the RoleBinding
-	if err := controllerutil.SetControllerReference(falco, cm, cl.Scheme()); err != nil {
-		return nil, err
-	}
-
-	// convert to unstructured object.
-	unstructuredObj, err := toUnstructured(cm)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
-		return nil, err
-	}
-
-	// Set the name of the resource to the name of the falco CR.
-	if err := unstructured.SetNestedField(unstructuredObj.Object, falco.Name, "metadata", "name"); err != nil {
-		return nil, fmt.Errorf("failed to set name field: %w", err)
-	}
-
-	removeUnwantedFields(unstructuredObj)
-
-	return unstructuredObj, nil
+	)
 }

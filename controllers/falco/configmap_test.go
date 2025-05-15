@@ -45,6 +45,10 @@ func TestGenerateConfigmap(t *testing.T) {
 		{
 			name: "deployment type configmap",
 			falco: &instancev1alpha1.Falco{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: instancev1alpha1.GroupVersion.String(),
+					Kind:       "Falco",
+				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
@@ -61,6 +65,10 @@ func TestGenerateConfigmap(t *testing.T) {
 		{
 			name: "daemonset type configmap",
 			falco: &instancev1alpha1.Falco{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: instancev1alpha1.GroupVersion.String(),
+					Kind:       "Falco",
+				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
@@ -77,6 +85,10 @@ func TestGenerateConfigmap(t *testing.T) {
 		{
 			name: "invalid type configmap",
 			falco: &instancev1alpha1.Falco{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: instancev1alpha1.GroupVersion.String(),
+					Kind:       "Falco",
+				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
@@ -92,10 +104,10 @@ func TestGenerateConfigmap(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a fake client
+			// Create a fake client.
 			client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			// Call the function
+			// Call the function.
 			result, err := generateConfigmap(context.Background(), client, tt.falco)
 
 			if tt.wantErr {
@@ -110,7 +122,7 @@ func TestGenerateConfigmap(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, result)
 
-			// Verify the basic structure of the configmap
+			// Verify the basic structure of the configmap.
 			name, _, err := unstructured.NestedString(result.Object, "metadata", "name")
 			assert.NoError(t, err)
 			assert.Equal(t, tt.falco.Name, name)
@@ -119,12 +131,12 @@ func TestGenerateConfigmap(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tt.falco.Namespace, namespace)
 
-			// Verify the config data exists
+			// Verify the config data exists.
 			data, _, err := unstructured.NestedStringMap(result.Object, "data")
 			assert.NoError(t, err)
 			assert.Contains(t, data, "falco.yaml")
 
-			// Verify config content based on type
+			// Verify config content based on type.
 			expectedConfig := ""
 			switch tt.falco.Spec.Type {
 			case resourceTypeDeployment:
@@ -134,10 +146,24 @@ func TestGenerateConfigmap(t *testing.T) {
 			}
 			assert.Equal(t, expectedConfig, data["falco.yaml"])
 
-			// Verify labels
+			// Verify labels.
 			labels, _, err := unstructured.NestedStringMap(result.Object, "metadata", "labels")
 			assert.NoError(t, err)
 			assert.Equal(t, tt.falco.Labels, labels)
+
+			// Verify controller reference.
+			ownerRefs, exists, err := unstructured.NestedSlice(result.Object, "metadata", "ownerReferences")
+			assert.NoError(t, err)
+			assert.True(t, exists)
+			assert.Len(t, ownerRefs, 1)
+
+			ownerRef := ownerRefs[0].(map[string]interface{})
+			assert.Equal(t, tt.falco.Name, ownerRef["name"])
+			assert.Equal(t, tt.falco.Kind, ownerRef["kind"])
+			assert.Equal(t, tt.falco.APIVersion, ownerRef["apiVersion"])
+			assert.Equal(t, string(tt.falco.UID), ownerRef["uid"])
+			assert.True(t, ownerRef["controller"].(bool))
+			assert.True(t, ownerRef["blockOwnerDeletion"].(bool))
 		})
 	}
 }
