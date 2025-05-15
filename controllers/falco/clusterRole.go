@@ -22,6 +22,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -30,45 +31,38 @@ import (
 // generateClusterRole creates a ClusterRole resource for the given Falco instance.
 // It maps necessary permissions and sets it as an unstructured object. Returns the resource or an error.
 func generateClusterRole(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
+	return generateResourceFromFalcoInstance(ctx, cl, falco,
+		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
 
-	clusterRole := &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ClusterRole",
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			clusterRole := &rbacv1.ClusterRole{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ClusterRole",
+					APIVersion: "rbac.authorization.k8s.io/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   resourceName,
+					Labels: falco.Labels,
+				},
+				Rules: []rbacv1.PolicyRule{
+					{
+						APIGroups: []string{""},
+						Resources: []string{"nodes"},
+						Verbs:     []string{"get", "list", "watch"},
+					},
+					{
+						APIGroups: []string{"rbac.authorization.k8s.io"},
+						Resources: []string{"clusterroles", "clusterrolebindings"},
+						Verbs:     []string{"get", "list", "watch"},
+					},
+				},
+			}
+
+			return clusterRole, nil
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: falco.Labels,
+		generateOptions{
+			setControllerRef: false,
+			isClusterScoped:  true,
 		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{""},
-				Resources: []string{"nodes"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{"rbac.authorization.k8s.io"},
-				Resources: []string{"clusterroles", "clusterrolebindings"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-		},
-	}
-
-	// Convert to unstructured object.
-	unstructuredObj, err := toUnstructured(clusterRole)
-	if err != nil {
-		return nil, err
-	}
-
-	// Set the defaults by dry-run applying the object.
-	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
-		return nil, err
-	}
-
-	unstructuredObj.SetName(resourceName)
-
-	removeUnwantedFields(unstructuredObj)
-
-	return unstructuredObj, nil
+	)
 }
