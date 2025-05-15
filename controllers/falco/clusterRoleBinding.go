@@ -22,6 +22,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -31,43 +32,36 @@ import (
 // It associates a specified ServiceAccount with a ClusterRole and ensures the object is managed by the Falco instance.
 // The function converts the ClusterRoleBinding object to unstructured format and sets default values for it.
 func generateClusterRoleBinding(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
+	return generateResourceFromFalcoInstance(ctx, cl, falco,
+		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
 
-	clusterRoleBinding := &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ClusterRoleBinding",
-			APIVersion: "rbac.authorization.k8s.io/v1",
+			return &rbacv1.ClusterRoleBinding{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "ClusterRoleBinding",
+					APIVersion: "rbac.authorization.k8s.io/v1",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   resourceName,
+					Labels: falco.Labels,
+				},
+				Subjects: []rbacv1.Subject{
+					{
+						Kind:      "ServiceAccount",
+						Name:      falco.Name,
+						Namespace: falco.Namespace,
+					},
+				},
+				RoleRef: rbacv1.RoleRef{
+					Kind:     "ClusterRole",
+					Name:     resourceName,
+					APIGroup: "rbac.authorization.k8s.io",
+				},
+			}, nil
 		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: falco.Labels,
+		generateOptions{
+			setControllerRef: false,
+			isClusterScoped:  true,
 		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      falco.Name,
-				Namespace: falco.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
-			Kind:     "ClusterRole",
-			Name:     resourceName,
-			APIGroup: "rbac.authorization.k8s.io",
-		},
-	}
-
-	unstructuredObj, err := toUnstructured(clusterRoleBinding)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := setDefaultValues(ctx, cl, unstructuredObj); err != nil {
-		return nil, err
-	}
-
-	unstructuredObj.SetName(resourceName)
-
-	removeUnwantedFields(unstructuredObj)
-
-	return unstructuredObj, nil
+	)
 }
