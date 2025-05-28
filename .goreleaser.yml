@@ -1,0 +1,54 @@
+version: 2
+
+project_name: falco-operator
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: "falco-operator"
+    binary: "falco-operator"
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+    ldflags: |
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.BuildDate={{ .Date }}
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.GitCommit={{ .Commit }}
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.SemVersion={{ if .IsSnapshot }}{{ .Commit }}{{ else }}{{ .Version }}{{ end }}
+      -s
+      -w
+    main: ./cmd/falco/main.go
+    env:
+      - GO111MODULE=on
+      - CGO_ENABLED=0
+  - id: "artifact-operator"
+    binary: "artifact-operator"
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+    ldflags: |
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.BuildDate={{ .Date }}
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.GitCommit={{ .Commit }}
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.SemVersion={{ if .IsSnapshot }}{{ .Commit }}{{ else }}{{ .Version }}{{ end }}
+      -s
+      -w
+    main: ./cmd/artifact/main.go
+    env:
+      - GO111MODULE=on
+      - CGO_ENABLED=0
+
+snapshot:
+  version_template: "{{ .ShortCommit }}"
+
+release:
+  prerelease: auto
+  mode: replace
+
+changelog:
+  use: github-native
