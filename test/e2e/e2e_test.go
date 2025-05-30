@@ -28,7 +28,7 @@ import (
 )
 
 // namespace where the project is deployed in.
-const namespace = "falco-operator-system"
+const namespace = "falco-operator"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
