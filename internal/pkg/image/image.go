@@ -32,7 +32,7 @@ func BuildFalcoImageStringFromVersion(version string) string {
 		return BuildImageString(Registry, Repository, FalcoImage, FalcoTag)
 	}
 
-	return fmt.Sprintf("%s/%s/%s:%s%s", Registry, Repository, FalcoImage, version, FalcoDebianImageSuffix)
+	return fmt.Sprintf("%s/%s/%s:%s", Registry, Repository, FalcoImage, version)
 }
 
 // FalcoVersion returns the version of Falco specified in the FalcoTag.

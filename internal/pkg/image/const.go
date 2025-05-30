@@ -24,7 +24,5 @@ const (
 	// FalcoImage the default image name used for Falco.
 	FalcoImage = "falco"
 	// FalcoTag the default tag used for Falco.
-	FalcoTag = "0.40.0-debian"
-	// FalcoDebianImageSuffix suffix used for Falco Debian images.
-	FalcoDebianImageSuffix = "-debian"
+	FalcoTag = "0.41.0"
 )
