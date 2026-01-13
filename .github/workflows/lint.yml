@@ -22,4 +22,39 @@ jobs:
       - name: Run linter
         uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
         with:
-          version: v2.1.6
+          version: v2.8.0
+          only-new-issues: true
+  
+  gomodtidy:
+    name: Enforce go.mod tidiness
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          ref: "${{ github.event.pull_request.head.sha }}"
+          repository: ${{github.event.pull_request.head.repo.full_name}}
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: "go.mod"
+          check-latest: true
+
+      - name: Execute go mod tidy and check the outcome
+        working-directory: ./
+        run: |
+          go mod tidy
+          exit_code=$(git diff --exit-code)
+          exit ${exit_code}
+
+      - name: Print a comment in case of failure
+        run: |
+          echo "The go.mod and/or go.sum files appear not to be correctly tidied.
+
+          Please, rerun go mod tidy to fix the issues."
+          exit 1
+        if: |
+          failure() && github.event.pull_request.head.repo.full_name == github.repository
