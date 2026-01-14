@@ -214,9 +214,8 @@ metadata:
     app.kubernetes.io/name: falco-operator
   name: falco-rules
 spec:
- ociArtifact:
-   inline: |-
-     [rules body]
+ inlineRules: |-
+   [rules body]
 ```
 
 ### Managing Plugins
