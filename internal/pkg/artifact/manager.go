@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime"
 
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -55,6 +56,8 @@ const (
 	MediumInline Medium = "inline"
 	// MediumOCI represents an OCI artifact.
 	MediumOCI Medium = "oci"
+	// MediumConfigMap represents an artifact from a ConfigMap.
+	MediumConfigMap Medium = "configmap"
 )
 
 // File represents a tracked file for any artifact type.
@@ -285,6 +288,102 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	return nil
 }
 
+// StoreFromConfigMap stores an artifact from a ConfigMap to the local filesystem.
+func (am *Manager) StoreFromConfigMap(ctx context.Context, name string, artifactPriority int32, configMapRef *commonv1alpha1.ConfigMapRef, artifactType Type) error {
+	logger := log.FromContext(ctx)
+
+	// If the configMapRef is nil, we remove the artifact from the manager and from filesystem.
+	// It means that the instance has been updated and the artifact has been removed from the spec.
+	if configMapRef == nil {
+		// Get artifact from the manager.
+		if file := am.getArtifactFile(name, MediumConfigMap); file != nil {
+			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
+			if err := am.removeArtifact(ctx, name, MediumConfigMap); err != nil {
+				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
+				return err
+			}
+		}
+		return nil
+	}
+
+	newFile := File{
+		Path:     Path(name, artifactPriority, MediumConfigMap, artifactType),
+		Medium:   MediumConfigMap,
+		Priority: artifactPriority,
+	}
+
+	// Fetch the ConfigMap from the cluster.
+	configMap := &corev1.ConfigMap{}
+	configMapKey := client.ObjectKey{
+		Name:      configMapRef.Name,
+		Namespace: am.namespace,
+	}
+
+	if err := am.client.Get(ctx, configMapKey, configMap); err != nil {
+		logger.Error(err, "Failed to get ConfigMap", "configMap", configMapRef.Name)
+		return err
+	}
+
+	// Get the data from the ConfigMap.
+	data, ok := configMap.Data[configMapRef.Key]
+	if !ok {
+		err := fmt.Errorf("key %q not found in ConfigMap %q", configMapRef.Key, configMapRef.Name)
+		logger.Error(err, "ConfigMap key not found")
+		return err
+	}
+
+	// Check if the artifact is already stored.
+	if file := am.getArtifactFile(name, MediumConfigMap); file != nil {
+		logger.V(4).Info("Artifact already stored", "artifact", file)
+		// Check if the file already exists on the filesystem.
+		ok, err := file.Exists()
+		if err != nil {
+			logger.Error(err, "Failed to check if file exists", "file", file.Path)
+			return err
+		}
+		// If the file exists we check if the priority has changed or the content has been updated.
+		if ok {
+			logger.V(4).Info("File already exists, checking if is up to date", "file", file.Path)
+			// Read the file.
+			content, err := os.ReadFile(file.Path)
+			if err != nil {
+				logger.Error(err, "unable to read file", "file", file.Path)
+				return err
+			}
+			// Check if the content is the same and the priority has not changed.
+			if string(content) == data && file.Priority == artifactPriority {
+				logger.V(3).Info("file is up to date", "file", file.Path)
+				return nil
+			}
+
+			if file.Priority != artifactPriority {
+				logger.Info("Updating artifact file due to priority change",
+					"oldPriority", file.Priority, "newPriority", artifactPriority, "oldFile", file.Path, "newFile", newFile.Path)
+			}
+
+			logger.Info("File is outdated, updating", "file", file.Path)
+			// The content is different, remove the file.
+			if err := os.Remove(file.Path); err != nil {
+				logger.Error(err, "unable to remove file", "file", file.Path)
+				return err
+			}
+			// Remove the file from the manager.
+			am.removeArtifactFile(name, MediumConfigMap)
+		}
+	}
+
+	// Write the data to the filesystem.
+	if err := os.WriteFile(newFile.Path, []byte(data), 0o600); err != nil {
+		logger.Error(err, "unable to write file", "file", newFile.Path)
+		return err
+	}
+
+	// Add the artifact to the manager.
+	am.addArtifactFile(name, newFile)
+	logger.Info("ConfigMap data correctly written to filesystem", "file", newFile.Path, "configMap", configMapRef.Name, "key", configMapRef.Key)
+	return nil
+}
+
 func (am *Manager) removeArtifact(ctx context.Context, name string, medium Medium) error {
 	logger := log.FromContext(ctx)
 
@@ -394,8 +493,10 @@ func Path(name string, artifactPriority int32, medium Medium, artifactType Type)
 			subPriority = priority.OCISubPriority
 		case MediumInline:
 			subPriority = priority.InLineRulesSubPriority
+		case MediumConfigMap:
+			subPriority = priority.CMSubPriority
 		default:
-			// Default to 0 if medium is not OCI or Inline.
+			// Default to 0 if medium is not OCI, Inline, or ConfigMap.
 			subPriority = priority.MaxPriority
 		}
 		return filepath.Clean(
