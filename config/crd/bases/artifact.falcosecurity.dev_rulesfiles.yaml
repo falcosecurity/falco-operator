@@ -39,6 +39,20 @@ spec:
           spec:
             description: RulesfileSpec defines the desired state of Rulesfile.
             properties:
+              configMapRef:
+                description: ConfigMapRef specifies a reference to a ConfigMap containing
+                  the rules.
+                properties:
+                  key:
+                    description: Key is the key in the ConfigMap to select.
+                    type: string
+                  name:
+                    description: Name is the name of the ConfigMap.
+                    type: string
+                required:
+                - key
+                - name
+                type: object
               inlineRules:
                 description: InlineRules specifies the rules as a string.
                 type: string

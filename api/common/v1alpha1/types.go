@@ -65,3 +65,15 @@ type OCIPullSecret struct {
 	// +kubebuilder:default=password
 	PasswordKey string `json:"passwordKey,omitempty"`
 }
+
+// ConfigMapRef defines the structure for referencing a ConfigMap and a specific key within it.
+// +kubebuilder:object:generate=true
+type ConfigMapRef struct {
+	// Name is the name of the ConfigMap.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Key is the key in the ConfigMap to select.
+	// +kubebuilder:validation:Required
+	Key string `json:"key"`
+}
