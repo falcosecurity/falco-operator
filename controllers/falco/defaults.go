@@ -23,6 +23,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
 var (
@@ -386,9 +387,8 @@ webserver:
 
 	artifactOperatorName    = "artifact-operator"
 	artifactOperatorSidecar = corev1.Container{
-		Name: artifactOperatorName,
-		// TODO: Change the image repository to the official one.
-		Image:           "docker.io/falcosecurity/artifact-operator:latest",
+		Name:            artifactOperatorName,
+		Image:           version.ArtifactOperatorImage,
 		ImagePullPolicy: corev1.PullIfNotPresent,
 		RestartPolicy:   &restartPolicy,
 		EnvFrom:         []corev1.EnvFromSource{},

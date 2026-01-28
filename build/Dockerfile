@@ -6,6 +6,7 @@ ARG COMMIT
 ARG BUILD_DATE
 ARG PROJECT=github.com/falcosecurity/falco-operator
 ARG COMPONENT
+ARG ARTIFACT_OPERATOR_IMAGE=""
 
 RUN test -n "$RELEASE" || ( echo "The RELEASE argument is unset. Aborting" && false )
 RUN test -n "$COMMIT" || ( echo "The COMMIT argument is unset. Aborting" && false )
@@ -30,7 +31,8 @@ RUN CGO_ENABLED=0 \
     -w \
     -X '${PROJECT}/internal/pkg/version.SemVersion=${RELEASE}' \
     -X '${PROJECT}/internal/pkg/version.GitCommit=${COMMIT}' \
-    -X '${PROJECT}/internal/pkg/version.BuildDate=${BUILD_DATE}'" \
+    -X '${PROJECT}/internal/pkg/version.BuildDate=${BUILD_DATE}' \
+    -X '${PROJECT}/internal/pkg/version.ArtifactOperatorImage=${ARTIFACT_OPERATOR_IMAGE}'" \
     -o ${COMPONENT} ./cmd/${COMPONENT}/main.go
 
 RUN echo ${RELEASE}

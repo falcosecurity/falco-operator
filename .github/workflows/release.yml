@@ -101,40 +101,12 @@ jobs:
       - name: Set version fields
         id: vars
         run: |
-          echo "release=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "release=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-  falco-operator-image:
-    if: ${{ github.event_name == 'push' }}
-    needs: docker-configure
-    uses: ./.github/workflows/docker-image.yml
-    secrets: inherit
-    with:
-      release: ${{ needs.docker-configure.outputs.release }}
-      commit: ${{ needs.docker-configure.outputs.commit }}
-      build_date: ${{ needs.docker-configure.outputs.build_date }}
-      image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
-      component_name: "falco"
-
-  provenance-for-images-falco:
-    needs: [ docker-configure, falco-operator-image ]
-    permissions:
-      actions: read # for detecting the Github Actions environment.
-      id-token: write # for creating OIDC tokens for signing.
-      packages: write # for uploading attestations.
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
-    with:
-      image: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
-      # The image digest is used to prevent TOCTOU issues.
-      # This is an output of the docker/build-push-action
-      # See: https://github.com/slsa-framework/slsa-verifier#toctou-attacks
-      digest: ${{ needs.falco-operator-image.outputs.digest }}
-    secrets:
-      registry-username: ${{ secrets.DOCKERHUB_USER }}
-      registry-password: ${{ secrets.DOCKERHUB_SECRET }}
-
   artifact-operator-image:
+    if: ${{ github.event_name == 'push' }}
     needs: docker-configure
     uses: ./.github/workflows/docker-image.yml
     secrets: inherit
@@ -144,6 +116,19 @@ jobs:
       build_date: ${{ needs.docker-configure.outputs.build_date }}
       image_name: ${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}
       component_name: "artifact"
+
+  falco-operator-image:
+    if: ${{ github.event_name == 'push' }}
+    needs: [docker-configure, artifact-operator-image]
+    uses: ./.github/workflows/docker-image.yml
+    secrets: inherit
+    with:
+      release: ${{ needs.docker-configure.outputs.release }}
+      commit: ${{ needs.docker-configure.outputs.commit }}
+      build_date: ${{ needs.docker-configure.outputs.build_date }}
+      image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
+      component_name: "falco"
+      artifact_operator_image: "${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
 
   provenance-for-images-artifact:
     needs: [docker-configure, artifact-operator-image]
@@ -161,3 +146,48 @@ jobs:
     secrets:
       registry-username: ${{ secrets.DOCKERHUB_USER }}
       registry-password: ${{ secrets.DOCKERHUB_SECRET }}
+
+  provenance-for-images-falco:
+    needs: [docker-configure, falco-operator-image]
+    permissions:
+      actions: read # for detecting the Github Actions environment.
+      id-token: write # for creating OIDC tokens for signing.
+      packages: write # for uploading attestations.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+    with:
+      image: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
+      # The image digest is used to prevent TOCTOU issues.
+      # This is an output of the docker/build-push-action
+      # See: https://github.com/slsa-framework/slsa-verifier#toctou-attacks
+      digest: ${{ needs.falco-operator-image.outputs.digest }}
+    secrets:
+      registry-username: ${{ secrets.DOCKERHUB_USER }}
+      registry-password: ${{ secrets.DOCKERHUB_SECRET }}
+
+  # Generate install.yaml with properly tagged images and attach to release
+  generate-install-yaml:
+    needs: [docker-configure, falco-operator-image]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # To upload assets to the release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Generate install.yaml
+        run: |
+          make build-installer IMG="${{ vars.FALCO_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
+
+      - name: Upload install.yaml to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" config/dist/install.yaml --clobber
