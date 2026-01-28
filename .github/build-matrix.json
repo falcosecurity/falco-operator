@@ -1,0 +1,12 @@
+{
+  "include": [
+    {
+      "os": "linux",
+      "arch": "amd64"
+    },
+    {
+      "os": "linux",
+      "arch": "arm64"
+    }
+  ]
+}

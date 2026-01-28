@@ -121,16 +121,19 @@ build: manifests generate fmt vet ## Build manager binaries.
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./cmd/falco
 
-# If you wish to build the manager image targeting other platforms you can use the --platform flag.
-# (i.e. docker build --platform linux/arm64). However, you must enable docker buildKit for it.
-# More info: https://docs.docker.com/develop/develop-images/build_enhancements/
+GOARCH ?= $(shell go env GOARCH)
+.PHONY: docker-binaries
+docker-binaries: ## Build Go binaries for Docker image.
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) go build -ldflags \
+		"-s -w \
+		-X '$(PROJECT)/internal/pkg/version.SemVersion=$(RELEASE)' \
+		-X '$(PROJECT)/internal/pkg/version.GitCommit=$(COMMIT)' \
+		-X '$(PROJECT)/internal/pkg/version.BuildDate=$(BUILD_DATE)'" \
+		-o bin/linux/$(GOARCH)/manager ./cmd/$(OPERATOR)/main.go
+
 .PHONY: docker-build
-docker-build: ## Build docker image with the manager.
+docker-build: docker-binaries ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build \
-		--build-arg RELEASE=$(RELEASE) \
-		--build-arg COMMIT=$(COMMIT) \
-		--build-arg BUILD_DATE=$(BUILD_DATE) \
-		--build-arg COMPONENT=$(OPERATOR) \
 		-t ${IMG} \
 		-f build/Dockerfile .
 
@@ -147,21 +150,16 @@ docker-push: ## Push docker image with the manager.
 PLATFORMS ?= linux/arm64,linux/amd64
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
-	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
-	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' build/Dockerfile > Dockerfile.cross
+	$(MAKE) docker-binaries GOARCH=amd64
+	$(MAKE) docker-binaries GOARCH=arm64
 	- $(CONTAINER_TOOL) buildx create --name falco-operator-builder
 	$(CONTAINER_TOOL) buildx use falco-operator-builder
 	- $(CONTAINER_TOOL) buildx build \
- 		--push \
- 		--platform=$(PLATFORMS) \
- 		--tag ${IMG} \
- 		--build-arg RELEASE=$(RELEASE) \
- 		--build-arg COMMIT=$(COMMIT) \
- 		--build-arg BUILD_DATE=$(BUILD_DATE) \
- 		--build-arg COMPONENT=$(OPERATOR) \
- 		-f Dockerfile.cross .
+		--push \
+		--platform=$(PLATFORMS) \
+		--tag ${IMG} \
+		-f build/Dockerfile .
 	- $(CONTAINER_TOOL) buildx rm falco-operator-builder
-	rm Dockerfile.cross
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
