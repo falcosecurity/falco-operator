@@ -28,6 +28,11 @@ on:
         required: false
         default: false
         type: boolean
+      artifact_operator_image:
+        description: "The artifact-operator image to inject as sidecar (only for falco-operator)"
+        required: false
+        default: ""
+        type: string
     outputs:
       digest:
         description: The digest of the pushed image.
@@ -85,6 +90,7 @@ jobs:
             COMMIT=${{ inputs.commit }}
             BUILD_DATE=${{ inputs.build_date }}
             COMPONENT=${{ inputs.component_name }}
+            ARTIFACT_OPERATOR_IMAGE=${{ inputs.artifact_operator_image }}
 
       - name: Install Cosign
         if: ${{ inputs.sign }}

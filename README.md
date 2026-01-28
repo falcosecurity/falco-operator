@@ -98,7 +98,7 @@ The Falco Operator is the primary interface for users to interact with Falco in 
 Installing the Falco Operator is straightforward and can be done by applying the provided manifests. The operator is designed to be installed in the `falco-operator` namespace, but you can choose a different namespace if needed.
 All the necessary resources, including the CRDs, are included in the manifests. To install the Falco Operator, run:
 ````bash
-kubectl apply -f https://raw.githubusercontent.com/falcosecurity/falco-operator/refs/heads/main/config/dist/install.yaml
+kubectl apply -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
 ````
 After running this command, you can verify that the Falco Operator is running by checking the status of the pods in the `falco-operator` namespace:
 ```bash
