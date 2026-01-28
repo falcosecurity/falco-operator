@@ -30,6 +30,8 @@ type RulesfileSpec struct {
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
 	// InlineRules specifies the rules as a string.
 	InlineRules *string `json:"inlineRules,omitempty"`
+	// ConfigMapRef specifies a reference to a ConfigMap containing the rules.
+	ConfigMapRef *commonv1alpha1.ConfigMapRef `json:"configMapRef,omitempty"`
 	// Priority specifies the priority of the rulesfile.\
 	// The higher the value, the higher the priority.
 	// +kubebuilder:validation:Minimum=0

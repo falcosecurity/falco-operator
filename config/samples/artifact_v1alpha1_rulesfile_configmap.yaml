@@ -1,0 +1,53 @@
+---
+# Example ConfigMap containing Falco rules
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: custom-falco-rules
+  namespace: default
+data:
+  rules.yaml: |
+    - rule: Terminal shell in container
+      desc: A shell was used as the entrypoint/exec point into a container with an attached terminal.
+      condition: >
+        spawned_process and container
+        and shell_procs and proc.tty != 0
+        and container_entrypoint
+        and not user_expected_terminal_shell_in_container_conditions
+      output: >
+        A shell was spawned in a container with an attached terminal (user=%user.name user_loginuid=%user.loginuid %container.info
+        shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline terminal=%proc.tty container_id=%container.id image=%container.image.repository)
+      priority: NOTICE
+      tags: [container, shell, mitre_execution, T1059]
+
+    - rule: Write below binary dir
+      desc: An attempt to write to any file below a set of binary directories.
+      condition: >
+        bin_dir and evt.dir = < and open_write
+        and not package_mgmt_procs
+        and not exe_running_docker_save
+        and not python_running_get_pip
+        and not python_running_ms_oms
+        and not user_known_write_below_binary_dir_activities
+      output: >
+        File below a known binary directory opened for writing (user=%user.name user_loginuid=%user.loginuid
+        command=%proc.cmdline file=%fd.name parent=%proc.pname pcmdline=%proc.pcmdline gparent=%proc.aname[2] container_id=%container.id image=%container.image.repository)
+      priority: ERROR
+      tags: [filesystem, mitre_persistence, T1543]
+
+---
+# Example Rulesfile using ConfigMap reference
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: rulesfile-from-configmap
+  namespace: default
+spec:
+  configMapRef:
+    name: custom-falco-rules
+    key: rules.yaml
+  priority: 60
+
