@@ -39,8 +39,65 @@ on:
         value: ${{ jobs.docker-image.outputs.digest }}
 
 jobs:
+  load-matrix:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+      - id: read
+        run: echo "matrix=$(jq -c . .github/build-matrix.json)" >> $GITHUB_OUTPUT
+
+  build-binaries:
+    runs-on: ubuntu-22.04
+    needs: load-matrix
+    strategy:
+      matrix: ${{ fromJson(needs.load-matrix.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: "go.mod"
+          check-latest: true
+
+      - name: Validate inputs
+        run: |
+          test -n "${{ inputs.release }}" || { echo "The release input is unset. Aborting"; exit 1; }
+          test -n "${{ inputs.commit }}" || { echo "The commit input is unset. Aborting"; exit 1; }
+          test -n "${{ inputs.build_date }}" || { echo "The build_date input is unset. Aborting"; exit 1; }
+          test -n "${{ inputs.component_name }}" || { echo "The component_name input is unset. Aborting"; exit 1; }
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          PROJECT: github.com/falcosecurity/falco-operator
+        run: |
+          go build -ldflags \
+            "-s -w \
+            -X '${PROJECT}/internal/pkg/version.SemVersion=${{ inputs.release }}' \
+            -X '${PROJECT}/internal/pkg/version.GitCommit=${{ inputs.commit }}' \
+            -X '${PROJECT}/internal/pkg/version.BuildDate=${{ inputs.build_date }}' \
+            -X '${PROJECT}/internal/pkg/version.ArtifactOperatorImage=${{ inputs.artifact_operator_image }}'" \
+            -o bin/${{ matrix.os }}/${{ matrix.arch }}/${{ inputs.component_name }} \
+            ./cmd/${{ inputs.component_name }}/main.go
+
+      - name: Upload binary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ inputs.component_name }}-${{ matrix.os }}-${{ matrix.arch }}
+          path: bin/${{ matrix.os }}/${{ matrix.arch }}/${{ inputs.component_name }}
+          retention-days: 1
+
   docker-image:
     runs-on: ubuntu-22.04
+    needs: build-binaries
     outputs:
       image: ${{ steps.build-and-push.outputs.image }}
       digest: ${{ steps.build-and-push.outputs.digest }}
@@ -49,6 +106,28 @@ jobs:
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
+
+      - name: Set platforms
+        id: platforms
+        run: echo "value=$(jq -r '[.include[]|"\(.os)/\(.arch)"]|join(",")' .github/build-matrix.json)" >> $GITHUB_OUTPUT
+
+      - name: Download amd64 binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.component_name }}-linux-amd64
+          path: bin/linux/amd64
+
+      - name: Download arm64 binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.component_name }}-linux-arm64
+          path: bin/linux/arm64
+
+      - name: Prepare binaries
+        run: |
+          mv bin/linux/amd64/${{ inputs.component_name }} bin/linux/amd64/manager
+          mv bin/linux/arm64/${{ inputs.component_name }} bin/linux/arm64/manager
+          chmod +x bin/linux/amd64/manager bin/linux/arm64/manager
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
@@ -67,7 +146,6 @@ jobs:
         id: meta_image
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
-          # list of Docker images to use as base name for tags
           images: |
             ${{ inputs.image_name }}
           tags: |
@@ -81,16 +159,10 @@ jobs:
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.value }}
           push: true
           tags: ${{ steps.meta_image.outputs.tags }}
           file: ./build/Dockerfile
-          build-args: |
-            RELEASE=${{ inputs.release }}
-            COMMIT=${{ inputs.commit }}
-            BUILD_DATE=${{ inputs.build_date }}
-            COMPONENT=${{ inputs.component_name }}
-            ARTIFACT_OPERATOR_IMAGE=${{ inputs.artifact_operator_image }}
 
       - name: Install Cosign
         if: ${{ inputs.sign }}
