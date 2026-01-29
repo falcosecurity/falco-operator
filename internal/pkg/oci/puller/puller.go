@@ -26,26 +26,34 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/oci/client"
 )
 
-// Puller implements pull operations.
-type Puller struct {
-	Client    remote.Client
+// Puller defines the interface for pulling OCI artifacts.
+type Puller interface {
+	Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc) (*RegistryResult, error)
+}
+
+// OciPuller implements the Puller interface for OCI artifacts.
+type OciPuller struct {
 	plainHTTP bool
 }
 
-// NewPuller create a new puller that can be used for pull operations.
-// The client must be ready to be used by the puller.
-func NewPuller(client remote.Client, plainHTTP bool) *Puller {
-	return &Puller{
-		Client:    client,
+// NewOciPuller create a new puller that can be used for pull operations.
+// The client is used as a template and is never modified directly.
+func NewOciPuller(plainHTTP bool) *OciPuller {
+	return &OciPuller{
 		plainHTTP: plainHTTP,
 	}
 }
 
 // Pull an artifact from a remote registry.
 // Ref format follows: REGISTRY/REPO[:TAG|@DIGEST]. Ex. localhost:5000/hello:latest.
-func (p *Puller) Pull(ctx context.Context, ref, destDir, os, arch string) (*RegistryResult, error) {
+func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc) (*RegistryResult, error) {
+	c := client.NewClient(client.WithCredentialFunc(creds))
+
 	fileStore, err := file.New(destDir)
 	if err != nil {
 		return nil, err
@@ -56,7 +64,7 @@ func (p *Puller) Pull(ctx context.Context, ref, destDir, os, arch string) (*Regi
 		return nil, fmt.Errorf("unable to create new repository with ref %s: %w", ref, err)
 	}
 
-	repo.Client = p.Client
+	repo.Client = c
 	repo.PlainHTTP = p.plainHTTP
 
 	// if no tag was specified, "latest" is used
