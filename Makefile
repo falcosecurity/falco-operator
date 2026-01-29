@@ -33,14 +33,6 @@ CONTAINER_TOOL ?= docker
 SHELL = /usr/bin/env bash -o pipefail
 .SHELLFLAGS = -ec
 
-# SED_INPLACE defines the sed in-place flag based on the OS.
-# macOS requires an empty string argument after -i, while Linux does not.
-ifeq ($(shell uname -s),Darwin)
-SED_INPLACE := sed -i ''
-else
-SED_INPLACE := sed -i
-endif
-
 .PHONY: all
 all: build
 

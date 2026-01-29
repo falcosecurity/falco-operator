@@ -33,6 +33,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
@@ -278,7 +279,7 @@ type PluginsConfig struct {
 
 func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 	var config = PluginConfig{
-		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
+		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, filesystem.MediumOCI, artifact.TypePlugin),
 		Name:        plugin.Name,
 	}
 
