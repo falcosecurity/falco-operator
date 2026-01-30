@@ -5,6 +5,7 @@ COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= falco
 PROJECT ?= github.com/falcosecurity/falco-operator
+ARTIFACT_OPERATOR_IMAGE ?= docker.io/falcosecurity/artifact-operator:latest
 
 # SED_INPLACE defines the sed in-place flag based on the OS.
 # macOS requires an empty string argument after -i, while Linux does not.
@@ -128,8 +129,10 @@ docker-binaries: ## Build Go binaries for Docker image.
 		"-s -w \
 		-X '$(PROJECT)/internal/pkg/version.SemVersion=$(RELEASE)' \
 		-X '$(PROJECT)/internal/pkg/version.GitCommit=$(COMMIT)' \
-		-X '$(PROJECT)/internal/pkg/version.BuildDate=$(BUILD_DATE)'" \
+		-X '$(PROJECT)/internal/pkg/version.BuildDate=$(BUILD_DATE)' \
+		-X '$(PROJECT)/internal/pkg/version.ArtifactOperatorImage=$(ARTIFACT_OPERATOR_IMAGE)'" \
 		-o bin/linux/$(GOARCH)/manager ./cmd/$(OPERATOR)/main.go
+	chmod 755 bin/linux/$(GOARCH)/manager
 
 .PHONY: docker-build
 docker-build: docker-binaries ## Build docker image with the manager.
