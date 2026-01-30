@@ -47,7 +47,7 @@ func generateRole(ctx context.Context, cl client.Client, falco *instancev1alpha1
 					{
 						APIGroups: []string{""},
 						Resources: []string{"configmaps"},
-						Verbs:     []string{"get", "list"},
+						Verbs:     []string{"get", "list", "watch"},
 					},
 					{
 						APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
