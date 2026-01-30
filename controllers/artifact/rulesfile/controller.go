@@ -21,12 +21,17 @@ package rulesfile
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
@@ -47,6 +52,7 @@ func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, 
 		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
+		namespace:       namespace,
 	}
 }
 
@@ -57,6 +63,7 @@ type RulesfileReconciler struct {
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
+	namespace       string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -108,10 +115,45 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Filter ConfigMap watches to only the operator's namespace to reduce overhead.
+	namespaceFilter := predicate.NewPredicateFuncs(func(object client.Object) bool {
+		return object.GetNamespace() == r.namespace
+	})
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&artifactv1alpha1.Rulesfile{}).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(r.findRulesfilesForConfigMap),
+			builder.WithPredicates(namespaceFilter),
+		).
 		Named("artifact-rulesfile").
 		Complete(r)
+}
+
+// findRulesfilesForConfigMap finds all Rulesfiles that reference a given ConfigMap.
+func (r *RulesfileReconciler) findRulesfilesForConfigMap(ctx context.Context, configMap client.Object) []reconcile.Request {
+	logger := log.FromContext(ctx)
+	rulesfileList := &artifactv1alpha1.RulesfileList{}
+
+	if err := r.List(ctx, rulesfileList, client.InNamespace(configMap.GetNamespace())); err != nil {
+		logger.Error(err, "unable to list Rulesfiles")
+		return []reconcile.Request{}
+	}
+
+	var requests []reconcile.Request
+	for i := range rulesfileList.Items {
+		if rulesfileList.Items[i].Spec.ConfigMapRef != nil && rulesfileList.Items[i].Spec.ConfigMapRef.Name == configMap.GetName() {
+			requests = append(requests, reconcile.Request{
+				NamespacedName: client.ObjectKey{
+					Name:      rulesfileList.Items[i].Name,
+					Namespace: rulesfileList.Items[i].Namespace,
+				},
+			})
+		}
+	}
+
+	return requests
 }
 
 // ensureFinalizer ensures the finalizer is set.
@@ -146,6 +188,10 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	}
 
 	if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
+		return err
+	}
+
+	if err := r.artifactManager.StoreFromConfigMap(ctx, rulesfile.Name, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile); err != nil {
 		return err
 	}
 

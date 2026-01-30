@@ -327,6 +327,11 @@ func (in *RulesfileSpec) DeepCopyInto(out *RulesfileSpec) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.ConfigMapRef != nil {
+		in, out := &in.ConfigMapRef, &out.ConfigMapRef
+		*out = new(commonv1alpha1.ConfigMapRef)
+		**out = **in
+	}
 	if in.Selector != nil {
 		in, out := &in.Selector, &out.Selector
 		*out = new(v1.LabelSelector)
