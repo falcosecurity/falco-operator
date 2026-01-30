@@ -56,6 +56,17 @@ type Reconciler struct {
 	NativeSidecar bool
 }
 
+// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos;falcos/status,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles;rulesfiles/status,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs;configs/status,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins;plugins/status,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=pods;services;configmaps;secrets;serviceaccounts,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:urls=/metrics,verbs=get
+
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

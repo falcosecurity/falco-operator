@@ -57,7 +57,7 @@ help: ## Display this help.
 
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
-	$(CONTROLLER_GEN) crd:generateEmbeddedObjectMeta=true paths="./..." output:crd:artifacts:config=config/crd/bases
+	$(CONTROLLER_GEN) rbac:roleName=falco-operator-role crd:generateEmbeddedObjectMeta=true paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
@@ -166,9 +166,11 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 
 .PHONY: build-installer
 build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p dist
+	mkdir -p config/dist
+	@cp config/manager/kustomization.yaml config/manager/kustomization.yaml.bak
 	cd config/manager && $(KUSTOMIZE) edit set image falcosecurity/falco-operator=${IMG}
 	$(KUSTOMIZE) build config/default > config/dist/install.yaml
+	@mv config/manager/kustomization.yaml.bak config/manager/kustomization.yaml
 
 ##@ Deployment
 
