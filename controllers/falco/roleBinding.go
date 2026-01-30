@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"fmt"
 
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -30,8 +29,8 @@ import (
 )
 
 // generateRoleBinding returns a RoleBinding for Falco.
-func generateRoleBinding(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(ctx, cl, falco,
+func generateRoleBinding(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	return generateResourceFromFalcoInstance(cl, falco,
 		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
 			rb := &rbacv1.RoleBinding{
 				TypeMeta: metav1.TypeMeta{

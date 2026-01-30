@@ -17,8 +17,6 @@
 package falco
 
 import (
-	"context"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -30,8 +28,8 @@ import (
 )
 
 // generateRole returns a Role for Falco.
-func generateRole(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(ctx, cl, falco,
+func generateRole(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	return generateResourceFromFalcoInstance(cl, falco,
 		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
 			role := &rbacv1.Role{
 				TypeMeta: metav1.TypeMeta{

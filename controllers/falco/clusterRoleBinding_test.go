@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,7 +115,7 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			result, err := generateClusterRoleBinding(context.Background(), client, tt.falco)
+			result, err := generateClusterRoleBinding(client, tt.falco)
 
 			if tt.wantErr {
 				assert.Error(t, err)

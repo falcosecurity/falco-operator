@@ -175,9 +175,10 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
 	if !controllerutil.ContainsFinalizer(falco, finalizer) {
 		log.FromContext(ctx).V(3).Info("Setting finalizer", "finalizer", finalizer)
-		controllerutil.AddFinalizer(falco, finalizer)
 
-		if err := r.Update(ctx, falco); err != nil {
+		patch := client.MergeFrom(falco.DeepCopy())
+		controllerutil.AddFinalizer(falco, finalizer)
+		if err := r.Patch(ctx, falco, patch); err != nil {
 			log.FromContext(ctx).Error(err, "unable to set finalizer", "finalizer", finalizer)
 			return false, err
 		}
@@ -214,10 +215,12 @@ func (r *Reconciler) ensureVersion(ctx context.Context, falco *instancev1alpha1.
 
 	// Set the version in the Falco CRD if it differs from the desired version.
 	if version != falco.Spec.Version {
-		falco.Spec.Version = version
 		log.FromContext(ctx).V(3).Info("Setting Falco version", "version", version)
-		if err := r.Update(ctx, falco); err != nil {
-			log.FromContext(ctx).Error(err, "unable to set default Falco version", "version", image.FalcoVersion())
+
+		patch := client.MergeFrom(falco.DeepCopy())
+		falco.Spec.Version = version
+		if err := r.Patch(ctx, falco, patch); err != nil {
+			log.FromContext(ctx).Error(err, "unable to set default Falco version", "version", version)
 			return false, err
 		}
 		return true, nil
@@ -233,32 +236,37 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		if controllerutil.ContainsFinalizer(falco, finalizer) {
 			log.FromContext(ctx).Info("Removing finalizer", "finalizer", finalizer)
 
-			// Remove clusterrolebinding.
-			clb, err := generateClusterRoleBinding(ctx, r.Client, falco)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unablet to cleanup clusterrolebinding")
-				return false, err
-			}
-			if err := r.Delete(ctx, clb); err != nil && !apierrors.IsNotFound(err) {
+			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
+
+			crb := &unstructured.Unstructured{}
+			crb.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "rbac.authorization.k8s.io",
+				Version: "v1",
+				Kind:    "ClusterRoleBinding",
+			})
+			crb.SetName(resourceName)
+			if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
 				log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
 				return false, err
 			}
 
-			// Remove clusterrole.
-			cr, err := generateClusterRole(ctx, r.Client, falco)
-			if err != nil {
-				log.FromContext(ctx).Error(err, "unable to cleanup clusterrole")
-				return false, err
-			}
+			cr := &unstructured.Unstructured{}
+			cr.SetGroupVersionKind(schema.GroupVersionKind{
+				Group:   "rbac.authorization.k8s.io",
+				Version: "v1",
+				Kind:    "ClusterRole",
+			})
+			cr.SetName(resourceName)
 			if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
 				log.FromContext(ctx).Error(err, "unable to delete clusterrole")
 				return false, err
 			}
 
-			// Remove the finalizer.
-			if controllerutil.RemoveFinalizer(falco, finalizer) {
-				if err := r.Update(ctx, falco); err != nil {
-					log.FromContext(ctx).Error(err, "unable to update Falco instance")
+			if controllerutil.ContainsFinalizer(falco, finalizer) {
+				patch := client.MergeFrom(falco.DeepCopy())
+				controllerutil.RemoveFinalizer(falco, finalizer)
+				if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
+					log.FromContext(ctx).Error(err, "unable to remove finalizer from Falco instance")
 					return false, err
 				}
 			}
@@ -269,7 +277,6 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 }
 
 // ensureDeployment ensures the Falco deployment or daemonset is created or updated.
-// It returns an error if the operation fails.
 func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	logger := log.FromContext(ctx)
 	reconcileCondition := metav1.Condition{
@@ -287,7 +294,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	}()
 
 	logger.V(2).Info("Generating apply configuration from user input")
-	applyConfig, err := generateApplyConfiguration(ctx, r.Client, falco, r.NativeSidecar)
+	applyConfig, err := generateApplyConfiguration(r.Client, falco, r.NativeSidecar)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
 		reconcileCondition.Status = metav1.ConditionFalse
@@ -296,7 +303,6 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		return err
 	}
 
-	// transform the apply configuration to yaml.
 	applyConfigYaml, err := yaml.Marshal(applyConfig.Object)
 	if err != nil {
 		logger.Error(err, "unable to marshal apply configuration")
@@ -317,71 +323,57 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		return err
 	}
 
-	// Get existing Falco deployment/daemonset
+	// Check if the resource already exists and get its resourceVersion to detect changes.
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   appsv1.GroupName,
 		Version: appsv1.SchemeGroupVersion.Version,
-		Kind:    falco.Spec.Type, // "Deployment" or "DaemonSet"
+		Kind:    falco.Spec.Type,
 	})
+	resourceExists := true
+	previousResourceVersion := ""
+	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil {
+		if apierrors.IsNotFound(err) {
+			resourceExists = false
+		} else {
+			logger.Error(err, "unable to fetch existing resource")
+			reconcileCondition.Status = metav1.ConditionFalse
+			reconcileCondition.Reason = "ExistingResourceError"
+			reconcileCondition.Message = "Unable to fetch existing resource: " + err.Error()
+			return err
+		}
+	} else {
+		previousResourceVersion = existingResource.GetResourceVersion()
+	}
 
-	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil && !apierrors.IsNotFound(err) {
-		logger.Error(err, "unable to fetch existing resource")
+	if !resourceExists {
+		logger.Info("Creating Falco resource", "kind", falco.Spec.Type)
+	}
+
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("falco-controller")}
+	if err = r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyConfig), applyOpts...); err != nil {
+		logger.Error(err, "unable to apply resource", "kind", falco.Spec.Type)
 		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "ExistingResourceError"
-		reconcileCondition.Message = "Unable to fetch existing resource: " + err.Error()
+		reconcileCondition.Reason = "ApplyPatchError"
+		reconcileCondition.Message = "Unable to apply resource: " + err.Error()
 		return err
 	}
 
-	// If the resource has not been found, create it.
-	if apierrors.IsNotFound(err) {
-		logger.Info("Creating Falco resource", "kind", falco.Spec.Type)
-		err = r.Patch(ctx, applyConfig, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller"))
-		if err != nil {
-			logger.Error(err, "unable to apply patch")
-			reconcileCondition.Status = metav1.ConditionFalse
-			reconcileCondition.Reason = "ApplyPatchErrorOnCreate"
-			reconcileCondition.Message = "Unable to create resource by patch: " + err.Error()
-			return err
-		}
+	switch {
+	case !resourceExists:
 		logger.Info("Falco resource created", "kind", falco.Spec.Type)
 		reconcileCondition.Reason = "ResourceCreated"
 		reconcileCondition.Message = "Resource created successfully"
-		return nil
-	}
-
-	// If the resource has been found remove all the fields that are not needed.
-	removeUnwantedFields(existingResource)
-
-	cmp, err := diff(existingResource, applyConfig)
-	if err != nil {
-		logger.Error(err, "unable to compare existing and desired resources", "existing", existingResource, "desired", applyConfig)
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "ResourceComparisonError"
-		reconcileCondition.Message = "Unable to compare existing and desired resources: " + err.Error()
-		return err
-	}
-
-	if cmp.IsSame() {
+	case applyConfig.GetResourceVersion() != previousResourceVersion:
+		logger.Info("Falco resource updated", "kind", falco.Spec.Type)
+		reconcileCondition.Reason = "ResourceUpdated"
+		reconcileCondition.Message = "Resource updated successfully"
+	default:
 		logger.V(2).Info("Falco resource is up to date", "kind", falco.Spec.Type)
 		reconcileCondition.Reason = "ResourceUpToDate"
 		reconcileCondition.Message = "Resource is up to date"
-		return nil
 	}
 
-	logger.Info("Updating Falco resource", "kind", falco.Spec.Type, "diff", cmp.String())
-	if err = r.Patch(ctx, applyConfig, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller")); err != nil {
-		logger.Error(err, "unable to apply patch", "kind", falco.Spec.Type, "patch", applyConfig)
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "ApplyPatchErrorOnUpdate"
-		reconcileCondition.Message = "Unable to update resource by patch: " + err.Error()
-		return err
-	}
-
-	reconcileCondition.Reason = "ResourceUpdated"
-	reconcileCondition.Message = "Resource updated successfully"
-
-	logger.Info("Falco resource updated", "kind", falco.Spec.Type)
 	return nil
 }
 
@@ -449,11 +441,16 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 				return fmt.Errorf("unable to fetch deployment: %w", err)
 			}
 		}
-		falco.Status.DesiredReplicas = *falco.Spec.Replicas
+
+		desiredReplicas := int32(1)
+		if falco.Spec.Replicas != nil {
+			desiredReplicas = *falco.Spec.Replicas
+		}
+		falco.Status.DesiredReplicas = desiredReplicas
 		falco.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 		falco.Status.UnavailableReplicas = deployment.Status.UnavailableReplicas
 
-		if *falco.Spec.Replicas == deployment.Status.ReadyReplicas {
+		if desiredReplicas == deployment.Status.ReadyReplicas {
 			availableCondition.Status = metav1.ConditionTrue
 			availableCondition.Reason = "DeploymentAvailable"
 			availableCondition.Message = "Deployment is available"
@@ -519,43 +516,35 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 
 	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", desiredResource.GetName())
 
-	// Get existing resource
+	// Check if the resource already exists and get its resourceVersion to detect changes.
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
-
-	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
-	}
-
-	// Create if not found
-	if apierrors.IsNotFound(err) {
-		if err := r.Create(ctx, desiredResource); err != nil {
-			return fmt.Errorf("unable to create %s: %w", resourceType, err)
+	resourceExists := true
+	previousResourceVersion := ""
+	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil {
+		if apierrors.IsNotFound(err) {
+			resourceExists = false
+		} else {
+			return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
 		}
+	} else {
+		previousResourceVersion = existingResource.GetResourceVersion()
+	}
+
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("falco-controller")}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredResource), applyOpts...); err != nil {
+		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
+	}
+
+	switch {
+	case !resourceExists:
 		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
-		return nil
-	}
-
-	// Remove unwanted fields
-	removeUnwantedFields(existingResource)
-
-	// Compare and update if needed
-	cmp, err := diff(existingResource, desiredResource)
-	if err != nil {
-		return fmt.Errorf("unable to compare existing and desired %s: %w", resourceType, err)
-	}
-
-	if cmp.IsSame() {
+	case desiredResource.GetResourceVersion() != previousResourceVersion:
+		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName())
+	default:
 		logger.V(3).Info(resourceType+" is up to date", "name", desiredResource.GetName())
-		return nil
 	}
 
-	logger.V(3).Info("Updating "+resourceType, "name", desiredResource.GetName(), "diff", cmp.String())
-	if err := r.Patch(ctx, desiredResource, client.Apply, client.ForceOwnership, client.FieldOwner("falco-controller")); err != nil {
-		return fmt.Errorf("unable to apply patch to %s: %w", resourceType, err)
-	}
-
-	logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName())
 	return nil
 }
 
@@ -563,7 +552,7 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "ServiceAccount",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateServiceAccount(ctx, r.Client, falco)
+			return generateServiceAccount(r.Client, falco)
 		})
 }
 
@@ -571,7 +560,7 @@ func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1
 func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "Role",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateRole(ctx, r.Client, falco)
+			return generateRole(r.Client, falco)
 		})
 }
 
@@ -579,7 +568,7 @@ func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Fal
 func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "RoleBinding",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateRoleBinding(ctx, r.Client, falco)
+			return generateRoleBinding(r.Client, falco)
 		})
 }
 
@@ -587,7 +576,7 @@ func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alp
 func (r *Reconciler) ensureClusterRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "ClusterRole",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateClusterRole(ctx, r.Client, falco)
+			return generateClusterRole(r.Client, falco)
 		})
 }
 
@@ -595,7 +584,7 @@ func (r *Reconciler) ensureClusterRole(ctx context.Context, falco *instancev1alp
 func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "ClusterRoleBinding",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateClusterRoleBinding(ctx, r.Client, falco)
+			return generateClusterRoleBinding(r.Client, falco)
 		})
 }
 
@@ -603,7 +592,7 @@ func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instan
 func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "Service",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateService(ctx, r.Client, falco)
+			return generateService(r.Client, falco)
 		})
 }
 
@@ -611,6 +600,6 @@ func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.
 func (r *Reconciler) ensureConfigMap(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	return r.ensureResource(ctx, falco, "ConfigMap",
 		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateConfigmap(ctx, r.Client, falco)
+			return generateConfigmap(r.Client, falco)
 		})
 }
