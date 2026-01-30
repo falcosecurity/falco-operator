@@ -119,15 +119,12 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 	if !controllerutil.ContainsFinalizer(rulesfile, r.finalizer) {
 		logger := log.FromContext(ctx)
 		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
-		controllerutil.AddFinalizer(rulesfile, r.finalizer)
 
-		if err := r.Update(ctx, rulesfile); err != nil && !apierrors.IsConflict(err) {
+		patch := client.MergeFrom(rulesfile.DeepCopy())
+		controllerutil.AddFinalizer(rulesfile, r.finalizer)
+		if err := r.Patch(ctx, rulesfile, patch); err != nil {
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
-		} else if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while setting finalizer, retrying")
-			// It has already been added to the queue, so we return nil.
-			return false, nil
 		}
 
 		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
