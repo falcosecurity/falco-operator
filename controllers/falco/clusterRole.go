@@ -17,8 +17,6 @@
 package falco
 
 import (
-	"context"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -30,8 +28,8 @@ import (
 
 // generateClusterRole creates a ClusterRole resource for the given Falco instance.
 // It maps necessary permissions and sets it as an unstructured object. Returns the resource or an error.
-func generateClusterRole(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(ctx, cl, falco,
+func generateClusterRole(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	return generateResourceFromFalcoInstance(cl, falco,
 		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
 			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
 

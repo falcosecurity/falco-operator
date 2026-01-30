@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,7 +61,7 @@ func TestGenerateRole(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			// Generate the role
-			got, err := generateRole(context.Background(), cl, tt.falco)
+			got, err := generateRole(cl, tt.falco)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -109,7 +108,7 @@ func TestGenerateRoleWithNilFalco(t *testing.T) {
 	_ = rbacv1.AddToScheme(scheme)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	_, err := generateRole(context.Background(), cl, nil)
+	_, err := generateRole(cl, nil)
 	assert.Error(t, err)
 }
 
@@ -121,6 +120,6 @@ func TestGenerateRoleWithNilClient(t *testing.T) {
 		},
 	}
 
-	_, err := generateRole(context.Background(), nil, falco)
+	_, err := generateRole(nil, falco)
 	assert.Error(t, err)
 }

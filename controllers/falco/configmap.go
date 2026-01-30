@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -30,8 +29,8 @@ import (
 )
 
 // generateRoleBinding returns a RoleBinding for Falco.
-func generateConfigmap(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(ctx, cl, falco,
+func generateConfigmap(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	return generateResourceFromFalcoInstance(cl, falco,
 		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
 			var config string
 

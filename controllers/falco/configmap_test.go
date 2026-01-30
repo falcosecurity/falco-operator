@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -108,7 +107,7 @@ func TestGenerateConfigmap(t *testing.T) {
 			client := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			// Call the function.
-			result, err := generateConfigmap(context.Background(), client, tt.falco)
+			result, err := generateConfigmap(client, tt.falco)
 
 			if tt.wantErr {
 				assert.Error(t, err)

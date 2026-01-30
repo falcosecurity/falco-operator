@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,7 +96,7 @@ func TestGenerateService(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-			got, err := generateService(context.Background(), cl, tt.falco)
+			got, err := generateService(cl, tt.falco)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -149,6 +148,6 @@ func TestGenerateServiceWithNilClient(t *testing.T) {
 		},
 	}
 
-	_, err := generateService(context.Background(), nil, falco)
+	_, err := generateService(nil, falco)
 	assert.Error(t, err)
 }
