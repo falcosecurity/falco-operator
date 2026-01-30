@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,7 +65,7 @@ func TestGenerateRoleBinding(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			// Generate the role binding
-			got, err := generateRoleBinding(context.Background(), cl, tt.falco)
+			got, err := generateRoleBinding(cl, tt.falco)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -111,7 +110,7 @@ func TestGenerateRoleBindingWithNilClient(t *testing.T) {
 		},
 	}
 
-	_, err := generateRoleBinding(context.Background(), nil, falco)
+	_, err := generateRoleBinding(nil, falco)
 	assert.Error(t, err)
 }
 
@@ -135,7 +134,7 @@ func TestGenerateRoleBindingCustomLabels(t *testing.T) {
 		},
 	}
 
-	got, err := generateRoleBinding(context.Background(), cl, falco)
+	got, err := generateRoleBinding(cl, falco)
 	assert.NoError(t, err)
 	assert.NotNil(t, got)
 

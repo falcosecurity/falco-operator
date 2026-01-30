@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -42,10 +41,9 @@ const (
 // generateApplyConfiguration generates apply configuration for falco resources.
 // It creates a resource based on the falco CR and merges it with the user-defined one.
 // The resource type is determined by the falco CR spec, and it can be either a Deployment or a DaemonSet.
-func generateApplyConfiguration(ctx context.Context, cl client.Client, falco *v1alpha1.Falco,
+func generateApplyConfiguration(cl client.Client, falco *v1alpha1.Falco,
 	nativeSidecar bool) (*unstructured.Unstructured, error) {
 	return generateResourceFromFalcoInstance(
-		ctx,
 		cl,
 		falco,
 		func(falco *v1alpha1.Falco) (runtime.Object, error) {
@@ -277,12 +275,10 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 	}
 
 	// Remove the empty containers field if it exists.
+	// We can't leave an empty containers field since it will override the default one when merging.
 	if removeEmptyContainers(resource) != nil {
 		return nil, err
 	}
-
-	// Remove unwanted fields.
-	removeUnwantedFields(resource)
 
 	return resource, nil
 }

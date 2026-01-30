@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -108,7 +107,7 @@ func TestGenerateClusterRole(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 			// Execute the function
-			obj, err := generateClusterRole(context.Background(), cl, tt.falco)
+			obj, err := generateClusterRole(cl, tt.falco)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -122,20 +121,4 @@ func TestGenerateClusterRole(t *testing.T) {
 			tt.verify(t, obj)
 		})
 	}
-}
-
-// TestGenerateClusterRoleErrors tests error scenarios.
-func TestGenerateClusterRoleErrors(t *testing.T) {
-	// Create a failing client that always returns an error
-	failingClient := &mockFailingClient{}
-
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-falco",
-			Namespace: "default",
-		},
-	}
-
-	_, err := generateClusterRole(context.Background(), failingClient, falco)
-	assert.Error(t, err)
 }
