@@ -64,19 +64,13 @@ func TestGenerateClusterRole(t *testing.T) {
 				rules, found, err := unstructured.NestedSlice(obj.Object, "rules")
 				require.NoError(t, err)
 				require.True(t, found)
-				require.Len(t, rules, 2)
+				require.Len(t, rules, 1)
 
-				// Check first rule (nodes)
+				// Check nodes rule
 				rule0 := rules[0].(map[string]interface{})
 				assert.Equal(t, []interface{}{""}, rule0["apiGroups"])
 				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
 				assert.Equal(t, []interface{}{"get", "list", "watch"}, rule0["verbs"])
-
-				// Check second rule (RBAC)
-				rule1 := rules[1].(map[string]interface{})
-				assert.Equal(t, []interface{}{"rbac.authorization.k8s.io"}, rule1["apiGroups"])
-				assert.Equal(t, []interface{}{"clusterroles", "clusterrolebindings"}, rule1["resources"])
-				assert.Equal(t, []interface{}{"get", "list", "watch"}, rule1["verbs"])
 			},
 			wantErr: false,
 		},

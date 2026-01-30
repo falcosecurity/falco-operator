@@ -50,11 +50,6 @@ func generateClusterRole(ctx context.Context, cl client.Client, falco *instancev
 						Resources: []string{"nodes"},
 						Verbs:     []string{"get", "list", "watch"},
 					},
-					{
-						APIGroups: []string{"rbac.authorization.k8s.io"},
-						Resources: []string{"clusterroles", "clusterrolebindings"},
-						Verbs:     []string{"get", "list", "watch"},
-					},
 				},
 			}
 
