@@ -128,14 +128,12 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 	if !controllerutil.ContainsFinalizer(plugin, r.finalizer) {
 		logger := log.FromContext(ctx)
 		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
+
+		patch := client.MergeFrom(plugin.DeepCopy())
 		controllerutil.AddFinalizer(plugin, r.finalizer)
-		if err := r.Update(ctx, plugin); err != nil && !apierrors.IsConflict(err) {
+		if err := r.Patch(ctx, plugin, patch); err != nil {
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
-		} else if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while setting finalizer, retrying")
-			// It has already been added to the queue, so we return nil.
-			return false, nil
 		}
 
 		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
@@ -175,13 +173,11 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 			}
 			// Remove the finalizer.
 			logger.V(3).Info("Removing finalizer", "finalizer", r.finalizer)
+			patch := client.MergeFrom(plugin.DeepCopy())
 			controllerutil.RemoveFinalizer(plugin, r.finalizer)
-			if err := r.Update(ctx, plugin); err != nil && !apierrors.IsConflict(err) {
+			if err := r.Patch(ctx, plugin, patch); err != nil {
 				logger.Error(err, "unable to remove finalizer", "finalizer", r.finalizer)
 				return false, err
-			} else if apierrors.IsConflict(err) {
-				logger.Info("Conflict while removing finalizer, retrying")
-				return true, nil
 			}
 		}
 

@@ -119,15 +119,12 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 	if !controllerutil.ContainsFinalizer(config, r.finalizer) {
 		logger := log.FromContext(ctx)
 		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
-		controllerutil.AddFinalizer(config, r.finalizer)
 
-		if err := r.Update(ctx, config); err != nil && !apierrors.IsConflict(err) {
+		patch := client.MergeFrom(config.DeepCopy())
+		controllerutil.AddFinalizer(config, r.finalizer)
+		if err := r.Patch(ctx, config, patch); err != nil {
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
-		} else if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while setting finalizer, retrying")
-			// It has already been added to the queue, so we return nil.
-			return false, nil
 		}
 
 		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
