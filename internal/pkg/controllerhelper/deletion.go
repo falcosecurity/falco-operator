@@ -20,7 +20,6 @@ package controllerhelper
 import (
 	"context"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -41,14 +40,11 @@ func HandleObjectDeletion(ctx context.Context, cl client.Client, am *artifact.Ma
 			}
 
 			// Remove the finalizer.
+			patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
 			controllerutil.RemoveFinalizer(obj, finalizer)
-			if err := cl.Update(ctx, obj); err != nil && !apierrors.IsConflict(err) {
+			if err := cl.Patch(ctx, obj, patch); err != nil {
 				logger.Error(err, "unable to remove finalizer", "finalizer", finalizer)
 				return false, err
-			} else if apierrors.IsConflict(err) {
-				logger.Info("Conflict while removing finalizer, retrying")
-				// It has already been added to the queue, so we return nil.
-				return true, nil
 			}
 		}
 		return true, nil
@@ -67,12 +63,10 @@ func RemoveLocalResources(ctx context.Context, cl client.Client, am *artifact.Ma
 		}
 
 		// Remove the finalizer.
+		patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
 		controllerutil.RemoveFinalizer(obj, finalizer)
-		if err := cl.Update(ctx, obj); err != nil && !apierrors.IsConflict(err) {
+		if err := cl.Patch(ctx, obj, patch); err != nil {
 			return false, err
-		} else if apierrors.IsConflict(err) {
-			// It has already been added to the queue, so we return nil.
-			return true, nil
 		}
 	}
 	return true, nil
