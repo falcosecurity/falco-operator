@@ -17,7 +17,6 @@
 package falco
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
@@ -172,29 +171,6 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 			},
 		},
 		{
-			name: "client error during default value setting",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-				},
-			},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-				return &corev1.Service{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      falco.Name,
-						Namespace: falco.Namespace,
-					},
-				}, nil
-			},
-			options: generateOptions{
-				setControllerRef: true,
-				isClusterScoped:  false,
-			},
-			mockClient:    newMockFailingClient(),
-			expectedError: "failed to set default values: failed to set default values by dry-run creating the object : mock error",
-		},
-		{
 			name: "set controller reference fails",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
@@ -223,7 +199,6 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result, err := generateResourceFromFalcoInstance(
-				context.Background(),
 				tt.mockClient,
 				tt.falco,
 				tt.generator,
@@ -246,237 +221,57 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 	}
 }
 
-func TestSetDefaultValues(t *testing.T) {
+func TestToUnstructured(t *testing.T) {
 	tests := []struct {
-		name        string
-		obj         *unstructured.Unstructured
-		mockClient  client.Client
-		expectError bool
-		errorMsg    string
+		name    string
+		obj     interface{}
+		wantErr bool
 	}{
 		{
-			name: "successful default values setting",
+			name: "already unstructured",
 			obj: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"apiVersion": "v1",
-					"kind":       "Service",
-					"metadata":   map[string]interface{}{},
+					"kind":       "ConfigMap",
+					"metadata": map[string]interface{}{
+						"name": "test",
+					},
 				},
 			},
-			mockClient:  fake.NewClientBuilder().Build(),
-			expectError: false,
+			wantErr: false,
 		},
 		{
-			name: "error setting generateName field",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": 123,
+			name: "convert ConfigMap",
+			obj: &corev1.ConfigMap{
+				TypeMeta: metav1.TypeMeta{
+					APIVersion: "v1",
+					Kind:       "ConfigMap",
+				},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test",
 				},
 			},
-			mockClient:  fake.NewClientBuilder().Build(),
-			expectError: true,
-			errorMsg:    "failed to set generateName field",
+			wantErr: false,
 		},
 		{
-			name: "error setting name field",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": 123, // Invalid type for metadata field
-				},
-			},
-			mockClient:  fake.NewClientBuilder().Build(),
-			expectError: true,
-			errorMsg:    "failed to set generateName field: ",
-		},
-		{
-			name: "error in dry-run create",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"apiVersion": "v1",
-					"kind":       "Service",
-					"metadata":   map[string]interface{}{},
-				},
-			},
-			mockClient:  newMockFailingClient(),
-			expectError: true,
-			errorMsg:    "failed to set default values by dry-run creating the object",
-		},
-		{
-			name:        "nil object",
-			obj:         nil,
-			mockClient:  newMockFailingClient(),
-			expectError: true,
-			errorMsg:    "unstructured object cannot be nil",
+			name:    "invalid object",
+			obj:     make(chan int),
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := setDefaultValues(context.Background(), tt.mockClient, tt.obj)
-
-			if tt.expectError {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errorMsg)
-			} else {
-				require.NoError(t, err)
-
-				// Verify the fields were set correctly
-				generateName, _, err := unstructured.NestedString(tt.obj.Object, "metadata", "generateName")
-				require.NoError(t, err)
-				assert.Equal(t, "dry-run", generateName)
-
-				name, _, err := unstructured.NestedString(tt.obj.Object, "metadata", "name")
-				require.NoError(t, err)
-				assert.Equal(t, "", name)
+			result, err := toUnstructured(tt.obj)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, result)
+				return
 			}
-		})
-	}
-}
 
-func TestRemoveUnwantedFields(t *testing.T) {
-	tests := []struct {
-		name     string
-		obj      *unstructured.Unstructured
-		expected map[string]interface{}
-	}{
-		{
-			name: "removes all unwanted fields",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"name":              "test",
-						"uid":               "123",
-						"resourceVersion":   "1",
-						"managedFields":     []interface{}{},
-						"creationTimestamp": "2023-01-01T00:00:00Z",
-						"generateName":      "test-",
-						"generation":        1,
-						"annotations": map[string]interface{}{
-							"deployment.kubernetes.io/revision":        "1",
-							"deprecated.daemonset.template.generation": "2",
-							"should-remain": "true",
-						},
-					},
-					"spec": map[string]interface{}{
-						"template": map[string]interface{}{
-							"metadata": map[string]interface{}{
-								"creationTimestamp": "2023-01-01T00:00:00Z",
-							},
-						},
-						"revisionHistoryLimit": 10,
-					},
-					"status": map[string]interface{}{
-						"replicas": 1,
-					},
-				},
-			},
-			expected: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name": "test",
-					"annotations": map[string]interface{}{
-						"should-remain": "true",
-					},
-				},
-				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"metadata": map[string]interface{}{},
-					},
-				},
-			},
-		},
-		{
-			name: "removes empty annotations",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"name": "test",
-						"annotations": map[string]interface{}{
-							"deployment.kubernetes.io/revision":        "1",
-							"deprecated.daemonset.template.generation": "2",
-						},
-					},
-				},
-			},
-			expected: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name": "test",
-				},
-			},
-		},
-		{
-			name: "removes service specific fields",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"kind": "Service",
-					"metadata": map[string]interface{}{
-						"name": "test",
-					},
-					"spec": map[string]interface{}{
-						"clusterIP":  "10.0.0.1",
-						"clusterIPs": []string{"10.0.0.1"},
-						"ports":      []interface{}{map[string]interface{}{"port": 80}},
-					},
-				},
-			},
-			expected: map[string]interface{}{
-				"kind": "Service",
-				"metadata": map[string]interface{}{
-					"name": "test",
-				},
-				"spec": map[string]interface{}{
-					"ports": []interface{}{map[string]interface{}{"port": 80}},
-				},
-			},
-		},
-		{
-			name: "handles missing fields gracefully",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"name": "test",
-					},
-				},
-			},
-			expected: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name": "test",
-				},
-			},
-		},
-		{
-			name: "handles non-map metadata",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": "invalid",
-				},
-			},
-			expected: map[string]interface{}{
-				"metadata": "invalid",
-			},
-		},
-		{
-			name: "handles non-map annotations",
-			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"name":        "test",
-						"annotations": "invalid",
-					},
-				},
-			},
-			expected: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name":        "test",
-					"annotations": "invalid",
-				},
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			removeUnwantedFields(tt.obj)
-			assert.Equal(t, tt.expected, tt.obj.Object)
+			assert.NoError(t, err)
+			assert.NotNil(t, result)
+			assert.IsType(t, &unstructured.Unstructured{}, result)
 		})
 	}
 }

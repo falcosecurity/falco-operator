@@ -17,8 +17,6 @@
 package falco
 
 import (
-	"context"
-
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -31,8 +29,8 @@ import (
 // generateClusterRoleBinding creates a ClusterRoleBinding resource for the provided Falco instance in a Kubernetes cluster.
 // It associates a specified ServiceAccount with a ClusterRole and ensures the object is managed by the Falco instance.
 // The function converts the ClusterRoleBinding object to unstructured format and sets default values for it.
-func generateClusterRoleBinding(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(ctx, cl, falco,
+func generateClusterRoleBinding(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+	return generateResourceFromFalcoInstance(cl, falco,
 		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
 			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
 
