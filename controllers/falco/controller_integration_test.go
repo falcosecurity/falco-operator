@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -401,4 +402,62 @@ func TestReconcile_SwitchFromDeploymentToDaemonSet(t *testing.T) {
 	// Verify Deployment was deleted
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, deployment)
 	assert.True(t, errors.IsNotFound(err), "Deployment should be deleted after type switch")
+}
+
+func applyConfigMap(t *testing.T, ctx context.Context, name string, data map[string]string) string {
+	t.Helper()
+	cm := &corev1.ConfigMap{
+		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+		},
+		Data: data,
+	}
+	u, err := toUnstructured(cm)
+	require.NoError(t, err)
+
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("test-controller")}
+	err = k8sClient.Apply(ctx, client.ApplyConfigurationFromUnstructured(u), applyOpts...)
+	require.NoError(t, err)
+	return u.GetResourceVersion()
+}
+
+// TestApplyResourceVersionBehavior verifies SSA ResourceVersion behavior for change detection.
+func TestApplyResourceVersionBehavior(t *testing.T) {
+	ctx := context.Background()
+	cmName := "test-rv-behavior"
+
+	t.Cleanup(func() {
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: testNamespace}}
+		_ = k8sClient.Delete(ctx, cm)
+	})
+
+	tests := []struct {
+		name           string
+		data           map[string]string
+		expectRVChange bool
+	}{
+		{"create sets ResourceVersion", map[string]string{"key": "value"}, true},
+		{"no changes keeps same ResourceVersion", map[string]string{"key": "value"}, false},
+		{"changes increments ResourceVersion", map[string]string{"key": "new-value"}, true},
+	}
+
+	var previousRV string
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rv := applyConfigMap(t, ctx, cmName, tt.data)
+			t.Logf("ResourceVersion: %s (previous: %s)", rv, previousRV)
+
+			switch {
+			case previousRV == "":
+				assert.NotEmpty(t, rv)
+			case tt.expectRVChange:
+				assert.NotEqual(t, previousRV, rv)
+			default:
+				assert.Equal(t, previousRV, rv)
+			}
+			previousRV = rv
+		})
+	}
 }
