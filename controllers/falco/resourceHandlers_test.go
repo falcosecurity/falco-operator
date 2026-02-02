@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -105,7 +105,7 @@ func TestClusterScopedResourceHandlerEdgeCases(t *testing.T) {
 		expected []reconcile.Request
 	}{
 		{
-			name: "Empty name",
+			name: "Empty name returns nil",
 			obj: &rbacv1.ClusterRoleBinding{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "",
@@ -114,13 +114,13 @@ func TestClusterScopedResourceHandlerEdgeCases(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name: "No name at all",
+			name: "Name with only separator returns empty name and namespace",
 			obj: &rbacv1.ClusterRoleBinding{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "",
+					Name: "--",
 				},
 			},
-			expected: nil,
+			expected: nil, // ParseUniqueName returns error for "--"
 		},
 	}
 

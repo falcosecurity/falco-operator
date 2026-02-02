@@ -152,13 +152,19 @@ func TestReconcile_BasicScenarios(t *testing.T) {
 		validate   func(t *testing.T, ctx context.Context, resourceName string)
 	}{
 		{
-			name: "basic reconciliation succeeds",
+			name: "basic reconciliation succeeds and creates ServiceAccount",
 			setup: func(t *testing.T, ctx context.Context) string {
 				createFalco(t, ctx, "test-basic", instancev1alpha1.FalcoSpec{})
 				return "test-basic"
 			},
-			reconciles: 1,
-			validate:   func(t *testing.T, ctx context.Context, resourceName string) {},
+			reconciles: 3, // Need multiple reconciles to create all resources
+			validate: func(t *testing.T, ctx context.Context, resourceName string) {
+				// Verify ServiceAccount was created
+				sa := &corev1.ServiceAccount{}
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, sa)
+				require.NoError(t, err)
+				assert.Equal(t, resourceName, sa.Name)
+			},
 		},
 		{
 			name: "non-existent resource does not error and does not requeue",
