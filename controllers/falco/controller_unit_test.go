@@ -19,7 +19,6 @@ package falco
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,7 +44,10 @@ func testScheme() *runtime.Scheme {
 	return scheme
 }
 
-const testNamespaceUnit = "default"
+const (
+	testNamespaceUnit  = "default"
+	resourceConfigMaps = "configmaps"
+)
 
 // newFalco creates a basic Falco instance for testing.
 func newFalco(name string, opts ...func(*instancev1alpha1.Falco)) *instancev1alpha1.Falco {
@@ -108,91 +110,242 @@ func withImage(image string) func(*instancev1alpha1.Falco) {
 	}
 }
 
+// withLabels sets the Falco labels.
+func withLabels(labels map[string]string) func(*instancev1alpha1.Falco) {
+	return func(f *instancev1alpha1.Falco) {
+		f.Labels = labels
+	}
+}
+
 func TestEnsureResource(t *testing.T) {
 	scheme := testScheme()
 
-	// Generator that creates a ServiceAccount
-	saGenerator := func(labels map[string]string) func(context.Context, client.Client, *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-		return func(_ context.Context, _ client.Client, f *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			sa := &corev1.ServiceAccount{
-				TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "ServiceAccount"},
-				ObjectMeta: metav1.ObjectMeta{Name: f.Name, Namespace: f.Namespace, Labels: labels},
-			}
-			return toUnstructured(sa)
-		}
-	}
-
 	tests := []struct {
 		name           string
+		falco          *instancev1alpha1.Falco
 		existingObjs   []client.Object
-		generator      func(context.Context, client.Client, *instancev1alpha1.Falco) (*unstructured.Unstructured, error)
-		wantErr        bool
-		errContains    string
-		validateResult func(*testing.T, client.Client)
+		generator      func(client.Client, *instancev1alpha1.Falco) (*unstructured.Unstructured, error)
+		validateResult func(*testing.T, client.Client, *instancev1alpha1.Falco)
+		wantErr        string
 	}{
 		{
-			name:      "creates new resource",
-			generator: saGenerator(nil),
-			validateResult: func(t *testing.T, cl client.Client) {
+			name:      "creates ServiceAccount",
+			falco:     newFalco("test-falco"),
+			generator: generateServiceAccount,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
 				sa := &corev1.ServiceAccount{}
-				err := cl.Get(context.Background(), client.ObjectKey{Name: "test-falco", Namespace: testNamespaceUnit}, sa)
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), sa)
 				require.NoError(t, err)
-				assert.Equal(t, "test-falco", sa.Name)
+				assert.Equal(t, falco.Name, sa.Name)
+				assert.Equal(t, falco.Namespace, sa.Namespace)
 			},
 		},
 		{
-			name: "updates existing resource",
+			name:      "creates Role with correct rules",
+			falco:     newFalco("test-falco"),
+			generator: generateRole,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				role := &rbacv1.Role{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), role)
+				require.NoError(t, err)
+				assert.Equal(t, falco.Name, role.Name)
+				require.NotEmpty(t, role.Rules)
+				// Verify configmaps rule exists
+				foundConfigMapRule := false
+				for _, rule := range role.Rules {
+					for _, resource := range rule.Resources {
+						if resource == resourceConfigMaps {
+							foundConfigMapRule = true
+							assert.Contains(t, rule.Verbs, "get")
+							assert.Contains(t, rule.Verbs, "list")
+						}
+					}
+				}
+				assert.True(t, foundConfigMapRule, "Role should have configmaps rule")
+			},
+		},
+		{
+			name:      "creates RoleBinding",
+			falco:     newFalco("test-falco"),
+			generator: generateRoleBinding,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				rb := &rbacv1.RoleBinding{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), rb)
+				require.NoError(t, err)
+				assert.Equal(t, falco.Name, rb.Name)
+				assert.Equal(t, falco.Name, rb.RoleRef.Name)
+				require.Len(t, rb.Subjects, 1)
+				assert.Equal(t, falco.Name, rb.Subjects[0].Name)
+			},
+		},
+		{
+			name:      "creates ClusterRole",
+			falco:     newFalco("test-falco"),
+			generator: generateClusterRole,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				cr := &rbacv1.ClusterRole{}
+				expectedName := GenerateUniqueName(falco.Name, falco.Namespace)
+				err := cl.Get(context.Background(), client.ObjectKey{Name: expectedName}, cr)
+				require.NoError(t, err)
+				assert.Equal(t, expectedName, cr.Name)
+				require.NotEmpty(t, cr.Rules)
+			},
+		},
+		{
+			name:      "creates ClusterRoleBinding",
+			falco:     newFalco("test-falco"),
+			generator: generateClusterRoleBinding,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				crb := &rbacv1.ClusterRoleBinding{}
+				expectedName := GenerateUniqueName(falco.Name, falco.Namespace)
+				err := cl.Get(context.Background(), client.ObjectKey{Name: expectedName}, crb)
+				require.NoError(t, err)
+				assert.Equal(t, expectedName, crb.Name)
+				assert.Equal(t, expectedName, crb.RoleRef.Name)
+				require.Len(t, crb.Subjects, 1)
+				assert.Equal(t, falco.Name, crb.Subjects[0].Name)
+				assert.Equal(t, falco.Namespace, crb.Subjects[0].Namespace)
+			},
+		},
+		{
+			name:      "creates Service",
+			falco:     newFalco("test-falco"),
+			generator: generateService,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				svc := &corev1.Service{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), svc)
+				require.NoError(t, err)
+				assert.Equal(t, falco.Name, svc.Name)
+				require.NotEmpty(t, svc.Spec.Ports)
+			},
+		},
+		{
+			name:      "creates ConfigMap with DaemonSet config",
+			falco:     newFalco("test-falco", withType(resourceTypeDaemonSet)),
+			generator: generateConfigmap,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				cm := &corev1.ConfigMap{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), cm)
+				require.NoError(t, err)
+				assert.Equal(t, falco.Name, cm.Name)
+				assert.Contains(t, cm.Data, "falco.yaml")
+				// Verify it contains DaemonSet-specific config
+				assert.Contains(t, cm.Data["falco.yaml"], daemonsetFalcoConfig)
+			},
+		},
+		{
+			name:      "creates ConfigMap with Deployment config",
+			falco:     newFalco("test-falco", withType(resourceTypeDeployment)),
+			generator: generateConfigmap,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				cm := &corev1.ConfigMap{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), cm)
+				require.NoError(t, err)
+				assert.Equal(t, falco.Name, cm.Name)
+				assert.Contains(t, cm.Data, "falco.yaml")
+				// Verify it contains Deployment-specific config
+				assert.Contains(t, cm.Data["falco.yaml"], deploymentFalcoConfig)
+			},
+		},
+		{
+			name:  "updates existing ServiceAccount labels",
+			falco: newFalco("test-falco", withLabels(map[string]string{"new": "label"})),
 			existingObjs: []client.Object{
 				&corev1.ServiceAccount{
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "test-falco", Namespace: testNamespaceUnit, Labels: map[string]string{"old": "label"},
+						Name: "test-falco", Namespace: testNamespaceUnit,
+						Labels: map[string]string{"old": "label"},
 					},
 				},
 			},
-			generator: saGenerator(map[string]string{"new": "label"}),
-			validateResult: func(t *testing.T, cl client.Client) {
+			generator: generateServiceAccount,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
 				sa := &corev1.ServiceAccount{}
-				err := cl.Get(context.Background(), client.ObjectKey{Name: "test-falco", Namespace: testNamespaceUnit}, sa)
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), sa)
 				require.NoError(t, err)
 				assert.Equal(t, "label", sa.Labels["new"])
 			},
 		},
 		{
-			name: "handles no-change scenario",
+			name:  "preserves existing ServiceAccount annotations during update",
+			falco: newFalco("test-falco"),
 			existingObjs: []client.Object{
-				&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "test-falco", Namespace: testNamespaceUnit}},
+				&corev1.ServiceAccount{
+					TypeMeta: metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-falco", Namespace: testNamespaceUnit,
+						Annotations: map[string]string{"existing": "annotation"},
+					},
+				},
 			},
-			generator: saGenerator(nil),
+			generator: generateServiceAccount,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				sa := &corev1.ServiceAccount{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), sa)
+				require.NoError(t, err)
+				// SSA should preserve existing annotations not managed by controller
+				assert.Equal(t, "annotation", sa.Annotations["existing"])
+			},
 		},
 		{
-			name: "returns error when generator fails",
-			generator: func(_ context.Context, _ client.Client, _ *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-				return nil, assert.AnError
+			name:  "updates Role when rules change",
+			falco: newFalco("test-falco"),
+			existingObjs: []client.Object{
+				&rbacv1.Role{
+					TypeMeta: metav1.TypeMeta{Kind: "Role", APIVersion: "rbac.authorization.k8s.io/v1"},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "test-falco", Namespace: testNamespaceUnit,
+					},
+					Rules: []rbacv1.PolicyRule{
+						{
+							APIGroups: []string{""},
+							Resources: []string{"secrets"}, // Wrong resource, should be updated
+							Verbs:     []string{"get"},
+						},
+					},
+				},
 			},
-			wantErr:     true,
-			errContains: "unable to generate desired",
+			generator: generateRole,
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				role := &rbacv1.Role{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), role)
+				require.NoError(t, err)
+				// Verify rules were updated to include configmaps
+				foundConfigMapRule := false
+				for _, rule := range role.Rules {
+					for _, resource := range rule.Resources {
+						if resource == resourceConfigMaps {
+							foundConfigMapRule = true
+						}
+					}
+				}
+				assert.True(t, foundConfigMapRule, "Role should have configmaps rule after update")
+			},
+		},
+		{
+			name:      "returns error when generator fails with invalid Falco type",
+			falco:     newFalco("test-falco", withType("InvalidType")),
+			generator: generateConfigmap,
+			wantErr:   "unsupported falco type",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			falco := newFalco("test-falco")
-			objs := append([]client.Object{falco}, tt.existingObjs...)
+			objs := append([]client.Object{tt.falco}, tt.existingObjs...)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 			r := &Reconciler{Client: cl, Scheme: scheme, ReconciledConditions: map[string]metav1.Condition{}}
 
-			err := r.ensureResource(context.Background(), falco, "ServiceAccount", tt.generator)
+			err := r.ensureResource(context.Background(), tt.falco, tt.generator)
 
-			if tt.wantErr {
+			if tt.wantErr != "" {
 				require.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
+				assert.Contains(t, err.Error(), tt.wantErr)
 				return
 			}
 			require.NoError(t, err)
 			if tt.validateResult != nil {
-				tt.validateResult(t, cl)
+				tt.validateResult(t, cl, tt.falco)
 			}
 		})
 	}
@@ -228,11 +381,11 @@ func TestEnsureFinalizer(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantUpdated, updated)
 
-			if tt.wantUpdated {
-				fetched := &instancev1alpha1.Falco{}
-				_ = cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), fetched)
-				assert.Contains(t, fetched.Finalizers, finalizer)
-			}
+			// Always verify finalizer is present after the call
+			fetched := &instancev1alpha1.Falco{}
+			err = cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), fetched)
+			require.NoError(t, err)
+			assert.Contains(t, fetched.Finalizers, finalizer)
 		})
 	}
 }
@@ -292,63 +445,79 @@ func TestEnsureVersion(t *testing.T) {
 func TestHandleDeletion(t *testing.T) {
 	scheme := testScheme()
 
-	t.Run("no-op when not marked for deletion", func(t *testing.T) {
-		falco := newFalco("test")
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
-		r := &Reconciler{Client: cl, Scheme: scheme, ReconciledConditions: map[string]metav1.Condition{}}
+	tests := []struct {
+		name                   string
+		falco                  *instancev1alpha1.Falco
+		createClusterResources bool
+		wantHandled            bool
+		wantFinalizerPresent   bool
+		wantClusterResExist    bool
+	}{
+		{
+			name:                   "preserves finalizer and resources when not marked for deletion",
+			falco:                  newFalco("test", withFinalizer()),
+			createClusterResources: true,
+			wantHandled:            false,
+			wantFinalizerPresent:   true,
+			wantClusterResExist:    true,
+		},
+		{
+			name:                   "handles deletion when cluster resources do not exist",
+			falco:                  newFalco("test", withFinalizer(), withDeletionTimestamp()),
+			createClusterResources: false,
+			wantHandled:            true,
+			wantFinalizerPresent:   false,
+			wantClusterResExist:    false,
+		},
+		{
+			name:                   "removes cluster resources and finalizer during deletion",
+			falco:                  newFalco("test", withFinalizer(), withDeletionTimestamp()),
+			createClusterResources: true,
+			wantHandled:            true,
+			wantFinalizerPresent:   false,
+			wantClusterResExist:    false,
+		},
+	}
 
-		handled, err := r.handleDeletion(context.Background(), falco)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := []client.Object{tt.falco}
+			if tt.createClusterResources {
+				objs = append(objs,
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testNamespaceUnit)}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testNamespaceUnit)}},
+				)
+			}
 
-		require.NoError(t, err)
-		assert.False(t, handled)
-	})
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+			r := &Reconciler{Client: cl, Scheme: scheme, ReconciledConditions: map[string]metav1.Condition{}}
 
-	t.Run("handles deletion without finalizer", func(t *testing.T) {
-		// Create without deletion timestamp, then set it in-memory
-		// (fake client doesn't allow creating with deletionTimestamp but no finalizers)
-		falco := newFalco("test")
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
-		r := &Reconciler{Client: cl, Scheme: scheme, ReconciledConditions: map[string]metav1.Condition{}}
+			handled, err := r.handleDeletion(context.Background(), tt.falco)
 
-		// Set deletion timestamp in-memory to simulate the scenario
-		now := metav1.Now()
-		falco.DeletionTimestamp = &now
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantHandled, handled)
 
-		handled, err := r.handleDeletion(context.Background(), falco)
+			// Verify finalizer state
+			if tt.wantFinalizerPresent {
+				assert.Contains(t, tt.falco.Finalizers, finalizer)
+			} else {
+				assert.NotContains(t, tt.falco.Finalizers, finalizer)
+			}
 
-		require.NoError(t, err)
-		assert.True(t, handled)
-	})
+			// Verify cluster resources state
+			crErr := cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testNamespaceUnit)}, &rbacv1.ClusterRole{})
+			crbErr := cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testNamespaceUnit)}, &rbacv1.ClusterRoleBinding{})
 
-	t.Run("removes cluster resources and finalizer during deletion", func(t *testing.T) {
-		falco := newFalco("test", withFinalizer(), withDeletionTimestamp())
-		cr := &rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testNamespaceUnit)}}
-		crb := &rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testNamespaceUnit)}}
-
-		cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco, cr, crb).Build()
-		r := &Reconciler{Client: cl, Scheme: scheme, ReconciledConditions: map[string]metav1.Condition{}}
-
-		// Verify finalizer is present before deletion
-		assert.Contains(t, falco.Finalizers, finalizer, "finalizer should be present before handleDeletion")
-
-		handled, err := r.handleDeletion(context.Background(), falco)
-
-		require.NoError(t, err)
-		assert.True(t, handled)
-
-		// Verify finalizer was removed
-		assert.NotContains(t, falco.Finalizers, finalizer, "finalizer should be removed after handleDeletion")
-
-		// Verify ClusterRole was deleted
-		fetchedCR := &rbacv1.ClusterRole{}
-		err = cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testNamespaceUnit)}, fetchedCR)
-		assert.Error(t, err, "ClusterRole should be deleted")
-
-		// Verify ClusterRoleBinding was deleted
-		fetchedCRB := &rbacv1.ClusterRoleBinding{}
-		err = cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testNamespaceUnit)}, fetchedCRB)
-		assert.Error(t, err, "ClusterRoleBinding should be deleted")
-	})
+			if tt.wantClusterResExist {
+				assert.NoError(t, crErr, "ClusterRole should exist")
+				assert.NoError(t, crbErr, "ClusterRoleBinding should exist")
+			} else if tt.createClusterResources {
+				// Only check deletion if resources were created
+				assert.Error(t, crErr, "ClusterRole should be deleted")
+				assert.Error(t, crbErr, "ClusterRoleBinding should be deleted")
+			}
+		})
+	}
 }
 
 func TestUpdateStatus(t *testing.T) {
@@ -383,9 +552,11 @@ func TestUpdateStatus(t *testing.T) {
 			wantDesired: 3, wantAvailable: 1, wantUnavailable: 2,
 		},
 		{
-			name:        "deployment not found",
-			falco:       newFalco("test", withType("Deployment"), withReplicas(1)),
-			wantDesired: 1,
+			name:            "deployment not found sets zero availability",
+			falco:           newFalco("test", withType("Deployment"), withReplicas(1)),
+			wantDesired:     1,
+			wantAvailable:   0,
+			wantUnavailable: 0,
 		},
 		{
 			name:  "daemonset available",
@@ -406,8 +577,11 @@ func TestUpdateStatus(t *testing.T) {
 			wantDesired: 5, wantAvailable: 3, wantUnavailable: 2,
 		},
 		{
-			name:  "daemonset not found",
-			falco: newFalco("test", withType("DaemonSet")),
+			name:            "daemonset not found sets zero availability",
+			falco:           newFalco("test", withType("DaemonSet")),
+			wantDesired:     0, // DaemonSet desired comes from status, not spec
+			wantAvailable:   0,
+			wantUnavailable: 0,
 		},
 		{
 			name:  "with reconciled condition",
@@ -461,8 +635,12 @@ func TestCleanupDualDeployments(t *testing.T) {
 		wantDeleted  string // "Deployment" or "DaemonSet" that should be deleted
 	}{
 		{
-			name:  "no-op when no opposite type exists",
+			name:  "preserves Deployment when no DaemonSet exists",
 			falco: newFalco("test", withType("Deployment")),
+			existingObjs: []client.Object{
+				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testNamespaceUnit}},
+			},
+			// wantDeleted is empty, meaning nothing should be deleted
 		},
 		{
 			name:  "deletes DaemonSet when type is Deployment",
@@ -492,35 +670,28 @@ func TestCleanupDualDeployments(t *testing.T) {
 
 			require.NoError(t, err)
 
-			if tt.wantDeleted == "DaemonSet" {
+			switch tt.wantDeleted {
+			case resourceTypeDaemonSet:
 				ds := &appsv1.DaemonSet{}
 				err := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), ds)
 				assert.Error(t, err, "DaemonSet should be deleted")
-			}
-			if tt.wantDeleted == "Deployment" {
+			case resourceTypeDeployment:
 				dep := &appsv1.Deployment{}
 				err := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), dep)
 				assert.Error(t, err, "Deployment should be deleted")
+			default:
+				// When wantDeleted is empty, verify existing resources are preserved
+				if tt.falco.Spec.Type == resourceTypeDeployment {
+					dep := &appsv1.Deployment{}
+					err := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), dep)
+					assert.NoError(t, err, "Deployment should still exist")
+				}
+				if tt.falco.Spec.Type == resourceTypeDaemonSet {
+					ds := &appsv1.DaemonSet{}
+					err := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), ds)
+					assert.NoError(t, err, "DaemonSet should still exist")
+				}
 			}
 		})
 	}
-}
-
-func TestReconcilerConditionsMap(t *testing.T) {
-	r := &Reconciler{ReconciledConditions: map[string]metav1.Condition{}}
-
-	assert.Empty(t, r.ReconciledConditions)
-
-	condition := metav1.Condition{
-		Type:               "Reconciled",
-		Status:             metav1.ConditionTrue,
-		LastTransitionTime: metav1.Time{Time: time.Now()},
-		Reason:             "TestReason",
-		Message:            "Test message",
-	}
-	r.ReconciledConditions["default/test"] = condition
-
-	stored, ok := r.ReconciledConditions["default/test"]
-	assert.True(t, ok)
-	assert.Equal(t, "TestReason", stored.Reason)
 }

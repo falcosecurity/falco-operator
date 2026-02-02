@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -323,7 +323,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		return err
 	}
 
-	// Check if the resource already exists and get its resourceVersion to detect changes.
+	// Check if the resource already exists.
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   appsv1.GroupName,
@@ -331,7 +331,6 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		Kind:    falco.Spec.Type,
 	})
 	resourceExists := true
-	previousResourceVersion := ""
 	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil {
 		if apierrors.IsNotFound(err) {
 			resourceExists = false
@@ -342,8 +341,22 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 			reconcileCondition.Message = "Unable to fetch existing resource: " + err.Error()
 			return err
 		}
-	} else {
-		previousResourceVersion = existingResource.GetResourceVersion()
+	}
+
+	// Check if update is needed to avoid unnecessary API writes.
+	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
+	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	if resourceExists {
+		comparison, err := diff(existingResource, applyConfig)
+		if err != nil {
+			logger.Error(err, "unable to compare resources")
+			// On error, proceed with apply to be safe
+		} else if comparison.IsSame() {
+			logger.V(2).Info("Falco resource is up to date, skipping apply", "kind", falco.Spec.Type)
+			reconcileCondition.Reason = "ResourceUpToDate"
+			reconcileCondition.Message = "Resource is up to date"
+			return nil
+		}
 	}
 
 	if !resourceExists {
@@ -359,19 +372,14 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		return err
 	}
 
-	switch {
-	case !resourceExists:
+	if !resourceExists {
 		logger.Info("Falco resource created", "kind", falco.Spec.Type)
 		reconcileCondition.Reason = "ResourceCreated"
 		reconcileCondition.Message = "Resource created successfully"
-	case applyConfig.GetResourceVersion() != previousResourceVersion:
+	} else {
 		logger.Info("Falco resource updated", "kind", falco.Spec.Type)
 		reconcileCondition.Reason = "ResourceUpdated"
 		reconcileCondition.Message = "Resource updated successfully"
-	default:
-		logger.V(2).Info("Falco resource is up to date", "kind", falco.Spec.Type)
-		reconcileCondition.Reason = "ResourceUpToDate"
-		reconcileCondition.Message = "Resource is up to date"
 	}
 
 	return nil
@@ -504,31 +512,43 @@ func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.F
 
 // ensureResource is a generic function to ensure a resource exists and is up to date.
 func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1.Falco,
-	resourceType string,
-	generateFunc func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
+	generateFunc func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error)) error {
 	logger := log.FromContext(ctx)
 
 	// Generate the desired resource
-	desiredResource, err := generateFunc(ctx, r.Client, falco)
+	desiredResource, err := generateFunc(r.Client, falco)
 	if err != nil {
-		return fmt.Errorf("unable to generate desired %s: %w", resourceType, err)
+		return fmt.Errorf("unable to generate desired resource: %w", err)
 	}
+
+	resourceType := desiredResource.GetKind()
 
 	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", desiredResource.GetName())
 
-	// Check if the resource already exists and get its resourceVersion to detect changes.
+	// Check if the resource already exists.
 	existingResource := &unstructured.Unstructured{}
 	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
 	resourceExists := true
-	previousResourceVersion := ""
 	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil {
 		if apierrors.IsNotFound(err) {
 			resourceExists = false
 		} else {
 			return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
 		}
-	} else {
-		previousResourceVersion = existingResource.GetResourceVersion()
+	}
+
+	// Check if update is needed to avoid unnecessary API writes.
+	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
+	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	if resourceExists {
+		comparison, err := diff(existingResource, desiredResource)
+		if err != nil {
+			logger.Error(err, "unable to compare resources", "type", resourceType)
+			// On error, proceed with apply to be safe
+		} else if comparison.IsSame() {
+			logger.V(3).Info(resourceType+" is up to date, skipping apply", "name", desiredResource.GetName())
+			return nil
+		}
 	}
 
 	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("falco-controller")}
@@ -536,13 +556,10 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
 	}
 
-	switch {
-	case !resourceExists:
+	if !resourceExists {
 		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
-	case desiredResource.GetResourceVersion() != previousResourceVersion:
+	} else {
 		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName())
-	default:
-		logger.V(3).Info(resourceType+" is up to date", "name", desiredResource.GetName())
 	}
 
 	return nil
@@ -550,56 +567,35 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 
 // ensureServiceAccount ensures the Falco service account is created or updated.
 func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ServiceAccount",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateServiceAccount(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateServiceAccount)
 }
 
 // ensureRole ensures the Falco role is created or updated.
 func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "Role",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateRole(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateRole)
 }
 
 // ensureRoleBinding ensures the Falco role binding is created or updated.
 func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "RoleBinding",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateRoleBinding(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateRoleBinding)
 }
 
 // ensureClusterRole ensures the Falco cluster role is created or updated.
 func (r *Reconciler) ensureClusterRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ClusterRole",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateClusterRole(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateClusterRole)
 }
 
 // ensureClusterRoleBinding ensures the Falco cluster role binding is created or updated.
 func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ClusterRoleBinding",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateClusterRoleBinding(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateClusterRoleBinding)
 }
 
 // ensureService ensures the Falco service is created or updated.
 func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "Service",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateService(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateService)
 }
 
 // ensureConfigmap ensures the Falco configmap is created or updated.
 func (r *Reconciler) ensureConfigMap(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	return r.ensureResource(ctx, falco, "ConfigMap",
-		func(ctx context.Context, cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-			return generateConfigmap(r.Client, falco)
-		})
+	return r.ensureResource(ctx, falco, generateConfigmap)
 }

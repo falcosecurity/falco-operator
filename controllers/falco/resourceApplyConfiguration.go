@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -275,7 +275,6 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 	}
 
 	// Remove the empty containers field if it exists.
-	// We can't leave an empty containers field since it will override the default one when merging.
 	if removeEmptyContainers(resource) != nil {
 		return nil, err
 	}

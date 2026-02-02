@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -74,7 +74,7 @@ func TestGenerateClusterRole(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "ClusterRole with empty namespace",
+			name: "ClusterRole with empty namespace still has valid rules",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-falco",
@@ -82,11 +82,18 @@ func TestGenerateClusterRole(t *testing.T) {
 			},
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, "test-falco--", obj.GetName())
+				// Verify rules are still present even with empty namespace
+				rules, found, err := unstructured.NestedSlice(obj.Object, "rules")
+				require.NoError(t, err)
+				require.True(t, found)
+				require.Len(t, rules, 1)
+				rule0 := rules[0].(map[string]interface{})
+				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
 			},
 			wantErr: false,
 		},
 		{
-			name: "ClusterRole with no labels",
+			name: "ClusterRole propagates nil labels correctly",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
@@ -96,6 +103,9 @@ func TestGenerateClusterRole(t *testing.T) {
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				labels := obj.GetLabels()
 				assert.Empty(t, labels)
+				// Verify ClusterRole is still valid and has correct structure
+				assert.Equal(t, "ClusterRole", obj.GetKind())
+				assert.Equal(t, "test-falco--default", obj.GetName())
 			},
 			wantErr: false,
 		},
