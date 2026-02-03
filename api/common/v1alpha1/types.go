@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -39,6 +39,11 @@ const (
 	ConditionReconciled ConditionType = "ConditionReconciled"
 )
 
+const (
+	// ConfigMapRulesKey is the standard key used for rules data in ConfigMaps.
+	ConfigMapRulesKey = "rules.yaml"
+)
+
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
 // +kubebuilder:object:generate=true
 type OCIArtifact struct {
@@ -72,8 +77,4 @@ type ConfigMapRef struct {
 	// Name is the name of the ConfigMap.
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
-
-	// Key is the key in the ConfigMap to select.
-	// +kubebuilder:validation:Required
-	Key string `json:"key"`
 }

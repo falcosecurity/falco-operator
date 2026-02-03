@@ -37,6 +37,7 @@ data:
 
 ---
 # Example Rulesfile using ConfigMap reference
+# Note: The ConfigMap must have a key named "rules.yaml" containing the rules content
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
 metadata:
@@ -48,6 +49,5 @@ metadata:
 spec:
   configMapRef:
     name: custom-falco-rules
-    key: rules.yaml
   priority: 60
 
