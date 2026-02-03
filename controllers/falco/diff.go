@@ -1,4 +1,4 @@
-// Copyright (C) 2026 The Falco Authors
+// Copyright (C) 2025 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,122 +18,72 @@ package falco
 
 import (
 	"fmt"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/structured-merge-diff/v4/typed"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
+	"github.com/falcosecurity/falco-operator/internal/pkg/managedfields"
 )
 
-// diff calculates the difference between the current and desired objects.
-// It accepts either unstructured.Unstructured objects or typed objects that can be converted to unstructured.
+const (
+	// fieldManager is the name used to identify the controller's managed fields.
+	fieldManager = "falco-controller"
+)
+
+// needsUpdate checks if the current object needs to be updated to match the desired state.
+// It extracts only the fields managed by this controller and compares them with the desired config.
 //
-// This is used to avoid unnecessary API writes on Kubernetes versions < 1.31 where
-// Server-Side Apply may cause spurious resourceVersion bumps on no-op patches to CRDs.
+// This avoids unnecessary API writes on Kubernetes versions < 1.31 where Server-Side Apply
+// may cause spurious resourceVersion bumps on no-op patches.
 // See: https://github.com/kubernetes/kubernetes/issues/124605
-func diff(current, desired interface{}) (*typed.Comparison, error) {
-	// Convert inputs to unstructured if needed
-	currentUnstructured, err := toUnstructured(current)
-	if err != nil {
-		return nil, fmt.Errorf("failed to convert current object to unstructured: %w", err)
+func needsUpdate(current runtime.Object, desired *unstructured.Unstructured) (bool, error) {
+	if current == nil || desired == nil {
+		return true, nil
 	}
 
-	desiredUnstructured, err := toUnstructured(desired)
+	// Extract only the fields managed by our field manager from the current object
+	extracted, err := managedfields.ExtractAsUnstructured(current, fieldManager)
 	if err != nil {
-		return nil, fmt.Errorf("failed to convert desired object to unstructured: %w", err)
+		return true, fmt.Errorf("failed to extract managed fields: %w", err)
 	}
 
-	// Remove server-managed fields before comparison
-	removeUnwantedFields(currentUnstructured)
-	removeUnwantedFields(desiredUnstructured)
-
-	// Create a parser to compare the resources
-	parser := scheme.Parser()
-
-	currentTypePath := getTypePath(currentUnstructured)
-
-	// Parse the base resource
-	currentTyped, err := parser.Type(currentTypePath).FromUnstructured(currentUnstructured.Object)
-	if err != nil {
-		return nil, err
+	// If no managed fields found, we need to apply
+	if extracted == nil {
+		return true, nil
 	}
 
-	desiredTypePath := getTypePath(desiredUnstructured)
-	// Parse the user defined resource
-	desiredTyped, err := parser.Type(desiredTypePath).FromUnstructured(desiredUnstructured.Object)
-	if err != nil {
-		return nil, err
-	}
+	// Prune empty fields from both objects before comparison
+	managedfields.PruneEmptyFields(extracted)
+	managedfields.PruneEmptyFields(desired)
 
-	return currentTyped.Compare(desiredTyped)
+	// Compare the extracted managed fields with the desired state
+	return managedfields.NeedsUpdate(extracted, desired)
 }
 
-// getTypePath returns the schema type path for an unstructured object.
-func getTypePath(obj *unstructured.Unstructured) string {
-	apiVersion := obj.GetAPIVersion()
-	resourceType := obj.GetKind()
-	gv := strings.Split(apiVersion, "/")
-
-	// Build the schema path based on whether it's a core resource or not
-	var typePath string
-	if len(gv) == 1 {
-		// Core resources like v1 have no group
-		typePath = fmt.Sprintf("io.k8s.api.core.%s.%s", gv[0], resourceType)
-	} else {
-		// Other resources have group and version
-		typePath = fmt.Sprintf("io.k8s.api.%s.%s.%s", apiGroupToSchemaGroup(gv[0]), gv[1], resourceType)
+// diff calculates the difference between the current and desired objects.
+// Returns a typed.Comparison that contains Added, Modified, and Removed field sets.
+func diff(current runtime.Object, desired *unstructured.Unstructured) (*typed.Comparison, error) {
+	if current == nil || desired == nil {
+		return nil, fmt.Errorf("current and desired objects cannot be nil")
 	}
 
-	return typePath
-}
-
-func apiGroupToSchemaGroup(apiGroup string) string {
-	mappings := map[string]string{
-		"rbac.authorization.k8s.io":    "rbac",
-		"networking.k8s.io":            "networking",
-		"certificates.k8s.io":          "certificates",
-		"storage.k8s.io":               "storage",
-		"admissionregistration.k8s.io": "admissionregistration",
-		"scheduling.k8s.io":            "scheduling",
-		"coordination.k8s.io":          "coordination",
-		"discovery.k8s.io":             "discovery",
+	// Extract only the fields managed by our field manager
+	extracted, err := managedfields.ExtractAsUnstructured(current, fieldManager)
+	if err != nil {
+		return nil, fmt.Errorf("failed to extract managed fields: %w", err)
 	}
 
-	if mapped, ok := mappings[apiGroup]; ok {
-		return mapped
+	if extracted == nil {
+		return nil, fmt.Errorf("no managed fields found for field manager %s", fieldManager)
 	}
 
-	return apiGroup
-}
+	// Deep copy desired to avoid modifying the original
+	desiredCopy := desired.DeepCopy()
 
-// removeUnwantedFields removes server-managed fields from the unstructured object
-// so they don't affect the comparison.
-func removeUnwantedFields(obj *unstructured.Unstructured) {
-	unstructured.RemoveNestedField(obj.Object, "metadata", "uid")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "resourceVersion")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "managedFields")
-	unstructured.RemoveNestedField(obj.Object, "status")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "creationTimestamp")
-	unstructured.RemoveNestedField(obj.Object, "spec", "template", "metadata", "creationTimestamp")
-	unstructured.RemoveNestedField(obj.Object, "spec", "revisionHistoryLimit")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generateName")
-	unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
-	// Remove the revision field from the annotations.
-	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
-	// Remove the deprecated field from the annotations.
-	unstructured.RemoveNestedField(obj.Object, "metadata", "annotations", "deprecated.daemonset.template.generation")
-	// If the annotations field is empty, remove it.
-	if metadata, ok := obj.Object["metadata"].(map[string]interface{}); ok {
-		if annotations, ok := metadata["annotations"].(map[string]interface{}); ok {
-			if len(annotations) == 0 {
-				unstructured.RemoveNestedField(obj.Object, "metadata", "annotations")
-			}
-		}
-	}
-	// Only for services, remove the clusterIP and clusterIPs fields.
-	if obj.GetKind() == "Service" {
-		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIP")
-		unstructured.RemoveNestedField(obj.Object, "spec", "clusterIPs")
-	}
+	// Prune empty fields before comparison
+	managedfields.PruneEmptyFields(extracted)
+	managedfields.PruneEmptyFields(desiredCopy)
+
+	return managedfields.Compare(extracted, desiredCopy)
 }
