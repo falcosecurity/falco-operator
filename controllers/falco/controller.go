@@ -231,49 +231,60 @@ func (r *Reconciler) ensureVersion(ctx context.Context, falco *instancev1alpha1.
 
 // handleDeletion handles the deletion of the Falco instance.
 func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
-	if falco.DeletionTimestamp != nil {
-		log.FromContext(ctx).Info("Falco instance marked for deletion")
-		if controllerutil.ContainsFinalizer(falco, finalizer) {
-			log.FromContext(ctx).Info("Removing finalizer", "finalizer", finalizer)
+	if falco.DeletionTimestamp == nil {
+		return false, nil
+	}
 
-			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
-
-			crb := &unstructured.Unstructured{}
-			crb.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "rbac.authorization.k8s.io",
-				Version: "v1",
-				Kind:    "ClusterRoleBinding",
-			})
-			crb.SetName(resourceName)
-			if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
-				log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
-				return false, err
-			}
-
-			cr := &unstructured.Unstructured{}
-			cr.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   "rbac.authorization.k8s.io",
-				Version: "v1",
-				Kind:    "ClusterRole",
-			})
-			cr.SetName(resourceName)
-			if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
-				log.FromContext(ctx).Error(err, "unable to delete clusterrole")
-				return false, err
-			}
-
-			if controllerutil.ContainsFinalizer(falco, finalizer) {
-				patch := client.MergeFrom(falco.DeepCopy())
-				controllerutil.RemoveFinalizer(falco, finalizer)
-				if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
-					log.FromContext(ctx).Error(err, "unable to remove finalizer from Falco instance")
-					return false, err
-				}
-			}
-		}
+	// Check if finalizer is already removed
+	if !controllerutil.ContainsFinalizer(falco, finalizer) {
+		// Finalizer already removed, nothing to do
 		return true, nil
 	}
-	return false, nil
+
+	log.FromContext(ctx).Info("Falco instance marked for deletion, removing finalizer", "finalizer", finalizer)
+
+	resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
+
+	crb := &unstructured.Unstructured{}
+	crb.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "rbac.authorization.k8s.io",
+		Version: "v1",
+		Kind:    "ClusterRoleBinding",
+	})
+	crb.SetName(resourceName)
+	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
+		return false, err
+	}
+
+	cr := &unstructured.Unstructured{}
+	cr.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "rbac.authorization.k8s.io",
+		Version: "v1",
+		Kind:    "ClusterRole",
+	})
+	cr.SetName(resourceName)
+	if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "unable to delete clusterrole")
+		return false, err
+	}
+
+	// Remove the finalizer using patch.
+	// Track ResourceVersion to detect if the patch was a no-op (due to cache race conditions).
+	oldRV := falco.ResourceVersion
+	patch := client.MergeFrom(falco.DeepCopy())
+	controllerutil.RemoveFinalizer(falco, finalizer)
+	if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
+		log.FromContext(ctx).Error(err, "unable to remove finalizer from Falco instance")
+		return false, err
+	}
+
+	// Only log deletion if the patch actually removed the finalizer
+	if falco.ResourceVersion != oldRV {
+		log.FromContext(ctx).Info("Falco instance deleted")
+	}
+
+	return true, nil
 }
 
 // ensureDeployment ensures the Falco deployment or daemonset is created or updated.

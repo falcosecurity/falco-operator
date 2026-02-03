@@ -44,13 +44,13 @@ var (
 		{
 			Name: "FALCO_HOSTNAME",
 			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "spec.nodeName"},
 			},
 		},
 		{
 			Name: "FALCO_K8S_NODE_NAME",
 			ValueFrom: &corev1.EnvVarSource{
-				FieldRef: &corev1.ObjectFieldSelector{FieldPath: "spec.nodeName"},
+				FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "spec.nodeName"},
 			},
 		},
 	}
@@ -397,7 +397,8 @@ webserver:
 				Name: "POD_NAMESPACE",
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
+						APIVersion: "v1",
+						FieldPath:  "metadata.namespace",
 					},
 				},
 			},
@@ -405,7 +406,8 @@ webserver:
 				Name: "NODE_NAME",
 				ValueFrom: &corev1.EnvVarSource{
 					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "spec.nodeName",
+						APIVersion: "v1",
+						FieldPath:  "spec.nodeName",
 					},
 				},
 			},
