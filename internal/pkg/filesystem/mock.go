@@ -143,10 +143,10 @@ func (m *mockReadCloser) Close() error {
 }
 
 // Exists checks if a file exists in the mock filesystem.
-func (m *mockFileSystem) Exists(f *File) (bool, error) {
+func (m *mockFileSystem) Exists(path string) (bool, error) {
 	if m.StatErr != nil && !errors.Is(m.StatErr, fs.ErrNotExist) {
 		return false, m.StatErr
 	}
-	_, ok := m.Files[f.Path]
+	_, ok := m.Files[path]
 	return ok, nil
 }

@@ -33,7 +33,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
@@ -278,8 +277,8 @@ type PluginsConfig struct {
 }
 
 func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
-	var config = PluginConfig{
-		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, filesystem.MediumOCI, artifact.TypePlugin),
+	config := PluginConfig{
+		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
 		Name:        plugin.Name,
 	}
 
@@ -359,16 +358,9 @@ func (pc *PluginsConfig) toString() (string, error) {
 	if err != nil {
 		return "", err
 	}
-
-	// Convert the YAML to a string.
-	yamlString := string(data)
-
-	return yamlString, nil
+	return string(data), nil
 }
 
 func (pc *PluginsConfig) isEmpty() bool {
-	if len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0 {
-		return true
-	}
-	return false
+	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
 }

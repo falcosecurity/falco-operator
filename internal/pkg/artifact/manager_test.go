@@ -90,7 +90,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 		configMapRef    *commonv1alpha1.ConfigMapRef
 		configMap       *corev1.ConfigMap
 		priority        int32
-		existingFile    *filesystem.File
+		existingFile    *File
 		existingData    string
 		fsWriteErr      error
 		fsRemoveErr     error
@@ -105,7 +105,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "successfully stores new artifact from ConfigMap",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -124,9 +123,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 		{
 			name:         "removes artifact when configMapRef is nil",
 			configMapRef: nil,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			wantErr:         false,
@@ -134,22 +133,19 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantRemoveCalls: 1,
 		},
 		{
-			name: "returns error when ConfigMap not found",
+			name: "returns nil when ConfigMap not found",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: "non-existent-configmap",
-				Key:  testKey,
 			},
 			priority:        50,
-			wantErr:         true,
-			wantErrMsg:      "not found",
+			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
 		},
 		{
-			name: "returns error when key not found in ConfigMap",
+			name: "returns nil when rules.yaml key not found in ConfigMap",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  "non-existent-key",
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -157,12 +153,11 @@ func TestStoreFromConfigMap(t *testing.T) {
 					Namespace: testNamespace,
 				},
 				Data: map[string]string{
-					testKey: testData,
+					"other-key": testData, // ConfigMap exists but doesn't have the required rules.yaml key
 				},
 			},
 			priority:        50,
-			wantErr:         true,
-			wantErrMsg:      "not found in ConfigMap",
+			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
 		},
@@ -170,7 +165,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "skips write when file content is unchanged",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -182,9 +176,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -196,7 +190,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "updates file when content changes",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -208,9 +201,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			existingData:    "old content",
@@ -222,7 +215,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "updates file when priority changes",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -234,9 +226,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 60,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -248,7 +240,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "returns error when write fails",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -270,7 +261,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "returns error when Exists check fails",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -282,9 +272,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			fsStatErr:       fmt.Errorf("permission denied"),
@@ -297,7 +287,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "returns error when ReadFile fails",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -309,9 +298,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -325,7 +314,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			name: "returns error when Remove fails during update",
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
-				Key:  testKey,
 			},
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -337,9 +325,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 				},
 			},
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
-				Medium:   filesystem.MediumConfigMap,
+				Medium:   MediumConfigMap,
 				Priority: 50,
 			},
 			existingData:    "old content",
@@ -369,14 +357,14 @@ func TestStoreFromConfigMap(t *testing.T) {
 
 			// Setup existing file if specified
 			if tt.existingFile != nil {
-				manager.files[testArtifactName] = []filesystem.File{*tt.existingFile}
+				manager.files[testArtifactName] = []File{*tt.existingFile}
 				if tt.existingData != "" {
 					mockFS.Files[tt.existingFile.Path] = []byte(tt.existingData)
 				}
 			}
 
 			ctx := context.Background()
-			err := manager.StoreFromConfigMap(ctx, testArtifactName, tt.priority, tt.configMapRef, TypeRulesfile)
+			err := manager.StoreFromConfigMap(ctx, testArtifactName, testNamespace, tt.priority, tt.configMapRef, TypeRulesfile)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -402,7 +390,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		name            string
 		data            *string
 		priority        int32
-		existingFile    *filesystem.File
+		existingFile    *File
 		existingData    string
 		fsWriteErr      error
 		fsRemoveErr     error
@@ -424,9 +412,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		{
 			name: "removes artifact when data is nil",
 			data: nil,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			wantErr:         false,
@@ -444,9 +432,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "skips write when file content is unchanged",
 			data:     ptr(testData),
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -458,9 +446,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "updates file when content changes",
 			data:     ptr(testData),
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			existingData:    "old content",
@@ -472,9 +460,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "updates file when priority changes",
 			data:     ptr(testData),
 			priority: 60,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -496,9 +484,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "returns error when Exists check fails",
 			data:     ptr(testData),
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			fsStatErr:       fmt.Errorf("permission denied"),
@@ -511,9 +499,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "returns error when ReadFile fails",
 			data:     ptr(testData),
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			existingData:    testData,
@@ -527,9 +515,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			name:     "returns error when Remove fails during update",
 			data:     ptr(testData),
 			priority: 50,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
-				Medium:   filesystem.MediumInline,
+				Medium:   MediumInline,
 				Priority: 50,
 			},
 			existingData:    "old content",
@@ -554,7 +542,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			manager := NewManagerWithOptions(fakeClient, testNamespace, WithFS(mockFS))
 
 			if tt.existingFile != nil {
-				manager.files[testArtifactName] = []filesystem.File{*tt.existingFile}
+				manager.files[testArtifactName] = []File{*tt.existingFile}
 				if tt.existingData != "" {
 					mockFS.Files[tt.existingFile.Path] = []byte(tt.existingData)
 				}
@@ -582,7 +570,7 @@ func TestRemoveAll(t *testing.T) {
 	tests := []struct {
 		name            string
 		artifactName    string
-		existingFiles   []filesystem.File
+		existingFiles   []File
 		fsRemoveErr     error
 		wantErr         bool
 		wantRemoveCalls int
@@ -597,8 +585,8 @@ func TestRemoveAll(t *testing.T) {
 		{
 			name:         "removes single artifact",
 			artifactName: "test-artifact",
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantErr:         false,
 			wantRemoveCalls: 1,
@@ -606,9 +594,9 @@ func TestRemoveAll(t *testing.T) {
 		{
 			name:         "removes multiple artifacts",
 			artifactName: "test-artifact",
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
-				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
 			},
 			wantErr:         false,
 			wantRemoveCalls: 2,
@@ -616,8 +604,8 @@ func TestRemoveAll(t *testing.T) {
 		{
 			name:         "returns error when remove fails",
 			artifactName: "test-artifact",
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			fsRemoveErr:     fmt.Errorf("permission denied"),
 			wantErr:         true,
@@ -661,31 +649,31 @@ func TestPath(t *testing.T) {
 		name         string
 		artifactName string
 		priority     int32
-		filesystem.Medium
+		Medium
 		artifactType Type
 		wantContains string
 	}{
 		{
-			name:         "rulesfile with OCI filesystem.Medium",
+			name:         "rulesfile with OCI Medium",
 			artifactName: "my-rules",
 			priority:     50,
-			Medium:       filesystem.MediumOCI,
+			Medium:       MediumOCI,
 			artifactType: TypeRulesfile,
 			wantContains: "50-01-my-rules-oci.yaml",
 		},
 		{
-			name:         "rulesfile with inline filesystem.Medium",
+			name:         "rulesfile with inline Medium",
 			artifactName: "my-rules",
 			priority:     50,
-			Medium:       filesystem.MediumInline,
+			Medium:       MediumInline,
 			artifactType: TypeRulesfile,
 			wantContains: "50-03-my-rules-inline.yaml",
 		},
 		{
-			name:         "rulesfile with configmap filesystem.Medium",
+			name:         "rulesfile with configmap Medium",
 			artifactName: "my-rules",
 			priority:     50,
-			Medium:       filesystem.MediumConfigMap,
+			Medium:       MediumConfigMap,
 			artifactType: TypeRulesfile,
 			wantContains: "50-02-my-rules-configmap.yaml",
 		},
@@ -693,7 +681,7 @@ func TestPath(t *testing.T) {
 			name:         "plugin type",
 			artifactName: "my-plugin",
 			priority:     50,
-			Medium:       filesystem.MediumOCI,
+			Medium:       MediumOCI,
 			artifactType: TypePlugin,
 			wantContains: "my-plugin.so",
 		},
@@ -701,7 +689,7 @@ func TestPath(t *testing.T) {
 			name:         "config type",
 			artifactName: "my-config",
 			priority:     50,
-			Medium:       filesystem.MediumInline,
+			Medium:       MediumInline,
 			artifactType: TypeConfig,
 			wantContains: "50-my-config.yaml",
 		},
@@ -709,7 +697,7 @@ func TestPath(t *testing.T) {
 			name:         "rulesfile with unknown medium uses default subpriority",
 			artifactName: "my-rules",
 			priority:     50,
-			Medium:       filesystem.Medium("unknown"),
+			Medium:       Medium("unknown"),
 			artifactType: TypeRulesfile,
 			wantContains: "50-99-my-rules-unknown.yaml",
 		},
@@ -717,7 +705,7 @@ func TestPath(t *testing.T) {
 			name:         "unknown artifact type uses default path",
 			artifactName: "my-artifact",
 			priority:     50,
-			Medium:       filesystem.MediumOCI,
+			Medium:       MediumOCI,
 			artifactType: Type("unknown"),
 			wantContains: "50-my-artifact",
 		},
@@ -737,8 +725,8 @@ func TestRemoveArtifact(t *testing.T) {
 	tests := []struct {
 		name            string
 		artifactName    string
-		medium          filesystem.Medium
-		existingFiles   []filesystem.File
+		medium          Medium
+		existingFiles   []File
 		fsRemoveErr     error
 		wantErr         bool
 		wantRemoveCalls int
@@ -746,38 +734,38 @@ func TestRemoveArtifact(t *testing.T) {
 		{
 			name:            "does nothing when no artifacts exist",
 			artifactName:    "non-existent",
-			medium:          filesystem.MediumConfigMap,
+			medium:          MediumConfigMap,
 			existingFiles:   nil,
 			wantErr:         false,
 			wantRemoveCalls: 0,
 		},
 		{
-			name:         "removes artifact with matching filesystem.Medium",
+			name:         "removes artifact with matching Medium",
 			artifactName: "test-artifact",
-			medium:       filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			medium:       MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantErr:         false,
 			wantRemoveCalls: 1,
 		},
 		{
-			name:         "does not remove artifact with different filesystem.Medium",
+			name:         "does not remove artifact with different Medium",
 			artifactName: "test-artifact",
-			medium:       filesystem.MediumInline,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			medium:       MediumInline,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantErr:         false,
 			wantRemoveCalls: 0,
 		},
 		{
-			name:         "removes only artifact with matching filesystem.Medium from multiple",
+			name:         "removes only artifact with matching Medium from multiple",
 			artifactName: "test-artifact",
-			medium:       filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
-				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
+			medium:       MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
 			},
 			wantErr:         false,
 			wantRemoveCalls: 1,
@@ -785,9 +773,9 @@ func TestRemoveArtifact(t *testing.T) {
 		{
 			name:         "returns error when remove fails",
 			artifactName: "test-artifact",
-			medium:       filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			medium:       MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			fsRemoveErr:     fmt.Errorf("permission denied"),
 			wantErr:         true,
@@ -837,8 +825,8 @@ func TestRemoveAllIgnoresNotExistError(t *testing.T) {
 	// RemoveAll should ignore this error
 
 	manager := NewManagerWithOptions(fakeClient, testNamespace, WithFS(mockFS))
-	manager.files["test-artifact"] = []filesystem.File{
-		{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+	manager.files["test-artifact"] = []File{
+		{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 	}
 	// Note: we don't add the file to mockFS.files, so Remove will return os.ErrNotExist
 
@@ -856,44 +844,44 @@ func TestGetArtifactFile(t *testing.T) {
 	tests := []struct {
 		name          string
 		artifactName  string
-		Medium        filesystem.Medium
-		existingFiles []filesystem.File
-		wantFile      *filesystem.File
+		Medium        Medium
+		existingFiles []File
+		wantFile      *File
 	}{
 		{
 			name:          "returns nil when no artifacts exist",
 			artifactName:  "non-existent",
-			Medium:        filesystem.MediumConfigMap,
+			Medium:        MediumConfigMap,
 			existingFiles: nil,
 			wantFile:      nil,
 		},
 		{
-			name:         "returns file with matching filesystem.Medium",
+			name:         "returns file with matching Medium",
 			artifactName: "test-artifact",
-			Medium:       filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			Medium:       MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
-			wantFile: &filesystem.File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			wantFile: &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 		},
 		{
-			name:         "returns nil when filesystem.Medium does not match",
+			name:         "returns nil when Medium does not match",
 			artifactName: "test-artifact",
-			Medium:       filesystem.MediumInline,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			Medium:       MediumInline,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantFile: nil,
 		},
 		{
 			name:         "returns correct file from multiple",
 			artifactName: "test-artifact",
-			Medium:       filesystem.MediumInline,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
-				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
+			Medium:       MediumInline,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
 			},
-			wantFile: &filesystem.File{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
+			wantFile: &File{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
 		},
 	}
 
@@ -928,22 +916,22 @@ func TestAddArtifactFile(t *testing.T) {
 	tests := []struct {
 		name          string
 		artifactName  string
-		fileToAdd     filesystem.File
-		existingFiles []filesystem.File
+		fileToAdd     File
+		existingFiles []File
 		wantCount     int
 	}{
 		{
 			name:         "adds file when no artifacts exist",
 			artifactName: "test-artifact",
-			fileToAdd:    filesystem.File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			fileToAdd:    File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			wantCount:    1,
 		},
 		{
 			name:         "adds file to existing artifacts",
 			artifactName: "test-artifact",
-			fileToAdd:    filesystem.File{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			fileToAdd:    File{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantCount: 2,
 		},
@@ -973,41 +961,41 @@ func TestRemoveArtifactFile(t *testing.T) {
 	tests := []struct {
 		name           string
 		artifactName   string
-		MediumToRemove filesystem.Medium
-		existingFiles  []filesystem.File
+		MediumToRemove Medium
+		existingFiles  []File
 		wantCount      int
 	}{
 		{
 			name:           "does nothing when no artifacts exist",
 			artifactName:   "non-existent",
-			MediumToRemove: filesystem.MediumConfigMap,
+			MediumToRemove: MediumConfigMap,
 			wantCount:      0,
 		},
 		{
-			name:           "removes file with matching filesystem.Medium",
+			name:           "removes file with matching Medium",
 			artifactName:   "test-artifact",
-			MediumToRemove: filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			MediumToRemove: MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantCount: 0,
 		},
 		{
-			name:           "does not remove file with different filesystem.Medium",
+			name:           "does not remove file with different Medium",
 			artifactName:   "test-artifact",
-			MediumToRemove: filesystem.MediumInline,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
+			MediumToRemove: MediumInline,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			},
 			wantCount: 1,
 		},
 		{
-			name:           "removes only matching filesystem.Medium from multiple",
+			name:           "removes only matching Medium from multiple",
 			artifactName:   "test-artifact",
-			MediumToRemove: filesystem.MediumConfigMap,
-			existingFiles: []filesystem.File{
-				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: filesystem.MediumConfigMap, Priority: 50},
-				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: filesystem.MediumInline, Priority: 50},
+			MediumToRemove: MediumConfigMap,
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+				{Path: "/etc/falco/rules.d/50-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 50},
 			},
 			wantCount: 1,
 		},
@@ -1048,7 +1036,7 @@ func TestStoreFromOCI(t *testing.T) {
 		artifact        *commonv1alpha1.OCIArtifact
 		priority        int32
 		artifactType    Type
-		existingFile    *filesystem.File
+		existingFile    *File
 		existingData    string
 		pullerResult    *puller.RegistryResult
 		pullerErr       error
@@ -1064,9 +1052,9 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name:     "removes artifact when artifact is nil",
 			artifact: nil,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			wantErr:         false,
@@ -1089,9 +1077,9 @@ func TestStoreFromOCI(t *testing.T) {
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			// No existingData means file doesn't exist
@@ -1108,9 +1096,9 @@ func TestStoreFromOCI(t *testing.T) {
 			},
 			priority:     60,
 			artifactType: TypeRulesfile,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			existingData:    "existing content",
@@ -1126,9 +1114,9 @@ func TestStoreFromOCI(t *testing.T) {
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			existingData:    "existing content",
@@ -1174,9 +1162,9 @@ func TestStoreFromOCI(t *testing.T) {
 			},
 			priority:     60,
 			artifactType: TypeRulesfile,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			existingData:    "existing content",
@@ -1194,9 +1182,9 @@ func TestStoreFromOCI(t *testing.T) {
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
-			existingFile: &filesystem.File{
+			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   filesystem.MediumOCI,
+				Medium:   MediumOCI,
 				Priority: 50,
 			},
 			fsStatErr:       fmt.Errorf("permission denied"),
@@ -1283,7 +1271,7 @@ func TestStoreFromOCI(t *testing.T) {
 
 			// Setup existing file if specified
 			if tt.existingFile != nil {
-				manager.files[testArtifactName] = []filesystem.File{*tt.existingFile}
+				manager.files[testArtifactName] = []File{*tt.existingFile}
 				if tt.existingData != "" {
 					mockFS.Files[tt.existingFile.Path] = []byte(tt.existingData)
 				}

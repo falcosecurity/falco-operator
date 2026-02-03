@@ -29,5 +29,5 @@ type FileSystem interface {
 	Remove(name string) error
 	Rename(oldpath, newpath string) error
 	Open(name string) (io.ReadCloser, error)
-	Exists(f *File) (bool, error)
+	Exists(path string) (bool, error)
 }

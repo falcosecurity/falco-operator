@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package filesystem
+package artifact
 
 // Medium represents how the artifact is distributed.
 type Medium string

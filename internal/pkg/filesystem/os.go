@@ -61,8 +61,8 @@ func (OS) Open(name string) (io.ReadCloser, error) {
 }
 
 // Exists checks if the file exists.
-func (OS) Exists(f *File) (bool, error) {
-	if _, err := os.Stat(f.Path); err != nil && !os.IsNotExist(err) {
+func (OS) Exists(path string) (bool, error) {
+	if _, err := os.Stat(path); err != nil && !os.IsNotExist(err) {
 		return false, err
 	} else if os.IsNotExist(err) {
 		return false, nil
