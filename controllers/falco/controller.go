@@ -18,6 +18,7 @@ package falco
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -269,9 +270,6 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		return false, err
 	}
 
-	// Remove the finalizer using patch.
-	// Track ResourceVersion to detect if the patch was a no-op (due to cache race conditions).
-	oldRV := falco.ResourceVersion
 	patch := client.MergeFrom(falco.DeepCopy())
 	controllerutil.RemoveFinalizer(falco, finalizer)
 	if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
@@ -279,10 +277,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		return false, err
 	}
 
-	// Only log deletion if the patch actually removed the finalizer
-	if falco.ResourceVersion != oldRV {
-		log.FromContext(ctx).Info("Falco instance deleted")
-	}
+	log.FromContext(ctx).Info("Falco instance deleted")
 
 	return true, nil
 }
@@ -357,16 +352,26 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	// Check if update is needed to avoid unnecessary API writes.
 	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
 	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	var changedFields string
 	if resourceExists {
 		comparison, err := diff(existingResource, applyConfig)
 		if err != nil {
-			logger.Error(err, "unable to compare resources")
-			// On error, proceed with apply to be safe
-		} else if comparison.IsSame() {
-			logger.V(2).Info("Falco resource is up to date, skipping apply", "kind", falco.Spec.Type)
-			reconcileCondition.Reason = "ResourceUpToDate"
-			reconcileCondition.Message = "Resource is up to date"
-			return nil
+			if !errors.Is(err, ErrNoManagedFields) {
+				logger.Error(err, "unable to compare existing resource with desired state")
+				reconcileCondition.Status = metav1.ConditionFalse
+				reconcileCondition.Reason = "ResourceComparisonError"
+				reconcileCondition.Message = "Unable to compare existing resource with desired state: " + err.Error()
+				return err
+			}
+			logger.V(2).Info("No managed fields found, proceeding with apply to take ownership", "kind", falco.Spec.Type)
+		} else {
+			if comparison.IsSame() {
+				logger.V(2).Info("Falco resource is up to date, skipping apply", "kind", falco.Spec.Type)
+				reconcileCondition.Reason = "ResourceUpToDate"
+				reconcileCondition.Message = "Resource is up to date"
+				return nil
+			}
+			changedFields = formatChangedFields(comparison)
 		}
 	}
 
@@ -374,7 +379,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		logger.Info("Creating Falco resource", "kind", falco.Spec.Type)
 	}
 
-	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("falco-controller")}
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
 	if err = r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyConfig), applyOpts...); err != nil {
 		logger.Error(err, "unable to apply resource", "kind", falco.Spec.Type)
 		reconcileCondition.Status = metav1.ConditionFalse
@@ -388,7 +393,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		reconcileCondition.Reason = "ResourceCreated"
 		reconcileCondition.Message = "Resource created successfully"
 	} else {
-		logger.Info("Falco resource updated", "kind", falco.Spec.Type)
+		logger.Info("Falco resource updated", "kind", falco.Spec.Type, "changedFields", changedFields)
 		reconcileCondition.Reason = "ResourceUpdated"
 		reconcileCondition.Message = "Resource updated successfully"
 	}
@@ -551,14 +556,20 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	// Check if update is needed to avoid unnecessary API writes.
 	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
 	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	var changedFields string
 	if resourceExists {
 		comparison, err := diff(existingResource, desiredResource)
 		if err != nil {
-			logger.Error(err, "unable to compare resources", "type", resourceType)
-			// On error, proceed with apply to be safe
-		} else if comparison.IsSame() {
-			logger.V(3).Info(resourceType+" is up to date, skipping apply", "name", desiredResource.GetName())
-			return nil
+			if !errors.Is(err, ErrNoManagedFields) {
+				return fmt.Errorf("unable to compare existing %s with desired state: %w", resourceType, err)
+			}
+			logger.V(3).Info("No managed fields found, proceeding with apply to take ownership", "type", resourceType, "name", desiredResource.GetName())
+		} else {
+			if comparison.IsSame() {
+				logger.V(3).Info(resourceType+" is up to date, skipping apply", "name", desiredResource.GetName())
+				return nil
+			}
+			changedFields = formatChangedFields(comparison)
 		}
 	}
 
@@ -570,7 +581,7 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	if !resourceExists {
 		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
 	} else {
-		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName())
+		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName(), "changedFields", changedFields)
 	}
 
 	return nil

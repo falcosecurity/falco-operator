@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,7 +17,9 @@
 package falco
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,35 +33,10 @@ const (
 	fieldManager = "falco-controller"
 )
 
-// needsUpdate checks if the current object needs to be updated to match the desired state.
-// It extracts only the fields managed by this controller and compares them with the desired config.
-//
-// This avoids unnecessary API writes on Kubernetes versions < 1.31 where Server-Side Apply
-// may cause spurious resourceVersion bumps on no-op patches.
-// See: https://github.com/kubernetes/kubernetes/issues/124605
-func needsUpdate(current runtime.Object, desired *unstructured.Unstructured) (bool, error) {
-	if current == nil || desired == nil {
-		return true, nil
-	}
-
-	// Extract only the fields managed by our field manager from the current object
-	extracted, err := managedfields.ExtractAsUnstructured(current, fieldManager)
-	if err != nil {
-		return true, fmt.Errorf("failed to extract managed fields: %w", err)
-	}
-
-	// If no managed fields found, we need to apply
-	if extracted == nil {
-		return true, nil
-	}
-
-	// Prune empty fields from both objects before comparison
-	managedfields.PruneEmptyFields(extracted)
-	managedfields.PruneEmptyFields(desired)
-
-	// Compare the extracted managed fields with the desired state
-	return managedfields.NeedsUpdate(extracted, desired)
-}
+// ErrNoManagedFields is returned when no managed fields are found for the field manager.
+// This is not a fatal error - it indicates the resource was never managed by this controller
+// and should be applied.
+var ErrNoManagedFields = errors.New("no managed fields found for field manager")
 
 // diff calculates the difference between the current and desired objects.
 // Returns a typed.Comparison that contains Added, Modified, and Removed field sets.
@@ -75,7 +52,7 @@ func diff(current runtime.Object, desired *unstructured.Unstructured) (*typed.Co
 	}
 
 	if extracted == nil {
-		return nil, fmt.Errorf("no managed fields found for field manager %s", fieldManager)
+		return nil, ErrNoManagedFields
 	}
 
 	// Deep copy desired to avoid modifying the original
@@ -86,4 +63,29 @@ func diff(current runtime.Object, desired *unstructured.Unstructured) (*typed.Co
 	managedfields.PruneEmptyFields(desiredCopy)
 
 	return managedfields.Compare(extracted, desiredCopy)
+}
+
+// formatChangedFields returns a human-readable summary of the changed fields from a comparison.
+func formatChangedFields(comparison *typed.Comparison) string {
+	if comparison == nil {
+		return ""
+	}
+
+	var parts []string
+
+	if !comparison.Added.Empty() {
+		parts = append(parts, fmt.Sprintf("added: %s", comparison.Added.String()))
+	}
+	if !comparison.Modified.Empty() {
+		parts = append(parts, fmt.Sprintf("modified: %s", comparison.Modified.String()))
+	}
+	if !comparison.Removed.Empty() {
+		parts = append(parts, fmt.Sprintf("removed: %s", comparison.Removed.String()))
+	}
+
+	if len(parts) == 0 {
+		return "no changes"
+	}
+
+	return strings.Join(parts, "; ")
 }
