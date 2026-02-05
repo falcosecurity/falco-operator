@@ -8,7 +8,7 @@ on:
 
 jobs:
   test-e2e:
-    name: tests-e2e
+    name: Tests E2E
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -19,19 +19,61 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Install the latest version of kind
+      - name: Install chainsaw
+        uses: kyverno/action-install-chainsaw@v0.2.12
+
+      - name: Check install
+        run: chainsaw version
+
+      - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
           chmod +x ./kind
           sudo mv ./kind /usr/local/bin/kind
 
-      - name: Verify kind installation
-        run: kind version
-
       - name: Create kind cluster
-        run: kind create cluster
+        run: kind create cluster --wait 60s
 
-      - name: Running Test e2e
+      - name: Build artifact-operator image
+        run: make docker-build OPERATOR=artifact IMG=falcosecurity/artifact-operator:e2e
+
+      - name: Build falco-operator image
+        run: make docker-build OPERATOR=falco IMG=falcosecurity/falco-operator:e2e ARTIFACT_OPERATOR_IMAGE=falcosecurity/artifact-operator:e2e
+
+      - name: Load images into kind
         run: |
-          go mod tidy
-          make test-e2e
+          kind load docker-image falcosecurity/artifact-operator:e2e
+          kind load docker-image falcosecurity/falco-operator:e2e
+
+      - name: Install CRDs
+        run: make install
+
+      - name: Deploy operator
+        run: make deploy IMG=falcosecurity/falco-operator:e2e
+
+      - name: Wait for operator
+        run: kubectl wait --for=condition=Available deployment/falco-operator -n falco-operator --timeout=120s
+
+      - name: Ensure scripts are executable
+        run: chmod +x .github/chainsaw/scripts/*.sh .github/chainsaw/*/verify.sh
+
+      - name: Run e2e tests
+        run: chainsaw test --config .github/chainsaw/chainsaw-config.yaml --test-dir .github/chainsaw/
+
+      - name: Show test report
+        if: always()
+        run: |
+          if [ -f chainsaw-report.json ]; then
+            echo "=== Chainsaw Test Report ==="
+            jq -r '
+              "Summary: \(.summary.passed // 0) passed, \(.summary.failed // 0) failed, \(.summary.skipped // 0) skipped",
+              "",
+              "Test Results:",
+              "-------------",
+              (.results[]? | "  [\(.result)] \(.name)")
+            ' chainsaw-report.json 2>/dev/null || cat chainsaw-report.json
+          fi
+
+      - name: Cleanup
+        if: always()
+        run: kind delete cluster || true
