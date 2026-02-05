@@ -22,9 +22,6 @@ jobs:
       - name: Install chainsaw
         uses: kyverno/action-install-chainsaw@v0.2.12
 
-      - name: Check install
-        run: chainsaw version
-
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -55,24 +52,10 @@ jobs:
         run: kubectl wait --for=condition=Available deployment/falco-operator -n falco-operator --timeout=120s
 
       - name: Ensure scripts are executable
-        run: chmod +x .github/chainsaw/scripts/*.sh .github/chainsaw/*/verify.sh
+        run: chmod +x .github/chainsaw/scripts/*.sh .github/chainsaw/*/verify.sh .github/chainsaw/*/verify-update.sh
 
       - name: Run e2e tests
         run: chainsaw test --config .github/chainsaw/chainsaw-config.yaml --test-dir .github/chainsaw/
-
-      - name: Show test report
-        if: always()
-        run: |
-          if [ -f chainsaw-report.json ]; then
-            echo "=== Chainsaw Test Report ==="
-            jq -r '
-              "Summary: \(.summary.passed // 0) passed, \(.summary.failed // 0) failed, \(.summary.skipped // 0) skipped",
-              "",
-              "Test Results:",
-              "-------------",
-              (.results[]? | "  [\(.result)] \(.name)")
-            ' chainsaw-report.json 2>/dev/null || cat chainsaw-report.json
-          fi
 
       - name: Cleanup
         if: always()

@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: rulesfile-inline
 spec:
-  description: Test Rulesfile with inline rules
+  description: Test Rulesfile with inline rules (create and update)
   steps:
     - name: Create Falco instance
       try:
@@ -32,6 +32,29 @@ spec:
             entrypoint: bash
             args:
               - ./verify.sh
+            timeout: 120s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+      catch:
+        - command:
+            entrypoint: bash
+            args:
+              - ../scripts/debug-artifact.sh
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+    - name: Update Rulesfile with new content
+      try:
+        - apply:
+            file: 03-rulesfile-updated.yaml
+    - name: Verify rules file was updated
+      try:
+        - command:
+            entrypoint: bash
+            args:
+              - ./verify-update.sh
             timeout: 120s
             env:
               - name: NAMESPACE
