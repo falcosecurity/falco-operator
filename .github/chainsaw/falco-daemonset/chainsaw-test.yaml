@@ -1,0 +1,24 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-daemonset
+spec:
+  description: Test Falco instance deployed as a DaemonSet
+  steps:
+    - name: Create Falco instance as DaemonSet
+      try:
+        - apply:
+            file: 00-falco.yaml
+        - assert:
+            file: 01-assert-daemonset.yaml
+    - name: Wait for Falco pod to be ready
+      try:
+        - wait:
+            apiVersion: v1
+            kind: Pod
+            selector: app.kubernetes.io/instance=falco-test
+            timeout: 90s
+            for:
+              condition:
+                name: Ready
+                value: "true"

@@ -1,0 +1,27 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: falco-operator-e2e
+spec:
+  # Global timeout for all tests
+  timeouts:
+    apply: 30s
+    assert: 5m
+    cleanup: 2m
+    delete: 30s
+    error: 30s
+    exec: 3m
+  # Fail fast on first error
+  failFast: false
+  # Run tests in parallel
+  parallel: 6
+  # Report format
+  reportFormat: JSON
+  reportName: chainsaw-report
+  # Skip delete (useful for debugging)
+  skipDelete: false
+  # Catch configuration for debugging (uses test namespace automatically)
+  catch:
+    - events: {}
+    - podLogs:
+        tail: 100
