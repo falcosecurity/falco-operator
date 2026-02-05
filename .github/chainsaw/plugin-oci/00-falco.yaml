@@ -1,0 +1,8 @@
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Falco
+metadata:
+  name: falco-test
+spec:
+  type: Deployment
+  replicas: 1
+  version: "0.43.0"

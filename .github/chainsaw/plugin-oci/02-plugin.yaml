@@ -1,0 +1,11 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: plugin-json
+spec:
+  ociArtifact:
+    reference: ghcr.io/falcosecurity/plugins/plugin/json:latest
+  config:
+    name: json
+    initConfig:
+      jsonPointers: "/test"

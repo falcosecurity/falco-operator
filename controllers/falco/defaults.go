@@ -74,7 +74,7 @@ var (
 
 	// DefaultFalcoLivenessProbe is the default liveness probe for the Falco container.
 	DefaultFalcoLivenessProbe = &corev1.Probe{
-		InitialDelaySeconds: 60,
+		InitialDelaySeconds: 30,
 		TimeoutSeconds:      5,
 		PeriodSeconds:       15,
 		FailureThreshold:    3,
@@ -89,7 +89,7 @@ var (
 
 	// DefaultFalcoReadinessProbe is the default readiness probe for the Falco container.
 	DefaultFalcoReadinessProbe = &corev1.Probe{
-		InitialDelaySeconds: 30,
+		InitialDelaySeconds: 15,
 		TimeoutSeconds:      5,
 		PeriodSeconds:       15,
 		FailureThreshold:    3,
