@@ -3,7 +3,7 @@ kind: Test
 metadata:
   name: rulesfile-oci
 spec:
-  description: Test Rulesfile with OCI artifact reference
+  description: Test Rulesfile with OCI artifact reference (create and update priority)
   steps:
     - name: Create Falco instance
       try:
@@ -32,6 +32,29 @@ spec:
             entrypoint: bash
             args:
               - ./verify.sh
+            timeout: 120s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+      catch:
+        - command:
+            entrypoint: bash
+            args:
+              - ../scripts/debug-artifact.sh
+            timeout: 30s
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+    - name: Update Rulesfile priority
+      try:
+        - apply:
+            file: 03-rulesfile-updated.yaml
+    - name: Verify rules file was renamed
+      try:
+        - command:
+            entrypoint: bash
+            args:
+              - ./verify-update.sh
             timeout: 120s
             env:
               - name: NAMESPACE

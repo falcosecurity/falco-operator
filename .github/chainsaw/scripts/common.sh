@@ -108,6 +108,68 @@ exec_in_falco() {
   kubectl exec "$pod" -n "$NAMESPACE" -c falco -- $cmd
 }
 
+# Wait for file content to be updated (contains new pattern, doesn't contain old)
+# Usage: wait_for_content_update "/path/to/file" "new_pattern" "old_pattern"
+# Returns: 0 on success, 1 on timeout
+wait_for_content_update() {
+  local file_path="$1"
+  local new_pattern="$2"
+  local old_pattern="${3:-}"
+  local pod
+  pod=$(get_pod)
+
+  echo "Waiting for content update in $file_path..."
+  for i in $(seq 1 30); do
+    # Check if new content is present
+    if kubectl exec "$pod" -n "$NAMESPACE" -c falco -- grep -q "$new_pattern" "$file_path" 2>/dev/null; then
+      # If old_pattern specified, verify it's gone
+      if [ -n "$old_pattern" ]; then
+        if ! kubectl exec "$pod" -n "$NAMESPACE" -c falco -- grep -q "$old_pattern" "$file_path" 2>/dev/null; then
+          echo "OK: Content updated (new pattern found, old pattern removed)"
+          return 0
+        fi
+      else
+        echo "OK: Content updated (new pattern found)"
+        return 0
+      fi
+    fi
+    if [ "$i" -eq 30 ]; then
+      echo "FAIL: Content not updated after 60 seconds"
+      kubectl exec "$pod" -n "$NAMESPACE" -c falco -- cat "$file_path" 2>/dev/null || true
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+# Wait for file to be renamed (old file removed, new file created)
+# Usage: wait_for_file_rename "/old/path" "/new/path"
+# Returns: 0 on success, 1 on timeout
+wait_for_file_rename() {
+  local old_path="$1"
+  local new_path="$2"
+  local pod
+  pod=$(get_pod)
+
+  echo "Waiting for file rename from $old_path to $new_path..."
+  for i in $(seq 1 30); do
+    # Check new file exists and old file is gone
+    if kubectl exec "$pod" -n "$NAMESPACE" -c falco -- test -s "$new_path" 2>/dev/null; then
+      if ! kubectl exec "$pod" -n "$NAMESPACE" -c falco -- test -e "$old_path" 2>/dev/null; then
+        echo "OK: File renamed successfully"
+        return 0
+      fi
+    fi
+    if [ "$i" -eq 30 ]; then
+      echo "FAIL: File not renamed after 60 seconds"
+      echo "Old file exists: $(kubectl exec "$pod" -n "$NAMESPACE" -c falco -- test -e "$old_path" 2>/dev/null && echo "yes" || echo "no")"
+      echo "New file exists: $(kubectl exec "$pod" -n "$NAMESPACE" -c falco -- test -e "$new_path" 2>/dev/null && echo "yes" || echo "no")"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
 # Wait for a plugin file to exist in directory
 # Usage: plugin_file=$(wait_for_plugin "/path/to/plugins")
 # Returns: plugin file path on stdout, exit 1 on timeout

@@ -15,9 +15,6 @@ spec:
   failFast: false
   # Run tests in parallel
   parallel: 6
-  # Report format
-  reportFormat: JSON
-  reportName: chainsaw-report
   # Skip delete (useful for debugging)
   skipDelete: false
   # Catch configuration for debugging (uses test namespace automatically)
