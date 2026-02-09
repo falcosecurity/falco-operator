@@ -1,0 +1,28 @@
+# Step template for verifying a file exists in the Falco pod and contains expected content.
+#
+# Required bindings:
+#   - file_path: The file path to check inside the Falco pod.
+#   - expected_content: The grep pattern to search for in the file.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-file-contains
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FILE_PATH
+            value: ($file_path)
+          - name: EXPECTED_CONTENT
+            value: ($expected_content)
+        content: |
+          bash ../common/scripts/verify_file_contains.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../common/scripts/debug_artifact.sh

@@ -1,0 +1,28 @@
+# Step template for verifying a plugin .so file was downloaded.
+#
+# Required bindings:
+#   - plugin_dir: The directory where plugins are stored.
+#   - min_size: (Optional) Minimum plugin file size in bytes. Default used by script: 1000.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-plugin
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: PLUGIN_DIR
+            value: ($plugin_dir)
+          - name: MIN_SIZE
+            value: ($min_size)
+        content: |
+          bash ../common/scripts/wait_for_plugin.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../common/scripts/debug_artifact.sh
