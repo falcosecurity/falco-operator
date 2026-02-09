@@ -1,0 +1,57 @@
+# Test: Rulesfile with OCI artifact reference (create and update priority).
+# Verifies the artifact-operator pulls a rules file from an OCI registry
+# and correctly handles priority changes (file rename).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci
+spec:
+  description: Test Rulesfile with OCI artifact reference (create and update priority)
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: rules_file_path
+      value: "/etc/falco/rules.d/50-01-rulesfile-oci-oci.yaml"
+    - name: rules_file_name
+      value: "50-01-rulesfile-oci-oci.yaml"
+    - name: renamed_rules_file_path
+      value: "/etc/falco/rules.d/60-01-rulesfile-oci-oci.yaml"
+  steps:
+    - name: Create Falco instance
+      use:
+        template: ../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod to be ready
+      use:
+        template: ../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Create Rulesfile from OCI registry
+      try:
+        - apply:
+            file: rulesfile.yaml
+
+    - name: Verify OCI rules file downloaded and loaded
+      use:
+        template: ../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: ($rules_file_path)
+        - name: min_size
+          value: "100"
+        - name: rules_file_name
+          value: ($rules_file_name)
+
+    - name: Update Rulesfile priority
+      try:
+        - apply:
+            file: rulesfile-updated.yaml
+
+    - name: Verify rules file was renamed after priority change
+      use:
+        template: ../common/_step_templates/verify-file-rename.yaml
+      bindings:
+        - name: old_file_path
+          value: ($rules_file_path)
+        - name: new_file_path
+          value: ($renamed_rules_file_path)

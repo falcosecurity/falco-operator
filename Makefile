@@ -82,9 +82,15 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # E2E test configuration using Kind cluster
 E2E_FALCO_IMG ?= falcosecurity/falco-operator:e2e
 E2E_ARTIFACT_IMG ?= falcosecurity/artifact-operator:e2e
+CHAINSAW_TEST_DIR ?= ./test/e2e/chainsaw
+CHAINSAW_CONFIG ?= ./test/e2e/chainsaw/.chainsaw.yaml
 
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet chainsaw ## Run e2e tests with Kind: build, deploy, test, cleanup.
+test-e2e: chainsaw ## Run chainsaw e2e tests (requires running cluster with operator deployed).
+	$(CHAINSAW) test --config $(CHAINSAW_CONFIG) --test-dir $(CHAINSAW_TEST_DIR)
+
+.PHONY: test-e2e-setup
+test-e2e-setup: manifests generate fmt vet ## Build images and deploy operator to Kind cluster for e2e testing.
 	@command -v kind >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -106,12 +112,13 @@ test-e2e: manifests generate fmt vet chainsaw ## Run e2e tests with Kind: build,
 	@$(MAKE) deploy IMG=$(E2E_FALCO_IMG)
 	@echo "=== Waiting for operator to be ready ==="
 	@kubectl wait --for=condition=Available deployment/falco-operator -n falco-operator --timeout=120s
-	@echo "=== Running e2e tests ==="
-	@chmod +x .github/chainsaw/scripts/*.sh .github/chainsaw/*/verify.sh 2>/dev/null || true
-	@$(CHAINSAW) test --config .github/chainsaw/chainsaw-config.yaml --test-dir .github/chainsaw/
-	@echo "=== Undeploying operator ==="
+
+.PHONY: test-e2e-teardown
+test-e2e-teardown: ## Undeploy operator after e2e testing.
 	@$(MAKE) undeploy ignore-not-found=true || true
-	@echo "=== E2E tests completed successfully ==="
+
+.PHONY: test-e2e-all
+test-e2e-all: test-e2e-setup test-e2e test-e2e-teardown ## Full e2e test lifecycle: setup, test, teardown.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter

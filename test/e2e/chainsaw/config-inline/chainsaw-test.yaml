@@ -1,0 +1,53 @@
+# Test: Config with inline configuration (create and update).
+# Verifies the artifact-operator creates a config file in the Falco pod
+# and correctly updates it when the Config CR is modified.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-inline
+spec:
+  description: Test Config with inline configuration (create and update)
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: config_file_path
+      value: "/etc/falco/config.d/50-config-test.yaml"
+  steps:
+    - name: Create Falco instance
+      use:
+        template: ../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod to be ready
+      use:
+        template: ../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Create Config with inline configuration
+      try:
+        - apply:
+            file: config.yaml
+
+    - name: Verify config file exists and has expected content
+      use:
+        template: ../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: ($config_file_path)
+        - name: expected_content
+          value: "json_output"
+
+    - name: Update Config with new content
+      try:
+        - apply:
+            file: config-updated.yaml
+
+    - name: Verify config file was updated
+      use:
+        template: ../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: ($config_file_path)
+        - name: new_content
+          value: "json_output: false"
+        - name: old_content
+          value: "json_output: true"

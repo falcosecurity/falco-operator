@@ -1,0 +1,31 @@
+# Step template for verifying a file content was updated in the Falco pod.
+#
+# Required bindings:
+#   - file_path: The file path to check inside the Falco pod.
+#   - new_content: The grep pattern for the new expected content.
+#   - old_content: The grep pattern for the old content that should be absent.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-content-update
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FILE_PATH
+            value: ($file_path)
+          - name: NEW_CONTENT
+            value: ($new_content)
+          - name: OLD_CONTENT
+            value: ($old_content)
+        content: |
+          bash ../common/scripts/verify_content_update.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../common/scripts/debug_artifact.sh

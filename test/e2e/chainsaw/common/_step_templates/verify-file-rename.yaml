@@ -1,0 +1,28 @@
+# Step template for verifying a file was renamed (e.g., priority change).
+#
+# Required bindings:
+#   - old_file_path: The old file path that should no longer exist.
+#   - new_file_path: The new file path that should now exist.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-file-rename
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OLD_FILE_PATH
+            value: ($old_file_path)
+          - name: NEW_FILE_PATH
+            value: ($new_file_path)
+        content: |
+          bash ../common/scripts/verify_file_rename.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../common/scripts/debug_artifact.sh

@@ -1,0 +1,36 @@
+# Global Chainsaw configuration file.
+# This file configures default timeouts and settings for all chainsaw e2e tests.
+# Individual tests can override these settings if needed.
+#
+# Note: Some settings like --quiet are CLI-only and configured in the Makefile.
+
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: falco-operator-e2e
+spec:
+  # Default timeouts for all operations.
+  # These are generous defaults to account for:
+  # - Slow CI environments
+  # - Falco pod startup time
+  # - OCI artifact download delays
+  timeouts:
+    apply: 30s
+    assert: 5m
+    cleanup: 2m
+    delete: 30s
+    error: 30s
+    exec: 3m
+
+  # Test execution settings.
+  # Can be overridden via CLI: chainsaw test --parallel N
+  parallel: 6
+  failFast: false
+  fullName: true
+  skipDelete: false
+
+  # Debug collection on failure.
+  catch:
+    - events: {}
+    - podLogs:
+        tail: 100

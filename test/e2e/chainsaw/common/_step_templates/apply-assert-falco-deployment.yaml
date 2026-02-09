@@ -1,0 +1,34 @@
+# Step template for creating a Falco instance as Deployment and asserting readiness.
+#
+# Required bindings:
+#   - falco_name: Name of the Falco instance.
+#   - falco_version: Falco version to deploy.
+#   - falco_replicas: Number of replicas to deploy.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-falco-deployment
+spec:
+  try:
+    # 1. Apply the Falco CR as Deployment.
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+          spec:
+            type: Deployment
+            replicas: ($falco_replicas)
+            version: ($falco_version)
+
+    # 2. Assert the Deployment is created and ready.
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ($falco_name)
+          status:
+            availableReplicas: ($falco_replicas)
+            readyReplicas: ($falco_replicas)

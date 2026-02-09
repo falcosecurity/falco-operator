@@ -51,11 +51,16 @@ jobs:
       - name: Wait for operator
         run: kubectl wait --for=condition=Available deployment/falco-operator -n falco-operator --timeout=120s
 
-      - name: Ensure scripts are executable
-        run: chmod +x .github/chainsaw/scripts/*.sh .github/chainsaw/*/verify.sh .github/chainsaw/*/verify-update.sh
-
       - name: Run e2e tests
-        run: chainsaw test --config .github/chainsaw/chainsaw-config.yaml --test-dir .github/chainsaw/
+        run: chainsaw test --config test/e2e/chainsaw/.chainsaw.yaml --test-dir test/e2e/chainsaw/
+
+      - name: Collect operator logs
+        if: failure()
+        run: |
+          echo "=== Falco Operator Logs ==="
+          kubectl logs -n falco-operator deployment/falco-operator --tail=200 || true
+          echo "=== Cluster Events ==="
+          kubectl get events --all-namespaces --sort-by='.lastTimestamp' | tail -50 || true
 
       - name: Cleanup
         if: always()
