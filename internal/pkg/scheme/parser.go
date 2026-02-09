@@ -1671,6 +1671,9 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: updatedReplicas
       type:
         scalar: numeric
+    - name: terminatingReplicas
+      type:
+        scalar: numeric
 - name: io.k8s.api.apps.v1.DeploymentStrategy
   map:
     fields:

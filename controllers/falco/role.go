@@ -50,7 +50,7 @@ func generateRole(cl client.Client, falco *instancev1alpha1.Falco) (*unstructure
 					{
 						APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 						Resources: []string{"configs", "rulesfiles", "plugins"},
-						Verbs:     []string{"get", "update", "list", "watch"},
+						Verbs:     []string{"get", "update", "patch", "list", "watch"},
 					},
 				},
 			}

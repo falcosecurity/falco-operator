@@ -97,7 +97,7 @@ func TestGenerateRole(t *testing.T) {
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 				Resources: []string{"configs", "rulesfiles", "plugins"},
-				Verbs:     []string{"get", "update", "list", "watch"},
+				Verbs:     []string{"get", "update", "patch", "list", "watch"},
 			})
 		})
 	}
