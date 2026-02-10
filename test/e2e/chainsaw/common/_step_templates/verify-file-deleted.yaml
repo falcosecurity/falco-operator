@@ -1,12 +1,11 @@
-# Step template for verifying a file exists in the Falco pod and contains expected content.
+# Step template for verifying a file has been removed from the Falco pod.
 #
 # Required bindings:
-#   - file_path: The file path to check inside the Falco pod.
-#   - expected_content: The grep pattern to search for in the file.
+#   - file_path: The file path that should no longer exist inside the Falco pod.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: StepTemplate
 metadata:
-  name: verify-file-contains
+  name: verify-file-deleted
 spec:
   try:
     - script:
@@ -15,10 +14,8 @@ spec:
             value: ($namespace)
           - name: FILE_PATH
             value: ($file_path)
-          - name: EXPECTED_CONTENT
-            value: ($expected_content)
         content: |
-          bash ../../common/scripts/verify_file_contains.sh
+          bash ../../common/scripts/verify_file_deleted.sh
   catch:
     - script:
         env:

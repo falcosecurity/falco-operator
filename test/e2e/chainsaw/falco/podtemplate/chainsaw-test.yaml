@@ -1,0 +1,73 @@
+# Test: Falco instance with custom podTemplateSpec.
+# Verifies custom labels, tolerations, and resource limits are applied to pods.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-custom-podtemplate
+spec:
+  description: Test Falco instance with custom podTemplateSpec fields
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    - name: Create Falco instance with custom podTemplateSpec
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                type: DaemonSet
+                version: ($falco_version)
+                podTemplateSpec:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                  spec:
+                    tolerations:
+                      - key: test-tol
+                        operator: Exists
+                        effect: NoSchedule
+                    containers:
+                      - name: falco
+                        resources:
+                          limits:
+                            cpu: 500m
+                            memory: 1Gi
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              status:
+                numberReady: 1
+                desiredNumberScheduled: 1
+    - name: Wait for Falco pod to be ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Assert pod has custom label
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                labels:
+                  custom-label: test-value
+              status:
+                phase: Running
+    - name: Assert pod has toleration
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=falco-test -o jsonpath='{.items[0].spec.tolerations[*].key}' | grep -q "test-tol"
+            check:
+              ($error == null): true

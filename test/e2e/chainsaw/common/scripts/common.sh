@@ -18,15 +18,22 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FALCO_LABEL="${FALCO_LABEL:-app.kubernetes.io/instance=falco-test}"
 RETRY_COUNT="${RETRY_COUNT:-30}"
 RETRY_DELAY="${RETRY_DELAY:-2}"
+_CACHED_POD=""
 
 # get_pod returns the name of the Falco pod matching the label selector.
+# The result is cached for the lifetime of the script (one shell invocation).
 get_pod() {
+  if [ -n "${_CACHED_POD}" ]; then
+    echo "${_CACHED_POD}"
+    return 0
+  fi
   local pod
   pod=$(kubectl get pods -n "${NAMESPACE}" -l "${FALCO_LABEL}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
   if [ -z "${pod}" ]; then
     echo '{"error": "No Falco pod found", "namespace": "'"${NAMESPACE}"'", "label": "'"${FALCO_LABEL}"'"}' >&2
     return 1
   fi
+  _CACHED_POD="${pod}"
   echo "${pod}"
 }
 

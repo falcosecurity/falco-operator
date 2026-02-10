@@ -1,0 +1,13 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: full-stack-rules
+spec:
+  priority: 50
+  inlineRules: |
+    - rule: Full Stack Test Rule
+      desc: A test rule for full stack e2e testing
+      condition: evt.type = open
+      output: "Full stack test rule triggered"
+      priority: DEBUG
+      enabled: false

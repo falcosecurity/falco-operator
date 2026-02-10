@@ -24,7 +24,7 @@ spec:
 
   # Test execution settings.
   # Can be overridden via CLI: chainsaw test --parallel N
-  parallel: 6
+  parallel: 5
   failFast: false
   fullName: true
   skipDelete: false

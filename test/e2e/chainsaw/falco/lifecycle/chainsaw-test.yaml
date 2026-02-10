@@ -1,0 +1,155 @@
+# Test: Falco CRD lifecycle — create, idempotent, type-switch, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-lifecycle
+spec:
+  description: "Falco DaemonSet lifecycle: create → idempotent → type-switch → delete"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    # --- falco-daemonset ---
+    - name: Create Falco as DaemonSet
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Assert Falco status conditions
+      use:
+        template: ../../common/_step_templates/assert-falco-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+    # --- falco-idempotent ---
+    - name: Re-apply the same Falco resource
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                type: DaemonSet
+                version: ($falco_version)
+    - name: Wait for reconciliation after re-apply
+      use:
+        template: ../../common/_step_templates/assert-falco-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+    - name: Verify DaemonSet stable after re-apply
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              RESTARTS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/instance=falco-test -o jsonpath='{.items[0].status.containerStatuses[?(@.name=="falco")].restartCount}')
+              RESTARTS="${RESTARTS:-0}"
+              if [ "$RESTARTS" != "0" ]; then
+                echo "{\"error\": \"Pod restarted\", \"restartCount\": \"$RESTARTS\"}"
+                exit 1
+              fi
+              echo "{\"status\": \"ok\", \"restartCount\": \"$RESTARTS\"}"
+            check:
+              ($error == null): true
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              status:
+                numberReady: 1
+                desiredNumberScheduled: 1
+    # --- falco-type-switch ---
+    - name: Patch Falco type to Deployment
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                type: Deployment
+                replicas: 1
+    - name: Assert DaemonSet no longer exists
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+    - name: Assert Deployment exists and is ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+    - name: Wait for new pod after type switch
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    # --- falco-delete ---
+    - name: Delete Falco CR
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+    - name: Verify namespaced resources are gone
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($falco_name)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($falco_name)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($falco_name)
+    - name: Verify cluster-scoped resources are gone
+      try:
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: (join('--', [$falco_name, $namespace]))
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('--', [$falco_name, $namespace]))

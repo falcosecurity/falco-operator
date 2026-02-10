@@ -1,0 +1,54 @@
+# Test: CRD validation rejects invalid resources.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: validation
+spec:
+  description: Test CRD validation rejects invalid resources
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    - name: Reject invalid Falco type
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: invalid-type
+              spec:
+                type: StatefulSet
+            expect:
+              - check:
+                  ($error != null): true
+    - name: Reject Config priority over 99
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-high
+              spec:
+                priority: 100
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true
+    - name: Reject Config priority below 0
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-low
+              spec:
+                priority: -1
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true

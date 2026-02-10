@@ -3,6 +3,6 @@ kind: Rulesfile
 metadata:
   name: rulesfile-oci
 spec:
-  priority: 50
+  priority: 60
   ociArtifact:
-    reference: ghcr.io/falcosecurity/rules/falco-rules:latest
+    reference: ghcr.io/falcosecurity/rules/falco-rules:3

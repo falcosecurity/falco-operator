@@ -1,0 +1,49 @@
+# Test: Falco Deployment lifecycle — create, status, scale.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-deployment
+spec:
+  description: "Falco Deployment: create → status → scale replicas"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: falco_replicas
+      value: 1
+  steps:
+    - name: Create Falco instance as Deployment
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-deployment.yaml
+    - name: Wait for Falco pod to be ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Assert Falco Deployment status conditions
+      use:
+        template: ../../common/_step_templates/assert-falco-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+    - name: Scale Deployment replicas
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                replicas: 2
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+              spec:
+                replicas: 2
+              status:
+                readyReplicas: 2

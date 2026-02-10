@@ -1,0 +1,278 @@
+# Test: Rulesfile CRD lifecycle — inline, OCI, ConfigMap, multi-source, all-sources, remove-source, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-lifecycle
+spec:
+  description: "Rulesfile lifecycle: inline → OCI → ConfigMap → multi-source → all-sources → remove-source → delete"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    # --- Shared setup ---
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    # --- rulesfile-inline: create ---
+    - name: Create Rulesfile with inline rules
+      try:
+        - apply:
+            file: rulesfile-inline.yaml
+
+    - name: Verify inline rules file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-inline-inline.yaml"
+        - name: expected_content
+          value: "Test Inline Rule"
+
+    # --- rulesfile-inline: update ---
+    - name: Update Rulesfile with new inline content
+      try:
+        - apply:
+            file: rulesfile-inline-updated.yaml
+
+    - name: Verify inline rules file updated
+      use:
+        template: ../../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-inline-inline.yaml"
+        - name: new_content
+          value: "Updated Inline Rule"
+        - name: old_content
+          value: "Test Inline Rule"
+
+    # --- rulesfile-oci: create ---
+    - name: Create Rulesfile from OCI registry
+      try:
+        - apply:
+            file: rulesfile-oci.yaml
+
+    - name: Verify OCI rules file downloaded
+      use:
+        template: ../../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-01-rulesfile-oci-oci.yaml"
+        - name: min_size
+          value: "100"
+        - name: rules_file_name
+          value: "50-01-rulesfile-oci-oci.yaml"
+
+    # --- rulesfile-oci: priority update ---
+    - name: Update Rulesfile OCI priority
+      try:
+        - apply:
+            file: rulesfile-oci-updated.yaml
+
+    - name: Verify rules file renamed after priority change
+      use:
+        template: ../../common/_step_templates/verify-file-rename.yaml
+      bindings:
+        - name: old_file_path
+          value: "/etc/falco/rules.d/50-01-rulesfile-oci-oci.yaml"
+        - name: new_file_path
+          value: "/etc/falco/rules.d/60-01-rulesfile-oci-oci.yaml"
+
+    # --- rulesfile-configmap: create ---
+    - name: Create ConfigMap with rules content
+      try:
+        - apply:
+            file: configmap.yaml
+
+    - name: Create Rulesfile with ConfigMap reference
+      try:
+        - apply:
+            file: rulesfile-configmap.yaml
+
+    - name: Verify ConfigMap rules file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-02-rulesfile-cm-configmap.yaml"
+        - name: expected_content
+          value: "Test ConfigMap Rule"
+
+    # --- rulesfile-configmap: update ---
+    - name: Update ConfigMap with new content
+      try:
+        - apply:
+            file: configmap-updated.yaml
+
+    - name: Verify ConfigMap rules file updated
+      use:
+        template: ../../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-02-rulesfile-cm-configmap.yaml"
+        - name: new_content
+          value: "Updated ConfigMap Rule"
+        - name: old_content
+          value: "Test ConfigMap Rule"
+
+    # --- rulesfile-multi-source ---
+    - name: Create Rulesfile with OCI and inline sources
+      try:
+        - apply:
+            file: rulesfile-multi-source.yaml
+
+    - name: Verify multi-source OCI file exists
+      use:
+        template: ../../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-01-rulesfile-multi-oci.yaml"
+        - name: min_size
+          value: "100"
+        - name: rules_file_name
+          value: "50-01-rulesfile-multi-oci.yaml"
+
+    - name: Verify multi-source inline file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-multi-inline.yaml"
+        - name: expected_content
+          value: "Inline Test Rule"
+
+    # --- rulesfile-all-sources ---
+    - name: Create ConfigMap for all-sources test
+      try:
+        - apply:
+            file: configmap-all.yaml
+
+    - name: Create Rulesfile with all three sources
+      try:
+        - apply:
+            file: rulesfile-all-sources.yaml
+
+    - name: Verify all three rules files exist
+      use:
+        template: ../../common/_step_templates/verify-dir-listing.yaml
+      bindings:
+        - name: dir_path
+          value: "/etc/falco/rules.d"
+        - name: expected_files
+          value: "50-01-rulesfile-all-oci.yaml,50-02-rulesfile-all-configmap.yaml,50-03-rulesfile-all-inline.yaml"
+
+    # --- rulesfile-remove-source ---
+    - name: Create Rulesfile with OCI and inline for removal test
+      try:
+        - apply:
+            file: rulesfile-remove-source.yaml
+
+    - name: Verify OCI file exists for removal test
+      use:
+        template: ../../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-01-rulesfile-rm-oci.yaml"
+        - name: min_size
+          value: "100"
+        - name: rules_file_name
+          value: ""
+
+    - name: Verify inline file exists for removal test
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-rm-inline.yaml"
+        - name: expected_content
+          value: "Removable Inline Rule"
+
+    - name: Remove inline source from Rulesfile
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: rulesfile-rm
+              spec:
+                inlineRules: null
+
+    - name: Verify inline rules file deleted
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-rm-inline.yaml"
+
+    - name: Verify OCI rules file still exists
+      use:
+        template: ../../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-01-rulesfile-rm-oci.yaml"
+        - name: min_size
+          value: "100"
+        - name: rules_file_name
+          value: ""
+
+    # --- rulesfile-selector: matching ---
+    - name: Apply Rulesfile with matching selector
+      try:
+        - apply:
+            file: rulesfile-matching.yaml
+
+    - name: Verify matching rulesfile exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-matching-inline.yaml"
+        - name: expected_content
+          value: "Matching Selector Rule"
+
+    # --- rulesfile-selector: non-matching ---
+    - name: Apply Rulesfile with non-matching selector
+      try:
+        - apply:
+            file: rulesfile-nonmatching.yaml
+
+    - name: Wait for potential file write
+      try:
+        # No positive signal exists for "controller decided not to create file".
+        - sleep:
+            duration: 5s
+
+    - name: Verify non-matching rulesfile does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-nonmatching-inline.yaml"
+
+    # --- rulesfile-delete ---
+    - name: Delete Rulesfile CR
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: rulesfile-inline
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: rulesfile-inline
+
+    - name: Verify rules file removed
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-03-rulesfile-inline-inline.yaml"

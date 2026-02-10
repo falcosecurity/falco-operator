@@ -1,0 +1,9 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-low
+spec:
+  priority: 30
+  config: |
+    json_output: true
+    log_level: info
