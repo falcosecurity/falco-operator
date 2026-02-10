@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-rules-cm
+data:
+  rules.yaml: |
+    - rule: Updated ConfigMap Rule
+      desc: An updated test rule from ConfigMap
+      condition: evt.type = openat
+      output: "Updated ConfigMap rule triggered"
+      priority: INFO
+      source: syscall

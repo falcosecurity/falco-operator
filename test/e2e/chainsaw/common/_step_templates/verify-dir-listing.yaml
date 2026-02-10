@@ -1,0 +1,28 @@
+# Step template for listing files in a directory and verifying expected files exist.
+#
+# Required bindings:
+#   - dir_path: The directory path to list inside the Falco pod.
+#   - expected_files: Comma-separated list of filenames expected in the directory.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-dir-listing
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: DIR_PATH
+            value: ($dir_path)
+          - name: EXPECTED_FILES
+            value: ($expected_files)
+        content: |
+          bash ../../common/scripts/verify_dir_listing.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../../common/scripts/debug_artifact.sh

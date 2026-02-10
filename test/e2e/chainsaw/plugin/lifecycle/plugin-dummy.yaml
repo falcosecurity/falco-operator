@@ -1,0 +1,7 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: dummy
+spec:
+  ociArtifact:
+    reference: ghcr.io/falcosecurity/plugins/plugin/dummy:latest

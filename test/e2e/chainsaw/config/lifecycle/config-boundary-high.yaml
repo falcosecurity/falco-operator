@@ -1,0 +1,8 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-boundary-high
+spec:
+  priority: 99
+  config: |
+    log_level: debug

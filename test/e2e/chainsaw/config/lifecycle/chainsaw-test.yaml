@@ -1,0 +1,213 @@
+# Test: Config CRD lifecycle — inline CRUD, priority rename, selector, multi-priority, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-lifecycle
+spec:
+  description: "Config lifecycle: inline → priority → selector → multi-priority → delete"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    # --- Shared setup ---
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    # --- config-inline: create ---
+    - name: Create Config with inline configuration
+      try:
+        - apply:
+            file: config-inline.yaml
+
+    - name: Verify inline config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-test.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    # --- config-inline: update ---
+    - name: Update Config with new content
+      try:
+        - apply:
+            file: config-inline-updated.yaml
+
+    - name: Verify config file was updated
+      use:
+        template: ../../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-test.yaml"
+        - name: new_content
+          value: "json_output: false"
+        - name: old_content
+          value: "json_output: true"
+
+    # --- config-priority: create + rename ---
+    - name: Create Config with priority 50
+      try:
+        - apply:
+            file: config-priority.yaml
+
+    - name: Verify config at priority-50 path
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-priority.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Update Config priority to 30
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: config-priority
+              spec:
+                priority: 30
+
+    - name: Verify old config file deleted
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-priority.yaml"
+
+    - name: Verify new config file at renamed path
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/30-config-priority.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    # --- config-selector: matching ---
+    - name: Apply Config with matching selector
+      try:
+        - apply:
+            file: config-matching.yaml
+
+    - name: Verify matching config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-matching.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    # --- config-selector: non-matching ---
+    - name: Apply Config with non-matching selector
+      try:
+        - apply:
+            file: config-nonmatching.yaml
+
+    - name: Wait for potential file write
+      try:
+        - sleep:
+            duration: 5s
+
+    - name: Verify non-matching config file does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-nonmatching.yaml"
+
+    # --- config-multiple-priorities ---
+    - name: Apply both priority configs
+      try:
+        - apply:
+            file: config-low.yaml
+        - apply:
+            file: config-high.yaml
+
+    - name: Verify both config files exist
+      use:
+        template: ../../common/_step_templates/verify-dir-listing.yaml
+      bindings:
+        - name: dir_path
+          value: "/etc/falco/config.d"
+        - name: expected_files
+          value: "30-config-low.yaml,70-config-high.yaml"
+
+    - name: Verify low-priority config content
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/30-config-low.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify high-priority config content
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/70-config-high.yaml"
+        - name: expected_content
+          value: "log_level: debug"
+
+    # --- config-priority-boundaries ---
+    - name: Apply Config with minimum priority (0)
+      try:
+        - apply:
+            file: config-boundary-low.yaml
+
+    - name: Verify priority-0 config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/00-config-boundary-low.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Apply Config with maximum priority (99)
+      try:
+        - apply:
+            file: config-boundary-high.yaml
+
+    - name: Verify priority-99 config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/99-config-boundary-high.yaml"
+        - name: expected_content
+          value: "log_level"
+
+    # --- config-delete ---
+    - name: Delete Config CR
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: config-test
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: config-test
+
+    - name: Verify config file removed
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-config-test.yaml"

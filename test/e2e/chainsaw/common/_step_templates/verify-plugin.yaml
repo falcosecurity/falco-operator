@@ -18,11 +18,11 @@ spec:
           - name: MIN_SIZE
             value: ($min_size)
         content: |
-          bash ../common/scripts/wait_for_plugin.sh
+          bash ../../common/scripts/wait_for_plugin.sh
   catch:
     - script:
         env:
           - name: NAMESPACE
             value: ($namespace)
         content: |
-          bash ../common/scripts/debug_artifact.sh
+          bash ../../common/scripts/debug_artifact.sh

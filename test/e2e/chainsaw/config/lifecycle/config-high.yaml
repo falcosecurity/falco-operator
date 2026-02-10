@@ -1,0 +1,9 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-high
+spec:
+  priority: 70
+  config: |
+    log_level: debug
+    log_stderr: true

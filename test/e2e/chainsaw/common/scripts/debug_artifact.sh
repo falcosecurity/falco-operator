@@ -42,7 +42,6 @@ fi
 
 echo ""
 echo "=== Falco Logs ==="
-falco_pod=$(get_pod 2>/dev/null || echo "")
 if [ -n "${falco_pod}" ]; then
   kubectl logs -n "${NAMESPACE}" "${falco_pod}" -c falco --tail=50 2>/dev/null || echo "Unable to get Falco logs"
 else

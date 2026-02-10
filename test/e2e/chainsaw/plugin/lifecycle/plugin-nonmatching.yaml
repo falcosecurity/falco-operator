@@ -1,11 +1,10 @@
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Plugin
 metadata:
-  name: plugin-json
+  name: plugin-nonmatching
 spec:
   ociArtifact:
     reference: ghcr.io/falcosecurity/plugins/plugin/json:latest
-  config:
-    name: json
-    initConfig:
-      jsonPointers: "/test"
+  selector:
+    matchLabels:
+      non-existent-label: does-not-exist

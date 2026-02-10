@@ -21,11 +21,11 @@ spec:
           - name: RULES_FILE_NAME
             value: ($rules_file_name)
         content: |
-          bash ../common/scripts/verify_file_size.sh
+          bash ../../common/scripts/verify_file_size.sh
   catch:
     - script:
         env:
           - name: NAMESPACE
             value: ($namespace)
         content: |
-          bash ../common/scripts/debug_artifact.sh
+          bash ../../common/scripts/debug_artifact.sh

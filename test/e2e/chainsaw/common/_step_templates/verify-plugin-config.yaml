@@ -1,0 +1,25 @@
+# Step template for verifying the plugin config file contains expected plugin entries.
+#
+# Required bindings:
+#   - plugin_name: The plugin name to search for in the config.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: verify-plugin-config
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: PLUGIN_NAME
+            value: ($plugin_name)
+        content: |
+          bash ../../common/scripts/verify_plugin_config.sh
+  catch:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../../common/scripts/debug_artifact.sh

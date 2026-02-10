@@ -1,0 +1,15 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-multi
+spec:
+  priority: 50
+  ociArtifact:
+    reference: ghcr.io/falcosecurity/rules/falco-rules:3
+  inlineRules: |
+    - rule: Inline Test Rule
+      desc: Test rule from inline
+      condition: evt.type = open
+      output: "Inline test"
+      priority: WARNING
+      source: syscall
