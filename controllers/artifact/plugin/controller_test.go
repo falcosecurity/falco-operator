@@ -336,6 +336,54 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 		assert.True(t, pc.isEmpty())
 	})
 
+	t.Run("changing spec.config.name removes stale entry via reconciler tracking", func(t *testing.T) {
+		pc := &PluginsConfig{}
+		crToConfigName := make(map[string]string)
+
+		// Initial: CR "my-plugin" with spec.config.name = "json".
+		plugin := &artifactv1alpha1.Plugin{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
+			Spec: artifactv1alpha1.PluginSpec{
+				Config: &artifactv1alpha1.PluginConfig{
+					Name: "json",
+				},
+			},
+		}
+		crToConfigName[plugin.Name] = resolveConfigName(plugin)
+		pc.addConfig(plugin)
+		require.Len(t, pc.Configs, 1)
+		assert.Equal(t, "json", pc.Configs[0].Name)
+		assert.Equal(t, []string{"json"}, pc.LoadPlugins)
+
+		// User changes spec.config.name from "json" to "json-v2".
+		pluginRenamed := &artifactv1alpha1.Plugin{
+			ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
+			Spec: artifactv1alpha1.PluginSpec{
+				Config: &artifactv1alpha1.PluginConfig{
+					Name: "json-v2",
+				},
+			},
+		}
+
+		// Reconciler detects name change and removes stale entry before addConfig.
+		newName := resolveConfigName(pluginRenamed)
+		if oldName, ok := crToConfigName[pluginRenamed.Name]; ok && oldName != newName {
+			pc.removeByName(oldName)
+		}
+		crToConfigName[pluginRenamed.Name] = newName
+		pc.addConfig(pluginRenamed)
+
+		// The old "json" entry must be gone, only "json-v2" should remain.
+		require.Len(t, pc.Configs, 1)
+		assert.Equal(t, "json-v2", pc.Configs[0].Name)
+		assert.Equal(t, []string{"json-v2"}, pc.LoadPlugins)
+
+		// Deletion should clean up fully.
+		pc.removeConfig(pluginRenamed)
+		delete(crToConfigName, pluginRenamed.Name)
+		assert.True(t, pc.isEmpty())
+	})
+
 	t.Run("add, update, then remove", func(t *testing.T) {
 		pc := &PluginsConfig{}
 

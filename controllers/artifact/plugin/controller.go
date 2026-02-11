@@ -52,6 +52,7 @@ func NewPluginReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 		artifactManager: artifact.NewManager(cl, namespace),
 		PluginsConfig:   &PluginsConfig{},
 		nodeName:        nodeName,
+		crToConfigName:  make(map[string]string),
 	}
 }
 
@@ -63,6 +64,7 @@ type PluginReconciler struct {
 	artifactManager *artifact.Manager
 	PluginsConfig   *PluginsConfig
 	nodeName        string
+	crToConfigName  map[string]string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -165,6 +167,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 
 			// Remove the plugin configuration.
 			r.PluginsConfig.removeConfig(plugin)
+			delete(r.crToConfigName, plugin.Name)
 
 			// Write the updated configuration to the file.
 			if err := r.removePluginConfig(ctx, plugin); err != nil {
@@ -191,6 +194,13 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Ensuring plugin configuration")
+
+	configName := resolveConfigName(plugin)
+	if oldName, ok := r.crToConfigName[plugin.Name]; ok && oldName != configName {
+		r.PluginsConfig.removeByName(oldName)
+	}
+	r.crToConfigName[plugin.Name] = configName
+
 	r.PluginsConfig.addConfig(plugin)
 	// Convert the struct to string.
 	pluginConfigString, err := r.PluginsConfig.toString()
@@ -271,6 +281,13 @@ type PluginsConfig struct {
 	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
 }
 
+func resolveConfigName(plugin *artifactv1alpha1.Plugin) string {
+	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
+		return plugin.Spec.Config.Name
+	}
+	return plugin.Name
+}
+
 func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 	config := PluginConfig{
 		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
@@ -315,12 +332,10 @@ func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 }
 
 func (pc *PluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
-	// Resolve the effective config name (same logic as addConfig).
-	name := plugin.Name
-	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
-		name = plugin.Spec.Config.Name
-	}
+	pc.removeByName(resolveConfigName(plugin))
+}
 
+func (pc *PluginsConfig) removeByName(name string) {
 	for i, c := range pc.Configs {
 		if c.Name == name {
 			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
@@ -337,7 +352,6 @@ func (pc *PluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
 }
 
 func (pc *PluginsConfig) toString() (string, error) {
-	// Convert the struct to YAML.
 	data, err := yaml.Marshal(pc)
 	if err != nil {
 		return "", err
