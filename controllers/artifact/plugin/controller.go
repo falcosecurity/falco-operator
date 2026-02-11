@@ -248,24 +248,19 @@ type PluginConfig struct {
 }
 
 func (p *PluginConfig) isSame(other *PluginConfig) bool {
-	if p.Name != other.Name {
-		return false
-	}
-	// Check if the maps are equal.
-	if len(p.InitConfig) != len(other.InitConfig) {
-		return false
-	}
-	// Check if the keys and values are equal.
-	for key, value := range p.InitConfig {
-		if otherValue, ok := other.InitConfig[key]; !ok || value != otherValue {
-			return false
-		}
-	}
 	if p.LibraryPath != other.LibraryPath {
 		return false
 	}
 	if p.OpenParams != other.OpenParams {
 		return false
+	}
+	if len(p.InitConfig) != len(other.InitConfig) {
+		return false
+	}
+	for key, value := range p.InitConfig {
+		if otherValue, ok := other.InitConfig[key]; !ok || value != otherValue {
+			return false
+		}
 	}
 	return true
 }
@@ -282,7 +277,6 @@ func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 		Name:        plugin.Name,
 	}
 
-	// If not nil, set the values that are not empty.
 	if plugin.Spec.Config != nil {
 		if plugin.Spec.Config.InitConfig != nil {
 			config.InitConfig = plugin.Spec.Config.InitConfig
@@ -298,54 +292,44 @@ func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 		}
 	}
 
-	// Check if the pluginConfig already exists in the list.
+	// If an entry with the same name already exists and is identical, skip the update
+	// to avoid unnecessary writes to the config file mounted in the pod.
 	for i, c := range pc.Configs {
-		if c.isSame(&config) {
-			// Remove the plugin from the list and add the current plugin.
+		if c.Name == config.Name {
+			if c.isSame(&config) {
+				return
+			}
 			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
 			break
 		}
 	}
+	pc.Configs = append(pc.Configs, config)
 
-	// Add the plugin to the list if it doesn't exist.
-	if len(pc.Configs) == 0 {
-		pc.Configs = append(pc.Configs, config)
-	} else {
-		found := false
-		for _, c := range pc.Configs {
-			if c.Name == plugin.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			pc.Configs = append(pc.Configs, config)
-		}
-	}
-
-	// Check if the plugin is already in the list.
+	// Add to LoadPlugins if not already present (use config.Name for consistency).
 	for _, c := range pc.LoadPlugins {
-		if c == plugin.Name {
+		if c == config.Name {
 			return
 		}
 	}
-	pc.LoadPlugins = append(pc.LoadPlugins, plugin.Name)
+	pc.LoadPlugins = append(pc.LoadPlugins, config.Name)
 }
 
 func (pc *PluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
-	// Check if the pluginConfig already exists in the list.
+	// Resolve the effective config name (same logic as addConfig).
+	name := plugin.Name
+	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
+		name = plugin.Spec.Config.Name
+	}
+
 	for i, c := range pc.Configs {
-		if c.Name == plugin.Name {
-			// Remove the plugin from the list.
+		if c.Name == name {
 			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
 			break
 		}
 	}
 
-	// Check if the plugin is already in the list.
 	for i, c := range pc.LoadPlugins {
-		if c == plugin.Name {
-			// Remove the plugin from the list.
+		if c == name {
 			pc.LoadPlugins = append(pc.LoadPlugins[:i], pc.LoadPlugins[i+1:]...)
 			break
 		}
