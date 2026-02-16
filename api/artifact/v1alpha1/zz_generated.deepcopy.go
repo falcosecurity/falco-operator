@@ -24,6 +24,7 @@ package v1alpha1
 
 import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
 )
@@ -161,10 +162,8 @@ func (in *PluginConfig) DeepCopyInto(out *PluginConfig) {
 	*out = *in
 	if in.InitConfig != nil {
 		in, out := &in.InitConfig, &out.InitConfig
-		*out = make(map[string]string, len(*in))
-		for key, val := range *in {
-			(*out)[key] = val
-		}
+		*out = new(apiextensionsv1.JSON)
+		(*in).DeepCopyInto(*out)
 	}
 }
 

@@ -43,11 +43,9 @@ spec:
                 description: Config specifies the configuration for the plugin.
                 properties:
                   initConfig:
-                    additionalProperties:
-                      type: string
                     description: InitConfig is the initialization configuration for
                       the plugin.
-                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   libraryPath:
                     description: |-
                       LibraryPath is the path to the plugin library, e.g., /usr/share/falco/plugins/myplugin.so.

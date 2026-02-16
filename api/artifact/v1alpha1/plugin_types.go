@@ -19,6 +19,7 @@
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -43,7 +44,7 @@ type PluginConfig struct {
 	// If omitted, it is set to /usr/share/falco/plugins/plugin-name.so.
 	LibraryPath string `json:"libraryPath,omitempty"`
 	// InitConfig is the initialization configuration for the plugin.
-	InitConfig map[string]string `json:"initConfig,omitempty"`
+	InitConfig *apiextensionsv1.JSON `json:"initConfig,omitempty"`
 	// OpenParams is the open parameters for the plugin.
 	OpenParams string `json:"openParams,omitempty"`
 }
