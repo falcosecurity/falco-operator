@@ -20,8 +20,11 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 
 	"gopkg.in/yaml.v3"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -251,10 +254,27 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 
 // PluginConfig is the configuration for a plugin.
 type PluginConfig struct {
-	InitConfig  map[string]string `yaml:"init_config,omitempty"`
-	LibraryPath string            `yaml:"library_path"`
-	Name        string            `yaml:"name"`
-	OpenParams  string            `yaml:"open_params,omitempty"`
+	InitConfig  *InitConfig `yaml:"init_config,omitempty"`
+	LibraryPath string      `yaml:"library_path"`
+	Name        string      `yaml:"name"`
+	OpenParams  string      `yaml:"open_params,omitempty"`
+}
+
+// InitConfig wraps apiextensionsv1.JSON to provide proper YAML marshaling.
+type InitConfig struct {
+	*apiextensionsv1.JSON
+}
+
+// MarshalYAML implements yaml.Marshaler to serialize the JSON content as nested YAML.
+func (c *InitConfig) MarshalYAML() (interface{}, error) {
+	if c == nil || c.JSON == nil || len(c.Raw) == 0 {
+		return nil, nil
+	}
+	var data interface{}
+	if err := json.Unmarshal(c.Raw, &data); err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (p *PluginConfig) isSame(other *PluginConfig) bool {
@@ -264,15 +284,13 @@ func (p *PluginConfig) isSame(other *PluginConfig) bool {
 	if p.OpenParams != other.OpenParams {
 		return false
 	}
-	if len(p.InitConfig) != len(other.InitConfig) {
+	if p.InitConfig == nil && other.InitConfig == nil {
+		return true
+	}
+	if p.InitConfig == nil || other.InitConfig == nil {
 		return false
 	}
-	for key, value := range p.InitConfig {
-		if otherValue, ok := other.InitConfig[key]; !ok || value != otherValue {
-			return false
-		}
-	}
-	return true
+	return reflect.DeepEqual(p.InitConfig.JSON, other.InitConfig.JSON)
 }
 
 // PluginsConfig is the configuration for the plugins.
@@ -295,8 +313,8 @@ func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
 	}
 
 	if plugin.Spec.Config != nil {
-		if plugin.Spec.Config.InitConfig != nil {
-			config.InitConfig = plugin.Spec.Config.InitConfig
+		if plugin.Spec.Config.InitConfig != nil && len(plugin.Spec.Config.InitConfig.Raw) > 0 {
+			config.InitConfig = &InitConfig{JSON: plugin.Spec.Config.InitConfig}
 		}
 		if plugin.Spec.Config.LibraryPath != "" {
 			config.LibraryPath = plugin.Spec.Config.LibraryPath
