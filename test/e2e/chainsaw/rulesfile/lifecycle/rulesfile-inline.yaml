@@ -1,0 +1,13 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-inline
+spec:
+  priority: 50
+  inlineRules: |
+    - rule: Test Inline Rule
+      desc: A simple test rule for e2e testing
+      condition: evt.type = open
+      output: "Test rule triggered"
+      priority: DEBUG
+      enabled: false

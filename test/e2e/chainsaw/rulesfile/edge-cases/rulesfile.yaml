@@ -1,0 +1,15 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-cm-missing
+spec:
+  priority: 50
+  configMapRef:
+    name: nonexistent-configmap
+  inlineRules: |
+    - rule: Inline Fallback Rule
+      desc: A test rule that should still work when ConfigMap is missing
+      condition: evt.type = open
+      output: "Inline fallback rule triggered"
+      priority: DEBUG
+      enabled: false

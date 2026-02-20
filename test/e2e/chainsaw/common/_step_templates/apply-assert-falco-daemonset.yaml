@@ -1,0 +1,32 @@
+# Step template for creating a Falco instance as DaemonSet and asserting readiness.
+#
+# Required bindings:
+#   - falco_name: Name of the Falco instance.
+#   - falco_version: Falco version to deploy.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-falco-daemonset
+spec:
+  try:
+    # 1. Apply the Falco CR as DaemonSet.
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+          spec:
+            type: DaemonSet
+            version: ($falco_version)
+
+    # 2. Assert the DaemonSet is created and ready.
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: DaemonSet
+          metadata:
+            name: ($falco_name)
+          status:
+            numberReady: 1
+            desiredNumberScheduled: 1

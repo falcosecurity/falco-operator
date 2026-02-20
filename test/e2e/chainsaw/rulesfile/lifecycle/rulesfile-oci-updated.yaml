@@ -1,0 +1,8 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-oci
+spec:
+  priority: 60
+  ociArtifact:
+    reference: ghcr.io/falcosecurity/rules/falco-rules:3

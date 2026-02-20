@@ -1,0 +1,118 @@
+# Test: Falco version management — upgrade and image override.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-version
+spec:
+  description: "Falco version: upgrade → image override"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: initial_version
+      value: "0.40.0"
+    - name: upgraded_version
+      value: "0.43.0"
+    - name: initial_image
+      value: "docker.io/falcosecurity/falco:0.40.0"
+    - name: upgraded_image
+      value: "docker.io/falcosecurity/falco:0.43.0"
+  steps:
+    # --- version-upgrade ---
+    - name: Create Falco with initial version
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                type: DaemonSet
+                version: ($initial_version)
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              status:
+                numberReady: 1
+                desiredNumberScheduled: 1
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Patch Falco version to upgraded version
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                version: ($upgraded_version)
+    - name: Verify DaemonSet has updated image
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: ($upgraded_image)
+    - name: Wait for DaemonSet rollout after upgrade
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              status:
+                numberReady: 1
+                updatedNumberScheduled: 1
+    # --- version-override ---
+    - name: Apply image override via podTemplateSpec
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: ($initial_image)
+    - name: Verify DaemonSet has overridden image
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              spec:
+                template:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: ($initial_image)
+    - name: Wait for DaemonSet rollout after override
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+              status:
+                numberReady: 1
+                updatedNumberScheduled: 1
