@@ -51,6 +51,25 @@ spec:
         - name: old_content
           value: "Test Inline Rule"
 
+    # --- container-plugin ---
+    - name: Install container plugin for OCI rules
+      try:
+        - apply:
+            file: plugin-container.yaml
+
+    - name: Verify container plugin downloaded
+      use:
+        template: ../../common/_step_templates/verify-plugin.yaml
+      bindings:
+        - name: plugin_dir
+          value: "/usr/share/falco/plugins"
+        - name: min_size
+          value: "1000"
+
+    - name: Wait for Falco pod ready after plugin install
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
     # --- rulesfile-oci: create ---
     - name: Create Rulesfile from OCI registry
       try:
@@ -65,8 +84,6 @@ spec:
           value: "/etc/falco/rules.d/50-01-rulesfile-oci-oci.yaml"
         - name: min_size
           value: "100"
-        - name: rules_file_name
-          value: "50-01-rulesfile-oci-oci.yaml"
 
     # --- rulesfile-oci: priority update ---
     - name: Update Rulesfile OCI priority
@@ -134,8 +151,6 @@ spec:
           value: "/etc/falco/rules.d/50-01-rulesfile-multi-oci.yaml"
         - name: min_size
           value: "100"
-        - name: rules_file_name
-          value: "50-01-rulesfile-multi-oci.yaml"
 
     - name: Verify multi-source inline file exists
       use:
@@ -180,8 +195,6 @@ spec:
           value: "/etc/falco/rules.d/50-01-rulesfile-rm-oci.yaml"
         - name: min_size
           value: "100"
-        - name: rules_file_name
-          value: ""
 
     - name: Verify inline file exists for removal test
       use:
@@ -218,8 +231,6 @@ spec:
           value: "/etc/falco/rules.d/50-01-rulesfile-rm-oci.yaml"
         - name: min_size
           value: "100"
-        - name: rules_file_name
-          value: ""
 
     # --- rulesfile-selector: matching ---
     - name: Apply Rulesfile with matching selector

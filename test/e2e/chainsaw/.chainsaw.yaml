@@ -24,7 +24,7 @@ spec:
 
   # Test execution settings.
   # Can be overridden via CLI: chainsaw test --parallel N
-  parallel: 5
+  parallel: 10
   failFast: false
   fullName: true
   skipDelete: false
@@ -33,4 +33,5 @@ spec:
   catch:
     - events: {}
     - podLogs:
+        selector: app.kubernetes.io/instance=falco-test
         tail: 100

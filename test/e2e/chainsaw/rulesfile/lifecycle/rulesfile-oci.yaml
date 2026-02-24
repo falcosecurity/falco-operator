@@ -5,4 +5,4 @@ metadata:
 spec:
   priority: 50
   ociArtifact:
-    reference: ghcr.io/falcosecurity/rules/falco-rules:3
+    reference: ghcr.io/falcosecurity/rules/falco-rules:latest

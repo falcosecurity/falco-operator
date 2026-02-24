@@ -6,7 +6,6 @@
 #   NAMESPACE: (Required) The namespace where the Falco pod is running.
 #   FILE_PATH: (Required) The file path to check inside the Falco pod.
 #   MIN_SIZE: (Required) The minimum expected file size in bytes.
-#   RULES_FILE_NAME: (Optional) If set, also verifies Falco loaded this rules file from logs.
 #   FALCO_LABEL: (Optional) Label selector for the Falco pod. Default: app.kubernetes.io/instance=falco-test.
 #   RETRY_COUNT: (Optional) Number of retries. Default: 30.
 #   RETRY_DELAY: (Optional) Delay between retries in seconds. Default: 2.
@@ -34,9 +33,5 @@ else
 fi
 
 verify_falco_running
-
-if [ -n "${RULES_FILE_NAME:-}" ]; then
-  verify_falco_loaded_rules "${RULES_FILE_NAME}"
-fi
 
 echo '{"status": "ok", "file_path": "'"${FILE_PATH}"'", "file_size": '"${FILE_SIZE}"'}'

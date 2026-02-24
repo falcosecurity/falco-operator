@@ -57,8 +57,6 @@ spec:
           value: /usr/share/falco/plugins/dummy.so
         - name: min_size
           value: "1000"
-        - name: rules_file_name
-          value: ""
 
     - name: Verify dummy plugin in config
       use:

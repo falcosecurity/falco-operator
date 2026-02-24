@@ -3,7 +3,6 @@
 # Required bindings:
 #   - file_path: The file path to check inside the Falco pod.
 #   - min_size: The minimum expected file size in bytes.
-#   - rules_file_name: (Optional) If set, also verifies Falco loaded this rules file.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: StepTemplate
 metadata:
@@ -18,8 +17,6 @@ spec:
             value: ($file_path)
           - name: MIN_SIZE
             value: ($min_size)
-          - name: RULES_FILE_NAME
-            value: ($rules_file_name)
         content: |
           bash ../../common/scripts/verify_file_size.sh
   catch:

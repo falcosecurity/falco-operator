@@ -51,7 +51,7 @@ spec:
                 name: ($falco_name)
               spec:
                 version: ($upgraded_version)
-    - name: Verify DaemonSet has updated image
+    - name: Verify DaemonSet has updated image and rollout complete
       try:
         - assert:
             resource:
@@ -62,17 +62,11 @@ spec:
               spec:
                 template:
                   spec:
-                    containers:
-                      - name: falco
-                        image: ($upgraded_image)
-    - name: Wait for DaemonSet rollout after upgrade
-      try:
-        - assert:
-            resource:
-              apiVersion: apps/v1
-              kind: DaemonSet
-              metadata:
-                name: ($falco_name)
+                    # Use JMESPath filter to match the specific container by name.
+                    # Direct array assertion fails because chainsaw does strict element-count matching
+                    # and the DaemonSet has 2 containers (falco + artifact-operator sidecar).
+                    (containers[?name == 'falco']):
+                      - image: ($upgraded_image)
               status:
                 numberReady: 1
                 updatedNumberScheduled: 1
@@ -91,7 +85,7 @@ spec:
                     containers:
                       - name: falco
                         image: ($initial_image)
-    - name: Verify DaemonSet has overridden image
+    - name: Verify DaemonSet has overridden image and rollout complete
       try:
         - assert:
             resource:
@@ -102,17 +96,8 @@ spec:
               spec:
                 template:
                   spec:
-                    containers:
-                      - name: falco
-                        image: ($initial_image)
-    - name: Wait for DaemonSet rollout after override
-      try:
-        - assert:
-            resource:
-              apiVersion: apps/v1
-              kind: DaemonSet
-              metadata:
-                name: ($falco_name)
+                    (containers[?name == 'falco']):
+                      - image: ($initial_image)
               status:
                 numberReady: 1
                 updatedNumberScheduled: 1

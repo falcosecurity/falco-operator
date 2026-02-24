@@ -22,20 +22,12 @@ source "${SCRIPT_DIR}/common.sh"
 
 MIN_SIZE="${MIN_SIZE:-1000}"
 
-PLUGIN_FILE=$(wait_for_plugin "${PLUGIN_DIR}")
-
-echo "Verifying plugin file size..."
-FILE_SIZE=$(get_file_size "${PLUGIN_FILE}")
-if [ "${FILE_SIZE}" -gt "${MIN_SIZE}" ]; then
-  echo "OK: Plugin file has valid size (${FILE_SIZE} bytes > ${MIN_SIZE} bytes)"
-else
-  echo '{"error": "Plugin file too small", "plugin_file": "'"${PLUGIN_FILE}"'", "actual_size": '"${FILE_SIZE}"', "min_size": '"${MIN_SIZE}"'}' >&2
-  exit 1
-fi
+PLUGIN_FILE=$(wait_for_plugin "${PLUGIN_DIR}" "${MIN_SIZE}")
 
 verify_falco_running
 
 echo "Plugin directory contents:"
 exec_in_falco "ls -la ${PLUGIN_DIR}" 2>/dev/null || true
 
+FILE_SIZE=$(get_file_size "${PLUGIN_FILE}")
 echo '{"status": "ok", "plugin_file": "'"${PLUGIN_FILE}"'", "file_size": '"${FILE_SIZE}"'}'

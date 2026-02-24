@@ -86,18 +86,23 @@ verify_file_contains() {
   return 1
 }
 
-# verify_falco_running checks that the Falco process is running in the pod.
+# verify_falco_running waits for the Falco process to be running in the pod.
+# This uses the same retry pattern as wait_for_file and wait_for_content_update
+# to handle container restarts (e.g., liveness probe kills during hot reload).
 verify_falco_running() {
   local pod
   pod=$(get_pod)
 
-  echo "Verifying Falco process is running..."
-  if kubectl exec -n "${NAMESPACE}" "${pod}" -c falco -- pgrep falco >/dev/null 2>&1; then
-    echo "OK: Falco process is running"
-    return 0
-  fi
+  echo "Waiting for Falco process to be running..."
+  for i in $(seq 1 "${RETRY_COUNT}"); do
+    if kubectl exec -n "${NAMESPACE}" "${pod}" -c falco -- pgrep falco >/dev/null 2>&1; then
+      echo "OK: Falco process is running (attempt ${i}/${RETRY_COUNT})"
+      return 0
+    fi
+    sleep "${RETRY_DELAY}"
+  done
 
-  echo '{"error": "Falco process not running", "namespace": "'"${NAMESPACE}"'", "pod": "'"${pod}"'"}' >&2
+  echo '{"error": "Falco process not running after '"${RETRY_COUNT}"' attempts", "namespace": "'"${NAMESPACE}"'", "pod": "'"${pod}"'"}' >&2
   return 1
 }
 
@@ -176,26 +181,31 @@ wait_for_file_rename() {
   return 1
 }
 
-# wait_for_plugin waits for a .so plugin file to appear in a directory.
-# Arguments: $1 = plugin directory
-# Returns: the full path to the plugin file via stdout
+# wait_for_plugin waits for a .so plugin file to appear in a directory and exceed min_size.
+# Arguments: $1 = plugin directory, $2 = minimum file size in bytes (optional, default: 0)
 wait_for_plugin() {
   local plugin_dir="$1"
+  local min_size="${2:-0}"
   local pod
   pod=$(get_pod)
 
-  echo "Waiting for plugin in ${plugin_dir}..." >&2
+  echo "Waiting for plugin in ${plugin_dir} (min size: ${min_size} bytes)..." >&2
   for i in $(seq 1 "${RETRY_COUNT}"); do
     local plugin_file
     plugin_file=$(kubectl exec -n "${NAMESPACE}" "${pod}" -c falco -- find "${plugin_dir}" -name "*.so" -type f 2>/dev/null | head -1)
     if [ -n "${plugin_file}" ]; then
-      echo "OK: Plugin found at ${plugin_file} (attempt ${i}/${RETRY_COUNT})" >&2
-      echo "${plugin_file}"
-      return 0
+      local file_size
+      file_size=$(kubectl exec -n "${NAMESPACE}" "${pod}" -c falco -- stat -c%s "${plugin_file}" 2>/dev/null || echo "0")
+      if [ "${file_size}" -gt "${min_size}" ]; then
+        echo "OK: Plugin found at ${plugin_file} (${file_size} bytes, attempt ${i}/${RETRY_COUNT})" >&2
+        echo "${plugin_file}"
+        return 0
+      fi
+      echo "Plugin found at ${plugin_file} but too small (${file_size} bytes), retrying... (attempt ${i}/${RETRY_COUNT})" >&2
     fi
     sleep "${RETRY_DELAY}"
   done
 
-  echo '{"error": "Plugin not found after '"${RETRY_COUNT}"' attempts", "plugin_dir": "'"${plugin_dir}"'", "kubectl_command": "kubectl exec -n '"${NAMESPACE}"' '"${pod}"' -c falco -- find '"${plugin_dir}"' -name *.so"}' >&2
+  echo '{"error": "Plugin not found after '"${RETRY_COUNT}"' attempts", "plugin_dir": "'"${plugin_dir}"'", "min_size": '"${min_size}"'}' >&2
   return 1
 }
