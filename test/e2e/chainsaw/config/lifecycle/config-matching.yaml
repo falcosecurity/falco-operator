@@ -1,0 +1,11 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-matching
+spec:
+  priority: 50
+  config: |
+    json_output: true
+  selector:
+    matchLabels:
+      kubernetes.io/os: linux

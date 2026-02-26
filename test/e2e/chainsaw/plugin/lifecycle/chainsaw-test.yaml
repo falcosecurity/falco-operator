@@ -1,0 +1,156 @@
+# Test: Plugin CRD lifecycle — create, multiple, update, delete.
+# NOTE: The "update initConfig" step fails due to a known operator bug where
+# addConfig uses isSame() (Name + InitConfig equality) instead of name-based
+# replacement, preventing initConfig updates from being reflected.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-lifecycle
+spec:
+  description: "Plugin lifecycle: create → multiple → update → delete"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: plugin_dir
+      value: "/usr/share/falco/plugins"
+    - name: min_size
+      value: "1000"
+  steps:
+    # --- Shared setup ---
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    # --- plugin-oci: create ---
+    - name: Create Plugin from OCI registry
+      try:
+        - apply:
+            file: plugin-json.yaml
+
+    - name: Verify plugin binary downloaded
+      use:
+        template: ../../common/_step_templates/verify-plugin.yaml
+
+    - name: Verify plugin config generated
+      use:
+        template: ../../common/_step_templates/verify-plugin-config.yaml
+      bindings:
+        - name: plugin_name
+          value: json
+
+    # --- plugin-multiple ---
+    - name: Create second Plugin CR
+      try:
+        - apply:
+            file: plugin-dummy.yaml
+
+    - name: Verify dummy plugin binary
+      use:
+        template: ../../common/_step_templates/verify-file-size.yaml
+      bindings:
+        - name: file_path
+          value: /usr/share/falco/plugins/dummy.so
+        - name: min_size
+          value: "1000"
+        - name: rules_file_name
+          value: ""
+
+    - name: Verify dummy plugin in config
+      use:
+        template: ../../common/_step_templates/verify-plugin-config.yaml
+      bindings:
+        - name: plugin_name
+          value: dummy
+
+    - name: Verify json plugin still in config
+      use:
+        template: ../../common/_step_templates/verify-plugin-config.yaml
+      bindings:
+        - name: plugin_name
+          value: json
+
+    # --- plugin-update (known operator bug) ---
+    - name: Verify plugin config has initial value
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/config.d/99-plugins-config.yaml
+        - name: expected_content
+          value: "initial.example.com"
+
+    - name: Update Plugin initConfig
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: json
+              spec:
+                config:
+                  initConfig:
+                    sssURL: "https://updated.example.com"
+
+    - name: Verify plugin config updated
+      use:
+        template: ../../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/config.d/99-plugins-config.yaml
+        - name: new_content
+          value: "updated.example.com"
+        - name: old_content
+          value: "initial.example.com"
+
+    # --- plugin-selector: non-matching ---
+    - name: Apply Plugin with non-matching selector
+      try:
+        - apply:
+            file: plugin-nonmatching.yaml
+
+    - name: Wait for potential plugin download
+      try:
+        - sleep:
+            duration: 5s
+
+    - name: Verify non-matching plugin NOT downloaded
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: /usr/share/falco/plugins/plugin-nonmatching.so
+
+    # --- plugin-delete ---
+    - name: Delete json Plugin CR
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: json
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: json
+
+    - name: Verify json plugin binary removed
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: /usr/share/falco/plugins/json.so
+
+    - name: Verify dummy still in config
+      use:
+        template: ../../common/_step_templates/verify-plugin-config.yaml
+      bindings:
+        - name: plugin_name
+          value: dummy

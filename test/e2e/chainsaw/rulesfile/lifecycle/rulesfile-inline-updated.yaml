@@ -1,0 +1,13 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-inline
+spec:
+  priority: 50
+  inlineRules: |
+    - rule: Updated Inline Rule
+      desc: An updated test rule for e2e testing
+      condition: evt.type = openat
+      output: "Updated rule triggered"
+      priority: INFO
+      enabled: false

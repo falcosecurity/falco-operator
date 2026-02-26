@@ -1,0 +1,10 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: full-stack-config
+spec:
+  priority: 50
+  config: |
+    json_output: true
+    log_stderr: true
+    log_level: info

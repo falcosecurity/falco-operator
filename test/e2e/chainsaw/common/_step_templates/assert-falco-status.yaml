@@ -1,0 +1,23 @@
+# Step template for asserting Falco CR status conditions.
+#
+# Required bindings:
+#   - falco_name: Name of the Falco instance.
+#   - expected_reconciled: Expected status of the Reconciled condition (True/False).
+#   - expected_available: Expected status of the Available condition (True/False).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-falco-status
+spec:
+  try:
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+          status:
+            (conditions[?type == 'ConditionReconciled']):
+              - status: ($expected_reconciled)
+            (conditions[?type == 'ConditionAvailable']):
+              - status: ($expected_available)

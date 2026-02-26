@@ -1,0 +1,11 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-nonmatching
+spec:
+  priority: 50
+  config: |
+    log_level: debug
+  selector:
+    matchLabels:
+      non-existent-label: does-not-exist

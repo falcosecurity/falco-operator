@@ -1,0 +1,42 @@
+# Test: Rulesfile with missing ConfigMap — graceful handling.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-edge-cases
+spec:
+  description: Test Rulesfile edge cases (missing ConfigMap)
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: inline_file_path
+      value: "/etc/falco/rules.d/50-03-rulesfile-cm-missing-inline.yaml"
+  steps:
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Create Rulesfile with missing ConfigMap and inline rules
+      try:
+        - apply:
+            file: rulesfile.yaml
+
+    - name: Verify inline rules file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: ($inline_file_path)
+        - name: expected_content
+          value: "Inline Fallback Rule"
+
+    - name: Verify configmap rules file does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-02-rulesfile-cm-missing-configmap.yaml"

@@ -1,0 +1,16 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-matching
+spec:
+  priority: 50
+  inlineRules: |
+    - rule: Matching Selector Rule
+      desc: Rule applied only to matching nodes
+      condition: evt.type = open
+      output: "Matching selector rule triggered"
+      priority: DEBUG
+      enabled: false
+  selector:
+    matchLabels:
+      kubernetes.io/os: linux
