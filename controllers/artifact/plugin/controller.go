@@ -31,6 +31,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -67,7 +68,6 @@ func NewPluginReconciler(
 		PluginsConfig:   &PluginsConfig{},
 		nodeName:        nodeName,
 		crToConfigName:  make(map[string]string),
-		conditions:      make(map[string][]metav1.Condition),
 	}
 }
 
@@ -81,19 +81,17 @@ type PluginReconciler struct {
 	PluginsConfig   *PluginsConfig
 	nodeName        string
 	crToConfigName  map[string]string
-	conditions      map[string][]metav1.Condition
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var err error
+func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	plugin := &artifactv1alpha1.Plugin{}
 
 	// Fetch the Plugin instance.
 	logger.V(2).Info("Fetching Plugin instance")
-	if err = r.Get(ctx, req.NamespacedName, plugin); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error(err, "Unable to fetch Plugin")
 		return ctrl.Result{}, err
 	} else if apierrors.IsNotFound(err) {
@@ -123,11 +121,16 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	// Update status via defer to ensure it's always called.
+	// Snapshot status before any condition modifications.
+	statusPatch := client.MergeFrom(plugin.DeepCopy())
+
+	// Patch status via defer to ensure it's always called.
 	defer func() {
-		if err := r.updateStatus(ctx, plugin); err != nil {
-			logger.Error(err, "unable to update status")
+		patchErr := r.patchStatus(ctx, plugin, statusPatch)
+		if patchErr != nil {
+			logger.Error(patchErr, "unable to patch status")
 		}
+		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
 	}()
 
 	// Ensure the Plugin instance is created and configured correctly.
@@ -177,20 +180,15 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 
 // ensurePlugin ensures that the Plugin artifact is stored correctly.
 func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
 	gen := plugin.GetGeneration()
 	logger := log.FromContext(ctx)
 	var err error
 
 	// Ensure Reconciled condition is stored even on early return.
 	defer func() {
-		// Add overall Reconciled condition.
 		if err != nil {
-			r.conditions[key] = append(r.conditions[key], common.NewReconciledCondition(
-				metav1.ConditionFalse,
-				artifact.ReasonReconcileFailed,
-				err.Error(),
-				gen,
+			apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse, artifact.ReasonReconcileFailed, err.Error(), gen,
 			))
 		}
 	}()
@@ -199,23 +197,17 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		logger.Error(err, "unable to store plugin artifact")
 		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
 			artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
-		r.conditions[key] = append(r.conditions[key],
-			common.NewOCIArtifactCondition(
-				metav1.ConditionFalse,
-				artifact.ReasonOCIArtifactStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()),
-				gen,
-			))
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewOCIArtifactCondition(
+			metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
+		))
 		return err
 	}
 
 	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
 		artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
-	r.conditions[key] = append(r.conditions[key], common.NewOCIArtifactCondition(
-		metav1.ConditionTrue,
-		artifact.ReasonOCIArtifactStored,
-		artifact.MessageOCIArtifactStored,
-		gen,
+	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewOCIArtifactCondition(
+		metav1.ConditionTrue, artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored, gen,
 	))
 	return nil
 }
@@ -264,9 +256,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 
 // ensurePluginConfig ensures plugin configuration is set correctly.
 func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
 	gen := plugin.GetGeneration()
-	var conditions []metav1.Condition
 	var err error
 	logger := log.FromContext(ctx)
 	logger.Info("Ensuring plugin configuration")
@@ -281,24 +271,17 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 
 	// Ensure Reconciled condition is stored even on early return.
 	defer func() {
-		// Add overall Reconciled condition.
 		if err != nil {
-			conditions = append(conditions, common.NewReconciledCondition(
-				metav1.ConditionFalse,
-				artifact.ReasonReconcileFailed,
-				err.Error(),
-				gen,
+			apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse, artifact.ReasonReconcileFailed, err.Error(), gen,
 			))
 		} else {
-			r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonReconciled, artifact.ReasonReconciled, artifact.MessagePluginReconciled)
-			conditions = append(conditions, common.NewReconciledCondition(
-				metav1.ConditionTrue,
-				artifact.ReasonReconciled,
-				artifact.MessagePluginReconciled,
-				gen,
+			r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonReconciled,
+				artifact.ReasonReconciled, artifact.MessagePluginReconciled)
+			apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewReconciledCondition(
+				metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessagePluginReconciled, gen,
 			))
 		}
-		r.conditions[key] = append(r.conditions[key], conditions...)
 	}()
 
 	pluginConfigString, err := r.PluginsConfig.toString()
@@ -306,11 +289,9 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		logger.Error(err, "unable to convert plugin config to string")
 		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
 			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
-		conditions = append(conditions, common.NewInlineContentCondition(
-			metav1.ConditionFalse,
-			artifact.ReasonInlinePluginConfigStoreFailed,
-			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()),
-			gen,
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse, artifact.ReasonInlinePluginConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
@@ -320,22 +301,17 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
 			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
-		conditions = append(conditions, common.NewInlineContentCondition(
-			metav1.ConditionFalse,
-			artifact.ReasonInlinePluginConfigStoreFailed,
-			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()),
-			gen,
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse, artifact.ReasonInlinePluginConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
 
 	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonInlinePluginConfigStored,
 		artifact.ReasonInlinePluginConfigStored, artifact.MessageInlinePluginConfigStored)
-	conditions = append(conditions, common.NewInlineContentCondition(
-		metav1.ConditionTrue,
-		artifact.ReasonInlinePluginConfigStored,
-		artifact.MessageInlinePluginConfigStored,
-		gen,
+	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewInlineContentCondition(
+		metav1.ConditionTrue, artifact.ReasonInlinePluginConfigStored, artifact.MessageInlinePluginConfigStored, gen,
 	))
 	return nil
 }
@@ -499,33 +475,16 @@ func (pc *PluginsConfig) isEmpty() bool {
 	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
 }
 
-// updateStatus updates the Plugin status with conditions collected during reconciliation.
-func (r *PluginReconciler) updateStatus(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
-
-	// Get conditions collected during reconciliation.
-	conditions, ok := r.conditions[key]
-	if !ok || len(conditions) == 0 {
-		return nil
-	}
-
-	// Clean up conditions from map after use.
-	defer delete(r.conditions, key)
-
-	// Create patch from current state.
-	patch := client.MergeFrom(plugin.DeepCopy())
-
-	for _, c := range conditions {
-		apimeta.SetStatusCondition(&plugin.Status.Conditions, c)
-	}
-
+// patchStatus patches the Plugin status using the given pre-modification snapshot.
+func (r *PluginReconciler) patchStatus(ctx context.Context, plugin *artifactv1alpha1.Plugin, patch client.Patch) error {
+	logger := log.FromContext(ctx)
 	if err := r.Status().Patch(ctx, plugin, patch); err != nil {
 		if apierrors.IsConflict(err) {
-			log.FromContext(ctx).V(3).Info("Conflict while patching status, will retry")
-			return nil
+			logger.V(3).Info("Conflict while patching status, will retry")
+			return err
 		}
-		return fmt.Errorf("unable to patch status: %w", err)
+		logger.Error(err, "unable to patch status")
+		return err
 	}
-
 	return nil
 }
