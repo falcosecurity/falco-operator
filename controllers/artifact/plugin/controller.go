@@ -229,7 +229,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 			logger.Info("Plugin instance marked for deletion, cleaning up")
 			if err := r.artifactManager.RemoveAll(ctx, plugin.Name); err != nil {
 				r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonArtifactRemoveFailed,
-					artifact.ReasonArtifactRemoveFailed, artifact.MessageFormatPluginArtifactsRemoveFailed, err)
+					artifact.ReasonArtifactRemoveFailed, artifact.MessageFormatPluginArtifactsRemoveFailed, err.Error())
 				return false, err
 			}
 

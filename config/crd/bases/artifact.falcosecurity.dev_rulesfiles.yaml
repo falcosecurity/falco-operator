@@ -14,7 +14,27 @@ spec:
     singular: rulesfile
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: The priority of the rulesfile
+      jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
+      name: Reconciled
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'OCIArtifact')].status
+      name: OCIArtifact
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'InlineContent')].status
+      name: InlineContent
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'ConfigMapRef')].status
+      name: ConfigMapRef
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Rulesfile is the Schema for the rulesfiles API.

@@ -14,7 +14,20 @@ spec:
     singular: plugin
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
+      name: Reconciled
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'OCIArtifact')].status
+      name: OCIArtifact
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'InlineContent')].status
+      name: InlineContent
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Plugin is the Schema for the plugin API.

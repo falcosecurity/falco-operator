@@ -31,10 +31,10 @@ spec:
       jsonPath: .status.availableReplicas
       name: Ready
       type: integer
-    - jsonPath: .status.conditions[?(@.type == 'ConditionReconciled')].status
+    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
       name: Reconciled
       type: string
-    - jsonPath: .status.conditions[?(@.type == 'ConditionAvailable')].status
+    - jsonPath: .status.conditions[?(@.type == 'Available')].status
       name: Available
       type: string
     - jsonPath: .metadata.creationTimestamp

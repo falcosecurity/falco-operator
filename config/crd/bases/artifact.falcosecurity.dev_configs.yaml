@@ -14,7 +14,21 @@ spec:
     singular: config
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - description: The priority of the config
+      jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
+      name: Reconciled
+      type: string
+    - jsonPath: .status.conditions[?(@.type == 'InlineContent')].status
+      name: InlineContent
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: Config is the Schema for the configs API.

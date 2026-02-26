@@ -55,6 +55,12 @@ type RulesfileStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority",description="The priority of the rulesfile"
+// +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
+// +kubebuilder:printcolumn:name="OCIArtifact",type="string",JSONPath=".status.conditions[?(@.type == 'OCIArtifact')].status"
+// +kubebuilder:printcolumn:name="InlineContent",type="string",JSONPath=".status.conditions[?(@.type == 'InlineContent')].status"
+// +kubebuilder:printcolumn:name="ConfigMapRef",type="string",JSONPath=".status.conditions[?(@.type == 'ConfigMapRef')].status"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Rulesfile is the Schema for the rulesfiles API.
 type Rulesfile struct {

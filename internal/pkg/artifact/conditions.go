@@ -71,15 +71,15 @@ const (
 // Condition message formats (for use with fmt.Sprintf).
 const (
 	// MessageFormatConfigStoreFailed is the format for config store failure message.
-	MessageFormatConfigStoreFailed = "Failed to store config: %v"
+	MessageFormatConfigStoreFailed = "Failed to store config: %s"
 	// MessageFormatOCIArtifactStoreFailed is the format for OCI artifact store failure message.
-	MessageFormatOCIArtifactStoreFailed = "Failed to store OCI artifact: %v"
+	MessageFormatOCIArtifactStoreFailed = "Failed to store OCI artifact: %s"
 	// MessageFormatPluginArtifactsRemoveFailed is the format for plugin artifacts remove failure message.
-	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %v"
+	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %s"
 	// MessageFormatInlineRulesStoreFailed is the format for inline rules store failure message.
-	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %v"
+	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %s"
 	// MessageFormatConfigMapResolutionFailed is the format for ConfigMap resolution failure message.
-	MessageFormatConfigMapResolutionFailed = "Failed to resolve ConfigMap: %v"
+	MessageFormatConfigMapResolutionFailed = "Failed to resolve ConfigMap: %s"
 	// MessageFormatConfigMapResolved is the format for ConfigMap resolved message.
 	MessageFormatConfigMapResolved = "ConfigMap %q resolved successfully"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.

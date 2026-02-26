@@ -190,11 +190,11 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 		ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig,
 	); err != nil {
 		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
-			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err)
+			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
 		conditions = append(conditions, common.NewInlineContentCondition(
 			metav1.ConditionFalse,
 			artifact.ReasonInlineConfigStoreFailed,
-			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err),
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()),
 			gen,
 		))
 		return err
