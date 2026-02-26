@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -334,7 +335,7 @@ func TestEnsureResource(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := append([]client.Object{tt.falco}, tt.existingObjs...)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			err := r.ensureResource(context.Background(), tt.falco, tt.generator)
 
@@ -374,7 +375,7 @@ func TestEnsureFinalizer(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.falco).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			updated, err := r.ensureFinalizer(context.Background(), tt.falco)
 
@@ -427,7 +428,7 @@ func TestEnsureVersion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.falco).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			updated, err := r.ensureVersion(context.Background(), tt.falco)
 
@@ -490,7 +491,7 @@ func TestHandleDeletion(t *testing.T) {
 			}
 
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			handled, err := r.handleDeletion(context.Background(), tt.falco)
 
@@ -603,7 +604,7 @@ func TestUpdateStatus(t *testing.T) {
 				objs = append(objs, tt.workload)
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(tt.falco).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			if tt.withReconciledCond {
 				r.conditions["default/test"] = []metav1.Condition{{
@@ -664,7 +665,7 @@ func TestCleanupDualDeployments(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := append([]client.Object{tt.falco}, tt.existingObjs...)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
 			err := r.cleanupDualDeployments(context.Background(), tt.falco)
 
