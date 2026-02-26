@@ -29,15 +29,37 @@ const (
 	// - Degraded: some pods aren't ready, the service is partially available.
 	// - False: no pods are running, the service is totally unavailable.
 	// - Unknown: the operator couldn't determine the condition status.
-	ConditionAvailable ConditionType = "ConditionAvailable"
+	ConditionAvailable ConditionType = "Available"
 	// ConditionReconciled indicates whether the operator has reconciled the state of
 	// the underlying resources with the object's spec.
 	// The possible status values for this condition type are:
 	// - True: the reconciliation was successful.
 	// - False: the reconciliation failed.
 	// - Unknown: the operator couldn't determine the condition status.
-	ConditionReconciled ConditionType = "ConditionReconciled"
+	ConditionReconciled ConditionType = "Reconciled"
+	// ConditionConfigMapRef indicates whether the ConfigMap references have been
+	// successfully resolved.
+	// The possible status values for this condition type are:
+	// - True: all references were resolved successfully.
+	// - False: one or more references could not be resolved.
+	ConditionConfigMapRef ConditionType = "ConfigMapRef"
+	// ConditionOCIArtifact indicates whether the OCI artifact has been successfully
+	// pulled and stored.
+	// The possible status values for this condition type are:
+	// - True: the OCI artifact was pulled and stored successfully.
+	// - False: the OCI artifact could not be pulled or stored.
+	ConditionOCIArtifact ConditionType = "OCIArtifact"
+	// ConditionInlineContent indicates whether inline content has been successfully stored.
+	// The possible status values for this condition type are:
+	// - True: the inline content was stored successfully.
+	// - False: the inline content could not be stored.
+	ConditionInlineContent ConditionType = "InlineContent"
 )
+
+// String returns the string representation of the condition type.
+func (c ConditionType) String() string {
+	return string(c)
+}
 
 const (
 	// ConfigMapRulesKey is the standard key used for rules data in ConfigMaps.

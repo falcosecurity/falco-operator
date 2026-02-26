@@ -8614,7 +8614,8 @@ spec:
                 format: int32
                 type: integer
               conditions:
-                description: The current status of the Falco instance
+                description: Conditions represent the latest available observations
+                  of the Falco instance's state.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -8670,6 +8671,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               desiredReplicas:
                 description: |-
                   Desired number of instances for the Falco deployment.

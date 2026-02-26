@@ -21,12 +21,17 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"reflect"
 
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -47,15 +52,22 @@ const (
 )
 
 // NewPluginReconciler creates a new PluginReconciler instance.
-func NewPluginReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, namespace string) *PluginReconciler {
+func NewPluginReconciler(
+	cl client.Client,
+	scheme *runtime.Scheme,
+	recorder events.EventRecorder,
+	nodeName, namespace string,
+) *PluginReconciler {
 	return &PluginReconciler{
 		Client:          cl,
 		Scheme:          scheme,
+		recorder:        recorder,
 		finalizer:       common.FormatFinalizerName(pluginFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		PluginsConfig:   &PluginsConfig{},
 		nodeName:        nodeName,
 		crToConfigName:  make(map[string]string),
+		conditions:      make(map[string][]metav1.Condition),
 	}
 }
 
@@ -63,11 +75,13 @@ func NewPluginReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 type PluginReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
+	recorder        events.EventRecorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	PluginsConfig   *PluginsConfig
 	nodeName        string
 	crToConfigName  map[string]string
+	conditions      map[string][]metav1.Condition
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -98,14 +112,23 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		}
 		return ctrl.Result{}, nil
 	}
+
 	// Handle deletion of the Plugin instance.
 	if ok, err := r.handleDeletion(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
 	// Ensure the finalizer is set on the Plugin instance.
 	if ok, err := r.ensureFinalizers(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Update status via defer to ensure it's always called.
+	defer func() {
+		if err := r.updateStatus(ctx, plugin); err != nil {
+			logger.Error(err, "unable to update status")
+		}
+	}()
 
 	// Ensure the Plugin instance is created and configured correctly.
 	if err := r.ensurePlugin(ctx, plugin); err != nil {
@@ -137,6 +160,10 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 		patch := client.MergeFrom(plugin.DeepCopy())
 		controllerutil.AddFinalizer(plugin, r.finalizer)
 		if err := r.Patch(ctx, plugin, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.V(3).Info("Conflict while setting finalizer, will retry")
+				return false, err
+			}
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
 		}
@@ -148,12 +175,48 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 	return false, nil
 }
 
-// ensurePlugin ensures that the Plugin instance is created and configured correctly.
+// ensurePlugin ensures that the Plugin artifact is stored correctly.
 func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	if err := r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact); err != nil {
+	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
+	gen := plugin.GetGeneration()
+	logger := log.FromContext(ctx)
+	var err error
+
+	// Ensure Reconciled condition is stored even on early return.
+	defer func() {
+		// Add overall Reconciled condition.
+		if err != nil {
+			r.conditions[key] = append(r.conditions[key], common.NewReconciledCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonReconcileFailed,
+				err.Error(),
+				gen,
+			))
+		}
+	}()
+
+	if err = r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact); err != nil {
+		logger.Error(err, "unable to store plugin artifact")
+		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
+			artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
+		r.conditions[key] = append(r.conditions[key],
+			common.NewOCIArtifactCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonOCIArtifactStoreFailed,
+				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()),
+				gen,
+			))
 		return err
 	}
 
+	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
+		artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
+	r.conditions[key] = append(r.conditions[key], common.NewOCIArtifactCondition(
+		metav1.ConditionTrue,
+		artifact.ReasonOCIArtifactStored,
+		artifact.MessageOCIArtifactStored,
+		gen,
+	))
 	return nil
 }
 
@@ -165,6 +228,8 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 		if controllerutil.ContainsFinalizer(plugin, r.finalizer) {
 			logger.Info("Plugin instance marked for deletion, cleaning up")
 			if err := r.artifactManager.RemoveAll(ctx, plugin.Name); err != nil {
+				r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonArtifactRemoveFailed,
+					artifact.ReasonArtifactRemoveFailed, artifact.MessageFormatPluginArtifactsRemoveFailed, err)
 				return false, err
 			}
 
@@ -177,6 +242,10 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 				logger.Error(err, "unable to remove plugin config")
 				return false, err
 			}
+
+			r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonArtifactRemoved,
+				artifact.ReasonArtifactRemoved, artifact.MessagePluginArtifactsRemoved)
+
 			// Remove the finalizer.
 			logger.V(3).Info("Removing finalizer", "finalizer", r.finalizer)
 			patch := client.MergeFrom(plugin.DeepCopy())
@@ -193,8 +262,12 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 	return false, nil
 }
 
-// Ensure plugin configuration is set correctly.
+// ensurePluginConfig ensures plugin configuration is set correctly.
 func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
+	gen := plugin.GetGeneration()
+	var conditions []metav1.Condition
+	var err error
 	logger := log.FromContext(ctx)
 	logger.Info("Ensuring plugin configuration")
 
@@ -205,19 +278,65 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	r.crToConfigName[plugin.Name] = configName
 
 	r.PluginsConfig.addConfig(plugin)
-	// Convert the struct to string.
+
+	// Ensure Reconciled condition is stored even on early return.
+	defer func() {
+		// Add overall Reconciled condition.
+		if err != nil {
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonReconcileFailed,
+				err.Error(),
+				gen,
+			))
+		} else {
+			r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonReconciled, artifact.ReasonReconciled, artifact.MessagePluginReconciled)
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionTrue,
+				artifact.ReasonReconciled,
+				artifact.MessagePluginReconciled,
+				gen,
+			))
+		}
+		r.conditions[key] = append(r.conditions[key], conditions...)
+	}()
+
 	pluginConfigString, err := r.PluginsConfig.toString()
 	if err != nil {
 		logger.Error(err, "unable to convert plugin config to string")
+		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
+			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
+		conditions = append(conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse,
+			artifact.ReasonInlinePluginConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()),
+			gen,
+		))
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
+	if err = r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
 		&pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
+		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
+			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
+		conditions = append(conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse,
+			artifact.ReasonInlinePluginConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()),
+			gen,
+		))
 		return err
 	}
 
+	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonInlinePluginConfigStored,
+		artifact.ReasonInlinePluginConfigStored, artifact.MessageInlinePluginConfigStored)
+	conditions = append(conditions, common.NewInlineContentCondition(
+		metav1.ConditionTrue,
+		artifact.ReasonInlinePluginConfigStored,
+		artifact.MessageInlinePluginConfigStored,
+		gen,
+	))
 	return nil
 }
 
@@ -236,7 +355,6 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 		return nil
 	}
 
-	// Convert the struct to string.
 	pluginConfigString, err := r.PluginsConfig.toString()
 	if err != nil {
 		logger.Error(err, "unable to convert plugin config to string")
@@ -379,4 +497,35 @@ func (pc *PluginsConfig) toString() (string, error) {
 
 func (pc *PluginsConfig) isEmpty() bool {
 	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
+}
+
+// updateStatus updates the Plugin status with conditions collected during reconciliation.
+func (r *PluginReconciler) updateStatus(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	key := fmt.Sprintf("%s/%s", plugin.Namespace, plugin.Name)
+
+	// Get conditions collected during reconciliation.
+	conditions, ok := r.conditions[key]
+	if !ok || len(conditions) == 0 {
+		return nil
+	}
+
+	// Clean up conditions from map after use.
+	defer delete(r.conditions, key)
+
+	// Create patch from current state.
+	patch := client.MergeFrom(plugin.DeepCopy())
+
+	for _, c := range conditions {
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, c)
+	}
+
+	if err := r.Status().Patch(ctx, plugin, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).V(3).Info("Conflict while patching status, will retry")
+			return nil
+		}
+		return fmt.Errorf("unable to patch status: %w", err)
+	}
+
+	return nil
 }

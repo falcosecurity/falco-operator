@@ -100,11 +100,7 @@ func getFirstFoundEnvTestBinaryDir() string {
 
 // newTestReconciler creates a new reconciler for integration tests.
 func newTestReconciler() *Reconciler {
-	return &Reconciler{
-		Client:               k8sClient,
-		Scheme:               k8sClient.Scheme(),
-		ReconciledConditions: map[string]metav1.Condition{},
-	}
+	return NewReconciler(k8sClient, k8sClient.Scheme(), false)
 }
 
 // createFalco creates a Falco resource and registers cleanup to run after the test.

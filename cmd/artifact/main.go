@@ -223,20 +223,35 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = config.NewConfigReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
-		SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Artifact")
+	if err = config.NewConfigReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		mgr.GetEventRecorder("config-controller"),
+		nodeName,
+		namespace,
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Config")
 		os.Exit(1)
 	}
 
-	if err := rulesfile.NewRulesfileReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
-		SetupWithManager(mgr); err != nil {
+	if err := rulesfile.NewRulesfileReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		mgr.GetEventRecorder("rulesfile-controller"),
+		nodeName,
+		namespace,
+	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
 	}
 
-	if err := plugin.NewPluginReconciler(mgr.GetClient(), mgr.GetScheme(), nodeName, namespace).
-		SetupWithManager(mgr); err != nil {
+	if err := plugin.NewPluginReconciler(
+		mgr.GetClient(),
+		mgr.GetScheme(),
+		mgr.GetEventRecorder("plugin-controller"),
+		nodeName,
+		namespace,
+	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
 		os.Exit(1)
 	}

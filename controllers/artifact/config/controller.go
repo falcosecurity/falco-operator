@@ -18,9 +18,14 @@ package config
 
 import (
 	"context"
+	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -37,13 +42,20 @@ const (
 )
 
 // NewConfigReconciler returns a new ConfigReconciler.
-func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, namespace string) *ConfigReconciler {
+func NewConfigReconciler(
+	cl client.Client,
+	scheme *runtime.Scheme,
+	recorder events.EventRecorder,
+	nodeName, namespace string,
+) *ConfigReconciler {
 	return &ConfigReconciler{
 		Client:          cl,
 		Scheme:          scheme,
+		recorder:        recorder,
 		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
+		conditions:      make(map[string][]metav1.Condition),
 	}
 }
 
@@ -51,9 +63,11 @@ func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 type ConfigReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
+	recorder        events.EventRecorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
+	conditions      map[string][]metav1.Condition
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -79,7 +93,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	} else if !ok {
 		logger.Info("Config instance does not match node selector, will remove local resources if any")
 
-		// Here we handle the case where the config was created with a selector that matched the node, but now it doesn't.
+		// Handle case where config selector no longer matches the node.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, config); ok || err != nil {
 			return ctrl.Result{}, err
 		}
@@ -95,6 +109,13 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if ok, err := r.ensureFinalizer(ctx, config); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Update status via defer to ensure it's always called.
+	defer func() {
+		if err := r.updateStatus(ctx, config); err != nil {
+			logger.Error(err, "unable to update status")
+		}
+	}()
 
 	// Ensure the configuration is written to the filesystem.
 	if err := r.ensureConfig(ctx, config); err != nil {
@@ -121,6 +142,10 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 		patch := client.MergeFrom(config.DeepCopy())
 		controllerutil.AddFinalizer(config, r.finalizer)
 		if err := r.Patch(ctx, config, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.V(3).Info("Conflict while setting finalizer, will retry")
+				return false, err
+			}
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
 		}
@@ -134,5 +159,85 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 
 // ensureConfig ensures the configuration is written to the filesystem.
 func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config) error {
-	return r.artifactManager.StoreFromInLineYaml(ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig)
+	key := fmt.Sprintf("%s/%s", config.Namespace, config.Name)
+	gen := config.GetGeneration()
+	var conditions []metav1.Condition
+	var err error
+
+	// Ensure Reconciled condition is stored even on early return.
+	defer func() {
+		// Add overall Reconciled condition.
+		if err != nil {
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonReconcileFailed,
+				err.Error(),
+				gen,
+			))
+		} else {
+			r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonReconciled, artifact.ReasonReconciled, artifact.MessageConfigReconciled)
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionTrue,
+				artifact.ReasonReconciled,
+				artifact.MessageConfigReconciled,
+				gen,
+			))
+		}
+		r.conditions[key] = conditions
+	}()
+
+	if err := r.artifactManager.StoreFromInLineYaml(
+		ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig,
+	); err != nil {
+		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
+			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err)
+		conditions = append(conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse,
+			artifact.ReasonInlineConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err),
+			gen,
+		))
+		return err
+	}
+
+	r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
+		artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
+	conditions = append(conditions, common.NewInlineContentCondition(
+		metav1.ConditionTrue,
+		artifact.ReasonInlineConfigStored,
+		artifact.MessageInlineConfigStored,
+		gen,
+	))
+	return nil
+}
+
+// updateStatus updates the Config status with conditions collected during reconciliation.
+func (r *ConfigReconciler) updateStatus(ctx context.Context, config *artifactv1alpha1.Config) error {
+	key := fmt.Sprintf("%s/%s", config.Namespace, config.Name)
+
+	// Get conditions collected during reconciliation.
+	conditions, ok := r.conditions[key]
+	if !ok || len(conditions) == 0 {
+		return nil
+	}
+
+	// Clean up conditions from map after use.
+	defer delete(r.conditions, key)
+
+	// Create patch from current state.
+	patch := client.MergeFrom(config.DeepCopy())
+
+	for _, c := range conditions {
+		apimeta.SetStatusCondition(&config.Status.Conditions, c)
+	}
+
+	if err := r.Status().Patch(ctx, config, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).V(3).Info("Conflict while patching status, will retry")
+			return nil
+		}
+		return fmt.Errorf("unable to patch status: %w", err)
+	}
+
+	return nil
 }
