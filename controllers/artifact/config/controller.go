@@ -40,6 +40,7 @@ import (
 
 const (
 	configFinalizerPrefix = "config.artifact.falcosecurity.dev/finalizer"
+	fieldManager          = "artifact-config"
 )
 
 // NewConfigReconciler returns a new ConfigReconciler.
@@ -108,12 +109,9 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		return ctrl.Result{}, err
 	}
 
-	// Snapshot status before any condition modifications.
-	statusPatch := client.MergeFrom(config.DeepCopy())
-
 	// Patch status via defer to ensure it's always called.
 	defer func() {
-		patchErr := r.patchStatus(ctx, config, statusPatch)
+		patchErr := r.patchStatus(ctx, config)
 		if patchErr != nil {
 			logger.Error(patchErr, "unable to patch status")
 		}
@@ -199,16 +197,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	return nil
 }
 
-// patchStatus patches the Config status using the given pre-modification snapshot.
-func (r *ConfigReconciler) patchStatus(ctx context.Context, config *artifactv1alpha1.Config, patch client.Patch) error {
-	logger := log.FromContext(ctx)
-	if err := r.Status().Patch(ctx, config, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while patching status, will retry")
-			return err
-		}
-		logger.Error(err, "unable to patch status")
-		return err
-	}
-	return nil
+// patchStatus patches the Config status using server-side apply.
+func (r *ConfigReconciler) patchStatus(ctx context.Context, config *artifactv1alpha1.Config) error {
+	return controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, config, fieldManager)
 }

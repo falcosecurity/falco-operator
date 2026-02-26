@@ -542,12 +542,11 @@ func TestPatchStatus(t *testing.T) {
 	fetched := &artifactv1alpha1.Rulesfile{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, fetched))
 
-	patch := client.MergeFrom(fetched.DeepCopy())
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageRulesfileReconciled, 1),
 	}
 
-	require.NoError(t, r.patchStatus(context.Background(), fetched, patch))
+	require.NoError(t, r.patchStatus(context.Background(), fetched))
 
 	obj := &artifactv1alpha1.Rulesfile{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, obj))
