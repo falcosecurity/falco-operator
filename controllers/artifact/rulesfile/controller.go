@@ -260,11 +260,11 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
 			logger.Error(err, "unable to store Rulesfile OCI artifact")
 			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
-				artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err)
+				artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
 			conditions = append(conditions, common.NewOCIArtifactCondition(
 				metav1.ConditionFalse,
 				artifact.ReasonOCIArtifactStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err),
+				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()),
 				gen,
 			))
 			return err
@@ -284,11 +284,11 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
 			logger.Error(err, "unable to store Rulesfile inline rules")
 			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
-				artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err)
+				artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
 			conditions = append(conditions, common.NewInlineContentCondition(
 				metav1.ConditionFalse,
 				artifact.ReasonInlineRulesStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err),
+				fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()),
 				gen,
 			))
 			return err
@@ -311,11 +311,11 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
 			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapResolutionFailed,
-				artifact.ReasonConfigMapResolutionFailed, artifact.MessageFormatConfigMapResolutionFailed, err)
+				artifact.ReasonConfigMapResolutionFailed, artifact.MessageFormatConfigMapResolutionFailed, err.Error())
 			conditions = append(conditions, common.NewConfigMapRefCondition(
 				metav1.ConditionFalse,
 				artifact.ReasonConfigMapResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapResolutionFailed, err),
+				fmt.Sprintf(artifact.MessageFormatConfigMapResolutionFailed, err.Error()),
 				gen,
 			))
 			return err

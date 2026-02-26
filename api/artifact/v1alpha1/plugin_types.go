@@ -63,6 +63,10 @@ type PluginStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=plugins
+// +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
+// +kubebuilder:printcolumn:name="OCIArtifact",type="string",JSONPath=".status.conditions[?(@.type == 'OCIArtifact')].status"
+// +kubebuilder:printcolumn:name="InlineContent",type="string",JSONPath=".status.conditions[?(@.type == 'InlineContent')].status"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Plugin is the Schema for the plugin API.
 type Plugin struct {
