@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -210,12 +209,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&falco.Reconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		ReconciledConditions: map[string]metav1.Condition{},
-		NativeSidecar:        sidecarEnabled,
-	}).SetupWithManager(mgr); err != nil {
+	if err = falco.NewReconciler(
+		mgr.GetClient(), mgr.GetScheme(), sidecarEnabled,
+	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)
 	}

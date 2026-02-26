@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -75,11 +76,13 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 	return &PluginReconciler{
 		Client:          fakeClient,
 		Scheme:          s,
+		recorder:        events.NewFakeRecorder(100),
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		PluginsConfig:   &PluginsConfig{},
 		nodeName:        testNodeName,
 		crToConfigName:  make(map[string]string),
+		conditions:      make(map[string][]metav1.Condition),
 	}, fakeClient
 }
 
@@ -108,8 +111,8 @@ func testRequest(name string) ctrl.Request {
 func TestNewPluginReconciler(t *testing.T) {
 	s := testScheme(t)
 	fakeClient := fake.NewClientBuilder().WithScheme(s).Build()
-
-	r := NewPluginReconciler(fakeClient, s, "my-node", "my-namespace")
+	fakeRecorder := events.NewFakeRecorder(10)
+	r := NewPluginReconciler(fakeClient, s, fakeRecorder, "my-node", "my-namespace")
 
 	require.NotNil(t, r)
 	assert.Equal(t, "my-node", r.nodeName)

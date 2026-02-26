@@ -18,10 +18,14 @@ package rulesfile
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -30,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
@@ -43,14 +48,21 @@ const (
 )
 
 // NewRulesfileReconciler returns a new RulesfileReconciler.
-func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, namespace string) *RulesfileReconciler {
+func NewRulesfileReconciler(
+	cl client.Client,
+	scheme *runtime.Scheme,
+	recorder events.EventRecorder,
+	nodeName, namespace string,
+) *RulesfileReconciler {
 	return &RulesfileReconciler{
 		Client:          cl,
 		Scheme:          scheme,
+		recorder:        recorder,
 		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
 		namespace:       namespace,
+		conditions:      make(map[string][]metav1.Condition),
 	}
 }
 
@@ -58,10 +70,12 @@ func NewRulesfileReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, 
 type RulesfileReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
+	recorder        events.EventRecorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
 	namespace       string
+	conditions      map[string][]metav1.Condition
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -87,7 +101,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	} else if !ok {
 		logger.Info("Rulesfile instance does not match node selector, will remove local resources if any")
 
-		// Here we handle the case where the rulesfile was created with a selector that matched the node, but now it doesn't.
+		// Handle case where rulesfile selector no longer matches the node.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, rulesfile); ok || err != nil {
 			return ctrl.Result{}, err
 		}
@@ -98,10 +112,18 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ok, err := controllerhelper.HandleObjectDeletion(ctx, r.Client, r.artifactManager, r.finalizer, rulesfile); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
 	// Ensure the finalizer is set.
 	if ok, err := r.ensureFinalizer(ctx, rulesfile); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Update status via defer to ensure it's always called.
+	defer func() {
+		if err := r.updateStatus(ctx, rulesfile); err != nil {
+			logger.Error(err, "unable to update status")
+		}
+	}()
 
 	// Ensure the rulesfile.
 	if err := r.ensureRulesfile(ctx, rulesfile); err != nil {
@@ -175,6 +197,10 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 		patch := client.MergeFrom(rulesfile.DeepCopy())
 		controllerutil.AddFinalizer(rulesfile, r.finalizer)
 		if err := r.Patch(ctx, rulesfile, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.V(3).Info("Conflict while setting finalizer, will retry")
+				return false, err
+			}
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
 		}
@@ -186,21 +212,153 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 	return false, nil
 }
 
+// ensureRulesfile ensures the rulesfile artifacts are stored on the filesystem.
 func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
-	// Get the priority of the configuration.
+	key := fmt.Sprintf("%s/%s", rulesfile.Namespace, rulesfile.Name)
+	gen := rulesfile.GetGeneration()
+	var err error
+	logger := log.FromContext(ctx)
 	p := rulesfile.Spec.Priority
+	var conditions []metav1.Condition
 
-	if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
-		return err
+	// Remove conditions for source types no longer present in the spec.
+	if rulesfile.Spec.OCIArtifact == nil {
+		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionOCIArtifact.String())
+	}
+	if rulesfile.Spec.InlineRules == nil {
+		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionInlineContent.String())
+	}
+	if rulesfile.Spec.ConfigMapRef == nil {
+		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionConfigMapRef.String())
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
-		return err
+	// Ensure Reconciled condition is stored even on early return.
+	defer func() {
+		// Add overall Reconciled condition.
+		if err != nil {
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonReconcileFailed,
+				err.Error(),
+				gen,
+			))
+		} else {
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonReconciled,
+				artifact.ReasonReconciled, artifact.MessageRulesfileReconciled)
+			conditions = append(conditions, common.NewReconciledCondition(
+				metav1.ConditionTrue,
+				artifact.ReasonReconciled,
+				artifact.MessageRulesfileReconciled,
+				gen,
+			))
+		}
+		r.conditions[key] = conditions
+	}()
+
+	// Store OCI artifact if specified.
+	if rulesfile.Spec.OCIArtifact != nil {
+		if err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
+			logger.Error(err, "unable to store Rulesfile OCI artifact")
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
+				artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err)
+			conditions = append(conditions, common.NewOCIArtifactCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonOCIArtifactStoreFailed,
+				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err),
+				gen,
+			))
+			return err
+		}
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
+			artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
+		conditions = append(conditions, common.NewOCIArtifactCondition(
+			metav1.ConditionTrue,
+			artifact.ReasonOCIArtifactStored,
+			artifact.MessageOCIArtifactStored,
+			gen,
+		))
 	}
 
-	if err := r.artifactManager.StoreFromConfigMap(
-		ctx, rulesfile.Name, rulesfile.Namespace, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile); err != nil {
-		return err
+	// Store inline rules if specified.
+	if rulesfile.Spec.InlineRules != nil {
+		if err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
+			logger.Error(err, "unable to store Rulesfile inline rules")
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
+				artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err)
+			conditions = append(conditions, common.NewInlineContentCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonInlineRulesStoreFailed,
+				fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err),
+				gen,
+			))
+			return err
+		}
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonInlineRulesStored,
+			artifact.ReasonInlineRulesStored, artifact.MessageInlineRulesStored)
+		conditions = append(conditions, common.NewInlineContentCondition(
+			metav1.ConditionTrue,
+			artifact.ReasonInlineRulesStored,
+			artifact.MessageInlineRulesStored,
+			gen,
+		))
+	}
+
+	// Store ConfigMap rules if specified.
+	if rulesfile.Spec.ConfigMapRef != nil {
+		err := r.artifactManager.StoreFromConfigMap(
+			ctx, rulesfile.Name, rulesfile.Namespace, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile,
+		)
+		if err != nil {
+			logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapResolutionFailed,
+				artifact.ReasonConfigMapResolutionFailed, artifact.MessageFormatConfigMapResolutionFailed, err)
+			conditions = append(conditions, common.NewConfigMapRefCondition(
+				metav1.ConditionFalse,
+				artifact.ReasonConfigMapResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatConfigMapResolutionFailed, err),
+				gen,
+			))
+			return err
+		}
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapResolved,
+			artifact.ReasonConfigMapResolved, artifact.MessageFormatConfigMapResolved, rulesfile.Spec.ConfigMapRef.Name)
+		conditions = append(conditions, common.NewConfigMapRefCondition(
+			metav1.ConditionTrue,
+			artifact.ReasonConfigMapResolved,
+			fmt.Sprintf(artifact.MessageFormatConfigMapResolved, rulesfile.Spec.ConfigMapRef.Name),
+			gen,
+		))
+	}
+
+	return nil
+}
+
+// updateStatus updates the Rulesfile status with conditions collected during reconciliation.
+func (r *RulesfileReconciler) updateStatus(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
+	key := fmt.Sprintf("%s/%s", rulesfile.Namespace, rulesfile.Name)
+
+	// Get conditions collected during reconciliation.
+	conditions, ok := r.conditions[key]
+	if !ok || len(conditions) == 0 {
+		return nil
+	}
+
+	// Clean up conditions from map after use.
+	defer delete(r.conditions, key)
+
+	// Create patch from current state.
+	patch := client.MergeFrom(rulesfile.DeepCopy())
+
+	for _, c := range conditions {
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, c)
+	}
+
+	if err := r.Status().Patch(ctx, rulesfile, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).V(3).Info("Conflict while patching status, will retry")
+			return nil
+		}
+		return fmt.Errorf("unable to patch status: %w", err)
 	}
 
 	return nil

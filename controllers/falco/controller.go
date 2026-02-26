@@ -20,13 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,8 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 )
 
@@ -50,11 +50,20 @@ const (
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	// Last reconciled conditions for Falco instances.
-	// This is used to update the status of the Falco instance in the defer function.
-	ReconciledConditions map[string]metav1.Condition
+	// conditions stores conditions accumulated during reconciliation, keyed by namespace/name.
+	conditions map[string][]metav1.Condition
 	// NativeSidecar is a flag to enable the native sidecar.
 	NativeSidecar bool
+}
+
+// NewReconciler creates a new Reconciler.
+func NewReconciler(cl client.Client, scheme *runtime.Scheme, nativeSidecar bool) *Reconciler {
+	return &Reconciler{
+		Client:        cl,
+		Scheme:        scheme,
+		conditions:    make(map[string][]metav1.Condition),
+		NativeSidecar: nativeSidecar,
+	}
 }
 
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos;falcos/status,verbs=create;delete;get;list;patch;update;watch
@@ -64,6 +73,7 @@ type Reconciler struct {
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=pods;services;configmaps;secrets;serviceaccounts,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:urls=/metrics,verbs=get
@@ -285,36 +295,39 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 // ensureDeployment ensures the Falco deployment or daemonset is created or updated.
 func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	logger := log.FromContext(ctx)
-	reconcileCondition := metav1.Condition{
-		Type:               string(commonv1alpha1.ConditionReconciled),
-		Status:             metav1.ConditionTrue,
-		ObservedGeneration: falco.GetGeneration(),
-		LastTransitionTime: metav1.Time{
-			Time: time.Now().UTC(),
-		},
-	}
+	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
+
+	// Condition values to be set during reconciliation.
+	conditionStatus := metav1.ConditionTrue
+	conditionReason := ""
+	conditionMessage := ""
 
 	// Ensure the reconcile status is saved.
 	defer func() {
-		r.ReconciledConditions[fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)] = reconcileCondition
+		r.conditions[key] = append(r.conditions[key], common.NewReconciledCondition(
+			conditionStatus,
+			conditionReason,
+			conditionMessage,
+			falco.GetGeneration(),
+		))
 	}()
 
 	logger.V(2).Info("Generating apply configuration from user input")
 	applyConfig, err := generateApplyConfiguration(r.Client, falco, r.NativeSidecar)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "ApplyConfigurationError"
-		reconcileCondition.Message = "Unable to generate apply configuration: " + err.Error()
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = ReasonApplyConfigurationError
+		conditionMessage = fmt.Sprintf(MessageFormatApplyConfigurationError, err.Error())
 		return err
 	}
 
 	applyConfigYaml, err := yaml.Marshal(applyConfig.Object)
 	if err != nil {
 		logger.Error(err, "unable to marshal apply configuration")
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "MarshalConfigurationError"
-		reconcileCondition.Message = "Unable to marshal apply configuration: " + err.Error()
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = ReasonMarshalConfigurationError
+		conditionMessage = fmt.Sprintf(MessageFormatMarshalConfigurationError, err.Error())
 		return err
 	}
 
@@ -323,9 +336,9 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	// Set owner reference.
 	if err = ctrl.SetControllerReference(falco, applyConfig, r.Scheme); err != nil {
 		logger.Error(err, "unable to set owner reference")
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "OwnerReferenceError"
-		reconcileCondition.Message = "Unable to set owner reference: " + err.Error()
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = ReasonOwnerReferenceError
+		conditionMessage = fmt.Sprintf(MessageFormatOwnerReferenceError, err.Error())
 		return err
 	}
 
@@ -342,9 +355,9 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 			resourceExists = false
 		} else {
 			logger.Error(err, "unable to fetch existing resource")
-			reconcileCondition.Status = metav1.ConditionFalse
-			reconcileCondition.Reason = "ExistingResourceError"
-			reconcileCondition.Message = "Unable to fetch existing resource: " + err.Error()
+			conditionStatus = metav1.ConditionFalse
+			conditionReason = ReasonExistingResourceError
+			conditionMessage = fmt.Sprintf(MessageFormatExistingResourceError, err.Error())
 			return err
 		}
 	}
@@ -358,17 +371,17 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		if err != nil {
 			if !errors.Is(err, ErrNoManagedFields) {
 				logger.Error(err, "unable to compare existing resource with desired state")
-				reconcileCondition.Status = metav1.ConditionFalse
-				reconcileCondition.Reason = "ResourceComparisonError"
-				reconcileCondition.Message = "Unable to compare existing resource with desired state: " + err.Error()
+				conditionStatus = metav1.ConditionFalse
+				conditionReason = ReasonResourceComparisonError
+				conditionMessage = fmt.Sprintf(MessageFormatResourceComparisonError, err.Error())
 				return err
 			}
 			logger.V(2).Info("No managed fields found, proceeding with apply to take ownership", "kind", falco.Spec.Type)
 		} else {
 			if comparison.IsSame() {
 				logger.V(2).Info("Falco resource is up to date, skipping apply", "kind", falco.Spec.Type)
-				reconcileCondition.Reason = "ResourceUpToDate"
-				reconcileCondition.Message = "Resource is up to date"
+				conditionReason = ReasonResourceUpToDate
+				conditionMessage = MessageResourceUpToDate
 				return nil
 			}
 			changedFields = formatChangedFields(comparison)
@@ -382,20 +395,26 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
 	if err = r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyConfig), applyOpts...); err != nil {
 		logger.Error(err, "unable to apply resource", "kind", falco.Spec.Type)
-		reconcileCondition.Status = metav1.ConditionFalse
-		reconcileCondition.Reason = "ApplyPatchError"
-		reconcileCondition.Message = "Unable to apply resource: " + err.Error()
+		if !resourceExists {
+			conditionStatus = metav1.ConditionFalse
+			conditionReason = ReasonApplyPatchErrorOnCreate
+			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnCreate, err.Error())
+		} else {
+			conditionStatus = metav1.ConditionFalse
+			conditionReason = ReasonApplyPatchErrorOnUpdate
+			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnUpdate, err.Error())
+		}
 		return err
 	}
 
 	if !resourceExists {
 		logger.Info("Falco resource created", "kind", falco.Spec.Type)
-		reconcileCondition.Reason = "ResourceCreated"
-		reconcileCondition.Message = "Resource created successfully"
+		conditionReason = ReasonResourceCreated
+		conditionMessage = MessageResourceCreated
 	} else {
 		logger.Info("Falco resource updated", "kind", falco.Spec.Type, "changedFields", changedFields)
-		reconcileCondition.Reason = "ResourceUpdated"
-		reconcileCondition.Message = "Resource updated successfully"
+		conditionReason = ReasonResourceUpdated
+		conditionMessage = MessageResourceUpdated
 	}
 
 	return nil
@@ -441,86 +460,117 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 
 // updateStatus updates the status of the Falco instance.
 func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	var err error
-	availableCondition := metav1.Condition{
-		Type:               string(commonv1alpha1.ConditionAvailable),
-		Status:             metav1.ConditionUnknown,
-		ObservedGeneration: falco.GetGeneration(),
-		LastTransitionTime: metav1.Time{
-			Time: time.Now().UTC(),
-		},
+	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
+
+	// Create patch from current state before any modifications.
+	patch := client.MergeFrom(falco.DeepCopy())
+
+	// Compute and append Available condition from live deployment/daemonset state.
+	computeErr := r.computeAvailableCondition(ctx, falco)
+
+	// Get conditions collected during reconciliation.
+	conditions, ok := r.conditions[key]
+	if !ok || len(conditions) == 0 {
+		return computeErr
 	}
+
+	// Clean up conditions from map after use.
+	defer delete(r.conditions, key)
+
+	for _, c := range conditions {
+		apimeta.SetStatusCondition(&falco.Status.Conditions, c)
+	}
+
+	if err := r.Status().Patch(ctx, falco, patch); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).V(3).Info(
+				"Conflict while patching status, will retry",
+			)
+			return nil
+		}
+		return fmt.Errorf("unable to patch status: %w", err)
+	}
+
+	return computeErr
+}
+
+// computeAvailableCondition queries live deployment/daemonset state.
+func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
+	conditionStatus := metav1.ConditionUnknown
+	conditionReason := ""
+	conditionMessage := ""
+
+	defer func() {
+		r.conditions[key] = append(r.conditions[key], common.NewAvailableCondition(
+			conditionStatus, conditionReason, conditionMessage,
+			falco.GetGeneration(),
+		))
+	}()
 
 	switch falco.Spec.Type {
 	case resourceTypeDeployment:
-		deployment := &appsv1.Deployment{}
-		err = r.Get(ctx, client.ObjectKeyFromObject(falco), deployment)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				// Deployment has not been created or has been deleted.
-				availableCondition.Status = metav1.ConditionFalse
-				availableCondition.Reason = "DeploymentNotFound"
-				availableCondition.Message = "Deployment has not been created or has been deleted"
-			} else {
-				return fmt.Errorf("unable to fetch deployment: %w", err)
-			}
-		}
-
 		desiredReplicas := int32(1)
 		if falco.Spec.Replicas != nil {
 			desiredReplicas = *falco.Spec.Replicas
 		}
 		falco.Status.DesiredReplicas = desiredReplicas
+
+		deployment := &appsv1.Deployment{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(falco), deployment); err != nil {
+			if apierrors.IsNotFound(err) {
+				conditionStatus = metav1.ConditionFalse
+				conditionReason = ReasonDeploymentNotFound
+				conditionMessage = MessageDeploymentNotFound
+				break
+			}
+			conditionStatus = metav1.ConditionUnknown
+			conditionReason = ReasonDeploymentFetchError
+			conditionMessage = fmt.Sprintf(MessageFormatDeploymentFetchError, err.Error())
+			log.FromContext(ctx).Error(err, "unable to fetch deployment for status")
+			return fmt.Errorf("unable to fetch deployment: %w", err)
+		}
+
 		falco.Status.AvailableReplicas = deployment.Status.AvailableReplicas
 		falco.Status.UnavailableReplicas = deployment.Status.UnavailableReplicas
 
 		if desiredReplicas == deployment.Status.ReadyReplicas {
-			availableCondition.Status = metav1.ConditionTrue
-			availableCondition.Reason = "DeploymentAvailable"
-			availableCondition.Message = "Deployment is available"
+			conditionStatus = metav1.ConditionTrue
+			conditionReason = ReasonDeploymentAvailable
+			conditionMessage = MessageDeploymentAvailable
 		} else {
-			availableCondition.Status = metav1.ConditionFalse
-			availableCondition.Reason = "DeploymentUnavailable"
-			availableCondition.Message = "Deployment is unavailable"
+			conditionStatus = metav1.ConditionFalse
+			conditionReason = ReasonDeploymentUnavailable
+			conditionMessage = MessageDeploymentUnavailable
 		}
 	case resourceTypeDaemonSet:
 		daemonset := &appsv1.DaemonSet{}
-		err = r.Get(ctx, client.ObjectKeyFromObject(falco), daemonset)
-		if err != nil {
+		if err := r.Get(ctx, client.ObjectKeyFromObject(falco), daemonset); err != nil {
 			if apierrors.IsNotFound(err) {
-				// DaemonSet has not been created or has been deleted.
-				availableCondition.Status = metav1.ConditionFalse
-				availableCondition.Reason = "DaemonSetNotFound"
-				availableCondition.Message = "DaemonSet has not been created or has been deleted"
-			} else {
-				return fmt.Errorf("unable to fetch daemonset: %w", err)
+				conditionStatus = metav1.ConditionFalse
+				conditionReason = ReasonDaemonSetNotFound
+				conditionMessage = MessageDaemonSetNotFound
+				break
 			}
+			conditionStatus = metav1.ConditionUnknown
+			conditionReason = ReasonDaemonSetFetchError
+			conditionMessage = fmt.Sprintf(MessageFormatDaemonSetFetchError, err.Error())
+			log.FromContext(ctx).Error(err, "unable to fetch daemonset for status")
+			return fmt.Errorf("unable to fetch daemonset: %w", err)
 		}
 		falco.Status.DesiredReplicas = daemonset.Status.DesiredNumberScheduled
 		falco.Status.AvailableReplicas = daemonset.Status.NumberAvailable
 		falco.Status.UnavailableReplicas = daemonset.Status.NumberUnavailable
 
 		if daemonset.Status.DesiredNumberScheduled == daemonset.Status.NumberAvailable {
-			availableCondition.Status = metav1.ConditionTrue
-			availableCondition.Reason = "DaemonSetAvailable"
-			availableCondition.Message = "DaemonSet is available"
+			conditionStatus = metav1.ConditionTrue
+			conditionReason = ReasonDaemonSetAvailable
+			conditionMessage = MessageDaemonSetAvailable
 		} else {
-			availableCondition.Status = metav1.ConditionFalse
-			availableCondition.Reason = "DaemonSetUnavailable"
-			availableCondition.Message = "DaemonSet is unavailable"
+			conditionStatus = metav1.ConditionFalse
+			conditionReason = ReasonDaemonSetUnavailable
+			conditionMessage = MessageDaemonSetUnavailable
 		}
-	}
-
-	// Get the reconciled condition.
-	if reconciledCondition, ok := r.ReconciledConditions[fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)]; ok {
-		falco.Status.Conditions = updateConditions(falco.Status.Conditions, availableCondition, reconciledCondition)
-	} else {
-		// Update the status conditions.
-		falco.Status.Conditions = updateConditions(falco.Status.Conditions, availableCondition)
-	}
-
-	if err := r.Status().Update(ctx, falco); err != nil && !apierrors.IsConflict(err) {
-		return fmt.Errorf("unable to update status: %w", err)
 	}
 
 	return nil
