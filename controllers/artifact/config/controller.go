@@ -25,6 +25,7 @@ import (
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,7 +56,6 @@ func NewConfigReconciler(
 		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
-		conditions:      make(map[string][]metav1.Condition),
 	}
 }
 
@@ -67,20 +67,18 @@ type ConfigReconciler struct {
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
-	conditions      map[string][]metav1.Condition
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var err error
+func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	config := &artifactv1alpha1.Config{}
 
 	// Fetch the Config instance.
 	logger.V(2).Info("Fetching Config instance")
 
-	if err = r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch Config instance")
 		return ctrl.Result{}, err
 	} else if apierrors.IsNotFound(err) {
@@ -110,11 +108,16 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		return ctrl.Result{}, err
 	}
 
-	// Update status via defer to ensure it's always called.
+	// Snapshot status before any condition modifications.
+	statusPatch := client.MergeFrom(config.DeepCopy())
+
+	// Patch status via defer to ensure it's always called.
 	defer func() {
-		if err := r.updateStatus(ctx, config); err != nil {
-			logger.Error(err, "unable to update status")
+		patchErr := r.patchStatus(ctx, config, statusPatch)
+		if patchErr != nil {
+			logger.Error(patchErr, "unable to patch status")
 		}
+		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
 	}()
 
 	// Ensure the configuration is written to the filesystem.
@@ -159,85 +162,53 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 
 // ensureConfig ensures the configuration is written to the filesystem.
 func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config) error {
-	key := fmt.Sprintf("%s/%s", config.Namespace, config.Name)
 	gen := config.GetGeneration()
-	var conditions []metav1.Condition
 	var err error
 
 	// Ensure Reconciled condition is stored even on early return.
 	defer func() {
-		// Add overall Reconciled condition.
 		if err != nil {
-			conditions = append(conditions, common.NewReconciledCondition(
-				metav1.ConditionFalse,
-				artifact.ReasonReconcileFailed,
-				err.Error(),
-				gen,
+			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewReconciledCondition(
+				metav1.ConditionFalse, artifact.ReasonReconcileFailed, err.Error(), gen,
 			))
 		} else {
 			r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonReconciled, artifact.ReasonReconciled, artifact.MessageConfigReconciled)
-			conditions = append(conditions, common.NewReconciledCondition(
-				metav1.ConditionTrue,
-				artifact.ReasonReconciled,
-				artifact.MessageConfigReconciled,
-				gen,
+			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewReconciledCondition(
+				metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageConfigReconciled, gen,
 			))
 		}
-		r.conditions[key] = conditions
 	}()
 
-	if err := r.artifactManager.StoreFromInLineYaml(
+	if err = r.artifactManager.StoreFromInLineYaml(
 		ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig,
 	); err != nil {
 		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
 			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-		conditions = append(conditions, common.NewInlineContentCondition(
-			metav1.ConditionFalse,
-			artifact.ReasonInlineConfigStoreFailed,
-			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()),
-			gen,
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewInlineContentCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
 
 	r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
 		artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
-	conditions = append(conditions, common.NewInlineContentCondition(
-		metav1.ConditionTrue,
-		artifact.ReasonInlineConfigStored,
-		artifact.MessageInlineConfigStored,
-		gen,
+	apimeta.SetStatusCondition(&config.Status.Conditions, common.NewInlineContentCondition(
+		metav1.ConditionTrue, artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored, gen,
 	))
 	return nil
 }
 
-// updateStatus updates the Config status with conditions collected during reconciliation.
-func (r *ConfigReconciler) updateStatus(ctx context.Context, config *artifactv1alpha1.Config) error {
-	key := fmt.Sprintf("%s/%s", config.Namespace, config.Name)
-
-	// Get conditions collected during reconciliation.
-	conditions, ok := r.conditions[key]
-	if !ok || len(conditions) == 0 {
-		return nil
-	}
-
-	// Clean up conditions from map after use.
-	defer delete(r.conditions, key)
-
-	// Create patch from current state.
-	patch := client.MergeFrom(config.DeepCopy())
-
-	for _, c := range conditions {
-		apimeta.SetStatusCondition(&config.Status.Conditions, c)
-	}
-
+// patchStatus patches the Config status using the given pre-modification snapshot.
+func (r *ConfigReconciler) patchStatus(ctx context.Context, config *artifactv1alpha1.Config, patch client.Patch) error {
+	logger := log.FromContext(ctx)
 	if err := r.Status().Patch(ctx, config, patch); err != nil {
 		if apierrors.IsConflict(err) {
-			log.FromContext(ctx).V(3).Info("Conflict while patching status, will retry")
-			return nil
+			logger.V(3).Info("Conflict while patching status, will retry")
+			return err
 		}
-		return fmt.Errorf("unable to patch status: %w", err)
+		logger.Error(err, "unable to patch status")
+		return err
 	}
-
 	return nil
 }

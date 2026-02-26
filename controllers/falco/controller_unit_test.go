@@ -521,18 +521,17 @@ func TestHandleDeletion(t *testing.T) {
 	}
 }
 
-func TestUpdateStatus(t *testing.T) {
+func TestComputeAvailableCondition(t *testing.T) {
 	scheme := testScheme()
 
 	tests := []struct {
-		name                 string
-		falco                *instancev1alpha1.Falco
-		workload             client.Object // Deployment or DaemonSet
-		wantDesired          int32
-		wantAvailable        int32
-		wantUnavailable      int32
-		withReconciledCond   bool
-		wantConditionsNotNil bool
+		name            string
+		falco           *instancev1alpha1.Falco
+		workload        client.Object // Deployment or DaemonSet
+		wantDesired     int32
+		wantAvailable   int32
+		wantUnavailable int32
+		wantErr         bool
 	}{
 		{
 			name:  "deployment available",
@@ -584,17 +583,6 @@ func TestUpdateStatus(t *testing.T) {
 			wantAvailable:   0,
 			wantUnavailable: 0,
 		},
-		{
-			name:  "with reconciled condition",
-			falco: newFalco("test", withType("Deployment"), withReplicas(1)),
-			workload: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testNamespaceUnit},
-				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1},
-			},
-			withReconciledCond:   true,
-			wantConditionsNotNil: true,
-			wantDesired:          1,
-		},
 	}
 
 	for _, tt := range tests {
@@ -606,22 +594,19 @@ func TestUpdateStatus(t *testing.T) {
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(tt.falco).Build()
 			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
-			if tt.withReconciledCond {
-				r.conditions["default/test"] = []metav1.Condition{{
-					Type: "Reconciled", Status: metav1.ConditionTrue, Reason: "Success",
-				}}
+			err := r.computeAvailableCondition(context.Background(), tt.falco)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
-
-			err := r.updateStatus(context.Background(), tt.falco)
-
-			require.NoError(t, err)
 			assert.Equal(t, tt.wantDesired, tt.falco.Status.DesiredReplicas)
 			assert.Equal(t, tt.wantAvailable, tt.falco.Status.AvailableReplicas)
 			assert.Equal(t, tt.wantUnavailable, tt.falco.Status.UnavailableReplicas)
 
-			if tt.wantConditionsNotNil {
-				assert.NotEmpty(t, tt.falco.Status.Conditions)
-			}
+			// computeAvailableCondition always sets the Available condition.
+			assert.NotEmpty(t, tt.falco.Status.Conditions)
 		})
 	}
 }

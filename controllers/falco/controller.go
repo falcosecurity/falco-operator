@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -53,8 +54,6 @@ type Reconciler struct {
 	Scheme *runtime.Scheme
 	// recorder is the event recorder for creating Kubernetes events.
 	recorder events.EventRecorder
-	// conditions stores conditions accumulated during reconciliation, keyed by namespace/name.
-	conditions map[string][]metav1.Condition
 	// NativeSidecar is a flag to enable the native sidecar.
 	NativeSidecar bool
 }
@@ -65,7 +64,6 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 		Client:        cl,
 		Scheme:        scheme,
 		recorder:      recorder,
-		conditions:    make(map[string][]metav1.Condition),
 		NativeSidecar: nativeSidecar,
 	}
 }
@@ -84,15 +82,14 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var err error
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	falco := &instancev1alpha1.Falco{}
 
 	// Fetch the Falco instance
 	logger.V(2).Info("Fetching falco instance")
 
-	if err = r.Get(ctx, req.NamespacedName, falco); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, falco); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch falco instance")
 		return ctrl.Result{}, err
 	} else if apierrors.IsNotFound(err) {
@@ -104,11 +101,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Update the status.
+	// Snapshot status before any condition modifications.
+	statusPatch := client.MergeFrom(falco.DeepCopy())
+
+	// Patch status via defer to ensure it's always called.
 	defer func() {
-		if err := r.updateStatus(ctx, falco); err != nil {
-			logger.Error(err, "unable to update Falco status")
+		computeErr := r.computeAvailableCondition(ctx, falco)
+		if computeErr != nil {
+			logger.Error(computeErr, "unable to compute available condition")
 		}
+		patchErr := r.patchStatus(ctx, falco, statusPatch)
+		if patchErr != nil {
+			logger.Error(patchErr, "unable to patch Falco status")
+		}
+		reterr = kerrors.NewAggregate([]error{reterr, computeErr, patchErr})
 	}()
 
 	// Ensure the service account is created.
@@ -307,7 +313,6 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 // ensureDeployment ensures the Falco deployment or daemonset is created or updated.
 func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alpha1.Falco) error {
 	logger := log.FromContext(ctx)
-	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
 
 	// Condition values to be set during reconciliation.
 	conditionStatus := metav1.ConditionTrue
@@ -316,7 +321,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 
 	// Ensure the reconcile status is saved.
 	defer func() {
-		r.conditions[key] = append(r.conditions[key], common.NewReconciledCondition(
+		apimeta.SetStatusCondition(&falco.Status.Conditions, common.NewReconciledCondition(
 			conditionStatus,
 			conditionReason,
 			conditionMessage,
@@ -478,51 +483,28 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 	return nil
 }
 
-// updateStatus updates the status of the Falco instance.
-func (r *Reconciler) updateStatus(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
-
-	// Create patch from current state before any modifications.
-	patch := client.MergeFrom(falco.DeepCopy())
-
-	// Compute and append Available condition from live deployment/daemonset state.
-	computeErr := r.computeAvailableCondition(ctx, falco)
-
-	// Get conditions collected during reconciliation.
-	conditions, ok := r.conditions[key]
-	if !ok || len(conditions) == 0 {
-		return computeErr
-	}
-
-	// Clean up conditions from map after use.
-	defer delete(r.conditions, key)
-
-	for _, c := range conditions {
-		apimeta.SetStatusCondition(&falco.Status.Conditions, c)
-	}
-
+// patchStatus patches the Falco status using the given pre-modification snapshot.
+func (r *Reconciler) patchStatus(ctx context.Context, falco *instancev1alpha1.Falco, patch client.Patch) error {
+	logger := log.FromContext(ctx)
 	if err := r.Status().Patch(ctx, falco, patch); err != nil {
 		if apierrors.IsConflict(err) {
-			log.FromContext(ctx).V(3).Info(
-				"Conflict while patching status, will retry",
-			)
-			return nil
+			logger.V(3).Info("Conflict while patching status, will retry")
+			return err
 		}
-		return fmt.Errorf("unable to patch status: %w", err)
+		logger.Error(err, "unable to patch status")
+		return err
 	}
-
-	return computeErr
+	return nil
 }
 
 // computeAvailableCondition queries live deployment/daemonset state.
 func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *instancev1alpha1.Falco) error {
-	key := fmt.Sprintf("%s/%s", falco.Namespace, falco.Name)
 	conditionStatus := metav1.ConditionUnknown
 	conditionReason := ""
 	conditionMessage := ""
 
 	defer func() {
-		r.conditions[key] = append(r.conditions[key], common.NewAvailableCondition(
+		apimeta.SetStatusCondition(&falco.Status.Conditions, common.NewAvailableCondition(
 			conditionStatus, conditionReason, conditionMessage,
 			falco.GetGeneration(),
 		))
