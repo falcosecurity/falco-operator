@@ -210,7 +210,7 @@ func main() {
 	}
 
 	if err = falco.NewReconciler(
-		mgr.GetClient(), mgr.GetScheme(), sidecarEnabled,
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"), sidecarEnabled,
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)

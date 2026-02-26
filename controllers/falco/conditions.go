@@ -40,6 +40,26 @@ const (
 	ReasonResourceComparisonError = "ResourceComparisonError"
 )
 
+// Sub-resource event reasons.
+const (
+	// ReasonResourceGenerateError indicates an error generating a sub-resource.
+	ReasonResourceGenerateError = "ResourceGenerateError"
+	// ReasonResourceApplyError indicates an error applying a sub-resource.
+	ReasonResourceApplyError = "ResourceApplyError"
+	// ReasonSubResourceCreated indicates a sub-resource was created successfully.
+	ReasonSubResourceCreated = "SubResourceCreated"
+	// ReasonSubResourceUpdated indicates a sub-resource was updated successfully.
+	ReasonSubResourceUpdated = "SubResourceUpdated"
+)
+
+// Deletion event reasons.
+const (
+	// ReasonDeletionError indicates an error during deletion cleanup.
+	ReasonDeletionError = "DeletionError"
+	// ReasonInstanceDeleted indicates the Falco instance was deleted successfully.
+	ReasonInstanceDeleted = "InstanceDeleted"
+)
+
 // Available condition reasons.
 const (
 	// ReasonDeploymentNotFound indicates the deployment was not found.
@@ -80,6 +100,8 @@ const (
 	MessageResourceUpdated = "Resource updated successfully"
 	// MessageResourceUpToDate is the message when resource is up to date.
 	MessageResourceUpToDate = "Resource is up to date"
+	// MessageInstanceDeleted is the message when a Falco instance is deleted.
+	MessageInstanceDeleted = "Falco instance deleted successfully"
 )
 
 // Available condition message formats (for use with fmt.Sprintf).
@@ -106,4 +128,14 @@ const (
 	MessageFormatApplyPatchErrorOnUpdate = "Unable to update resource by patch: %s"
 	// MessageFormatResourceComparisonError is the format for resource comparison error message.
 	MessageFormatResourceComparisonError = "Unable to compare existing and desired resources: %s"
+	// MessageFormatResourceGenerateError is the format for resource generation error message.
+	MessageFormatResourceGenerateError = "Unable to generate desired resource: %s"
+	// MessageFormatResourceApplyError is the format for resource apply error message.
+	MessageFormatResourceApplyError = "Unable to apply %s: %s"
+	// MessageFormatSubResourceCreated is the format for sub-resource created message.
+	MessageFormatSubResourceCreated = "%s %s created successfully"
+	// MessageFormatSubResourceUpdated is the format for sub-resource updated message.
+	MessageFormatSubResourceUpdated = "%s %s updated successfully"
+	// MessageFormatDeletionError is the format for deletion error message.
+	MessageFormatDeletionError = "Unable to delete %s during cleanup: %s"
 )

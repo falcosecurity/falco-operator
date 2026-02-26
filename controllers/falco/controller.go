@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -50,6 +51,8 @@ const (
 type Reconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// recorder is the event recorder for creating Kubernetes events.
+	recorder events.EventRecorder
 	// conditions stores conditions accumulated during reconciliation, keyed by namespace/name.
 	conditions map[string][]metav1.Condition
 	// NativeSidecar is a flag to enable the native sidecar.
@@ -57,10 +60,11 @@ type Reconciler struct {
 }
 
 // NewReconciler creates a new Reconciler.
-func NewReconciler(cl client.Client, scheme *runtime.Scheme, nativeSidecar bool) *Reconciler {
+func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder, nativeSidecar bool) *Reconciler {
 	return &Reconciler{
 		Client:        cl,
 		Scheme:        scheme,
+		recorder:      recorder,
 		conditions:    make(map[string][]metav1.Condition),
 		NativeSidecar: nativeSidecar,
 	}
@@ -265,6 +269,8 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 	crb.SetName(resourceName)
 	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
+		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
+			ReasonDeletionError, MessageFormatDeletionError, "ClusterRoleBinding", err.Error())
 		return false, err
 	}
 
@@ -277,6 +283,8 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 	cr.SetName(resourceName)
 	if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to delete clusterrole")
+		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
+			ReasonDeletionError, MessageFormatDeletionError, "ClusterRole", err.Error())
 		return false, err
 	}
 
@@ -284,10 +292,14 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 	controllerutil.RemoveFinalizer(falco, finalizer)
 	if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to remove finalizer from Falco instance")
+		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
+			ReasonDeletionError, MessageFormatDeletionError, "Finalizer", err.Error())
 		return false, err
 	}
 
 	log.FromContext(ctx).Info("Falco instance deleted")
+	r.recorder.Eventf(falco, nil, corev1.EventTypeNormal, ReasonInstanceDeleted,
+		ReasonInstanceDeleted, MessageInstanceDeleted)
 
 	return true, nil
 }
@@ -399,10 +411,14 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 			conditionStatus = metav1.ConditionFalse
 			conditionReason = ReasonApplyPatchErrorOnCreate
 			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnCreate, err.Error())
+			r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonApplyPatchErrorOnCreate,
+				ReasonApplyPatchErrorOnCreate, MessageFormatApplyPatchErrorOnCreate, err.Error())
 		} else {
 			conditionStatus = metav1.ConditionFalse
 			conditionReason = ReasonApplyPatchErrorOnUpdate
 			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnUpdate, err.Error())
+			r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonApplyPatchErrorOnUpdate,
+				ReasonApplyPatchErrorOnUpdate, MessageFormatApplyPatchErrorOnUpdate, err.Error())
 		}
 		return err
 	}
@@ -411,10 +427,14 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		logger.Info("Falco resource created", "kind", falco.Spec.Type)
 		conditionReason = ReasonResourceCreated
 		conditionMessage = MessageResourceCreated
+		r.recorder.Eventf(falco, nil, corev1.EventTypeNormal, ReasonResourceCreated,
+			ReasonResourceCreated, MessageResourceCreated)
 	} else {
 		logger.Info("Falco resource updated", "kind", falco.Spec.Type, "changedFields", changedFields)
 		conditionReason = ReasonResourceUpdated
 		conditionMessage = MessageResourceUpdated
+		r.recorder.Eventf(falco, nil, corev1.EventTypeNormal, ReasonResourceUpdated,
+			ReasonResourceUpdated, MessageResourceUpdated)
 	}
 
 	return nil
@@ -542,6 +562,8 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *insta
 			conditionStatus = metav1.ConditionFalse
 			conditionReason = ReasonDeploymentUnavailable
 			conditionMessage = MessageDeploymentUnavailable
+			r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeploymentUnavailable,
+				ReasonDeploymentUnavailable, MessageDeploymentUnavailable)
 		}
 	case resourceTypeDaemonSet:
 		daemonset := &appsv1.DaemonSet{}
@@ -570,6 +592,8 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *insta
 			conditionStatus = metav1.ConditionFalse
 			conditionReason = ReasonDaemonSetUnavailable
 			conditionMessage = MessageDaemonSetUnavailable
+			r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDaemonSetUnavailable,
+				ReasonDaemonSetUnavailable, MessageDaemonSetUnavailable)
 		}
 	}
 
@@ -584,6 +608,8 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	// Generate the desired resource
 	desiredResource, err := generateFunc(r.Client, falco)
 	if err != nil {
+		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonResourceGenerateError,
+			ReasonResourceGenerateError, MessageFormatResourceGenerateError, err.Error())
 		return fmt.Errorf("unable to generate desired resource: %w", err)
 	}
 
@@ -625,13 +651,19 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 
 	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("falco-controller")}
 	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredResource), applyOpts...); err != nil {
+		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonResourceApplyError,
+			ReasonResourceApplyError, MessageFormatResourceApplyError, resourceType, err.Error())
 		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
 	}
 
 	if !resourceExists {
 		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
+		r.recorder.Eventf(falco, nil, corev1.EventTypeNormal, ReasonSubResourceCreated,
+			ReasonSubResourceCreated, MessageFormatSubResourceCreated, resourceType, desiredResource.GetName())
 	} else {
 		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName(), "changedFields", changedFields)
+		r.recorder.Eventf(falco, nil, corev1.EventTypeNormal, ReasonSubResourceUpdated,
+			ReasonSubResourceUpdated, MessageFormatSubResourceUpdated, resourceType, desiredResource.GetName())
 	}
 
 	return nil
