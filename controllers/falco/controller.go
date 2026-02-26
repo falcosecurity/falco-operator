@@ -41,6 +41,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 )
 
@@ -101,16 +102,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	// Snapshot status before any condition modifications.
-	statusPatch := client.MergeFrom(falco.DeepCopy())
-
 	// Patch status via defer to ensure it's always called.
 	defer func() {
 		computeErr := r.computeAvailableCondition(ctx, falco)
 		if computeErr != nil {
 			logger.Error(computeErr, "unable to compute available condition")
 		}
-		patchErr := r.patchStatus(ctx, falco, statusPatch)
+		patchErr := r.patchStatus(ctx, falco)
 		if patchErr != nil {
 			logger.Error(patchErr, "unable to patch Falco status")
 		}
@@ -483,18 +481,9 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 	return nil
 }
 
-// patchStatus patches the Falco status using the given pre-modification snapshot.
-func (r *Reconciler) patchStatus(ctx context.Context, falco *instancev1alpha1.Falco, patch client.Patch) error {
-	logger := log.FromContext(ctx)
-	if err := r.Status().Patch(ctx, falco, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while patching status, will retry")
-			return err
-		}
-		logger.Error(err, "unable to patch status")
-		return err
-	}
-	return nil
+// patchStatus patches the Falco status using server-side apply.
+func (r *Reconciler) patchStatus(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, falco, fieldManager)
 }
 
 // computeAvailableCondition queries live deployment/daemonset state.

@@ -46,6 +46,8 @@ const (
 	rulesfileFinalizerPrefix = "rulesfile.artifact.falcosecurity.dev/finalizer"
 	// configMapRefIndexField is the field used for indexing Rulesfiles by ConfigMap reference.
 	configMapRefIndexField = ".spec.configMapRef.name"
+	// fieldManager is the name used to identify the controller's managed fields.
+	fieldManager = "artifact-rulesfile"
 )
 
 // NewRulesfileReconciler returns a new RulesfileReconciler.
@@ -116,12 +118,9 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	}
 
-	// Snapshot status before any condition modifications.
-	statusPatch := client.MergeFrom(rulesfile.DeepCopy())
-
 	// Patch status via defer to ensure it's always called.
 	defer func() {
-		patchErr := r.patchStatus(ctx, rulesfile, statusPatch)
+		patchErr := r.patchStatus(ctx, rulesfile)
 		if patchErr != nil {
 			logger.Error(patchErr, "unable to patch status")
 		}
@@ -312,16 +311,7 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	return nil
 }
 
-// patchStatus patches the Rulesfile status using the given pre-modification snapshot.
-func (r *RulesfileReconciler) patchStatus(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, patch client.Patch) error {
-	logger := log.FromContext(ctx)
-	if err := r.Status().Patch(ctx, rulesfile, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while patching status, will retry")
-			return err
-		}
-		logger.Error(err, "unable to patch status")
-		return err
-	}
-	return nil
+// patchStatus patches the Rulesfile status using server-side apply.
+func (r *RulesfileReconciler) patchStatus(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
+	return controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, fieldManager)
 }

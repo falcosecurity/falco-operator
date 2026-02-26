@@ -50,6 +50,8 @@ const (
 	pluginFinalizerPrefix = "plugin.artifact.falcosecurity.dev/finalizer"
 	// pluginConfigFileName is the name of the plugin configuration file.
 	pluginConfigFileName = "plugins-config"
+	// fieldManager is the name used to identify the controller's managed fields.
+	fieldManager = "artifact-plugin"
 )
 
 // NewPluginReconciler creates a new PluginReconciler instance.
@@ -121,12 +123,9 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		return ctrl.Result{}, err
 	}
 
-	// Snapshot status before any condition modifications.
-	statusPatch := client.MergeFrom(plugin.DeepCopy())
-
 	// Patch status via defer to ensure it's always called.
 	defer func() {
-		patchErr := r.patchStatus(ctx, plugin, statusPatch)
+		patchErr := r.patchStatus(ctx, plugin)
 		if patchErr != nil {
 			logger.Error(patchErr, "unable to patch status")
 		}
@@ -475,16 +474,7 @@ func (pc *PluginsConfig) isEmpty() bool {
 	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
 }
 
-// patchStatus patches the Plugin status using the given pre-modification snapshot.
-func (r *PluginReconciler) patchStatus(ctx context.Context, plugin *artifactv1alpha1.Plugin, patch client.Patch) error {
-	logger := log.FromContext(ctx)
-	if err := r.Status().Patch(ctx, plugin, patch); err != nil {
-		if apierrors.IsConflict(err) {
-			logger.V(3).Info("Conflict while patching status, will retry")
-			return err
-		}
-		logger.Error(err, "unable to patch status")
-		return err
-	}
-	return nil
+// patchStatus patches the Plugin status using server-side apply.
+func (r *PluginReconciler) patchStatus(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	return controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, fieldManager)
 }

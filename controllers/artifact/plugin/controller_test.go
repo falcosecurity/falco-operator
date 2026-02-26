@@ -1381,12 +1381,11 @@ func TestPatchStatus(t *testing.T) {
 	fetched := &artifactv1alpha1.Plugin{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, fetched))
 
-	patch := client.MergeFrom(fetched.DeepCopy())
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessagePluginReconciled, 1),
 	}
 
-	require.NoError(t, r.patchStatus(context.Background(), fetched, patch))
+	require.NoError(t, r.patchStatus(context.Background(), fetched))
 
 	obj := &artifactv1alpha1.Plugin{}
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, obj))
