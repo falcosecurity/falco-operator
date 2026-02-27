@@ -43,9 +43,9 @@ func NewReconciledCondition(status metav1.ConditionStatus, reason, message strin
 	return NewCondition(commonv1alpha1.ConditionReconciled, status, reason, message, generation)
 }
 
-// NewConfigMapRefCondition creates a ConditionConfigMapRef condition.
-func NewConfigMapRefCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
-	return NewCondition(commonv1alpha1.ConditionConfigMapRef, status, reason, message, generation)
+// NewResolvedRefCondition creates a ConditionResolvedRef condition.
+func NewResolvedRefCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
+	return NewCondition(commonv1alpha1.ConditionResolvedRef, status, reason, message, generation)
 }
 
 // NewAvailableCondition creates a ConditionAvailable condition.

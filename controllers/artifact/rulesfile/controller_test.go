@@ -268,7 +268,7 @@ func TestReconcile(t *testing.T) {
 			},
 			req: testutil.Request(testRulesfileName),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionConfigMapRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapResolved},
+				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 			},
 		},
@@ -425,7 +425,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionConfigMapRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapResolved},
+				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 			},
 		},
@@ -468,7 +468,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			writeErr: fmt.Errorf("mock write error"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionConfigMapRef.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapResolutionFailed},
+				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
 				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
 			},
 		},
@@ -481,7 +481,7 @@ func TestEnsureRulesfile(t *testing.T) {
 					Conditions: []metav1.Condition{
 						{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactStored},
 						{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineRulesStored},
-						{Type: commonv1alpha1.ConditionConfigMapRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapResolved},
+						{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 					},
 				},
 			},
@@ -523,7 +523,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				for _, c := range tt.rf.Status.Conditions {
 					assert.NotEqual(t, commonv1alpha1.ConditionOCIArtifact.String(), c.Type)
 					assert.NotEqual(t, commonv1alpha1.ConditionInlineContent.String(), c.Type)
-					assert.NotEqual(t, commonv1alpha1.ConditionConfigMapRef.String(), c.Type)
+					assert.NotEqual(t, commonv1alpha1.ConditionResolvedRef.String(), c.Type)
 				}
 			}
 		})
