@@ -229,7 +229,7 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionInlineContent.String())
 	}
 	if rulesfile.Spec.ConfigMapRef == nil {
-		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionConfigMapRef.String())
+		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionResolvedRef.String())
 	}
 
 	// Ensure Reconciled condition is stored even on early return.
@@ -292,19 +292,19 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapResolutionFailed,
-				artifact.ReasonConfigMapResolutionFailed, artifact.MessageFormatConfigMapResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewConfigMapRefCondition(
-				metav1.ConditionFalse, artifact.ReasonConfigMapResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapResolutionFailed, err.Error()), gen,
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefCondition(
+				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, err.Error()), gen,
 			))
 			return err
 		}
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapResolved,
-			artifact.ReasonConfigMapResolved, artifact.MessageFormatConfigMapResolved, rulesfile.Spec.ConfigMapRef.Name)
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewConfigMapRefCondition(
-			metav1.ConditionTrue, artifact.ReasonConfigMapResolved,
-			fmt.Sprintf(artifact.MessageFormatConfigMapResolved, rulesfile.Spec.ConfigMapRef.Name), gen,
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonReferenceResolved,
+			artifact.ReasonReferenceResolved, artifact.MessageFormatReferenceResolved, rulesfile.Spec.ConfigMapRef.Name)
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefCondition(
+			metav1.ConditionTrue, artifact.ReasonReferenceResolved,
+			fmt.Sprintf(artifact.MessageFormatReferenceResolved, rulesfile.Spec.ConfigMapRef.Name), gen,
 		))
 	}
 

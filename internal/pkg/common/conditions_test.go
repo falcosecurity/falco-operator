@@ -66,19 +66,19 @@ func TestNewReconciledCondition(t *testing.T) {
 	}
 }
 
-func TestNewConfigMapRefCondition(t *testing.T) {
-	condition := NewConfigMapRefCondition(metav1.ConditionFalse, "ConfigMapResolutionFailed", "not found", 2)
+func TestNewResolvedRefCondition(t *testing.T) {
+	condition := NewResolvedRefCondition(metav1.ConditionFalse, "ReferenceResolutionFailed", "not found", 2)
 
-	if condition.Type != string(commonv1alpha1.ConditionConfigMapRef) {
-		t.Errorf("NewConfigMapRefCondition().Type = %v, want %v",
-			condition.Type, string(commonv1alpha1.ConditionConfigMapRef))
+	if condition.Type != string(commonv1alpha1.ConditionResolvedRef) {
+		t.Errorf("NewResolvedRefCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionResolvedRef))
 	}
 	if condition.Status != metav1.ConditionFalse {
-		t.Errorf("NewConfigMapRefCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
+		t.Errorf("NewResolvedRefCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
 	}
-	if condition.Reason != "ConfigMapResolutionFailed" {
-		t.Errorf("NewConfigMapRefCondition().Reason = %v, want %v",
-			condition.Reason, "ConfigMapResolutionFailed")
+	if condition.Reason != "ReferenceResolutionFailed" {
+		t.Errorf("NewResolvedRefCondition().Reason = %v, want %v",
+			condition.Reason, "ReferenceResolutionFailed")
 	}
 }
 

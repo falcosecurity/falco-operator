@@ -22,10 +22,10 @@ const (
 	ReasonArtifactRemoved = "ArtifactRemoved"
 	// ReasonArtifactRemoveFailed indicates the artifact failed to be removed.
 	ReasonArtifactRemoveFailed = "ArtifactRemoveFailed"
-	// ReasonConfigMapResolved indicates the ConfigMap reference was resolved successfully.
-	ReasonConfigMapResolved = "ConfigMapResolved"
-	// ReasonConfigMapResolutionFailed indicates the ConfigMap reference failed to resolve.
-	ReasonConfigMapResolutionFailed = "ConfigMapResolutionFailed"
+	// ReasonReferenceResolved indicates the reference was resolved successfully.
+	ReasonReferenceResolved = "ReferenceResolved"
+	// ReasonReferenceResolutionFailed indicates the reference failed to resolve.
+	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
 	ReasonOCIArtifactStored = "OCIArtifactStored"
 	// ReasonOCIArtifactStoreFailed indicates the OCI artifact failed to store.
@@ -78,10 +78,10 @@ const (
 	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %s"
 	// MessageFormatInlineRulesStoreFailed is the format for inline rules store failure message.
 	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %s"
-	// MessageFormatConfigMapResolutionFailed is the format for ConfigMap resolution failure message.
-	MessageFormatConfigMapResolutionFailed = "Failed to resolve ConfigMap: %s"
-	// MessageFormatConfigMapResolved is the format for ConfigMap resolved message.
-	MessageFormatConfigMapResolved = "ConfigMap %q resolved successfully"
+	// MessageFormatReferenceResolutionFailed is the format for Reference resolution failure message.
+	MessageFormatReferenceResolutionFailed = "Failed to resolve Reference: %s"
+	// MessageFormatReferenceResolved is the format for Reference resolved message.
+	MessageFormatReferenceResolved = "Reference %q resolved successfully"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.
 	MessageFormatInlinePluginConfigStoreFailed = "Failed to store inline plugin config: %v"
 )

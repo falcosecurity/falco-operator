@@ -37,12 +37,11 @@ const (
 	// - False: the reconciliation failed.
 	// - Unknown: the operator couldn't determine the condition status.
 	ConditionReconciled ConditionType = "Reconciled"
-	// ConditionConfigMapRef indicates whether the ConfigMap references have been
-	// successfully resolved.
+	// ConditionResolvedRef indicates whether the references have been successfully resolved.
 	// The possible status values for this condition type are:
 	// - True: all references were resolved successfully.
 	// - False: one or more references could not be resolved.
-	ConditionConfigMapRef ConditionType = "ConfigMapRef"
+	ConditionResolvedRef ConditionType = "ResolvedRef"
 	// ConditionOCIArtifact indicates whether the OCI artifact has been successfully
 	// pulled and stored.
 	// The possible status values for this condition type are:
