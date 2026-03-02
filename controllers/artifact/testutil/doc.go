@@ -14,4 +14,5 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
+// Package testutil provides shared test helpers for artifact controller tests.
+package testutil

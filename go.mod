@@ -16,7 +16,7 @@ require (
 	k8s.io/client-go v0.35.1
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4
 	oras.land/oras-go/v2 v2.6.0
-	sigs.k8s.io/controller-runtime v0.23.1
+	sigs.k8s.io/controller-runtime v0.23.2-0.20260202104230-4dbfa5c66aa2
 	sigs.k8s.io/structured-merge-diff/v4 v4.7.0
 )
 

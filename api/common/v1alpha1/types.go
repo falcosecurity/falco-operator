@@ -29,15 +29,30 @@ const (
 	// - Degraded: some pods aren't ready, the service is partially available.
 	// - False: no pods are running, the service is totally unavailable.
 	// - Unknown: the operator couldn't determine the condition status.
-	ConditionAvailable ConditionType = "ConditionAvailable"
+	ConditionAvailable ConditionType = "Available"
 	// ConditionReconciled indicates whether the operator has reconciled the state of
 	// the underlying resources with the object's spec.
 	// The possible status values for this condition type are:
 	// - True: the reconciliation was successful.
 	// - False: the reconciliation failed.
 	// - Unknown: the operator couldn't determine the condition status.
-	ConditionReconciled ConditionType = "ConditionReconciled"
+	ConditionReconciled ConditionType = "Reconciled"
+	// ConditionResolvedRefs indicates whether the references have been successfully resolved.
+	// The possible status values for this condition type are:
+	// - True: all references were resolved successfully.
+	// - False: one or more references could not be resolved.
+	ConditionResolvedRefs ConditionType = "ResolvedRefs"
+	// ConditionProgrammed indicates whether the artifact has been successfully programmed into falco.
+	// The possible status values for this condition type are:
+	// - True: the artifact was programmed successfully.
+	// - False: the artifact could not be programmed.
+	ConditionProgrammed ConditionType = "Programmed"
 )
+
+// String returns the string representation of the condition type.
+func (c ConditionType) String() string {
+	return string(c)
+}
 
 const (
 	// ConfigMapRulesKey is the standard key used for rules data in ConfigMaps.

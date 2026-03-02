@@ -18,15 +18,22 @@ package config
 
 import (
 	"context"
+	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
@@ -34,13 +41,20 @@ import (
 
 const (
 	configFinalizerPrefix = "config.artifact.falcosecurity.dev/finalizer"
+	fieldManager          = "artifact-config"
 )
 
 // NewConfigReconciler returns a new ConfigReconciler.
-func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, namespace string) *ConfigReconciler {
+func NewConfigReconciler(
+	cl client.Client,
+	scheme *runtime.Scheme,
+	recorder events.EventRecorder,
+	nodeName, namespace string,
+) *ConfigReconciler {
 	return &ConfigReconciler{
 		Client:          cl,
 		Scheme:          scheme,
+		recorder:        recorder,
 		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
@@ -51,6 +65,7 @@ func NewConfigReconciler(cl client.Client, scheme *runtime.Scheme, nodeName, nam
 type ConfigReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
+	recorder        events.EventRecorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
@@ -58,15 +73,14 @@ type ConfigReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var err error
+func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	config := &artifactv1alpha1.Config{}
 
 	// Fetch the Config instance.
 	logger.V(2).Info("Fetching Config instance")
 
-	if err = r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch Config instance")
 		return ctrl.Result{}, err
 	} else if apierrors.IsNotFound(err) {
@@ -79,7 +93,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	} else if !ok {
 		logger.Info("Config instance does not match node selector, will remove local resources if any")
 
-		// Here we handle the case where the config was created with a selector that matched the node, but now it doesn't.
+		// Handle case where config selector no longer matches the node.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, config); ok || err != nil {
 			return ctrl.Result{}, err
 		}
@@ -95,6 +109,15 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if ok, err := r.ensureFinalizer(ctx, config); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Patch status via defer to ensure it's always called.
+	defer func() {
+		patchErr := r.patchStatus(ctx, config)
+		if patchErr != nil {
+			logger.Error(patchErr, "unable to patch status")
+		}
+		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
+	}()
 
 	// Ensure the configuration is written to the filesystem.
 	if err := r.ensureConfig(ctx, config); err != nil {
@@ -121,6 +144,10 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 		patch := client.MergeFrom(config.DeepCopy())
 		controllerutil.AddFinalizer(config, r.finalizer)
 		if err := r.Patch(ctx, config, patch); err != nil {
+			if apierrors.IsConflict(err) {
+				logger.V(3).Info("Conflict while setting finalizer, will retry")
+				return false, err
+			}
 			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
 			return false, err
 		}
@@ -134,5 +161,33 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 
 // ensureConfig ensures the configuration is written to the filesystem.
 func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config) error {
-	return r.artifactManager.StoreFromInLineYaml(ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig)
+	gen := config.GetGeneration()
+	var err error
+
+	// Clean up conditions before ensuring the plugin config.
+	apimeta.RemoveStatusCondition(&config.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+
+	if err = r.artifactManager.StoreFromInLineYaml(
+		ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig,
+	); err != nil {
+		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
+			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
+
+	r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
+		artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
+	apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
+	))
+	return nil
+}
+
+// patchStatus patches the Config status using server-side apply.
+func (r *ConfigReconciler) patchStatus(ctx context.Context, config *artifactv1alpha1.Config) error {
+	return controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, config, fieldManager)
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,7 +22,6 @@ import (
 	"os"
 	"path/filepath"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -210,12 +209,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&falco.Reconciler{
-		Client:               mgr.GetClient(),
-		Scheme:               mgr.GetScheme(),
-		ReconciledConditions: map[string]metav1.Condition{},
-		NativeSidecar:        sidecarEnabled,
-	}).SetupWithManager(mgr); err != nil {
+	if err = falco.NewReconciler(
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"), sidecarEnabled,
+	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)
 	}

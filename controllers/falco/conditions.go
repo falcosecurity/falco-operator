@@ -16,41 +16,126 @@
 
 package falco
 
-import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+// Reconciled condition reasons.
+const (
+	// ReasonApplyConfigurationError indicates an error generating the apply configuration.
+	ReasonApplyConfigurationError = "ApplyConfigurationError"
+	// ReasonMarshalConfigurationError indicates an error marshaling the configuration.
+	ReasonMarshalConfigurationError = "MarshalConfigurationError"
+	// ReasonOwnerReferenceError indicates an error setting the owner reference.
+	ReasonOwnerReferenceError = "OwnerReferenceError"
+	// ReasonExistingResourceError indicates an error fetching existing resource.
+	ReasonExistingResourceError = "ExistingResourceError"
+	// ReasonApplyPatchErrorOnCreate indicates an error applying patch during creation.
+	ReasonApplyPatchErrorOnCreate = "ApplyPatchErrorOnCreate"
+	// ReasonApplyPatchErrorOnUpdate indicates an error applying patch during update.
+	ReasonApplyPatchErrorOnUpdate = "ApplyPatchErrorOnUpdate"
+	// ReasonResourceCreated indicates the resource was created successfully.
+	ReasonResourceCreated = "ResourceCreated"
+	// ReasonResourceUpdated indicates the resource was updated successfully.
+	ReasonResourceUpdated = "ResourceUpdated"
+	// ReasonResourceUpToDate indicates the resource is already up to date.
+	ReasonResourceUpToDate = "ResourceUpToDate"
+	// ReasonResourceComparisonError indicates an error comparing resources.
+	ReasonResourceComparisonError = "ResourceComparisonError"
 )
 
-// findCondition searches for a condition of the specified type in the given slice of conditions.
-// It returns a pointer to the condition if found, otherwise it returns nil.
-func findCondition(conditions []metav1.Condition, conditionType commonv1alpha1.ConditionType) *metav1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == string(conditionType) {
-			return &conditions[i]
-		}
-	}
-	return nil
-}
+// Sub-resource event reasons.
+const (
+	// ReasonResourceGenerateError indicates an error generating a sub-resource.
+	ReasonResourceGenerateError = "ResourceGenerateError"
+	// ReasonResourceApplyError indicates an error applying a sub-resource.
+	ReasonResourceApplyError = "ResourceApplyError"
+	// ReasonSubResourceCreated indicates a sub-resource was created successfully.
+	ReasonSubResourceCreated = "SubResourceCreated"
+	// ReasonSubResourceUpdated indicates a sub-resource was updated successfully.
+	ReasonSubResourceUpdated = "SubResourceUpdated"
+)
 
-// updateConditions updates the given slice of conditions with the new conditions provided.
-// If a condition of the same type already exists, it updates the existing condition.
-// If the status of the condition has not changed, it retains the original LastTransitionTime.
-func updateConditions(conditions []metav1.Condition, newConditions ...metav1.Condition) []metav1.Condition {
-	ret := make([]metav1.Condition, 0, len(conditions))
+// Deletion event reasons.
+const (
+	// ReasonDeletionError indicates an error during deletion cleanup.
+	ReasonDeletionError = "DeletionError"
+	// ReasonInstanceDeleted indicates the Falco instance was deleted successfully.
+	ReasonInstanceDeleted = "InstanceDeleted"
+)
 
-	for _, nc := range newConditions {
-		c := findCondition(conditions, commonv1alpha1.ConditionType(nc.Type))
-		if c == nil {
-			ret = append(ret, nc)
-			continue
-		}
+// Available condition reasons.
+const (
+	// ReasonDeploymentNotFound indicates the deployment was not found.
+	ReasonDeploymentNotFound = "DeploymentNotFound"
+	// ReasonDeploymentAvailable indicates the deployment is available.
+	ReasonDeploymentAvailable = "DeploymentAvailable"
+	// ReasonDeploymentUnavailable indicates the deployment is unavailable.
+	ReasonDeploymentUnavailable = "DeploymentUnavailable"
+	// ReasonDeploymentFetchError indicates an error fetching the deployment status.
+	ReasonDeploymentFetchError = "DeploymentFetchError"
+	// ReasonDaemonSetNotFound indicates the daemonset was not found.
+	ReasonDaemonSetNotFound = "DaemonSetNotFound"
+	// ReasonDaemonSetAvailable indicates the daemonset is available.
+	ReasonDaemonSetAvailable = "DaemonSetAvailable"
+	// ReasonDaemonSetUnavailable indicates the daemonset is unavailable.
+	ReasonDaemonSetUnavailable = "DaemonSetUnavailable"
+	// ReasonDaemonSetFetchError indicates an error fetching the daemonset status.
+	ReasonDaemonSetFetchError = "DaemonSetFetchError"
+)
 
-		if nc.Status == c.Status {
-			nc.LastTransitionTime = c.LastTransitionTime
-		}
-		ret = append(ret, nc)
-	}
+// Condition messages.
+const (
+	// MessageDeploymentNotFound is the message when deployment is not found.
+	MessageDeploymentNotFound = "Deployment has not been created or has been deleted"
+	// MessageDeploymentAvailable is the message when deployment is available.
+	MessageDeploymentAvailable = "Deployment is available"
+	// MessageDeploymentUnavailable is the message when deployment is unavailable.
+	MessageDeploymentUnavailable = "Deployment is unavailable"
+	// MessageDaemonSetNotFound is the message when daemonset is not found.
+	MessageDaemonSetNotFound = "DaemonSet has not been created or has been deleted"
+	// MessageDaemonSetAvailable is the message when daemonset is available.
+	MessageDaemonSetAvailable = "DaemonSet is available"
+	// MessageDaemonSetUnavailable is the message when daemonset is unavailable.
+	MessageDaemonSetUnavailable = "DaemonSet is unavailable"
+	// MessageResourceCreated is the message when resource is created.
+	MessageResourceCreated = "Resource created successfully"
+	// MessageResourceUpdated is the message when resource is updated.
+	MessageResourceUpdated = "Resource updated successfully"
+	// MessageResourceUpToDate is the message when resource is up to date.
+	MessageResourceUpToDate = "Resource is up to date"
+	// MessageInstanceDeleted is the message when a Falco instance is deleted.
+	MessageInstanceDeleted = "Falco instance deleted successfully"
+)
 
-	return ret
-}
+// Available condition message formats (for use with fmt.Sprintf).
+const (
+	// MessageFormatDeploymentFetchError is the format for deployment fetch error message.
+	MessageFormatDeploymentFetchError = "Unable to fetch deployment for status: %s"
+	// MessageFormatDaemonSetFetchError is the format for daemonset fetch error message.
+	MessageFormatDaemonSetFetchError = "Unable to fetch daemonset for status: %s"
+)
+
+// Condition message formats (for use with fmt.Sprintf).
+const (
+	// MessageFormatApplyConfigurationError is the format for apply configuration error message.
+	MessageFormatApplyConfigurationError = "Unable to generate apply configuration: %s"
+	// MessageFormatMarshalConfigurationError is the format for marshal configuration error message.
+	MessageFormatMarshalConfigurationError = "Unable to marshal apply configuration: %s"
+	// MessageFormatOwnerReferenceError is the format for owner reference error message.
+	MessageFormatOwnerReferenceError = "Unable to set owner reference: %s"
+	// MessageFormatExistingResourceError is the format for existing resource error message.
+	MessageFormatExistingResourceError = "Unable to fetch existing resource: %s"
+	// MessageFormatApplyPatchErrorOnCreate is the format for apply patch error on create message.
+	MessageFormatApplyPatchErrorOnCreate = "Unable to create resource by patch: %s"
+	// MessageFormatApplyPatchErrorOnUpdate is the format for apply patch error on update message.
+	MessageFormatApplyPatchErrorOnUpdate = "Unable to update resource by patch: %s"
+	// MessageFormatResourceComparisonError is the format for resource comparison error message.
+	MessageFormatResourceComparisonError = "Unable to compare existing and desired resources: %s"
+	// MessageFormatResourceGenerateError is the format for resource generation error message.
+	MessageFormatResourceGenerateError = "Unable to generate desired resource: %s"
+	// MessageFormatResourceApplyError is the format for resource apply error message.
+	MessageFormatResourceApplyError = "Unable to apply %s: %s"
+	// MessageFormatSubResourceCreated is the format for sub-resource created message.
+	MessageFormatSubResourceCreated = "%s %s created successfully"
+	// MessageFormatSubResourceUpdated is the format for sub-resource updated message.
+	MessageFormatSubResourceUpdated = "%s %s updated successfully"
+	// MessageFormatDeletionError is the format for deletion error message.
+	MessageFormatDeletionError = "Unable to delete %s during cleanup: %s"
+)

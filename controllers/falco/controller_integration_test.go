@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -100,11 +101,7 @@ func getFirstFoundEnvTestBinaryDir() string {
 
 // newTestReconciler creates a new reconciler for integration tests.
 func newTestReconciler() *Reconciler {
-	return &Reconciler{
-		Client:               k8sClient,
-		Scheme:               k8sClient.Scheme(),
-		ReconciledConditions: map[string]metav1.Condition{},
-	}
+	return NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100), false)
 }
 
 // createFalco creates a Falco resource and registers cleanup to run after the test.

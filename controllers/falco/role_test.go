@@ -84,7 +84,7 @@ func TestGenerateRole(t *testing.T) {
 			assert.Equal(t, "rbac.authorization.k8s.io/v1", role.APIVersion)
 
 			// Verify rules
-			assert.Len(t, role.Rules, 2)
+			assert.Len(t, role.Rules, 4)
 
 			// Verify configmaps rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
@@ -93,11 +93,25 @@ func TestGenerateRole(t *testing.T) {
 				Verbs:     []string{"get", "list", "watch"},
 			})
 
+			// Verify events rule
+			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
+				APIGroups: []string{""},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "patch"},
+			})
+
 			// Verify artifact rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 				Resources: []string{"configs", "rulesfiles", "plugins"},
-				Verbs:     []string{"get", "update", "patch", "list", "watch"},
+				Verbs:     []string{"get", "list", "watch", "update", "patch"},
+			})
+
+			// Verify artifact status rule
+			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
+				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+				Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
+				Verbs:     []string{"get", "update", "patch"},
 			})
 		})
 	}
