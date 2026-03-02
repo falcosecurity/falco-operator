@@ -94,6 +94,7 @@ func TestReconcile(t *testing.T) {
 		req             ctrl.Request
 		triggerDeletion bool
 		pullErr         error
+		writeErr        error
 		wantErr         bool
 		wantFinalizer   *bool
 		wantConditions  []testutil.ConditionExpect
@@ -195,8 +196,7 @@ func TestReconcile(t *testing.T) {
 			},
 			req: testutil.Request(testRulesfileName),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineRulesStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -219,8 +219,7 @@ func TestReconcile(t *testing.T) {
 			pullErr: fmt.Errorf("mock pull error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
 			},
 		},
 		{
@@ -268,8 +267,74 @@ func TestReconcile(t *testing.T) {
 			},
 			req: testutil.Request(testRulesfileName),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "references resolved but OCI pull fails sets ResolvedRefs true and Programmed false",
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-pull-secret",
+						Namespace: testutil.Namespace,
+					},
+				},
+				&artifactv1alpha1.Rulesfile{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testRulesfileName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.RulesfileSpec{
+						OCIArtifact: &commonv1alpha1.OCIArtifact{
+							Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
+							PullSecret: &commonv1alpha1.OCIPullSecret{
+								SecretName: "my-pull-secret",
+							},
+						},
+					},
+				},
+			},
+			req:     testutil.Request(testRulesfileName),
+			pullErr: fmt.Errorf("mock pull error"),
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
+			},
+		},
+		{
+			name: "references resolved but configmap store fails sets ResolvedRefs true and Programmed false",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-rules-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
+					},
+				},
+				&artifactv1alpha1.Rulesfile{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testRulesfileName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.RulesfileSpec{
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
+							Name: "my-rules-cm",
+						},
+					},
+				},
+			},
+			req:      testutil.Request(testRulesfileName),
+			writeErr: fmt.Errorf("disk full"),
+			wantErr:  true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapRulesStoreFailed},
 			},
 		},
 	}
@@ -278,8 +343,11 @@ func TestReconcile(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, cl := newTestReconciler(t, tt.objects...)
 
-			if tt.pullErr != nil {
+			if tt.pullErr != nil || tt.writeErr != nil {
 				mockFS := filesystem.NewMockFileSystem()
+				if tt.writeErr != nil {
+					mockFS.WriteErr = tt.writeErr
+				}
 				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
@@ -364,14 +432,13 @@ func TestEnsureFinalizer(t *testing.T) {
 
 func TestEnsureRulesfile(t *testing.T) {
 	tests := []struct {
-		name                   string
-		objects                []client.Object
-		rf                     *artifactv1alpha1.Rulesfile
-		writeErr               error
-		pullErr                error
-		wantErr                bool
-		wantConditions         []testutil.ConditionExpect
-		wantNoSourceConditions bool
+		name           string
+		objects        []client.Object
+		rf             *artifactv1alpha1.Rulesfile
+		writeErr       error
+		pullErr        error
+		wantErr        bool
+		wantConditions []testutil.ConditionExpect
 	}{
 		{
 			name: "OCI pull error sets failure condition",
@@ -386,8 +453,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			pullErr: fmt.Errorf("mock pull error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
 			},
 		},
 		{
@@ -399,8 +465,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineRulesStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -425,8 +490,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -440,8 +504,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			writeErr: fmt.Errorf("mock write error"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineRulesStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineRulesStoreFailed},
 			},
 		},
 		{
@@ -468,26 +531,17 @@ func TestEnsureRulesfile(t *testing.T) {
 			writeErr: fmt.Errorf("mock write error"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapRulesStoreFailed},
 			},
 		},
 		{
-			name: "removes conditions for absent source types",
+			name: "no sources sets programmed without touching resolved refs",
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec:       artifactv1alpha1.RulesfileSpec{},
-				Status: artifactv1alpha1.RulesfileStatus{
-					Conditions: []metav1.Condition{
-						{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactStored},
-						{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineRulesStored},
-						{Type: commonv1alpha1.ConditionResolvedRef.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-					},
-				},
 			},
-			wantNoSourceConditions: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 	}
@@ -518,13 +572,185 @@ func TestEnsureRulesfile(t *testing.T) {
 			if len(tt.wantConditions) > 0 {
 				testutil.RequireConditions(t, tt.rf.Status.Conditions, tt.wantConditions)
 			}
+		})
+	}
+}
 
-			if tt.wantNoSourceConditions {
-				for _, c := range tt.rf.Status.Conditions {
-					assert.NotEqual(t, commonv1alpha1.ConditionOCIArtifact.String(), c.Type)
-					assert.NotEqual(t, commonv1alpha1.ConditionInlineContent.String(), c.Type)
-					assert.NotEqual(t, commonv1alpha1.ConditionResolvedRef.String(), c.Type)
-				}
+func TestEnforceReferenceResolution(t *testing.T) {
+	tests := []struct {
+		name             string
+		objects          []client.Object
+		rf               *artifactv1alpha1.Rulesfile
+		wantErr          bool
+		wantConditions   []testutil.ConditionExpect
+		wantNoConditions bool
+		wantStaleRemoved bool
+		presetConditions []metav1.Condition
+	}{
+		{
+			name: "inline only has no references and removes stale ResolvedRefs",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					InlineRules: &testInlineRules,
+				},
+			},
+			presetConditions: []metav1.Condition{
+				common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, 0),
+			},
+			wantNoConditions: true,
+		},
+		{
+			name: "OCI without PullSecret has no references",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
+					},
+				},
+			},
+			wantNoConditions: true,
+		},
+		{
+			name: "ConfigMap ref exists sets ResolvedRefs true",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+			},
+		},
+		{
+			name: "ConfigMap ref not found sets ResolvedRefs false and Programmed false",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+			},
+		},
+		{
+			name: "OCI PullSecret exists sets ResolvedRefs true",
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+					},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+			},
+		},
+		{
+			name: "OCI PullSecret not found sets ResolvedRefs false and Programmed false",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+					},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+			},
+		},
+		{
+			name: "ConfigMap and PullSecret both exist sets ResolvedRefs true",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+				},
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+					},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+			},
+		},
+		{
+			name: "ConfigMap exists but PullSecret missing fails on PullSecret",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+					},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := newTestReconciler(t, tt.objects...)
+
+			if len(tt.presetConditions) > 0 {
+				tt.rf.Status.Conditions = tt.presetConditions
+			}
+
+			err := r.enforceReferenceResolution(context.Background(), tt.rf)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			if tt.wantNoConditions {
+				assert.Empty(t, tt.rf.Status.Conditions)
+			}
+
+			if len(tt.wantConditions) > 0 {
+				testutil.RequireConditions(t, tt.rf.Status.Conditions, tt.wantConditions)
 			}
 		})
 	}

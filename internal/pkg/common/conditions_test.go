@@ -66,18 +66,18 @@ func TestNewReconciledCondition(t *testing.T) {
 	}
 }
 
-func TestNewResolvedRefCondition(t *testing.T) {
-	condition := NewResolvedRefCondition(metav1.ConditionFalse, "ReferenceResolutionFailed", "not found", 2)
+func TestNewResolvedRefsCondition(t *testing.T) {
+	condition := NewResolvedRefsCondition(metav1.ConditionFalse, "ReferenceResolutionFailed", "not found", 2)
 
-	if condition.Type != string(commonv1alpha1.ConditionResolvedRef) {
-		t.Errorf("NewResolvedRefCondition().Type = %v, want %v",
-			condition.Type, string(commonv1alpha1.ConditionResolvedRef))
+	if condition.Type != string(commonv1alpha1.ConditionResolvedRefs) {
+		t.Errorf("NewResolvedRefsCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionResolvedRefs))
 	}
 	if condition.Status != metav1.ConditionFalse {
-		t.Errorf("NewResolvedRefCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
+		t.Errorf("NewResolvedRefsCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
 	}
 	if condition.Reason != "ReferenceResolutionFailed" {
-		t.Errorf("NewResolvedRefCondition().Reason = %v, want %v",
+		t.Errorf("NewResolvedRefsCondition().Reason = %v, want %v",
 			condition.Reason, "ReferenceResolutionFailed")
 	}
 }
@@ -98,34 +98,18 @@ func TestNewAvailableCondition(t *testing.T) {
 	}
 }
 
-func TestNewOCIArtifactCondition(t *testing.T) {
-	condition := NewOCIArtifactCondition(metav1.ConditionTrue, "OCIArtifactStored", "stored", 5)
+func TestNewProgrammedCondition(t *testing.T) {
+	condition := NewProgrammedCondition(metav1.ConditionFalse, "ProgramFailed", "disk full", 4)
 
-	if condition.Type != string(commonv1alpha1.ConditionOCIArtifact) {
-		t.Errorf("NewOCIArtifactCondition().Type = %v, want %v",
-			condition.Type, string(commonv1alpha1.ConditionOCIArtifact))
+	if condition.Type != string(commonv1alpha1.ConditionProgrammed) {
+		t.Errorf("NewProgrammedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionProgrammed))
 	}
-	if condition.Status != metav1.ConditionTrue {
-		t.Errorf("NewOCIArtifactCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
+	if condition.Status != metav1.ConditionFalse {
+		t.Errorf("NewProgrammedCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
 	}
-	if condition.Reason != "OCIArtifactStored" {
-		t.Errorf("NewOCIArtifactCondition().Reason = %v, want %v",
-			condition.Reason, "OCIArtifactStored")
-	}
-}
-
-func TestNewInlineContentCondition(t *testing.T) {
-	condition := NewInlineContentCondition(metav1.ConditionTrue, "InlineConfigStored", "stored", 4)
-
-	if condition.Type != string(commonv1alpha1.ConditionInlineContent) {
-		t.Errorf("NewInlineContentCondition().Type = %v, want %v",
-			condition.Type, string(commonv1alpha1.ConditionInlineContent))
-	}
-	if condition.Status != metav1.ConditionTrue {
-		t.Errorf("NewInlineContentCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
-	}
-	if condition.Reason != "InlineConfigStored" {
-		t.Errorf("NewInlineContentCondition().Reason = %v, want %v",
-			condition.Reason, "InlineConfigStored")
+	if condition.Reason != "ProgramFailed" {
+		t.Errorf("NewProgrammedCondition().Reason = %v, want %v",
+			condition.Reason, "ProgramFailed")
 	}
 }

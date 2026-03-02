@@ -149,9 +149,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request(testPluginName),
 			wantConfigEmpty: testutil.BoolPtr(false),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactStored},
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlinePluginConfigStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -175,9 +173,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request("container"),
 			wantConfigEmpty: testutil.BoolPtr(false),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactStored},
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlinePluginConfigStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -239,9 +235,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request(testPluginName),
 			wantConfigEmpty: testutil.BoolPtr(false),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactStored},
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlinePluginConfigStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -308,8 +302,40 @@ func TestReconcile(t *testing.T) {
 			pullErr: fmt.Errorf("network error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionOCIArtifact.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
+			},
+		},
+		{
+			name: "references resolved but OCI pull fails sets ResolvedRefs true and Programmed false",
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-pull-secret",
+						Namespace: testutil.Namespace,
+					},
+				},
+				&artifactv1alpha1.Plugin{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testPluginName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.PluginSpec{
+						OCIArtifact: &commonv1alpha1.OCIArtifact{
+							Reference: "ghcr.io/falcosecurity/plugins/test:latest",
+							PullSecret: &commonv1alpha1.OCIPullSecret{
+								SecretName: "my-pull-secret",
+							},
+						},
+					},
+				},
+			},
+			req:     testutil.Request(testPluginName),
+			pullErr: fmt.Errorf("network error"),
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
 			},
 		},
 	}
@@ -637,8 +663,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			writeErr:       fmt.Errorf("disk full"),
 			wantErr:        true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlinePluginConfigStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlinePluginConfigStoreFailed},
 			},
 		},
 	}
@@ -1365,6 +1390,104 @@ func TestResolveConfigName(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, resolveConfigName(tt.plugin))
+		})
+	}
+}
+
+func TestEnforceReferenceResolution(t *testing.T) {
+	tests := []struct {
+		name             string
+		objects          []client.Object
+		plugin           *artifactv1alpha1.Plugin
+		wantErr          bool
+		wantConditions   []testutil.ConditionExpect
+		wantNoConditions bool
+		presetConditions []metav1.Condition
+	}{
+		{
+			name: "no PullSecret has no references and removes stale ResolvedRefs",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference: "ghcr.io/falcosecurity/plugins/test:latest",
+					},
+				},
+			},
+			presetConditions: []metav1.Condition{
+				common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, 0),
+			},
+			wantNoConditions: true,
+		},
+		{
+			name: "nil OCIArtifact has no references",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+			},
+			wantNoConditions: true,
+		},
+		{
+			name: "PullSecret exists sets ResolvedRefs true",
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+				},
+			},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/plugins/test:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+					},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+			},
+		},
+		{
+			name: "PullSecret not found sets ResolvedRefs false and Programmed false",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Reference:  "ghcr.io/falcosecurity/plugins/test:latest",
+						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+					},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := newTestReconciler(t, tt.objects...)
+
+			if len(tt.presetConditions) > 0 {
+				tt.plugin.Status.Conditions = tt.presetConditions
+			}
+
+			err := r.enforceReferenceResolution(context.Background(), tt.plugin)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			if tt.wantNoConditions {
+				assert.Empty(t, tt.plugin.Status.Conditions)
+			}
+
+			if len(tt.wantConditions) > 0 {
+				testutil.RequireConditions(t, tt.plugin.Status.Conditions, tt.wantConditions)
+			}
 		})
 	}
 }

@@ -127,6 +127,11 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
 	}()
 
+	// Enforce reference resolution.
+	if err := r.enforceReferenceResolution(ctx, rulesfile); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure the rulesfile.
 	if err := r.ensureRulesfile(ctx, rulesfile); err != nil {
 		return ctrl.Result{}, err
@@ -221,31 +226,8 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	logger := log.FromContext(ctx)
 	p := rulesfile.Spec.Priority
 
-	// Remove conditions for source types no longer present in the spec.
-	if rulesfile.Spec.OCIArtifact == nil {
-		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionOCIArtifact.String())
-	}
-	if rulesfile.Spec.InlineRules == nil {
-		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionInlineContent.String())
-	}
-	if rulesfile.Spec.ConfigMapRef == nil {
-		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionResolvedRef.String())
-	}
-
-	// Ensure Reconciled condition is stored even on early return.
-	defer func() {
-		if err != nil {
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewReconciledCondition(
-				metav1.ConditionFalse, artifact.ReasonReconcileFailed, err.Error(), gen,
-			))
-		} else {
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonReconciled,
-				artifact.ReasonReconciled, artifact.MessageRulesfileReconciled)
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewReconciledCondition(
-				metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageRulesfileReconciled, gen,
-			))
-		}
-	}()
+	// Clean up conditions before ensuring the rulesfile.
+	apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
 	// Store OCI artifact if specified.
 	if rulesfile.Spec.OCIArtifact != nil {
@@ -253,7 +235,7 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 			logger.Error(err, "unable to store Rulesfile OCI artifact")
 			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
 				artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewOCIArtifactCondition(
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 				metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
 				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
 			))
@@ -261,9 +243,6 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		}
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
 			artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewOCIArtifactCondition(
-			metav1.ConditionTrue, artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored, gen,
-		))
 	}
 
 	// Store inline rules if specified.
@@ -272,7 +251,7 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 			logger.Error(err, "unable to store Rulesfile inline rules")
 			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
 				artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewInlineContentCondition(
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 				metav1.ConditionFalse, artifact.ReasonInlineRulesStoreFailed,
 				fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()), gen,
 			))
@@ -280,9 +259,6 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		}
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonInlineRulesStored,
 			artifact.ReasonInlineRulesStored, artifact.MessageInlineRulesStored)
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewInlineContentCondition(
-			metav1.ConditionTrue, artifact.ReasonInlineRulesStored, artifact.MessageInlineRulesStored, gen,
-		))
 	}
 
 	// Store ConfigMap rules if specified.
@@ -292,20 +268,73 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
-				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, err.Error()), gen,
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapRulesStoreFailed,
+				artifact.ReasonConfigMapRulesStoreFailed, artifact.MessageFormatConfigMapRulesStoreFailed, err.Error())
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+				metav1.ConditionFalse, artifact.ReasonConfigMapRulesStoreFailed,
+				fmt.Sprintf(artifact.MessageFormatConfigMapRulesStoreFailed, err.Error()), gen,
 			))
 			return err
 		}
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapRulesStored,
+			artifact.ReasonConfigMapRulesStored, artifact.MessageConfigMapRulesStored)
+	}
+
+	apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
+	))
+
+	return nil
+}
+
+func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
+	logger := log.FromContext(ctx)
+	hasRefs := false
+
+	if rulesfile.Spec.ConfigMapRef != nil {
+		hasRefs = true
+		err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, rulesfile.Spec.ConfigMapRef.Name, &corev1.ConfigMap{})
+		if err != nil {
+			logger.Error(err, "ConfigMap reference resolution failed", "configMap", rulesfile.Spec.ConfigMapRef.Name)
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
+				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.ConfigMapRef.Name), rulesfile.GetGeneration()))
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.ConfigMapRef.Name), rulesfile.GetGeneration(),
+			))
+			return err
+		}
+	}
+
+	if rulesfile.Spec.OCIArtifact != nil && rulesfile.Spec.OCIArtifact.PullSecret != nil {
+		hasRefs = true
+		err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, rulesfile.Spec.OCIArtifact.PullSecret.SecretName, &corev1.Secret{})
+		if err != nil {
+			logger.Error(err, "OCIArtifact pull secret reference resolution failed", "secret", rulesfile.Spec.OCIArtifact.PullSecret.SecretName)
+			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
+				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.OCIArtifact.PullSecret.SecretName), rulesfile.GetGeneration()))
+			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.OCIArtifact.PullSecret.SecretName), rulesfile.GetGeneration(),
+			))
+			return err
+		}
+	}
+
+	if hasRefs {
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonReferenceResolved,
-			artifact.ReasonReferenceResolved, artifact.MessageFormatReferenceResolved, rulesfile.Spec.ConfigMapRef.Name)
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefCondition(
-			metav1.ConditionTrue, artifact.ReasonReferenceResolved,
-			fmt.Sprintf(artifact.MessageFormatReferenceResolved, rulesfile.Spec.ConfigMapRef.Name), gen,
+			artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
+			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, rulesfile.GetGeneration(),
 		))
+	} else {
+		apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
 	}
 
 	return nil

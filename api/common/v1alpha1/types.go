@@ -37,22 +37,16 @@ const (
 	// - False: the reconciliation failed.
 	// - Unknown: the operator couldn't determine the condition status.
 	ConditionReconciled ConditionType = "Reconciled"
-	// ConditionResolvedRef indicates whether the references have been successfully resolved.
+	// ConditionResolvedRefs indicates whether the references have been successfully resolved.
 	// The possible status values for this condition type are:
 	// - True: all references were resolved successfully.
 	// - False: one or more references could not be resolved.
-	ConditionResolvedRef ConditionType = "ResolvedRef"
-	// ConditionOCIArtifact indicates whether the OCI artifact has been successfully
-	// pulled and stored.
+	ConditionResolvedRefs ConditionType = "ResolvedRefs"
+	// ConditionProgrammed indicates whether the artifact has been successfully programmed into falco.
 	// The possible status values for this condition type are:
-	// - True: the OCI artifact was pulled and stored successfully.
-	// - False: the OCI artifact could not be pulled or stored.
-	ConditionOCIArtifact ConditionType = "OCIArtifact"
-	// ConditionInlineContent indicates whether inline content has been successfully stored.
-	// The possible status values for this condition type are:
-	// - True: the inline content was stored successfully.
-	// - False: the inline content could not be stored.
-	ConditionInlineContent ConditionType = "InlineContent"
+	// - True: the artifact was programmed successfully.
+	// - False: the artifact could not be programmed.
+	ConditionProgrammed ConditionType = "Programmed"
 )
 
 // String returns the string representation of the condition type.
