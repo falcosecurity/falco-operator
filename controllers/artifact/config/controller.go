@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
@@ -163,26 +164,15 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	gen := config.GetGeneration()
 	var err error
 
-	// Ensure Reconciled condition is stored even on early return.
-	defer func() {
-		if err != nil {
-			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewReconciledCondition(
-				metav1.ConditionFalse, artifact.ReasonReconcileFailed, err.Error(), gen,
-			))
-		} else {
-			r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonReconciled, artifact.ReasonReconciled, artifact.MessageConfigReconciled)
-			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewReconciledCondition(
-				metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageConfigReconciled, gen,
-			))
-		}
-	}()
+	// Clean up conditions before ensuring the plugin config.
+	apimeta.RemoveStatusCondition(&config.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
 	if err = r.artifactManager.StoreFromInLineYaml(
 		ctx, config.Name, config.Spec.Priority, &config.Spec.Config, artifact.TypeConfig,
 	); err != nil {
 		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
 			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewInlineContentCondition(
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
 			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
 		))
@@ -191,8 +181,8 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 
 	r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
 		artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
-	apimeta.SetStatusCondition(&config.Status.Conditions, common.NewInlineContentCondition(
-		metav1.ConditionTrue, artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored, gen,
+	apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
 	))
 	return nil
 }

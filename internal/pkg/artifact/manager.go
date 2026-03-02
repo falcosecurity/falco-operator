@@ -557,3 +557,21 @@ func Path(name string, artifactPriority int32, medium Medium, artifactType Type)
 		return priority.NameFromPriority(artifactPriority, name)
 	}
 }
+
+// CheckReferenceResolution checks if a specific Kubernetes resource exists.
+// Returns an error if the resource does not exist or cannot be retrieved.
+func (am *Manager) CheckReferenceResolution(ctx context.Context, namespace, name string, obj client.Object) error {
+	logger := log.FromContext(ctx)
+
+	key := client.ObjectKey{
+		Name:      name,
+		Namespace: namespace,
+	}
+
+	if err := am.client.Get(ctx, key, obj); err != nil {
+		logger.Error(err, "Failed to get resource", "name", name, "namespace", namespace)
+		return err
+	}
+
+	return nil
+}

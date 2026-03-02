@@ -223,8 +223,7 @@ func TestReconcile(t *testing.T) {
 			},
 			req: testutil.Request(testConfigName),
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineConfigStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -278,8 +277,7 @@ func TestReconcile(t *testing.T) {
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
 			},
 		},
 	}
@@ -420,8 +418,7 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineConfigStored},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
@@ -440,8 +437,7 @@ func TestEnsureConfig(t *testing.T) {
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionInlineContent.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
-				{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReconcileFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
 			},
 		},
 	}

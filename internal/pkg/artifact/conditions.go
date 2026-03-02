@@ -34,6 +34,10 @@ const (
 	ReasonInlineRulesStored = "InlineRulesStored"
 	// ReasonInlineRulesStoreFailed indicates inline rules failed to store.
 	ReasonInlineRulesStoreFailed = "InlineRulesStoreFailed"
+	// ReasonConfigMapRulesStored indicates rules from a ConfigMap were stored successfully.
+	ReasonConfigMapRulesStored = "ConfigMapRulesStored"
+	// ReasonConfigMapRulesStoreFailed indicates rules from a ConfigMap failed to store.
+	ReasonConfigMapRulesStoreFailed = "ConfigMapRulesStoreFailed"
 	// ReasonInlineConfigStored indicates inline configuration was stored successfully.
 	ReasonInlineConfigStored = "InlineConfigStored"
 	// ReasonInlineConfigStoreFailed indicates inline configuration failed to store.
@@ -46,6 +50,10 @@ const (
 	ReasonReconciled = "Reconciled"
 	// ReasonReconcileFailed indicates the artifact failed to reconcile.
 	ReasonReconcileFailed = "ReconcileFailed"
+	// ReasonProgrammed indicates the artifact was programmed successfully.
+	ReasonProgrammed = "Programmed"
+	// ReasonProgramFailed indicates the artifact failed to program.
+	ReasonProgramFailed = "ProgramFailed"
 )
 
 // Condition messages.
@@ -62,10 +70,16 @@ const (
 	MessageOCIArtifactStored = "OCI artifact stored successfully"
 	// MessageInlineRulesStored is the message when inline rules are stored successfully.
 	MessageInlineRulesStored = "Inline rules stored successfully"
+	// MessageConfigMapRulesStored is the message when rules from a ConfigMap are stored successfully.
+	MessageConfigMapRulesStored = "ConfigMap rules stored successfully"
 	// MessageInlineConfigStored is the message when inline configuration is stored successfully.
-	MessageInlineConfigStored = "Inline configuration stored successfully"
+	MessageInlineConfigStored = "Inline config content stored successfully"
 	// MessageInlinePluginConfigStored is the message when inline plugin configuration is stored successfully.
 	MessageInlinePluginConfigStored = "Inline plugin configuration stored successfully"
+	// MessageProgrammed is the message when the artifact is programmed successfully.
+	MessageProgrammed = "All artifacts sources were programmed successfully"
+	// MessageReferencesResolved is the message when all references are resolved successfully.
+	MessageReferencesResolved = "All references were resolved successfully"
 )
 
 // Condition message formats (for use with fmt.Sprintf).
@@ -76,6 +90,8 @@ const (
 	MessageFormatOCIArtifactStoreFailed = "Failed to store OCI artifact: %s"
 	// MessageFormatPluginArtifactsRemoveFailed is the format for plugin artifacts remove failure message.
 	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %s"
+	// MessageFormatConfigMapRulesStoreFailed is the format for ConfigMap rules store failure message.
+	MessageFormatConfigMapRulesStoreFailed = "Failed to store ConfigMap rules: %s"
 	// MessageFormatInlineRulesStoreFailed is the format for inline rules store failure message.
 	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %s"
 	// MessageFormatReferenceResolutionFailed is the format for Reference resolution failure message.

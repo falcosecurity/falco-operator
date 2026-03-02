@@ -43,9 +43,9 @@ func NewReconciledCondition(status metav1.ConditionStatus, reason, message strin
 	return NewCondition(commonv1alpha1.ConditionReconciled, status, reason, message, generation)
 }
 
-// NewResolvedRefCondition creates a ConditionResolvedRef condition.
-func NewResolvedRefCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
-	return NewCondition(commonv1alpha1.ConditionResolvedRef, status, reason, message, generation)
+// NewResolvedRefsCondition creates a ConditionResolvedRef condition.
+func NewResolvedRefsCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
+	return NewCondition(commonv1alpha1.ConditionResolvedRefs, status, reason, message, generation)
 }
 
 // NewAvailableCondition creates a ConditionAvailable condition.
@@ -53,12 +53,7 @@ func NewAvailableCondition(status metav1.ConditionStatus, reason, message string
 	return NewCondition(commonv1alpha1.ConditionAvailable, status, reason, message, generation)
 }
 
-// NewOCIArtifactCondition creates a ConditionOCIArtifact condition.
-func NewOCIArtifactCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
-	return NewCondition(commonv1alpha1.ConditionOCIArtifact, status, reason, message, generation)
-}
-
-// NewInlineContentCondition creates a ConditionInlineContent condition.
-func NewInlineContentCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
-	return NewCondition(commonv1alpha1.ConditionInlineContent, status, reason, message, generation)
+// NewProgrammedCondition creates a ConditionProgrammed condition.
+func NewProgrammedCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
+	return NewCondition(commonv1alpha1.ConditionProgrammed, status, reason, message, generation)
 }
