@@ -211,7 +211,10 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
 						OCIArtifact: &commonv1alpha1.OCIArtifact{
-							Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
+							Image: commonv1alpha1.ImageSpec{
+								Repository: "falcosecurity/rules/falco-rules",
+								Tag:        "latest",
+							},
 						},
 					},
 				},
@@ -289,9 +292,14 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
 						OCIArtifact: &commonv1alpha1.OCIArtifact{
-							Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
-							PullSecret: &commonv1alpha1.OCIPullSecret{
-								SecretName: "my-pull-secret",
+							Image: commonv1alpha1.ImageSpec{
+								Repository: "falcosecurity/rules/falco-rules",
+								Tag:        "latest",
+							},
+							Registry: &commonv1alpha1.RegistryConfig{
+								Auth: &commonv1alpha1.RegistryAuth{
+									SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+								},
 							},
 						},
 					},
@@ -447,7 +455,10 @@ func TestEnsureRulesfile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
 					},
 				},
 			},
@@ -602,12 +613,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			wantNoConditions: true,
 		},
 		{
-			name: "OCI without PullSecret has no references",
+			name: "OCI without registry has no references",
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference: "ghcr.io/falcosecurity/rules/falco-rules:latest",
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
 					},
 				},
 			},
@@ -645,7 +659,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "OCI PullSecret exists sets ResolvedRefs true",
+			name: "OCI auth secret exists sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
@@ -655,8 +669,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+							},
+						},
 					},
 				},
 			},
@@ -665,13 +686,20 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "OCI PullSecret not found sets ResolvedRefs false and Programmed false",
+			name: "OCI auth secret not found sets ResolvedRefs false and Programmed false",
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "missing-secret"},
+							},
+						},
 					},
 				},
 			},
@@ -682,7 +710,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "ConfigMap and PullSecret both exist sets ResolvedRefs true",
+			name: "ConfigMap and auth secret both exist sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
@@ -696,8 +724,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+							},
+						},
 					},
 				},
 			},
@@ -706,7 +741,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "ConfigMap exists but PullSecret missing fails on PullSecret",
+			name: "ConfigMap exists but auth secret missing fails on auth secret",
 			objects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
@@ -717,8 +752,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/rules/falco-rules:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/rules/falco-rules",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "missing-secret"},
+							},
+						},
 					},
 				},
 			},

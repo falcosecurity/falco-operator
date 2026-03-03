@@ -35,47 +35,34 @@ func credentialFuncFromCredentials(creds auth.Credential) auth.CredentialFunc {
 }
 
 // GetCredentialsFromSecret retrieves credentials from the Kubernetes secret
-// referenced by the OCIPullSecret and returns an ORAS credential.
-func GetCredentialsFromSecret(ctx context.Context, k8sClient client.Client, namespace string, pullSecret *commonv1alpha1.OCIPullSecret) (auth.CredentialFunc, error) {
+// referenced by the AuthSecretRef and returns an ORAS credential.
+func GetCredentialsFromSecret(ctx context.Context, k8sClient client.Client, namespace string, authSecretRef *commonv1alpha1.SecretRef) (auth.CredentialFunc, error) {
 	var creds = auth.EmptyCredential
 
-	if pullSecret == nil {
+	if authSecretRef == nil {
 		return credentialFuncFromCredentials(creds), nil
 	}
 
 	// Fetch the secret
 	secret := &corev1.Secret{}
 	secretNamespacedName := types.NamespacedName{
-		Name:      pullSecret.SecretName,
+		Name:      authSecretRef.Name,
 		Namespace: namespace,
 	}
 
 	if err := k8sClient.Get(ctx, secretNamespacedName, secret); err != nil {
-		return nil, fmt.Errorf("failed to get pull secret %s: %w", pullSecret.SecretName, err)
+		return nil, fmt.Errorf("failed to get pull secret %s: %w", authSecretRef.Name, err)
 	}
 
-	// Set default keys if not provided
-	usernameKey := pullSecret.UsernameKey
-	// This should never happen, but it's better to be safe than sorry.
-	if usernameKey == "" {
-		usernameKey = "username"
-	}
-
-	passwordKey := pullSecret.PasswordKey
-	// This should never happen, but it's better to be safe than sorry.
-	if passwordKey == "" {
-		passwordKey = "password"
-	}
-
-	// Extract username and password
-	username, ok := secret.Data[usernameKey]
+	// Extract username and password using standard kubernetes.io/basic-auth keys.
+	username, ok := secret.Data[commonv1alpha1.SecretUsernameKey]
 	if !ok {
-		return nil, fmt.Errorf("username key %s not found in secret %s", usernameKey, pullSecret.SecretName)
+		return nil, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretUsernameKey, authSecretRef.Name)
 	}
 
-	password, ok := secret.Data[passwordKey]
+	password, ok := secret.Data[commonv1alpha1.SecretPasswordKey]
 	if !ok {
-		return nil, fmt.Errorf("password key %s not found in secret %s", passwordKey, pullSecret.SecretName)
+		return nil, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretPasswordKey, authSecretRef.Name)
 	}
 
 	return credentialFuncFromCredentials(auth.Credential{

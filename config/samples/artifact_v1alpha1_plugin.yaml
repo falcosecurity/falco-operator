@@ -7,4 +7,8 @@ metadata:
   name: plugin-sample
 spec:
   ociArtifact:
-    reference: ghcr.io/falcosecurity/plugins/plugin/container:main
+    image:
+      repository: falcosecurity/plugins/plugin/container
+      tag: main
+    registry:
+      name: ghcr.io

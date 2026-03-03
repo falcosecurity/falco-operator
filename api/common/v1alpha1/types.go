@@ -57,35 +57,80 @@ func (c ConditionType) String() string {
 const (
 	// ConfigMapRulesKey is the standard key used for rules data in ConfigMaps.
 	ConfigMapRulesKey = "rules.yaml"
+
 	// ConfigMapConfigKey is the standard key used for Falco configuration data in ConfigMaps.
 	ConfigMapConfigKey = "config.yaml"
+
+	// SecretUsernameKey is the key used for the username in authentication Secrets.
+	SecretUsernameKey = "username"
+
+	// SecretPasswordKey is the key used for the password (or token) in authentication Secrets.
+	SecretPasswordKey = "password"
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
 // +kubebuilder:object:generate=true
 type OCIArtifact struct {
-	// Reference is the OCI artifact reference.
+	// Image specifies the OCI image coordinates.
 	// +kubebuilder:validation:Required
-	Reference string `json:"reference,omitempty"`
+	Image ImageSpec `json:"image"`
 
-	// PullSecret contains authentication details used to pull the OCI artifact.
-	PullSecret *OCIPullSecret `json:"pullSecret,omitempty"`
+	// Registry contains inline registry configuration for authentication, TLS, and hostname.
+	Registry *RegistryConfig `json:"registry,omitempty"`
 }
 
-// OCIPullSecret defines the structure for specifying authentication details for an OCI artifact.
+// ImageSpec specifies the OCI image coordinates.
 // +kubebuilder:object:generate=true
-type OCIPullSecret struct {
-	// SecretName is the name of the secret containing credentials.
+type ImageSpec struct {
+	// Repository is the OCI repository path (e.g. "falcosecurity/rules/falco-rules").
 	// +kubebuilder:validation:Required
-	SecretName string `json:"secretName,omitempty"`
+	Repository string `json:"repository"`
+	// Tag is the image tag or digest (e.g. "latest" or "sha256:abc...").
+	// +kubebuilder:default=latest
+	Tag string `json:"tag,omitempty"`
+}
 
-	// UsernameKey is the key in the secret that contains the username.
-	// +kubebuilder:default=username
-	UsernameKey string `json:"usernameKey,omitempty"`
+// SecretRef defines a reference to a Secret containing registry credentials.
+// The referenced Secret must contain the keys "username" and "password".
+// The "password" field can also hold an access token.
+// +kubebuilder:object:generate=true
+type SecretRef struct {
+	// Name is the name of the Secret containing credentials.
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+}
 
-	// PasswordKey is the key in the secret that contains the password.
-	// +kubebuilder:default=password
-	PasswordKey string `json:"passwordKey,omitempty"`
+// TLSConfig defines TLS transport options for OCI registry communication.
+// +kubebuilder:object:generate=true
+type TLSConfig struct {
+	// InsecureSkipVerify disables TLS certificate verification.
+	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
+}
+
+// RegistryAuth defines authentication configuration for an OCI registry.
+// +kubebuilder:object:generate=true
+type RegistryAuth struct {
+	// SecretRef references a Secret containing registry credentials.
+	SecretRef *SecretRef `json:"secretRef,omitempty"`
+}
+
+// RegistryConfig defines inline registry configuration for an OCI artifact.
+// +kubebuilder:object:generate=true
+// +kubebuilder:validation:XValidation:rule="!(has(self.plainHTTP) && self.plainHTTP && has(self.tls))",message="plainHTTP and tls are mutually exclusive"
+type RegistryConfig struct {
+	// Name is the registry hostname (e.g. "ghcr.io").
+	Name string `json:"name,omitempty"`
+
+	// Auth contains authentication configuration.
+	Auth *RegistryAuth `json:"auth,omitempty"`
+
+	// PlainHTTP allows connections to registries over plain HTTP (no TLS).
+	// Mutually exclusive with tls.
+	PlainHTTP *bool `json:"plainHTTP,omitempty"`
+
+	// TLS contains TLS transport configuration.
+	// Mutually exclusive with plainHTTP.
+	TLS *TLSConfig `json:"tls,omitempty"`
 }
 
 // ConfigMapRef defines the structure for referencing a ConfigMap and a specific key within it.

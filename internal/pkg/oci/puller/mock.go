@@ -26,19 +26,21 @@ import (
 type MockOCIPuller struct {
 	Result    *RegistryResult
 	PullErr   error
-	PullCalls []pullCall
+	PullCalls []PullCall
 }
 
-type pullCall struct {
-	ref     string
-	destDir string
-	os      string
-	arch    string
+// PullCall records the arguments of a Pull invocation.
+type PullCall struct {
+	Ref     string
+	DestDir string
+	OS      string
+	Arch    string
+	Opts    *RegistryOptions
 }
 
 // Pull records the call and returns the preset result or error.
-func (m *MockOCIPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc) (*RegistryResult, error) {
-	m.PullCalls = append(m.PullCalls, pullCall{ref: ref, destDir: destDir, os: os, arch: arch})
+func (m *MockOCIPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error) {
+	m.PullCalls = append(m.PullCalls, PullCall{Ref: ref, DestDir: destDir, OS: os, Arch: arch, Opts: opts})
 	if m.PullErr != nil {
 		return nil, m.PullErr
 	}
