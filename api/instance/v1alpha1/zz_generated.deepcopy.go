@@ -23,6 +23,7 @@
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
@@ -98,6 +99,16 @@ func (in *FalcoSpec) DeepCopyInto(out *FalcoSpec) {
 	if in.PodTemplateSpec != nil {
 		in, out := &in.PodTemplateSpec, &out.PodTemplateSpec
 		*out = new(v1.PodTemplateSpec)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.UpdateStrategy != nil {
+		in, out := &in.UpdateStrategy, &out.UpdateStrategy
+		*out = new(appsv1.DaemonSetUpdateStrategy)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.Strategy != nil {
+		in, out := &in.Strategy, &out.Strategy
+		*out = new(appsv1.DeploymentStrategy)
 		(*in).DeepCopyInto(*out)
 	}
 }

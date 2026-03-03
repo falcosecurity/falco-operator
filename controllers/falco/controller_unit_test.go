@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -116,6 +117,25 @@ func withLabels(labels map[string]string) func(*instancev1alpha1.Falco) {
 	return func(f *instancev1alpha1.Falco) {
 		f.Labels = labels
 	}
+}
+
+// withStrategy sets the Deployment strategy.
+func withStrategy(s appsv1.DeploymentStrategy) func(*instancev1alpha1.Falco) {
+	return func(f *instancev1alpha1.Falco) {
+		f.Spec.Strategy = &s
+	}
+}
+
+// withUpdateStrategy sets the DaemonSet update strategy.
+func withUpdateStrategy(s appsv1.DaemonSetUpdateStrategy) func(*instancev1alpha1.Falco) {
+	return func(f *instancev1alpha1.Falco) {
+		f.Spec.UpdateStrategy = &s
+	}
+}
+
+func intstrPtr(val int) *intstr.IntOrString {
+	v := intstr.FromInt32(int32(val))
+	return &v
 }
 
 func TestEnsureResource(t *testing.T) {
@@ -321,6 +341,80 @@ func TestEnsureResource(t *testing.T) {
 					}
 				}
 				assert.True(t, foundConfigMapRule, "Role should have configmaps rule after update")
+			},
+		},
+		{
+			name: "creates Deployment with custom Recreate strategy",
+			falco: newFalco("test-falco", withType(resourceTypeDeployment), withReplicas(1),
+				withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
+			generator: func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+				return generateApplyConfiguration(cl, falco, false)
+			},
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				dep := &appsv1.Deployment{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), dep)
+				require.NoError(t, err)
+				assert.Equal(t, appsv1.RecreateDeploymentStrategyType, dep.Spec.Strategy.Type)
+			},
+		},
+		{
+			name:  "creates Deployment with default RollingUpdate strategy",
+			falco: newFalco("test-falco", withType(resourceTypeDeployment), withReplicas(1)),
+			generator: func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+				return generateApplyConfiguration(cl, falco, false)
+			},
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				dep := &appsv1.Deployment{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), dep)
+				require.NoError(t, err)
+				assert.Equal(t, appsv1.RollingUpdateDeploymentStrategyType, dep.Spec.Strategy.Type)
+			},
+		},
+		{
+			name: "creates DaemonSet with custom OnDelete update strategy",
+			falco: newFalco("test-falco", withType(resourceTypeDaemonSet),
+				withUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType})),
+			generator: func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+				return generateApplyConfiguration(cl, falco, false)
+			},
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				ds := &appsv1.DaemonSet{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), ds)
+				require.NoError(t, err)
+				assert.Equal(t, appsv1.OnDeleteDaemonSetStrategyType, ds.Spec.UpdateStrategy.Type)
+			},
+		},
+		{
+			name:  "creates DaemonSet with default RollingUpdate update strategy",
+			falco: newFalco("test-falco", withType(resourceTypeDaemonSet)),
+			generator: func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+				return generateApplyConfiguration(cl, falco, false)
+			},
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				ds := &appsv1.DaemonSet{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), ds)
+				require.NoError(t, err)
+				assert.Equal(t, appsv1.RollingUpdateDaemonSetStrategyType, ds.Spec.UpdateStrategy.Type)
+			},
+		},
+		{
+			name: "creates DaemonSet with RollingUpdate maxUnavailable",
+			falco: newFalco("test-falco", withType(resourceTypeDaemonSet), withUpdateStrategy(appsv1.DaemonSetUpdateStrategy{
+				Type: appsv1.RollingUpdateDaemonSetStrategyType,
+				RollingUpdate: &appsv1.RollingUpdateDaemonSet{
+					MaxUnavailable: intstrPtr(3),
+				},
+			})),
+			generator: func(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
+				return generateApplyConfiguration(cl, falco, false)
+			},
+			validateResult: func(t *testing.T, cl client.Client, falco *instancev1alpha1.Falco) {
+				ds := &appsv1.DaemonSet{}
+				err := cl.Get(context.Background(), client.ObjectKeyFromObject(falco), ds)
+				require.NoError(t, err)
+				assert.Equal(t, appsv1.RollingUpdateDaemonSetStrategyType, ds.Spec.UpdateStrategy.Type)
+				require.NotNil(t, ds.Spec.UpdateStrategy.RollingUpdate)
+				assert.Equal(t, 3, ds.Spec.UpdateStrategy.RollingUpdate.MaxUnavailable.IntValue())
 			},
 		},
 		{
