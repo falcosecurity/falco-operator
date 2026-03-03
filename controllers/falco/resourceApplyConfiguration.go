@@ -155,9 +155,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 					},
 				},
 			},
-			Strategy: appsv1.DeploymentStrategy{
-				Type: appsv1.RollingUpdateDeploymentStrategyType,
-			},
+			Strategy: deploymentStrategy(falco),
 		},
 	}
 
@@ -188,6 +186,7 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 					"app.kubernetes.io/instance": falco.Name,
 				},
 			},
+			UpdateStrategy: daemonSetUpdateStrategy(falco),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: podTemplateSpecLabels(falco.Name, falco.Labels),
@@ -231,6 +230,26 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 	return ds
 }
 
+// deploymentStrategy returns the deployment strategy from the Falco CR or the default RollingUpdate.
+func deploymentStrategy(falco *v1alpha1.Falco) appsv1.DeploymentStrategy {
+	if falco.Spec.Strategy != nil {
+		return *falco.Spec.Strategy
+	}
+	return appsv1.DeploymentStrategy{
+		Type: appsv1.RollingUpdateDeploymentStrategyType,
+	}
+}
+
+// daemonSetUpdateStrategy returns the update strategy from the Falco CR or the default RollingUpdate.
+func daemonSetUpdateStrategy(falco *v1alpha1.Falco) appsv1.DaemonSetUpdateStrategy {
+	if falco.Spec.UpdateStrategy != nil {
+		return *falco.Spec.UpdateStrategy
+	}
+	return appsv1.DaemonSetUpdateStrategy{
+		Type: appsv1.RollingUpdateDaemonSetStrategyType,
+	}
+}
+
 // generateUserDefinedResource generates a user-defined resource from the falco CR.
 func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
 	// Build the default resource from the base one.
@@ -256,11 +275,17 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 		} else {
 			res.Spec.Template = corev1.PodTemplateSpec{}
 		}
+		if falco.Spec.Strategy != nil {
+			res.Spec.Strategy = *falco.Spec.Strategy
+		}
 	case *appsv1.DaemonSet:
 		if falco.Spec.PodTemplateSpec != nil {
 			res.Spec.Template = *falco.Spec.PodTemplateSpec
 		} else {
 			res.Spec.Template = corev1.PodTemplateSpec{}
+		}
+		if falco.Spec.UpdateStrategy != nil {
+			res.Spec.UpdateStrategy = *falco.Spec.UpdateStrategy
 		}
 	}
 

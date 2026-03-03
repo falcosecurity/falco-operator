@@ -17,6 +17,7 @@
 package v1alpha1
 
 import (
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -54,6 +55,16 @@ type FalcoSpec struct {
 	// Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
 	// +optional
 	PodTemplateSpec *corev1.PodTemplateSpec `json:"podTemplateSpec,omitempty"`
+
+	// UpdateStrategy specifies the update strategy for the DaemonSet.
+	// Only applicable when type is "DaemonSet".
+	// +optional
+	UpdateStrategy *appsv1.DaemonSetUpdateStrategy `json:"updateStrategy,omitempty"`
+
+	// Strategy specifies the deployment strategy for the Deployment.
+	// Only applicable when type is "Deployment".
+	// +optional
+	Strategy *appsv1.DeploymentStrategy `json:"strategy,omitempty"`
 }
 
 // FalcoStatus defines the observed state of Falco.

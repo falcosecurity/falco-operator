@@ -6,4 +6,15 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: falco-sample
 spec:
-  # TODO(user): Add fields here
+  # type: DaemonSet
+  # updateStrategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  # type: Deployment
+  # replicas: 2
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  #     maxSurge: 1
