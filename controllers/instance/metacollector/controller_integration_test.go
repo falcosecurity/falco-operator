@@ -40,7 +40,7 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/metacollector/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/instance/testutil"
 )
 
 const testNamespaceIntegration = "default"
@@ -59,7 +59,7 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -89,7 +89,7 @@ func TestMain(m *testing.M) {
 }
 
 func getFirstFoundEnvTestBinaryDir() string {
-	basePath := filepath.Join("..", "..", "bin", "k8s")
+	basePath := filepath.Join("..", "..", "..", "bin", "k8s")
 	entries, err := os.ReadDir(basePath)
 	if err != nil {
 		return ""

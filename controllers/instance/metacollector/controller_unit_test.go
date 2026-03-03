@@ -36,7 +36,7 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/metacollector/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/instance/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 )
 

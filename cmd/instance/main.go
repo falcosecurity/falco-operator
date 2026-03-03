@@ -35,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/falco"
-	"github.com/falcosecurity/falco-operator/controllers/metacollector"
+	"github.com/falcosecurity/falco-operator/controllers/instance/falco"
+	"github.com/falcosecurity/falco-operator/controllers/instance/metacollector"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
@@ -87,7 +87,7 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
-	setupLog.Info("Starting falco operator", "version", version.SemVersion, "commit", version.GitCommit,
+	setupLog.Info("Starting instance operator", "version", version.SemVersion, "commit", version.GitCommit,
 		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform)
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
