@@ -26,7 +26,7 @@
 
 > Uncomment one (or more) `/area <>` lines:
 
-> /area falco-operator
+> /area instance-operator
 
 > /area artifact-operator
 

@@ -20,7 +20,7 @@ builds:
       -X github.com/falcosecurity/falco-operator/internal/pkg/version.SemVersion={{ if .IsSnapshot }}{{ .Commit }}{{ else }}{{ .Version }}{{ end }}
       -s
       -w
-    main: ./cmd/falco/main.go
+    main: ./cmd/instance/main.go
     env:
       - GO111MODULE=on
       - CGO_ENABLED=0

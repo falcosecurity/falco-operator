@@ -1,6 +1,7 @@
 ## Append samples of your project ##
 resources:
 - instance_v1alpha1_falco.yaml
+- instance_v1alpha1_component.yaml
 - artifact_v1alpha1_config.yaml
 - artifact_v1alpha1_rulesfile.yaml
 - artifact_v1alpha1_plugin.yaml

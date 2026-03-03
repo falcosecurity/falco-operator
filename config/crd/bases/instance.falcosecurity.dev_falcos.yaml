@@ -8,19 +8,23 @@ metadata:
 spec:
   group: instance.falcosecurity.dev
   names:
+    categories:
+    - falcosecurity
     kind: Falco
     listKind: FalcoList
     plural: falcos
+    shortNames:
+    - falco
     singular: falco
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
     - description: The type of Kubernetes resource to deploy Falco
-      jsonPath: .spec.type
+      jsonPath: .status.resourceType
       name: Type
       type: string
     - description: The version of Falco
-      jsonPath: .spec.version
+      jsonPath: .status.version
       name: Version
       type: string
     - description: The desired number of replicas
@@ -8574,7 +8578,6 @@ spec:
                     type: object
                 type: object
               replicas:
-                default: 1
                 description: |-
                   Replicas defines the number of replicas for the Deployment.
                   Required only when 'type' is "Deployment".
@@ -8632,7 +8635,6 @@ spec:
                     type: string
                 type: object
               type:
-                default: DaemonSet
                 description: |-
                   Type specifies the type of Kubernetes resource to deploy Falco.
                   Allowed values: "DaemonSet" or "Deployment". Default value is DaemonSet.
@@ -8788,6 +8790,10 @@ spec:
                   The total number of nodes that should be running the daemon pod (including nodes correctly running the daemon pod).
                 format: int32
                 type: integer
+              resourceType:
+                description: ResourceType is the resolved Kubernetes resource type
+                  (Deployment or DaemonSet).
+                type: string
               unavailableReplicas:
                 description: |-
                   Total number of unavailable pods targeted by falco deployment/daemonset. This is the total number of
@@ -8796,6 +8802,9 @@ spec:
                   either be pods that are running but not yet available or pods that still have not been created.
                 format: int32
                 type: integer
+              version:
+                description: Version is the resolved version of Falco being deployed.
+                type: string
             type: object
         type: object
     served: true

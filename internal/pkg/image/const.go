@@ -17,12 +17,18 @@
 package image
 
 const (
-	// Registry the default registry used for Falco images.
+	// Registry the default registry used for images.
 	Registry = "docker.io"
-	// Repository the default repository used for Falco images.
+	// Repository the default repository used for images.
 	Repository = "falcosecurity"
+
 	// FalcoImage the default image name used for Falco.
 	FalcoImage = "falco"
 	// FalcoTag the default tag used for Falco.
 	FalcoTag = "0.41.0"
+
+	// MetacollectorImage the default image name used for k8s-metacollector.
+	MetacollectorImage = "k8s-metacollector"
+	// MetacollectorTag the default tag used for k8s-metacollector.
+	MetacollectorTag = "0.1.1"
 )
