@@ -36,6 +36,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/falco"
+	"github.com/falcosecurity/falco-operator/controllers/metacollector"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
@@ -215,6 +216,13 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)
 	}
+	if err = metacollector.NewReconciler(
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("metacollector-controller"),
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Metacollector")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if metricsCertWatcher != nil {
