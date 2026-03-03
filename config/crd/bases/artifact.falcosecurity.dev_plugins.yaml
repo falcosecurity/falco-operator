@@ -76,32 +76,63 @@ spec:
               ociArtifact:
                 description: OCIArtifact specifies the reference to an OCI artifact.
                 properties:
-                  pullSecret:
-                    description: PullSecret contains authentication details used to
-                      pull the OCI artifact.
+                  image:
+                    description: Image specifies the OCI image coordinates.
                     properties:
-                      passwordKey:
-                        default: password
-                        description: PasswordKey is the key in the secret that contains
-                          the password.
+                      repository:
+                        description: Repository is the OCI repository path (e.g. "falcosecurity/rules/falco-rules").
                         type: string
-                      secretName:
-                        description: SecretName is the name of the secret containing
-                          credentials.
-                        type: string
-                      usernameKey:
-                        default: username
-                        description: UsernameKey is the key in the secret that contains
-                          the username.
+                      tag:
+                        default: latest
+                        description: Tag is the image tag or digest (e.g. "latest"
+                          or "sha256:abc...").
                         type: string
                     required:
-                    - secretName
+                    - repository
                     type: object
-                  reference:
-                    description: Reference is the OCI artifact reference.
-                    type: string
+                  registry:
+                    description: Registry contains inline registry configuration for
+                      authentication, TLS, and hostname.
+                    properties:
+                      auth:
+                        description: Auth contains authentication configuration.
+                        properties:
+                          secretRef:
+                            description: SecretRef references a Secret containing
+                              registry credentials.
+                            properties:
+                              name:
+                                description: Name is the name of the Secret containing
+                                  credentials.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                        type: object
+                      name:
+                        description: Name is the registry hostname (e.g. "ghcr.io").
+                        type: string
+                      plainHTTP:
+                        description: |-
+                          PlainHTTP allows connections to registries over plain HTTP (no TLS).
+                          Mutually exclusive with tls.
+                        type: boolean
+                      tls:
+                        description: |-
+                          TLS contains TLS transport configuration.
+                          Mutually exclusive with plainHTTP.
+                        properties:
+                          insecureSkipVerify:
+                            description: InsecureSkipVerify disables TLS certificate
+                              verification.
+                            type: boolean
+                        type: object
+                    type: object
+                    x-kubernetes-validations:
+                    - message: plainHTTP and tls are mutually exclusive
+                      rule: '!(has(self.plainHTTP) && self.plainHTTP && has(self.tls))'
                 required:
-                - reference
+                - image
                 type: object
               selector:
                 description: Selector is used to select the nodes where the plugin

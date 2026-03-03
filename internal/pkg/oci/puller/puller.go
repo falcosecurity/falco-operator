@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,41 +18,48 @@ package puller
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/file"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/client"
 )
 
 // Puller defines the interface for pulling OCI artifacts.
 type Puller interface {
-	Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc) (*RegistryResult, error)
+	Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error)
 }
 
 // OciPuller implements the Puller interface for OCI artifacts.
+// It holds optional default RegistryOptions that are used when no
+// per-pull options are provided.
 type OciPuller struct {
-	plainHTTP bool
+	defaults *RegistryOptions
 }
 
-// NewOciPuller create a new puller that can be used for pull operations.
-// The client is used as a template and is never modified directly.
-func NewOciPuller(plainHTTP bool) *OciPuller {
-	return &OciPuller{
-		plainHTTP: plainHTTP,
-	}
+// NewOciPuller creates a new puller with optional default registry options.
+// Pass nil to use system defaults (HTTPS, system CAs).
+func NewOciPuller(defaults *RegistryOptions) *OciPuller {
+	return &OciPuller{defaults: defaults}
 }
 
 // Pull an artifact from a remote registry.
 // Ref format follows: REGISTRY/REPO[:TAG|@DIGEST]. Ex. localhost:5000/hello:latest.
-func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc) (*RegistryResult, error) {
-	c := client.NewClient(client.WithCredentialFunc(creds))
+// When opts is non-nil it overrides the puller defaults entirely.
+func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error) {
+	options := p.defaults
+	if opts != nil {
+		options = opts
+	}
 
 	fileStore, err := file.New(destDir)
 	if err != nil {
@@ -64,8 +71,19 @@ func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, cre
 		return nil, fmt.Errorf("unable to create new repository with ref %s: %w", ref, err)
 	}
 
-	repo.Client = c
-	repo.PlainHTTP = p.plainHTTP
+	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
+
+	if options != nil {
+		if options.InsecureSkipVerify {
+			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
+			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
+			retryTransport := retry.NewTransport(httpTransport)
+			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
+		}
+		repo.PlainHTTP = options.PlainHTTP
+	}
+
+	repo.Client = client.NewClient(clientOpts...)
 
 	// if no tag was specified, "latest" is used
 	if repo.Reference.Reference == "" {

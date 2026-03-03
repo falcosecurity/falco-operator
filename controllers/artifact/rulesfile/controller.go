@@ -289,22 +289,28 @@ func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, ru
 		}
 	}
 
-	if rulesfile.Spec.OCIArtifact != nil && rulesfile.Spec.OCIArtifact.PullSecret != nil {
-		hasRefs = true
-		err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, rulesfile.Spec.OCIArtifact.PullSecret.SecretName, &corev1.Secret{})
-		if err != nil {
-			logger.Error(err, "OCIArtifact pull secret reference resolution failed", "secret", rulesfile.Spec.OCIArtifact.PullSecret.SecretName)
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
-				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.OCIArtifact.PullSecret.SecretName), rulesfile.GetGeneration()))
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.OCIArtifact.PullSecret.SecretName), rulesfile.GetGeneration(),
-			))
-			return err
+	if ociArt := rulesfile.Spec.OCIArtifact; ociArt != nil && ociArt.Registry != nil {
+		reg := ociArt.Registry
+
+		if reg.Auth != nil && reg.Auth.SecretRef != nil {
+			hasRefs = true
+			secretName := reg.Auth.SecretRef.Name
+			err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, secretName, &corev1.Secret{})
+			if err != nil {
+				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
+				r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+					artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+				apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
+					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), rulesfile.GetGeneration()))
+				apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), rulesfile.GetGeneration(),
+				))
+				return err
+			}
 		}
+
 	}
 
 	if hasRefs {

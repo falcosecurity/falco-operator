@@ -6,7 +6,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: rulesfile-sample
 spec:
- ociArtifact:
-   reference: ghcr.io/falcosecurity/falco-rules:latest
-   pullSecret:
-        secretName: my-pull-secret
+  ociArtifact:
+    image:
+      repository: falcosecurity/falco-rules
+      tag: latest
+    registry:
+      name: ghcr.io
+      auth:
+        secretRef:
+          secretName: my-pull-secret

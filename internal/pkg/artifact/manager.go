@@ -66,8 +66,7 @@ func NewManager(cl client.Client, namespace string) *Manager {
 		namespace: namespace,
 		files:     make(map[string][]File),
 		fs:        filesystem.NewOSFileSystem(),
-		// TODO: make the insecure option configurable
-		ociPuller: puller.NewOciPuller(false),
+		ociPuller: puller.NewOciPuller(nil),
 	}
 }
 
@@ -236,19 +235,27 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 		dstDir = ""
 	}
 
-	logger.V(4).Info("Getting credentials from pull secret", "pullSecret", artifact.PullSecret)
-	// File does not exist on the filesystem, we store it.
-	// Retrieve registry credentials.
-	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, artifact.PullSecret)
+	// Resolve auth credentials.
+	var authSecretRef *commonv1alpha1.SecretRef
+	if artifact.Registry != nil && artifact.Registry.Auth != nil {
+		authSecretRef = artifact.Registry.Auth.SecretRef
+	}
+
+	logger.V(4).Info("Getting credentials from auth secret ref", "authSecretRef", authSecretRef)
+	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, authSecretRef)
 	if err != nil {
-		logger.Error(err, "unable to get credentials for the OCI artifact", "pullSecret", artifact.PullSecret)
+		logger.Error(err, "unable to get credentials for the OCI artifact", "authSecretRef", authSecretRef)
 		return err
 	}
 
-	logger.Info("Pulling OCI artifact", "reference", artifact.Reference)
-	res, err := am.ociPuller.Pull(ctx, artifact.Reference, dstDir, runtime.GOOS, runtime.GOARCH, creds)
+	// Resolve registry TLS options.
+	registryOpts := ResolveRegistryOptions(artifact)
+
+	ref := ResolveReference(artifact)
+	logger.Info("Pulling OCI artifact", "reference", ref)
+	res, err := am.ociPuller.Pull(ctx, ref, dstDir, runtime.GOOS, runtime.GOARCH, creds, registryOpts)
 	if err != nil {
-		logger.Error(err, "unable to pull artifact", "reference", artifact.Reference)
+		logger.Error(err, "unable to pull artifact", "reference", ref)
 		return err
 	}
 

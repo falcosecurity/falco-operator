@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -40,6 +41,8 @@ func createTestScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	return scheme
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 func TestNewManager(t *testing.T) {
 	tests := []struct {
@@ -1036,12 +1039,17 @@ func TestStoreFromOCI(t *testing.T) {
 	const (
 		testNamespace    = "test-namespace"
 		testArtifactName = "test-artifact"
-		testReference    = "ghcr.io/falcosecurity/rules/falco-rules:latest"
 	)
+
+	testImage := commonv1alpha1.ImageSpec{
+		Repository: "falcosecurity/rules/falco-rules",
+		Tag:        "latest",
+	}
 
 	tests := []struct {
 		name            string
 		artifact        *commonv1alpha1.OCIArtifact
+		objects         []client.Object // extra k8s objects for the fake client
 		priority        int32
 		artifactType    Type
 		existingFile    *File
@@ -1056,6 +1064,7 @@ func TestStoreFromOCI(t *testing.T) {
 		wantPullCalls   int
 		wantRenameCalls int
 		wantRemoveCalls int
+		wantOpts        *puller.RegistryOptions // expected opts received by mock puller
 	}{
 		{
 			name:     "removes artifact when artifact is nil",
@@ -1081,7 +1090,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when artifact already stored but file not found on filesystem",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
@@ -1100,7 +1109,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "renames file when priority changes",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     60,
 			artifactType: TypeRulesfile,
@@ -1118,7 +1127,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "skips pull when file already exists with same priority",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
@@ -1136,9 +1145,11 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when credentials getter fails",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
-				PullSecret: &commonv1alpha1.OCIPullSecret{
-					SecretName: "non-existent-secret",
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					Auth: &commonv1alpha1.RegistryAuth{
+						SecretRef: &commonv1alpha1.SecretRef{Name: "non-existent-secret"},
+					},
 				},
 			},
 			priority:        50,
@@ -1152,7 +1163,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when puller fails",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:        50,
 			artifactType:    TypeRulesfile,
@@ -1166,7 +1177,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when rename fails during priority change",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     60,
 			artifactType: TypeRulesfile,
@@ -1186,7 +1197,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when Exists check fails",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
@@ -1205,7 +1216,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "returns error when Open fails after successful pull",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
@@ -1222,7 +1233,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "uses plugin directory for plugin artifact type",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypePlugin,
@@ -1239,7 +1250,7 @@ func TestStoreFromOCI(t *testing.T) {
 		{
 			name: "uses empty directory for unknown artifact type",
 			artifact: &commonv1alpha1.OCIArtifact{
-				Reference: testReference,
+				Image: testImage,
 			},
 			priority:     50,
 			artifactType: Type("unknown"),
@@ -1253,12 +1264,60 @@ func TestStoreFromOCI(t *testing.T) {
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
 		},
+		{
+			name: "passes plainHTTP option to puller",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					PlainHTTP: boolPtr(true),
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			pullerResult: &puller.RegistryResult{
+				Filename: "rules.tar.gz",
+			},
+			fsOpenErr:       fmt.Errorf("cannot open archive"),
+			wantErr:         true,
+			wantErrMsg:      "cannot open archive",
+			wantPullCalls:   1,
+			wantRenameCalls: 0,
+			wantRemoveCalls: 0,
+			wantOpts:        &puller.RegistryOptions{PlainHTTP: true},
+		},
+		{
+			name: "passes TLS insecureSkipVerify option to puller",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					TLS: &commonv1alpha1.TLSConfig{
+						InsecureSkipVerify: true,
+					},
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			pullerResult: &puller.RegistryResult{
+				Filename: "rules.tar.gz",
+			},
+			fsOpenErr:       fmt.Errorf("cannot open archive"),
+			wantErr:         true,
+			wantErrMsg:      "cannot open archive",
+			wantPullCalls:   1,
+			wantRenameCalls: 0,
+			wantRemoveCalls: 0,
+			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := createTestScheme(t)
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, obj := range tt.objects {
+				clientBuilder = clientBuilder.WithObjects(obj)
+			}
+			fakeClient := clientBuilder.Build()
 
 			mockFS := filesystem.NewMockFileSystem()
 			mockFS.RenameErr = tt.fsRenameErr
@@ -1298,6 +1357,11 @@ func TestStoreFromOCI(t *testing.T) {
 			assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
 			assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
+
+			// Verify registry options passed to the puller.
+			if tt.wantOpts != nil && len(mockPuller.PullCalls) > 0 {
+				assert.Equal(t, tt.wantOpts, mockPuller.PullCalls[0].Opts)
+			}
 		})
 	}
 }

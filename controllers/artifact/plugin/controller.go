@@ -214,22 +214,28 @@ func (r *PluginReconciler) enforceReferenceResolution(ctx context.Context, plugi
 	logger := log.FromContext(ctx)
 	hasRefs := false
 
-	if plugin.Spec.OCIArtifact != nil && plugin.Spec.OCIArtifact.PullSecret != nil {
-		hasRefs = true
-		err := r.artifactManager.CheckReferenceResolution(ctx, plugin.Namespace, plugin.Spec.OCIArtifact.PullSecret.SecretName, &corev1.Secret{})
-		if err != nil {
-			logger.Error(err, "OCIArtifact pull secret reference resolution failed", "secret", plugin.Spec.OCIArtifact.PullSecret.SecretName)
-			r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
-				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewResolvedRefsCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, plugin.Spec.OCIArtifact.PullSecret.SecretName), plugin.GetGeneration()))
-			apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, plugin.Spec.OCIArtifact.PullSecret.SecretName), plugin.GetGeneration(),
-			))
-			return err
+	if ociArt := plugin.Spec.OCIArtifact; ociArt != nil && ociArt.Registry != nil {
+		reg := ociArt.Registry
+
+		if reg.Auth != nil && reg.Auth.SecretRef != nil {
+			hasRefs = true
+			secretName := reg.Auth.SecretRef.Name
+			err := r.artifactManager.CheckReferenceResolution(ctx, plugin.Namespace, secretName, &corev1.Secret{})
+			if err != nil {
+				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
+				r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+					artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+				apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewResolvedRefsCondition(
+					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), plugin.GetGeneration()))
+				apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
+					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
+					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), plugin.GetGeneration(),
+				))
+				return err
+			}
 		}
+
 	}
 
 	if hasRefs {

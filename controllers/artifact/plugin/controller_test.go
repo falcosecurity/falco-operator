@@ -293,7 +293,10 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: artifactv1alpha1.PluginSpec{
 						OCIArtifact: &commonv1alpha1.OCIArtifact{
-							Reference: "ghcr.io/falcosecurity/plugins/test:latest",
+							Image: commonv1alpha1.ImageSpec{
+								Repository: "falcosecurity/plugins/test",
+								Tag:        "latest",
+							},
 						},
 					},
 				},
@@ -322,9 +325,14 @@ func TestReconcile(t *testing.T) {
 					},
 					Spec: artifactv1alpha1.PluginSpec{
 						OCIArtifact: &commonv1alpha1.OCIArtifact{
-							Reference: "ghcr.io/falcosecurity/plugins/test:latest",
-							PullSecret: &commonv1alpha1.OCIPullSecret{
-								SecretName: "my-pull-secret",
+							Image: commonv1alpha1.ImageSpec{
+								Repository: "falcosecurity/plugins/test",
+								Tag:        "latest",
+							},
+							Registry: &commonv1alpha1.RegistryConfig{
+								Auth: &commonv1alpha1.RegistryAuth{
+									SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+								},
 							},
 						},
 					},
@@ -1405,12 +1413,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		presetConditions []metav1.Condition
 	}{
 		{
-			name: "no PullSecret has no references and removes stale ResolvedRefs",
+			name: "no registry has no references and removes stale ResolvedRefs",
 			plugin: &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference: "ghcr.io/falcosecurity/plugins/test:latest",
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/plugins/test",
+							Tag:        "latest",
+						},
 					},
 				},
 			},
@@ -1427,7 +1438,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			wantNoConditions: true,
 		},
 		{
-			name: "PullSecret exists sets ResolvedRefs true",
+			name: "auth secret exists sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
@@ -1437,8 +1448,15 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/plugins/test:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "my-pull-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/plugins/test",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+							},
+						},
 					},
 				},
 			},
@@ -1447,13 +1465,20 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "PullSecret not found sets ResolvedRefs false and Programmed false",
+			name: "auth secret not found sets ResolvedRefs false and Programmed false",
 			plugin: &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Reference:  "ghcr.io/falcosecurity/plugins/test:latest",
-						PullSecret: &commonv1alpha1.OCIPullSecret{SecretName: "missing-secret"},
+						Image: commonv1alpha1.ImageSpec{
+							Repository: "falcosecurity/plugins/test",
+							Tag:        "latest",
+						},
+						Registry: &commonv1alpha1.RegistryConfig{
+							Auth: &commonv1alpha1.RegistryAuth{
+								SecretRef: &commonv1alpha1.SecretRef{Name: "missing-secret"},
+							},
+						},
 					},
 				},
 			},
