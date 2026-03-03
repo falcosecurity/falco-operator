@@ -32,12 +32,22 @@ func BuildFalcoImageStringFromVersion(version string) string {
 		return BuildImageString(Registry, Repository, FalcoImage, FalcoTag)
 	}
 
-	return fmt.Sprintf("%s/%s/%s:%s", Registry, Repository, FalcoImage, version)
+	return BuildImageString(Registry, Repository, FalcoImage, version)
 }
 
-// FalcoVersion returns the version of Falco specified in the FalcoTag.
-func FalcoVersion() string {
-	return strings.Split(FalcoTag, "-")[0]
+// BuildMetacollectorImageStringFromVersion constructs the image string for k8s-metacollector.
+func BuildMetacollectorImageStringFromVersion(version string) string {
+	if version == "" {
+		return BuildImageString(Registry, Repository, MetacollectorImage, MetacollectorTag)
+	}
+
+	return BuildImageString(Registry, Repository, MetacollectorImage, version)
+}
+
+// VersionFromTag extracts the version from a tag string by stripping any suffix after the first "-".
+// For example, "0.41.0-rc1" returns "0.41.0".
+func VersionFromTag(tag string) string {
+	return strings.Split(tag, "-")[0]
 }
 
 // VersionFromImage returns the version from the image string.

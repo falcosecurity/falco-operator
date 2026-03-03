@@ -1,0 +1,39 @@
+// Copyright (C) 2026 The Falco Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package component
+
+import (
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
+	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
+)
+
+func generateApplyConfiguration(comp *instancev1alpha1.Component, defs *resources.InstanceDefaults) (*unstructured.Unstructured, error) {
+	baseResource, err := resources.GenerateWorkload(defs.ResourceType, &comp.ObjectMeta, defs, false)
+	if err != nil {
+		return nil, err
+	}
+
+	userOverlay, err := resources.GenerateUserOverlay(defs.ResourceType, comp.Name, defs, resources.GenerateOverlayOptions(comp)...)
+	if err != nil {
+		return nil, err
+	}
+
+	return instance.MergeApplyConfiguration(defs.ResourceType, baseResource, userOverlay)
+}

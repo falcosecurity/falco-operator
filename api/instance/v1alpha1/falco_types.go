@@ -28,14 +28,13 @@ import (
 type FalcoSpec struct {
 	// Type specifies the type of Kubernetes resource to deploy Falco.
 	// Allowed values: "DaemonSet" or "Deployment". Default value is DaemonSet.
-	// +kubebuilder:default=DaemonSet
 	// +kubebuilder:validation:Enum=DaemonSet;Deployment
-	Type string `json:"type,omitempty"`
+	// +optional
+	Type *string `json:"type,omitempty"`
 
 	// Replicas defines the number of replicas for the Deployment.
 	// Required only when 'type' is "Deployment".
 	// Default is 1.
-	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
@@ -49,7 +48,7 @@ type FalcoSpec struct {
 	//   tags (https://github.com/falcosecurity/falco/releases), typically
 	//   "major.minor.patch" (e.g., "0.39.2").
 	// +optional
-	Version string `json:"version,omitempty"`
+	Version *string `json:"version,omitempty"`
 
 	// PodTemplateSpec contains the pod template specification for the Falco instance.
 	// Users can customize metadata, initContainers, containers, volumes, tolerations, etc.
@@ -69,6 +68,12 @@ type FalcoSpec struct {
 
 // FalcoStatus defines the observed state of Falco.
 type FalcoStatus struct {
+	// ResourceType is the resolved Kubernetes resource type (Deployment or DaemonSet).
+	// +optional
+	ResourceType string `json:"resourceType,omitempty"`
+	// Version is the resolved version of Falco being deployed.
+	// +optional
+	Version string `json:"version,omitempty"`
 	// Desired number of instances for the Falco deployment.
 	// The total number of nodes that should be running the daemon pod (including nodes correctly running the daemon pod).
 	// +optional
@@ -95,9 +100,9 @@ type FalcoStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
-// +kubebuilder:resource:categories="prometheus-operator",shortName="prom"
-// +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type",description="The type of Kubernetes resource to deploy Falco"
-// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.version",description="The version of Falco"
+// +kubebuilder:resource:path=falcos,categories="falcosecurity",shortName="falco"
+// +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".status.resourceType",description="The type of Kubernetes resource to deploy Falco"
+// +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.version",description="The version of Falco"
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredReplicas",description="The desired number of replicas"
 // +kubebuilder:printcolumn:name="Ready",type="integer",JSONPath=".status.availableReplicas",description="The number of ready replicas"
 // +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
@@ -105,7 +110,6 @@ type FalcoStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:path=falcos
 
 // Falco is the Schema for the falcos API.
 type Falco struct {

@@ -3,7 +3,7 @@ IMG ?= falcosecurity/falco-operator:latest
 RELEASE ?= v0.0.1
 COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
-OPERATOR ?= falco
+OPERATOR ?= instance
 PROJECT ?= github.com/falcosecurity/falco-operator
 ARTIFACT_OPERATOR_IMAGE ?= docker.io/falcosecurity/artifact-operator:latest
 
@@ -115,12 +115,12 @@ update-kube-static-scheme-parser: ## Update the kube-static-structs parser
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binaries.
-	go build -o bin/falco-operator ./cmd/falco
+	go build -o bin/instance-operator ./cmd/instance
 	go build -o bin/artifact-operator ./cmd/artifact
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/falco
+	go run ./cmd/instance
 
 GOARCH ?= $(shell go env GOARCH)
 .PHONY: docker-binaries
