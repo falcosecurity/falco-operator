@@ -1,0 +1,33 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-config-base
+  namespace: default
+data:
+  config.yaml: |
+    output_timeout: 2000
+    buffered_outputs: false
+    outputs_queue:
+      capacity: 0
+---
+# Config with both spec.config (inline structured) and spec.configMapRef set.
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: config-both
+  namespace: default
+spec:
+  config:
+    engine:
+      kind: modern_ebpf
+      modern_ebpf:
+        buf_size_preset: 4
+        cpus_for_each_buffer: 2
+        drop_failed_exit: false
+  configMapRef:
+    name: falco-config-base
+  priority: 50
