@@ -17,8 +17,10 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -39,6 +41,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/artifact/config"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -221,6 +224,14 @@ func main() {
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
+	}
+
+	for _, idx := range index.All {
+		setupLog.Info("Registering field index", "object", fmt.Sprintf("%T", idx.Object), "field", idx.Field)
+		if err := mgr.GetFieldIndexer().IndexField(context.Background(), idx.Object, idx.Field, idx.ExtractValueFn); err != nil {
+			setupLog.Error(err, "unable to register field index", "field", idx.Field)
+			os.Exit(1)
+		}
 	}
 
 	if err = config.NewConfigReconciler(

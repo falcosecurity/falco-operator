@@ -17,15 +17,19 @@
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
 // ConfigSpec defines the desired state of Config.
 type ConfigSpec struct {
-	// Config is the configuration for Falco deployment.
-	// +kubebuilder:validation:Required
-	Config string `json:"config,omitempty"`
-	// Priority specifies the priority of the rulesfile.\
+	// Config is the configuration for Falco deployment, specified as a structured object.
+	Config *apiextensionsv1.JSON `json:"config,omitempty"`
+	// ConfigMapRef specifies a reference to a ConfigMap containing the Falco configuration.
+	ConfigMapRef *commonv1alpha1.ConfigMapRef `json:"configMapRef,omitempty"`
+	// Priority specifies the priority of the config.
 	// The higher the value, the higher the priority.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=99
@@ -49,8 +53,7 @@ type ConfigStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority",description="The priority of the config"
-// +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
-// +kubebuilder:printcolumn:name="InlineContent",type="string",JSONPath=".status.conditions[?(@.type == 'InlineContent')].status"
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=".status.conditions[?(@.type == 'Programmed')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Config is the Schema for the configs API.
@@ -58,7 +61,9 @@ type Config struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   ConfigSpec   `json:"spec,omitempty"`
+	Spec ConfigSpec `json:"spec,omitempty"`
+
+	// +kubebuilder:default={conditions: {{type: "Programmed", status: "Unknown", reason:"Pending", message:"Waiting for controller", lastTransitionTime: "1970-01-01T00:00:00Z"}}}
 	Status ConfigStatus `json:"status,omitempty"`
 }
 

@@ -57,6 +57,8 @@ func (c ConditionType) String() string {
 const (
 	// ConfigMapRulesKey is the standard key used for rules data in ConfigMaps.
 	ConfigMapRulesKey = "rules.yaml"
+	// ConfigMapConfigKey is the standard key used for Falco configuration data in ConfigMaps.
+	ConfigMapConfigKey = "config.yaml"
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.

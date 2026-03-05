@@ -38,6 +38,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -781,42 +782,6 @@ func TestPatchStatus(t *testing.T) {
 	})
 }
 
-func TestIndexRulesfileByConfigMapRef(t *testing.T) {
-	tests := []struct {
-		name     string
-		rf       *artifactv1alpha1.Rulesfile
-		expected []string
-	}{
-		{
-			name: "returns nil when no configmap ref",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{},
-			},
-			expected: nil,
-		},
-		{
-			name: "returns index key when configmap ref present",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					ConfigMapRef: &commonv1alpha1.ConfigMapRef{
-						Name: "my-rules-cm",
-					},
-				},
-			},
-			expected: []string{testutil.Namespace + "/my-rules-cm"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := indexRulesfileByConfigMapRef(tt.rf)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestFindRulesfilesForConfigMap(t *testing.T) {
 	s := testutil.Scheme(t)
 	rf := &artifactv1alpha1.Rulesfile{
@@ -834,7 +799,7 @@ func TestFindRulesfilesForConfigMap(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(rf).
-		WithIndex(&artifactv1alpha1.Rulesfile{}, configMapRefIndexField, indexRulesfileByConfigMapRef).
+		WithIndex(&artifactv1alpha1.Rulesfile{}, index.ConfigMapOnRulesfile, index.RulesfileByConfigMapRef).
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()

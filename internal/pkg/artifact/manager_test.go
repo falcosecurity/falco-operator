@@ -686,12 +686,20 @@ func TestPath(t *testing.T) {
 			wantContains: "my-plugin.so",
 		},
 		{
-			name:         "config type",
+			name:         "config type inline",
 			artifactName: "my-config",
 			priority:     50,
 			Medium:       MediumInline,
 			artifactType: TypeConfig,
-			wantContains: "50-my-config.yaml",
+			wantContains: "50-03-my-config-inline.yaml",
+		},
+		{
+			name:         "config type configmap",
+			artifactName: "my-config",
+			priority:     50,
+			Medium:       MediumConfigMap,
+			artifactType: TypeConfig,
+			wantContains: "50-02-my-config-configmap.yaml",
 		},
 		{
 			name:         "rulesfile with unknown medium uses default subpriority",
