@@ -17,54 +17,51 @@
 package metacollector
 
 import (
+	"context"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateClusterRole creates a ClusterRole resource for the given Metacollector instance.
-func generateClusterRole(cl client.Client, mc *instancev1alpha1.Metacollector) (*unstructured.Unstructured, error) {
-	return generateResourceFromMetacollectorInstance(cl, mc,
-		func(mc *instancev1alpha1.Metacollector) (runtime.Object, error) {
-			resourceName := GenerateUniqueName(mc.Name, mc.Namespace)
+func generateClusterRole(mc *instancev1alpha1.Metacollector) runtime.Object {
+	resourceName := instance.GenerateUniqueName(mc.Name, mc.Namespace)
 
-			clusterRole := &rbacv1.ClusterRole{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ClusterRole",
-					APIVersion: "rbac.authorization.k8s.io/v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   resourceName,
-					Labels: mc.Labels,
-				},
-				Rules: []rbacv1.PolicyRule{
-					{
-						APIGroups: []string{"apps"},
-						Resources: []string{"daemonsets", "deployments", "replicasets"},
-						Verbs:     []string{"get", "list", "watch"},
-					},
-					{
-						APIGroups: []string{""},
-						Resources: []string{"endpoints", "namespaces", "pods", "replicationcontrollers", "services"},
-						Verbs:     []string{"get", "list", "watch"},
-					},
-					{
-						APIGroups: []string{"discovery.k8s.io"},
-						Resources: []string{"endpointslices"},
-						Verbs:     []string{"get", "list", "watch"},
-					},
-				},
-			}
+	return &rbacv1.ClusterRole{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ClusterRole",
+			APIVersion: "rbac.authorization.k8s.io/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   resourceName,
+			Labels: mc.Labels,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"daemonsets", "deployments", "replicasets"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"endpoints", "namespaces", "pods", "replicationcontrollers", "services"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{"discovery.k8s.io"},
+				Resources: []string{"endpointslices"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+		},
+	}
+}
 
-			return clusterRole, nil
-		},
-		generateOptions{
-			setControllerRef: false,
-			isClusterScoped:  true,
-		},
+func (r *Reconciler) ensureClusterRole(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, mc, fieldManager,
+		generateClusterRole,
+		instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true},
 	)
 }

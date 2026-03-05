@@ -17,152 +17,87 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-func TestGenerateConfigmap(t *testing.T) {
-	// Create a new scheme and add the necessary types
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-
+func TestConfigmapGenerator(t *testing.T) {
 	tests := []struct {
-		name        string
-		falco       *instancev1alpha1.Falco
-		wantErr     bool
-		errContains string
+		name       string
+		config     string
+		wantConfig string
 	}{
 		{
-			name: "deployment type configmap",
-			falco: &instancev1alpha1.Falco{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: instancev1alpha1.GroupVersion.String(),
-					Kind:       "Falco",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
-				},
-				Spec: instancev1alpha1.FalcoSpec{
-					Type: resourceTypeDeployment,
-				},
-			},
-			wantErr: false,
+			name:       "deployment config",
+			config:     deploymentFalcoConfig,
+			wantConfig: deploymentFalcoConfig,
 		},
 		{
-			name: "daemonset type configmap",
-			falco: &instancev1alpha1.Falco{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: instancev1alpha1.GroupVersion.String(),
-					Kind:       "Falco",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
-				},
-				Spec: instancev1alpha1.FalcoSpec{
-					Type: resourceTypeDaemonSet,
-				},
-			},
-			wantErr: false,
-		},
-		{
-			name: "invalid type configmap",
-			falco: &instancev1alpha1.Falco{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: instancev1alpha1.GroupVersion.String(),
-					Kind:       "Falco",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-				},
-				Spec: instancev1alpha1.FalcoSpec{
-					Type: "invalid-type",
-				},
-			},
-			wantErr:     true,
-			errContains: "unsupported falco type",
+			name:       "daemonset config",
+			config:     daemonsetFalcoConfig,
+			wantConfig: daemonsetFalcoConfig,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a fake client.
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-			// Call the function.
-			result, err := generateConfigmap(client, tt.falco)
-
-			if tt.wantErr {
-				assert.Error(t, err)
-				if tt.errContains != "" {
-					assert.Contains(t, err.Error(), tt.errContains)
-				}
-				assert.Nil(t, result)
-				return
+			falco := &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-falco",
+					Namespace: "default",
+					Labels:    map[string]string{"app": "falco"},
+				},
 			}
 
-			assert.NoError(t, err)
-			assert.NotNil(t, result)
+			generator := configmapGenerator(tt.config)
+			result := generator(falco)
+			require.NotNil(t, result)
 
-			// Verify the basic structure of the configmap.
-			name, _, err := unstructured.NestedString(result.Object, "metadata", "name")
-			assert.NoError(t, err)
-			assert.Equal(t, tt.falco.Name, name)
-
-			namespace, _, err := unstructured.NestedString(result.Object, "metadata", "namespace")
-			assert.NoError(t, err)
-			assert.Equal(t, tt.falco.Namespace, namespace)
-
-			// Verify the config data exists.
-			data, _, err := unstructured.NestedStringMap(result.Object, "data")
-			assert.NoError(t, err)
-			assert.Contains(t, data, "falco.yaml")
-
-			// Verify config content based on type.
-			expectedConfig := ""
-			switch tt.falco.Spec.Type {
-			case resourceTypeDeployment:
-				expectedConfig = deploymentFalcoConfig
-			case resourceTypeDaemonSet:
-				expectedConfig = daemonsetFalcoConfig
-			}
-			assert.Equal(t, expectedConfig, data["falco.yaml"])
-
-			// Verify labels.
-			labels, _, err := unstructured.NestedStringMap(result.Object, "metadata", "labels")
-			assert.NoError(t, err)
-			assert.Equal(t, tt.falco.Labels, labels)
-
-			// Verify controller reference.
-			ownerRefs, exists, err := unstructured.NestedSlice(result.Object, "metadata", "ownerReferences")
-			assert.NoError(t, err)
-			assert.True(t, exists)
-			assert.Len(t, ownerRefs, 1)
-
-			ownerRef := ownerRefs[0].(map[string]interface{})
-			assert.Equal(t, tt.falco.Name, ownerRef["name"])
-			assert.Equal(t, tt.falco.Kind, ownerRef["kind"])
-			assert.Equal(t, tt.falco.APIVersion, ownerRef["apiVersion"])
-			assert.Equal(t, string(tt.falco.UID), ownerRef["uid"])
-			assert.True(t, ownerRef["controller"].(bool))
-			assert.True(t, ownerRef["blockOwnerDeletion"].(bool))
+			cm := result.(*corev1.ConfigMap)
+			assert.Equal(t, falco.Name, cm.Name)
+			assert.Equal(t, falco.Namespace, cm.Namespace)
+			assert.Equal(t, falco.Labels, cm.Labels)
+			assert.Equal(t, "ConfigMap", cm.Kind)
+			assert.Equal(t, "v1", cm.APIVersion)
+			assert.Contains(t, cm.Data, "falco.yaml")
+			assert.Equal(t, tt.wantConfig, cm.Data["falco.yaml"])
 		})
 	}
+}
+
+func TestEnsureConfigMap(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco(withType(instance.ResourceTypeDeployment))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+
+	require.NoError(t, r.ensureConfigMap(context.Background(), falco))
+
+	cm := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), cm))
+	assert.Equal(t, falco.Name, cm.Name)
+	assert.Contains(t, cm.Data, "falco.yaml")
+}
+
+func TestEnsureConfigMapInvalidType(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco(withType("invalid-type"))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+
+	err := r.ensureConfigMap(context.Background(), falco)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported falco type")
 }

@@ -23,13 +23,6 @@ import (
 	"k8s.io/utils/ptr"
 )
 
-const (
-	// DefaultImage is the default container image for k8s-metacollector.
-	DefaultImage = "docker.io/falcosecurity/k8s-metacollector"
-	// DefaultVersion is the default version of k8s-metacollector.
-	DefaultVersion = "0.1.1"
-)
-
 var (
 	// DefaultArgs are the default arguments for the metacollector container.
 	DefaultArgs = []string{"/meta-collector", "run"}

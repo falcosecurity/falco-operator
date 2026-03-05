@@ -17,6 +17,8 @@
 package testutil
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,13 +30,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
-
-	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 const (
-	// Namespace is the default namespace used for test resources.
-	Namespace = "default"
+	// TestNamespace is the namespace used in tests.
+	TestNamespace = "default"
+	// TestNodeName is the node name used in tests.
+	TestNodeName = "test-node"
 )
 
 // ConditionExpect describes an expected condition for declarative assertions.
@@ -44,23 +46,26 @@ type ConditionExpect struct {
 	Reason string
 }
 
-// Scheme creates a runtime.Scheme with all types required by the metacollector controller.
-func Scheme(t *testing.T) *runtime.Scheme {
+// Scheme creates a runtime.Scheme with common K8s types (core, apps, rbac) and any
+// additional types registered via the provided adders.
+func Scheme(t *testing.T, adders ...func(*runtime.Scheme) error) *runtime.Scheme {
 	t.Helper()
 	s := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(s))
-	require.NoError(t, rbacv1.AddToScheme(s))
 	require.NoError(t, appsv1.AddToScheme(s))
-	require.NoError(t, instancev1alpha1.AddToScheme(s))
+	require.NoError(t, rbacv1.AddToScheme(s))
+	for _, add := range adders {
+		require.NoError(t, add(s))
+	}
 	return s
 }
 
-// Request creates a ctrl.Request for the given resource name in Namespace.
+// Request creates a ctrl.Request for the given resource name in TestNamespace.
 func Request(name string) ctrl.Request {
 	return ctrl.Request{
 		NamespacedName: types.NamespacedName{
 			Name:      name,
-			Namespace: Namespace,
+			Namespace: TestNamespace,
 		},
 	}
 }
@@ -85,4 +90,30 @@ func RequireConditions(t *testing.T, actual []metav1.Condition, expected []Condi
 	for _, exp := range expected {
 		RequireCondition(t, actual, exp.Type, exp.Status, exp.Reason)
 	}
+}
+
+// BoolPtr returns a pointer to the given bool value, useful for optional table fields.
+func BoolPtr(b bool) *bool {
+	return &b
+}
+
+// CRDDirPath returns the CRD directory path relative to an instance controller package
+// (controllers/instance/X/).
+func CRDDirPath() string {
+	return filepath.Join("..", "..", "..", "config", "crd", "bases")
+}
+
+// GetFirstFoundEnvTestBinaryDir returns the first found envtest binary directory, or empty string if not found.
+func GetFirstFoundEnvTestBinaryDir() string {
+	basePath := filepath.Join("..", "..", "..", "bin", "k8s")
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return filepath.Join(basePath, entry.Name())
+		}
+	}
+	return ""
 }

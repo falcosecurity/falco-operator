@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
 	"context"
@@ -90,7 +90,7 @@ func TestClusterScopedResourceHandler(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := clusterScopedResourceHandler(ctx, tt.obj)
+			result := ClusterScopedResourceHandler(ctx, tt.obj)
 			assert.Equal(t, tt.expected, result)
 		})
 	}
@@ -114,7 +114,7 @@ func TestClusterScopedResourceHandlerEdgeCases(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name: "Name with only separator returns empty name and namespace",
+			name: "Name with only separator returns nil",
 			obj: &rbacv1.ClusterRoleBinding{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "--",
@@ -126,7 +126,7 @@ func TestClusterScopedResourceHandlerEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := clusterScopedResourceHandler(ctx, tt.obj)
+			result := ClusterScopedResourceHandler(ctx, tt.obj)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

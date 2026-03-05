@@ -14,5 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package testutil provides shared test helpers for artifact controller tests.
-package testutil
+// Package instance provides shared logic for instance controllers (Falco, Metacollector).
+// It manages common operations such as resource reconciliation, name generation,
+// field diffing, and status patching.
+package instance

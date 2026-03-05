@@ -17,52 +17,49 @@
 package falco
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateService returns a service for Falco.
-func generateService(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(cl, falco,
-		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-			svc := &corev1.Service{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "Service",
-					APIVersion: "v1",
+func generateService(falco *instancev1alpha1.Falco) runtime.Object {
+	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Service",
+			APIVersion: "v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+			Labels:    falco.Labels,
+		},
+		Spec: corev1.ServiceSpec{
+			Type: corev1.ServiceTypeClusterIP,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "web",
+					Protocol:   corev1.ProtocolTCP,
+					Port:       8765,
+					TargetPort: intstr.FromInt32(8765),
 				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      falco.Name,
-					Namespace: falco.Namespace,
-					Labels:    falco.Labels,
-				},
-				Spec: corev1.ServiceSpec{
-					Type: corev1.ServiceTypeClusterIP,
-					Ports: []corev1.ServicePort{
-						{
-							Name:       "web",
-							Protocol:   corev1.ProtocolTCP,
-							Port:       8765,
-							TargetPort: intstr.FromInt32(8765),
-						},
-					},
-					Selector: map[string]string{
-						"app.kubernetes.io/name":     falco.Name,
-						"app.kubernetes.io/instance": falco.Name,
-					},
-				},
-			}
+			},
+			Selector: map[string]string{
+				"app.kubernetes.io/name":     falco.Name,
+				"app.kubernetes.io/instance": falco.Name,
+			},
+		},
+	}
+}
 
-			return svc, nil
-		},
-		generateOptions{
-			setControllerRef: true,
-			isClusterScoped:  false,
-		},
+func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, falco, fieldManager,
+		generateService,
+		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false},
 	)
 }

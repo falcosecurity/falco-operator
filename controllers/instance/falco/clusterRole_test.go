@@ -17,80 +17,50 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func TestGenerateClusterRole(t *testing.T) {
-	// Create a fake client with the necessary schemes
-	scheme := runtime.NewScheme()
-	require.NoError(t, rbacv1.AddToScheme(scheme))
-	require.NoError(t, instancev1alpha1.AddToScheme(scheme))
-
 	tests := []struct {
-		name    string
-		falco   *instancev1alpha1.Falco
-		verify  func(*testing.T, *unstructured.Unstructured)
-		wantErr bool
+		name       string
+		falco      *instancev1alpha1.Falco
+		wantName   string
+		wantLabels map[string]string
 	}{
 		{
-			name: "Basic ClusterRole creation",
+			name: "basic ClusterRole creation",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "falco"},
 				},
 			},
-			verify: func(t *testing.T, obj *unstructured.Unstructured) {
-				assert.Equal(t, "ClusterRole", obj.GetKind())
-				assert.Equal(t, "rbac.authorization.k8s.io/v1", obj.GetAPIVersion())
-				assert.Equal(t, "test-falco--default", obj.GetName())
-				assert.Equal(t, map[string]string{"app": "falco"}, obj.GetLabels())
-
-				// Verify rules
-				rules, found, err := unstructured.NestedSlice(obj.Object, "rules")
-				require.NoError(t, err)
-				require.True(t, found)
-				require.Len(t, rules, 1)
-
-				// Check nodes rule
-				rule0 := rules[0].(map[string]interface{})
-				assert.Equal(t, []interface{}{""}, rule0["apiGroups"])
-				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
-				assert.Equal(t, []interface{}{"get", "list", "watch"}, rule0["verbs"])
-			},
-			wantErr: false,
+			wantName:   "test-falco--default",
+			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
-			name: "ClusterRole with empty namespace still has valid rules",
+			name: "ClusterRole with empty namespace",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "test-falco",
 				},
 			},
-			verify: func(t *testing.T, obj *unstructured.Unstructured) {
-				assert.Equal(t, "test-falco--", obj.GetName())
-				// Verify rules are still present even with empty namespace
-				rules, found, err := unstructured.NestedSlice(obj.Object, "rules")
-				require.NoError(t, err)
-				require.True(t, found)
-				require.Len(t, rules, 1)
-				rule0 := rules[0].(map[string]interface{})
-				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
-			},
-			wantErr: false,
+			wantName: "test-falco--",
 		},
 		{
 			name: "ClusterRole propagates nil labels correctly",
@@ -100,35 +70,58 @@ func TestGenerateClusterRole(t *testing.T) {
 					Namespace: "default",
 				},
 			},
-			verify: func(t *testing.T, obj *unstructured.Unstructured) {
-				labels := obj.GetLabels()
-				assert.Empty(t, labels)
-				// Verify ClusterRole is still valid and has correct structure
-				assert.Equal(t, "ClusterRole", obj.GetKind())
-				assert.Equal(t, "test-falco--default", obj.GetName())
-			},
-			wantErr: false,
+			wantName: "test-falco--default",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a new client for each test
-			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			result := generateClusterRole(tt.falco)
+			require.NotNil(t, result)
 
-			// Execute the function
-			obj, err := generateClusterRole(cl, tt.falco)
+			cr := result.(*rbacv1.ClusterRole)
+			assert.Equal(t, tt.wantName, cr.Name)
+			assert.Equal(t, "ClusterRole", cr.Kind)
+			assert.Equal(t, "rbac.authorization.k8s.io/v1", cr.APIVersion)
+			assert.Equal(t, tt.wantLabels, cr.Labels)
 
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-
-			require.NoError(t, err)
-			require.NotNil(t, obj)
-
-			// Run the verification function
-			tt.verify(t, obj)
+			require.Len(t, cr.Rules, 1)
+			assert.Equal(t, []string{""}, cr.Rules[0].APIGroups)
+			assert.Equal(t, []string{"nodes"}, cr.Rules[0].Resources)
+			assert.Equal(t, []string{"get", "list", "watch"}, cr.Rules[0].Verbs)
 		})
 	}
+}
+
+func TestGenerateClusterRoleViaGenerateResource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, instancev1alpha1.AddToScheme(scheme))
+
+	falco := &instancev1alpha1.Falco{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-falco", Namespace: "default"},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	result, err := instance.GenerateResource(cl, falco, generateClusterRole, instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true})
+	require.NoError(t, err)
+
+	expectedName := instance.GenerateUniqueName("test-falco", "default")
+	assert.Equal(t, expectedName, result.GetName())
+	assert.Equal(t, "ClusterRole", result.GetKind())
+}
+
+func TestEnsureClusterRole(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+
+	require.NoError(t, r.ensureClusterRole(context.Background(), falco))
+
+	cr := &rbacv1.ClusterRole{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: instance.GenerateUniqueName(falco.Name, falco.Namespace)}, cr))
+	assert.Equal(t, instance.GenerateUniqueName(falco.Name, falco.Namespace), cr.Name)
+	assert.NotEmpty(t, cr.Rules)
+	assert.Equal(t, []string{""}, cr.Rules[0].APIGroups)
 }

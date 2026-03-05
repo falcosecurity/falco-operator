@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package metacollector
+package instance
 
 // Reconciled condition reasons.
 const (
@@ -56,11 +56,11 @@ const (
 const (
 	// ReasonDeletionError indicates an error during deletion cleanup.
 	ReasonDeletionError = "DeletionError"
-	// ReasonInstanceDeleted indicates the Metacollector instance was deleted successfully.
+	// ReasonInstanceDeleted indicates the instance was deleted successfully.
 	ReasonInstanceDeleted = "InstanceDeleted"
 )
 
-// Available condition reasons.
+// Available condition reasons (Deployment).
 const (
 	// ReasonDeploymentNotFound indicates the deployment was not found.
 	ReasonDeploymentNotFound = "DeploymentNotFound"
@@ -72,6 +72,18 @@ const (
 	ReasonDeploymentFetchError = "DeploymentFetchError"
 )
 
+// DaemonSet available condition reasons (Falco-specific).
+const (
+	// ReasonDaemonSetNotFound indicates the daemonset was not found.
+	ReasonDaemonSetNotFound = "DaemonSetNotFound"
+	// ReasonDaemonSetAvailable indicates the daemonset is available.
+	ReasonDaemonSetAvailable = "DaemonSetAvailable"
+	// ReasonDaemonSetUnavailable indicates the daemonset is unavailable.
+	ReasonDaemonSetUnavailable = "DaemonSetUnavailable"
+	// ReasonDaemonSetFetchError indicates an error fetching the daemonset status.
+	ReasonDaemonSetFetchError = "DaemonSetFetchError"
+)
+
 // Condition messages.
 const (
 	// MessageDeploymentNotFound is the message when deployment is not found.
@@ -80,20 +92,30 @@ const (
 	MessageDeploymentAvailable = "Deployment is available"
 	// MessageDeploymentUnavailable is the message when deployment is unavailable.
 	MessageDeploymentUnavailable = "Deployment is unavailable"
+	// MessageDaemonSetNotFound is the message when daemonset is not found.
+	MessageDaemonSetNotFound = "DaemonSet has not been created or has been deleted"
+	// MessageDaemonSetAvailable is the message when daemonset is available.
+	MessageDaemonSetAvailable = "DaemonSet is available"
+	// MessageDaemonSetUnavailable is the message when daemonset is unavailable.
+	MessageDaemonSetUnavailable = "DaemonSet is unavailable"
 	// MessageResourceCreated is the message when resource is created.
 	MessageResourceCreated = "Resource created successfully"
 	// MessageResourceUpdated is the message when resource is updated.
 	MessageResourceUpdated = "Resource updated successfully"
 	// MessageResourceUpToDate is the message when resource is up to date.
 	MessageResourceUpToDate = "Resource is up to date"
-	// MessageInstanceDeleted is the message when a Metacollector instance is deleted.
-	MessageInstanceDeleted = "Metacollector instance deleted successfully"
+	// MessageFalcoInstanceDeleted is the message when a Falco instance is deleted.
+	MessageFalcoInstanceDeleted = "Falco instance deleted successfully"
+	// MessageMetacollectorInstanceDeleted is the message when a Metacollector instance is deleted.
+	MessageMetacollectorInstanceDeleted = "Metacollector instance deleted successfully"
 )
 
 // Condition message formats (for use with fmt.Sprintf).
 const (
 	// MessageFormatDeploymentFetchError is the format for deployment fetch error message.
 	MessageFormatDeploymentFetchError = "Unable to fetch deployment for status: %s"
+	// MessageFormatDaemonSetFetchError is the format for daemonset fetch error message.
+	MessageFormatDaemonSetFetchError = "Unable to fetch daemonset for status: %s"
 	// MessageFormatApplyConfigurationError is the format for apply configuration error message.
 	MessageFormatApplyConfigurationError = "Unable to generate apply configuration: %s"
 	// MessageFormatMarshalConfigurationError is the format for marshal configuration error message.

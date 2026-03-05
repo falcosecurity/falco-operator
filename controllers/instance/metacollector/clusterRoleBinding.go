@@ -17,47 +17,46 @@
 package metacollector
 
 import (
+	"context"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateClusterRoleBinding creates a ClusterRoleBinding resource for the provided Metacollector instance.
-func generateClusterRoleBinding(cl client.Client, mc *instancev1alpha1.Metacollector) (*unstructured.Unstructured, error) {
-	return generateResourceFromMetacollectorInstance(cl, mc,
-		func(mc *instancev1alpha1.Metacollector) (runtime.Object, error) {
-			resourceName := GenerateUniqueName(mc.Name, mc.Namespace)
+func generateClusterRoleBinding(mc *instancev1alpha1.Metacollector) runtime.Object {
+	resourceName := instance.GenerateUniqueName(mc.Name, mc.Namespace)
 
-			return &rbacv1.ClusterRoleBinding{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ClusterRoleBinding",
-					APIVersion: "rbac.authorization.k8s.io/v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   resourceName,
-					Labels: mc.Labels,
-				},
-				Subjects: []rbacv1.Subject{
-					{
-						Kind:      "ServiceAccount",
-						Name:      mc.Name,
-						Namespace: mc.Namespace,
-					},
-				},
-				RoleRef: rbacv1.RoleRef{
-					Kind:     "ClusterRole",
-					Name:     resourceName,
-					APIGroup: "rbac.authorization.k8s.io",
-				},
-			}, nil
+	return &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ClusterRoleBinding",
+			APIVersion: "rbac.authorization.k8s.io/v1",
 		},
-		generateOptions{
-			setControllerRef: false,
-			isClusterScoped:  true,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   resourceName,
+			Labels: mc.Labels,
 		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      mc.Name,
+				Namespace: mc.Namespace,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     resourceName,
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+}
+
+func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, mc, fieldManager,
+		generateClusterRoleBinding,
+		instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true},
 	)
 }

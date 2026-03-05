@@ -91,22 +91,72 @@ func TestBuildFalcoImageStringFromVersion(t *testing.T) {
 	}
 }
 
-func TestFalcoVersion(t *testing.T) {
+func TestBuildMetacollectorImageStringFromVersion(t *testing.T) {
 	tests := []struct {
-		name string
-		want string
+		name    string
+		version string
+		want    string
 	}{
 		{
-			name: "extract version from FalcoTag",
-			want: strings.Split(FalcoTag, "-")[0],
+			name:    "empty version uses default",
+			version: "",
+			want:    BuildImageString(Registry, Repository, MetacollectorImage, MetacollectorTag),
+		},
+		{
+			name:    "specific version",
+			version: "0.2.0",
+			want:    BuildImageString(Registry, Repository, MetacollectorImage, "0.2.0"),
+		},
+		{
+			name:    "version with prefix",
+			version: "v0.2.0",
+			want:    BuildImageString(Registry, Repository, MetacollectorImage, "v0.2.0"),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := FalcoVersion()
+			got := BuildMetacollectorImageStringFromVersion(tt.version)
 			if got != tt.want {
-				t.Errorf("FalcoVersion() = %v, want %v", got, tt.want)
+				t.Errorf("BuildMetacollectorImageStringFromVersion() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVersionFromTag(t *testing.T) {
+	tests := []struct {
+		name string
+		tag  string
+		want string
+	}{
+		{
+			name: "simple version",
+			tag:  "0.41.0",
+			want: "0.41.0",
+		},
+		{
+			name: "version with suffix",
+			tag:  "0.41.0-rc1",
+			want: "0.41.0",
+		},
+		{
+			name: "FalcoTag",
+			tag:  FalcoTag,
+			want: strings.Split(FalcoTag, "-")[0],
+		},
+		{
+			name: "MetacollectorTag",
+			tag:  MetacollectorTag,
+			want: strings.Split(MetacollectorTag, "-")[0],
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := VersionFromTag(tt.tag)
+			if got != tt.want {
+				t.Errorf("VersionFromTag() = %v, want %v", got, tt.want)
 			}
 		})
 	}

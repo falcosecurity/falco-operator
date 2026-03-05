@@ -17,49 +17,46 @@
 package falco
 
 import (
+	"context"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateClusterRoleBinding creates a ClusterRoleBinding resource for the provided Falco instance in a Kubernetes cluster.
-// It associates a specified ServiceAccount with a ClusterRole and ensures the object is managed by the Falco instance.
-// The function converts the ClusterRoleBinding object to unstructured format and sets default values for it.
-func generateClusterRoleBinding(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(cl, falco,
-		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-			resourceName := GenerateUniqueName(falco.Name, falco.Namespace)
+func generateClusterRoleBinding(falco *instancev1alpha1.Falco) runtime.Object {
+	resourceName := instance.GenerateUniqueName(falco.Name, falco.Namespace)
 
-			return &rbacv1.ClusterRoleBinding{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ClusterRoleBinding",
-					APIVersion: "rbac.authorization.k8s.io/v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   resourceName,
-					Labels: falco.Labels,
-				},
-				Subjects: []rbacv1.Subject{
-					{
-						Kind:      "ServiceAccount",
-						Name:      falco.Name,
-						Namespace: falco.Namespace,
-					},
-				},
-				RoleRef: rbacv1.RoleRef{
-					Kind:     "ClusterRole",
-					Name:     resourceName,
-					APIGroup: "rbac.authorization.k8s.io",
-				},
-			}, nil
+	return &rbacv1.ClusterRoleBinding{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ClusterRoleBinding",
+			APIVersion: "rbac.authorization.k8s.io/v1",
 		},
-		generateOptions{
-			setControllerRef: false,
-			isClusterScoped:  true,
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   resourceName,
+			Labels: falco.Labels,
 		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      "ServiceAccount",
+				Name:      falco.Name,
+				Namespace: falco.Namespace,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     resourceName,
+			APIGroup: "rbac.authorization.k8s.io",
+		},
+	}
+}
+
+func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, falco, fieldManager,
+		generateClusterRoleBinding,
+		instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true},
 	)
 }

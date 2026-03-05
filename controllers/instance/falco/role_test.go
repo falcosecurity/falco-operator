@@ -17,97 +17,82 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 )
 
 func TestGenerateRole(t *testing.T) {
-	// Create a test scheme
-	scheme := runtime.NewScheme()
-	_ = rbacv1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-
 	tests := []struct {
-		name    string
-		falco   *instancev1alpha1.Falco
-		wantErr bool
+		name       string
+		falco      *instancev1alpha1.Falco
+		wantLabels map[string]string
 	}{
 		{
-			name: "successfully generate role",
+			name: "Role with labels",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "falco"},
 				},
 			},
-			wantErr: false,
+			wantLabels: map[string]string{"app": "falco"},
+		},
+		{
+			name: "Role with nil labels",
+			falco: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-falco",
+					Namespace: "default",
+				},
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a fake client
-			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			result := generateRole(tt.falco)
+			require.NotNil(t, result)
 
-			// Generate the role
-			got, err := generateRole(cl, tt.falco)
-
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
-
-			assert.NoError(t, err)
-			assert.NotNil(t, got)
-
-			// Convert unstructured to Role
-			role := &rbacv1.Role{}
-			err = runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, role)
-			assert.NoError(t, err)
-
-			// Verify role properties
+			role := result.(*rbacv1.Role)
 			assert.Equal(t, tt.falco.Name, role.Name)
 			assert.Equal(t, tt.falco.Namespace, role.Namespace)
-			assert.Equal(t, tt.falco.Labels, role.Labels)
+			assert.Equal(t, tt.wantLabels, role.Labels)
 			assert.Equal(t, "Role", role.Kind)
 			assert.Equal(t, "rbac.authorization.k8s.io/v1", role.APIVersion)
 
-			// Verify rules
-			assert.Len(t, role.Rules, 4)
+			require.Len(t, role.Rules, 4)
 
-			// Verify configmaps rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{""},
 				Resources: []string{"configmaps"},
 				Verbs:     []string{"get", "list", "watch"},
 			})
 
-			// Verify events rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{""},
 				Resources: []string{"events"},
 				Verbs:     []string{"create", "patch"},
 			})
 
-			// Verify artifact rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 				Resources: []string{"configs", "rulesfiles", "plugins"},
 				Verbs:     []string{"get", "list", "watch", "update", "patch"},
 			})
 
-			// Verify artifact status rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
 				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 				Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
@@ -117,23 +102,16 @@ func TestGenerateRole(t *testing.T) {
 	}
 }
 
-func TestGenerateRoleWithNilFalco(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = rbacv1.AddToScheme(scheme)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+func TestEnsureRole(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
-	_, err := generateRole(cl, nil)
-	assert.Error(t, err)
-}
+	require.NoError(t, r.ensureRole(context.Background(), falco))
 
-func TestGenerateRoleWithNilClient(t *testing.T) {
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-falco",
-			Namespace: "default",
-		},
-	}
-
-	_, err := generateRole(nil, falco)
-	assert.Error(t, err)
+	role := &rbacv1.Role{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), role))
+	assert.Equal(t, falco.Name, role.Name)
+	assert.NotEmpty(t, role.Rules)
 }

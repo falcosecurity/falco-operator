@@ -23,19 +23,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
-	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
-)
-
-const (
-	resourceTypeDeployment = "Deployment"
-	resourceTypeDaemonSet  = "DaemonSet"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 // generateApplyConfiguration generates apply configuration for falco resources.
@@ -43,72 +36,43 @@ const (
 // The resource type is determined by the falco CR spec, and it can be either a Deployment or a DaemonSet.
 func generateApplyConfiguration(cl client.Client, falco *v1alpha1.Falco,
 	nativeSidecar bool) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(
+	merged, err := mergeWorkloadConfiguration(nativeSidecar, falco)
+	if err != nil {
+		return nil, err
+	}
+
+	return instance.GenerateResource(
 		cl,
 		falco,
-		func(falco *v1alpha1.Falco) (runtime.Object, error) {
-			// Determine the resource type from the Falco object.
-			resourceType := falco.Spec.Type
-
-			// Build the default resource.
-			var baseResource interface{}
-			switch resourceType {
-			case resourceTypeDeployment:
-				baseResource = baseDeployment(nativeSidecar, falco)
-			case resourceTypeDaemonSet:
-				baseResource = baseDaemonSet(nativeSidecar, falco)
-			default:
-				// Should never happen, since the type is validated by the CRD.
-				return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
-			}
-
-			// Create a parser to merge the base resource with the user-defined one.
-			parser := scheme.Parser()
-
-			// Parse the base resource.
-			baseTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromStructured(baseResource)
-			if err != nil {
-				return nil, err
-			}
-
-			// Generate the user-defined resource.
-			userUnstructured, err := generateUserDefinedResource(nativeSidecar, falco)
-			if err != nil {
-				return nil, err
-			}
-
-			// Parse the user-defined resource.
-			userTyped, err := parser.Type("io.k8s.api.apps.v1." + resourceType).FromUnstructured(userUnstructured.Object)
-			if err != nil {
-				return nil, err
-			}
-
-			// Merge the base and user-defined resources.
-			desiredTyped, err := baseTyped.Merge(userTyped)
-			if err != nil {
-				return nil, err
-			}
-
-			mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
-
-			desiredResourceUnstructured := &unstructured.Unstructured{
-				Object: mergedUnstructured,
-			}
-
-			// Set the group version kind for the resource.
-			desiredResourceUnstructured.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   appsv1.GroupName,
-				Version: appsv1.SchemeGroupVersion.Version,
-				Kind:    resourceType,
-			})
-
-			return desiredResourceUnstructured, nil
-		},
-		generateOptions{
-			setControllerRef: true,
-			isClusterScoped:  false,
+		func(_ *v1alpha1.Falco) runtime.Object { return merged },
+		instance.GenerateOptions{
+			SetControllerRef: true,
+			IsClusterScoped:  false,
 		},
 	)
+}
+
+// mergeWorkloadConfiguration merges the base workload (Deployment or DaemonSet)
+// with user-defined overrides from PodTemplateSpec.
+func mergeWorkloadConfiguration(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
+	resourceType := falco.Spec.Type
+
+	var baseResource runtime.Object
+	switch resourceType {
+	case instance.ResourceTypeDeployment:
+		baseResource = baseDeployment(nativeSidecar, falco)
+	case instance.ResourceTypeDaemonSet:
+		baseResource = baseDaemonSet(nativeSidecar, falco)
+	default:
+		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
+	}
+
+	userUnstructured, err := generateUserDefinedResource(nativeSidecar, falco)
+	if err != nil {
+		return nil, err
+	}
+
+	return instance.MergeApplyConfiguration(resourceType, baseResource, userUnstructured)
 }
 
 // baseDeployment returns the base deployment for Falco with default values + metadata coming from the Falco CR.
@@ -129,7 +93,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 			Replicas: falco.Spec.Replicas,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: podTemplateSpecLabels(falco.Name, falco.Labels),
+					Labels: instance.PodTemplateSpecLabels(falco.Name, falco.Labels),
 				},
 				Spec: corev1.PodSpec{
 					Tolerations: []corev1.Toleration{
@@ -140,7 +104,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 					Volumes:            falcoVolumes(falco),
 					Containers: []corev1.Container{
 						{
-							Name:            "falco",
+							Name:            containerName,
 							Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
 							ImagePullPolicy: DefaultFalcoImagePullPolicy,
 							Resources:       DefaultFalcoResources,
@@ -155,7 +119,7 @@ func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deploymen
 					},
 				},
 			},
-			Strategy: deploymentStrategy(falco),
+			Strategy: instance.DeploymentStrategy(falco.Spec.Strategy),
 		},
 	}
 
@@ -186,10 +150,10 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 					"app.kubernetes.io/instance": falco.Name,
 				},
 			},
-			UpdateStrategy: daemonSetUpdateStrategy(falco),
+			UpdateStrategy: instance.DaemonSetUpdateStrategy(falco.Spec.UpdateStrategy),
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: podTemplateSpecLabels(falco.Name, falco.Labels),
+					Labels: instance.PodTemplateSpecLabels(falco.Name, falco.Labels),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: falco.Name,
@@ -200,7 +164,7 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 					Volumes: falcoVolumes(falco),
 					Containers: []corev1.Container{
 						{
-							Name:            "falco",
+							Name:            containerName,
 							Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
 							ImagePullPolicy: DefaultFalcoImagePullPolicy,
 							Resources:       DefaultFalcoResources,
@@ -230,26 +194,6 @@ func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet 
 	return ds
 }
 
-// deploymentStrategy returns the deployment strategy from the Falco CR or the default RollingUpdate.
-func deploymentStrategy(falco *v1alpha1.Falco) appsv1.DeploymentStrategy {
-	if falco.Spec.Strategy != nil {
-		return *falco.Spec.Strategy
-	}
-	return appsv1.DeploymentStrategy{
-		Type: appsv1.RollingUpdateDeploymentStrategyType,
-	}
-}
-
-// daemonSetUpdateStrategy returns the update strategy from the Falco CR or the default RollingUpdate.
-func daemonSetUpdateStrategy(falco *v1alpha1.Falco) appsv1.DaemonSetUpdateStrategy {
-	if falco.Spec.UpdateStrategy != nil {
-		return *falco.Spec.UpdateStrategy
-	}
-	return appsv1.DaemonSetUpdateStrategy{
-		Type: appsv1.RollingUpdateDaemonSetStrategyType,
-	}
-}
-
 // generateUserDefinedResource generates a user-defined resource from the falco CR.
 func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
 	// Build the default resource from the base one.
@@ -259,9 +203,9 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 	resourceType := falco.Spec.Type
 
 	switch resourceType {
-	case resourceTypeDeployment:
+	case instance.ResourceTypeDeployment:
 		userResource = baseDeployment(nativeSidecar, falco)
-	case resourceTypeDaemonSet:
+	case instance.ResourceTypeDaemonSet:
 		userResource = baseDaemonSet(nativeSidecar, falco)
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
@@ -300,38 +244,11 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 	}
 
 	// Remove the empty containers field if it exists.
-	if removeEmptyContainers(resource) != nil {
+	if instance.RemoveEmptyContainers(resource) != nil {
 		return nil, err
 	}
 
 	return resource, nil
-}
-
-// removeEmptyContainers removes the empty containers field from the unstructured DaemonSet if it exists.
-func removeEmptyContainers(obj *unstructured.Unstructured) error {
-	if templateSpec, found, err := unstructured.NestedMap(obj.Object, "spec", "template", "spec"); err != nil {
-		return fmt.Errorf("failed to get podSpec from podTemplateSpec while generating user defined daemonset: %w", err)
-	} else if !found {
-		// should never happen
-		return fmt.Errorf("podSpec not found in podTemplateSpec while generating user defined daemonset")
-	} else {
-		// Get the containers map and remove it if it's empty.
-		// We can't leave an empty containers field since it will override the default one when merging with the base daemonset.
-		if containers, ok := templateSpec["containers"]; ok {
-			if containers == nil {
-				unstructured.RemoveNestedField(obj.Object, "spec", "template", "spec", "containers")
-			}
-		}
-	}
-	return nil
-}
-
-// podTemplateSpecLabels returns the labels for the pod template spec.
-func podTemplateSpecLabels(appName string, baseLabels map[string]string) map[string]string {
-	return labels.Merge(baseLabels, map[string]string{
-		"app.kubernetes.io/name":     appName,
-		"app.kubernetes.io/instance": appName,
-	})
 }
 
 // falcoVolumes returns the volumes for the Falco container.

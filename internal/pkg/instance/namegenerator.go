@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
 	"fmt"
@@ -26,7 +26,7 @@ const (
 	escapedDelimiter = "__DASH__"
 )
 
-// GenerateUniqueName creates a unique name from the name and namespace of a Falco instance.
+// GenerateUniqueName creates a unique name from the name and namespace of an instance.
 func GenerateUniqueName(name, namespace string) string {
 	escapedName := strings.ReplaceAll(name, delimiter, escapedDelimiter)
 	escapedNamespace := strings.ReplaceAll(namespace, delimiter, escapedDelimiter)

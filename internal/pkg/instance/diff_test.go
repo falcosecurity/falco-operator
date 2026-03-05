@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
 	"fmt"
@@ -37,7 +37,7 @@ func TestDiff(t *testing.T) {
 				"kind":       "ConfigMap",
 			},
 		}
-		result, err := diff(nil, desired)
+		result, err := Diff(nil, desired, "test-controller")
 		assert.Error(t, err)
 		assert.Nil(t, result)
 	})
@@ -50,7 +50,7 @@ func TestDiff(t *testing.T) {
 			},
 			ObjectMeta: metav1.ObjectMeta{Name: "test"},
 		}
-		result, err := diff(current, nil)
+		result, err := Diff(current, nil, "test-controller")
 		assert.Error(t, err)
 		assert.Nil(t, result)
 	})
@@ -59,7 +59,7 @@ func TestDiff(t *testing.T) {
 		current := &appsv1.DaemonSet{
 			TypeMeta: metav1.TypeMeta{
 				APIVersion: "apps/v1",
-				Kind:       "DaemonSet",
+				Kind:       ResourceTypeDaemonSet,
 			},
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "test",
@@ -69,13 +69,13 @@ func TestDiff(t *testing.T) {
 		desired := &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"apiVersion": "apps/v1",
-				"kind":       "DaemonSet",
+				"kind":       ResourceTypeDaemonSet,
 				"metadata": map[string]interface{}{
 					"name": "test",
 				},
 			},
 		}
-		result, err := diff(current, desired)
+		result, err := Diff(current, desired, "test-controller")
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, ErrNoManagedFields)
 		assert.Nil(t, result)
@@ -100,7 +100,7 @@ func TestErrNoManagedFields(t *testing.T) {
 
 func TestFormatChangedFields(t *testing.T) {
 	t.Run("nil comparison returns empty string", func(t *testing.T) {
-		result := formatChangedFields(nil)
+		result := FormatChangedFields(nil)
 		assert.Equal(t, "", result)
 	})
 
@@ -110,7 +110,7 @@ func TestFormatChangedFields(t *testing.T) {
 			Modified: &fieldpath.Set{},
 			Removed:  &fieldpath.Set{},
 		}
-		result := formatChangedFields(comparison)
+		result := FormatChangedFields(comparison)
 		assert.Equal(t, "no changes", result)
 	})
 
@@ -121,7 +121,7 @@ func TestFormatChangedFields(t *testing.T) {
 			Modified: &fieldpath.Set{},
 			Removed:  &fieldpath.Set{},
 		}
-		result := formatChangedFields(comparison)
+		result := FormatChangedFields(comparison)
 		assert.Contains(t, result, "added:")
 		assert.Contains(t, result, "spec")
 		assert.NotContains(t, result, "modified:")
@@ -135,7 +135,7 @@ func TestFormatChangedFields(t *testing.T) {
 			Modified: modified,
 			Removed:  &fieldpath.Set{},
 		}
-		result := formatChangedFields(comparison)
+		result := FormatChangedFields(comparison)
 		assert.Contains(t, result, "modified:")
 		assert.Contains(t, result, "spec")
 		assert.NotContains(t, result, "added:")
@@ -149,7 +149,7 @@ func TestFormatChangedFields(t *testing.T) {
 			Modified: &fieldpath.Set{},
 			Removed:  removed,
 		}
-		result := formatChangedFields(comparison)
+		result := FormatChangedFields(comparison)
 		assert.Contains(t, result, "removed:")
 		assert.Contains(t, result, "metadata")
 		assert.NotContains(t, result, "added:")
@@ -165,7 +165,7 @@ func TestFormatChangedFields(t *testing.T) {
 			Modified: modified,
 			Removed:  removed,
 		}
-		result := formatChangedFields(comparison)
+		result := FormatChangedFields(comparison)
 		assert.Contains(t, result, "added:")
 		assert.Contains(t, result, "modified:")
 		assert.Contains(t, result, "removed:")

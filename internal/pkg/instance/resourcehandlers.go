@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
 	"context"
@@ -26,16 +26,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
-// clusterScopedResourceHandler used to handle cluster-scoped resources like ClusterRole and ClusterRoleBinding.
-// It returns a list of reconcile.Requests for the Falco instance associated with the resource.
-func clusterScopedResourceHandler(ctx context.Context, obj client.Object) []reconcile.Request {
+// ClusterScopedResourceHandler handles cluster-scoped resources like ClusterRole and ClusterRoleBinding.
+// It returns a list of reconcile.Requests for the instance associated with the resource.
+func ClusterScopedResourceHandler(ctx context.Context, obj client.Object) []reconcile.Request {
 	var ns types.NamespacedName
 
 	logger := log.FromContext(ctx)
 
 	switch obj.(type) {
 	case *rbacv1.ClusterRoleBinding, *rbacv1.ClusterRole:
-		// We extract the Falco instance name and namespace from the resource name.
+		// We extract the instance name and namespace from the resource name.
 		name, namespace, err := ParseUniqueName(obj.GetName())
 		ns = types.NamespacedName{
 			Name:      name,

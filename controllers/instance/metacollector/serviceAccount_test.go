@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package metacollector
 
 import (
 	"context"
@@ -34,45 +34,45 @@ import (
 
 func TestGenerateServiceAccount(t *testing.T) {
 	tests := []struct {
-		name           string
-		falco          *instancev1alpha1.Falco
-		expectedLabels map[string]string
+		name       string
+		mc         *instancev1alpha1.Metacollector
+		wantName   string
+		wantLabels map[string]string
 	}{
 		{
-			name: "basic service account generation",
-			falco: &instancev1alpha1.Falco{
+			name: "basic ServiceAccount creation",
+			mc: &instancev1alpha1.Metacollector{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
+					Name:      "test-mc",
 					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
+					Labels:    map[string]string{"app": "metacollector"},
 				},
 			},
-			expectedLabels: map[string]string{"app": "falco"},
+			wantName:   "test-mc",
+			wantLabels: map[string]string{"app": "metacollector"},
 		},
 		{
-			name: "service account with custom labels",
-			falco: &instancev1alpha1.Falco{
+			name: "ServiceAccount with nil labels",
+			mc: &instancev1alpha1.Metacollector{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "custom-namespace",
-					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
+					Name:      "test-mc",
+					Namespace: "default",
 				},
 			},
-			expectedLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
+			wantName: "test-mc",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := generateServiceAccount(tt.falco)
+			result := generateServiceAccount(tt.mc)
 			require.NotNil(t, result)
 
 			sa := result.(*corev1.ServiceAccount)
-			assert.Equal(t, tt.falco.Name, sa.Name)
-			assert.Equal(t, tt.falco.Namespace, sa.Namespace)
-			assert.Equal(t, tt.expectedLabels, sa.Labels)
+			assert.Equal(t, tt.wantName, sa.Name)
 			assert.Equal(t, "ServiceAccount", sa.Kind)
 			assert.Equal(t, "v1", sa.APIVersion)
+			assert.Equal(t, tt.wantLabels, sa.Labels)
 		})
 	}
 }
@@ -82,20 +82,32 @@ func TestEnsureServiceAccount(t *testing.T) {
 
 	tests := []struct {
 		name         string
-		falco        *instancev1alpha1.Falco
+		mc           *instancev1alpha1.Metacollector
 		existingObjs []client.Object
 		wantLabels   map[string]string
+		wantAnnots   map[string]string
 	}{
 		{
-			name:  "creates with correct name and namespace",
-			falco: newFalco(),
+			name: "creates with correct name and namespace",
+			mc:   newMetacollector(withName("test-mc")),
 		},
 		{
-			name:  "applies new labels on existing ServiceAccount",
-			falco: newFalco(withLabels(map[string]string{"new": "label"})),
+			name: "preserves existing annotations during update",
+			mc:   newMetacollector(withName("test-mc")),
 			existingObjs: []client.Object{
 				&corev1.ServiceAccount{
-					ObjectMeta: metav1.ObjectMeta{Name: defaultName, Namespace: testutil.TestNamespace, Labels: map[string]string{"old": "label"}},
+					TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
+					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace, Annotations: map[string]string{"existing": "annotation"}},
+				},
+			},
+			wantAnnots: map[string]string{"existing": "annotation"},
+		},
+		{
+			name: "applies new labels on existing ServiceAccount",
+			mc:   newMetacollector(withName("test-mc"), withLabels(map[string]string{"new": "label"})),
+			existingObjs: []client.Object{
+				&corev1.ServiceAccount{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace, Labels: map[string]string{"old": "label"}},
 				},
 			},
 			wantLabels: map[string]string{"new": "label"},
@@ -104,18 +116,22 @@ func TestEnsureServiceAccount(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objs := append([]client.Object{tt.falco}, tt.existingObjs...)
+			objs := append([]client.Object{tt.mc}, tt.existingObjs...)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
-			require.NoError(t, r.ensureServiceAccount(context.Background(), tt.falco))
+			err := r.ensureServiceAccount(context.Background(), tt.mc)
+			require.NoError(t, err)
 
 			sa := &corev1.ServiceAccount{}
-			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), sa))
-			assert.Equal(t, tt.falco.Name, sa.Name)
-			assert.Equal(t, tt.falco.Namespace, sa.Namespace)
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.mc), sa))
+			assert.Equal(t, tt.mc.Name, sa.Name)
+			assert.Equal(t, tt.mc.Namespace, sa.Namespace)
 			for k, v := range tt.wantLabels {
 				assert.Equal(t, v, sa.Labels[k], "label %s", k)
+			}
+			for k, v := range tt.wantAnnots {
+				assert.Equal(t, v, sa.Annotations[k], "annotation %s", k)
 			}
 		})
 	}

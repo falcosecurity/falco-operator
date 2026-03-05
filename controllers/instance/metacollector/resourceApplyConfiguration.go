@@ -17,89 +17,45 @@
 package metacollector
 
 import (
-	"fmt"
-
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 // generateApplyConfiguration generates the apply configuration for the Metacollector Deployment.
 // It creates a base Deployment and merges it with user-defined overrides from PodTemplateSpec.
 func generateApplyConfiguration(cl client.Client, mc *instancev1alpha1.Metacollector) (*unstructured.Unstructured, error) {
-	return generateResourceFromMetacollectorInstance(
+	merged, err := mergeDeploymentConfiguration(mc)
+	if err != nil {
+		return nil, err
+	}
+
+	return instance.GenerateResource(
 		cl,
 		mc,
-		func(mc *instancev1alpha1.Metacollector) (runtime.Object, error) {
-			baseResource := baseDeployment(mc)
-
-			parser := scheme.Parser()
-
-			baseTyped, err := parser.Type("io.k8s.api.apps.v1.Deployment").FromStructured(baseResource)
-			if err != nil {
-				return nil, err
-			}
-
-			userUnstructured, err := generateUserDefinedResource(mc)
-			if err != nil {
-				return nil, err
-			}
-
-			userTyped, err := parser.Type("io.k8s.api.apps.v1.Deployment").FromUnstructured(userUnstructured.Object)
-			if err != nil {
-				return nil, err
-			}
-
-			desiredTyped, err := baseTyped.Merge(userTyped)
-			if err != nil {
-				return nil, err
-			}
-
-			mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
-
-			desiredResourceUnstructured := &unstructured.Unstructured{
-				Object: mergedUnstructured,
-			}
-
-			desiredResourceUnstructured.SetGroupVersionKind(schema.GroupVersionKind{
-				Group:   appsv1.GroupName,
-				Version: appsv1.SchemeGroupVersion.Version,
-				Kind:    "Deployment",
-			})
-
-			return desiredResourceUnstructured, nil
-		},
-		generateOptions{
-			setControllerRef: true,
-			isClusterScoped:  false,
+		func(_ *instancev1alpha1.Metacollector) runtime.Object { return merged },
+		instance.GenerateOptions{
+			SetControllerRef: true,
+			IsClusterScoped:  false,
 		},
 	)
 }
 
-// metacollectorImage builds the full image string from version.
-func metacollectorImage(version string) string {
-	if version == "" {
-		version = DefaultVersion
+// mergeDeploymentConfiguration merges the base Deployment with user-defined overrides.
+func mergeDeploymentConfiguration(mc *instancev1alpha1.Metacollector) (*unstructured.Unstructured, error) {
+	userUnstructured, err := generateUserDefinedResource(mc)
+	if err != nil {
+		return nil, err
 	}
-	return fmt.Sprintf("%s:%s", DefaultImage, version)
-}
 
-// deploymentStrategy returns the deployment strategy from the Metacollector CR or the default RollingUpdate.
-func deploymentStrategy(mc *instancev1alpha1.Metacollector) appsv1.DeploymentStrategy {
-	if mc.Spec.Strategy != nil {
-		return *mc.Spec.Strategy
-	}
-	return appsv1.DeploymentStrategy{
-		Type: appsv1.RollingUpdateDeploymentStrategyType,
-	}
+	return instance.MergeApplyConfiguration(instance.ResourceTypeDeployment, baseDeployment(mc), userUnstructured)
 }
 
 // baseDeployment returns the base Deployment for Metacollector with default values.
@@ -120,15 +76,15 @@ func baseDeployment(mc *instancev1alpha1.Metacollector) *appsv1.Deployment {
 			Replicas: mc.Spec.Replicas,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: podTemplateSpecLabels(mc.Name, mc.Labels),
+					Labels: instance.PodTemplateSpecLabels(mc.Name, mc.Labels),
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: mc.Name,
 					SecurityContext:    DefaultPodSecurityContext,
 					Containers: []corev1.Container{
 						{
-							Name:            "metacollector",
-							Image:           metacollectorImage(mc.Spec.Version),
+							Name:            containerName,
+							Image:           image.BuildMetacollectorImageStringFromVersion(mc.Spec.Version),
 							ImagePullPolicy: DefaultImagePullPolicy,
 							Args:            DefaultArgs,
 							Ports:           DefaultPorts,
@@ -140,7 +96,7 @@ func baseDeployment(mc *instancev1alpha1.Metacollector) *appsv1.Deployment {
 					},
 				},
 			},
-			Strategy: deploymentStrategy(mc),
+			Strategy: instance.DeploymentStrategy(mc.Spec.Strategy),
 		},
 	}
 }
@@ -167,33 +123,9 @@ func generateUserDefinedResource(mc *instancev1alpha1.Metacollector) (*unstructu
 		Object: unUserResource,
 	}
 
-	if removeEmptyContainers(resource) != nil {
+	if instance.RemoveEmptyContainers(resource) != nil {
 		return nil, err
 	}
 
 	return resource, nil
-}
-
-// removeEmptyContainers removes the empty containers field from the unstructured Deployment if it exists.
-func removeEmptyContainers(obj *unstructured.Unstructured) error {
-	if templateSpec, found, err := unstructured.NestedMap(obj.Object, "spec", "template", "spec"); err != nil {
-		return fmt.Errorf("failed to get podSpec from podTemplateSpec: %w", err)
-	} else if !found {
-		return fmt.Errorf("podSpec not found in podTemplateSpec")
-	} else {
-		if containers, ok := templateSpec["containers"]; ok {
-			if containers == nil {
-				unstructured.RemoveNestedField(obj.Object, "spec", "template", "spec", "containers")
-			}
-		}
-	}
-	return nil
-}
-
-// podTemplateSpecLabels returns the labels for the pod template spec.
-func podTemplateSpecLabels(appName string, baseLabels map[string]string) map[string]string {
-	return labels.Merge(baseLabels, map[string]string{
-		"app.kubernetes.io/name":     appName,
-		"app.kubernetes.io/instance": appName,
-	})
 }

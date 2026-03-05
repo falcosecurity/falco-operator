@@ -19,7 +19,6 @@ package falco
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,9 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
-
-const testNamespace = "default"
 
 var (
 	testEnv   *envtest.Environment
@@ -56,11 +55,11 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 		ErrorIfCRDPathMissing: true,
 	}
 
-	if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
+	if dir := testutil.GetFirstFoundEnvTestBinaryDir(); dir != "" {
 		testEnv.BinaryAssetsDirectory = dir
 	}
 
@@ -85,48 +84,30 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func getFirstFoundEnvTestBinaryDir() string {
-	basePath := filepath.Join("..", "..", "..", "bin", "k8s")
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return filepath.Join(basePath, entry.Name())
-		}
-	}
-	return ""
-}
-
 // newTestReconciler creates a new reconciler for integration tests.
 func newTestReconciler() *Reconciler {
 	return NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100), false)
 }
 
 // createFalco creates a Falco resource and registers cleanup to run after the test.
-func createFalco(t *testing.T, ctx context.Context, name string, spec instancev1alpha1.FalcoSpec) {
+func createFalco(t *testing.T, ctx context.Context, opts ...func(*instancev1alpha1.Falco)) *instancev1alpha1.Falco {
 	t.Helper()
 
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testNamespace,
-		},
-		Spec: spec,
-	}
+	falco := newFalco(opts...)
 
 	err := k8sClient.Create(ctx, falco)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
 		fetched := &instancev1alpha1.Falco{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNamespace}, fetched); err == nil {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched); err == nil {
 			fetched.Finalizers = nil
 			_ = k8sClient.Update(ctx, fetched)
 			_ = k8sClient.Delete(ctx, fetched)
 		}
 	})
+
+	return falco
 }
 
 // reconcileN runs reconciliation N times.
@@ -134,102 +115,76 @@ func reconcileN(t *testing.T, ctx context.Context, reconciler *Reconciler, name 
 	t.Helper()
 	for range n {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespace},
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testutil.TestNamespace},
 		})
 		require.NoError(t, err)
 	}
 }
 
-// TestReconcile_BasicScenarios tests basic reconciliation scenarios.
-func TestReconcile_BasicScenarios(t *testing.T) {
-	tests := []struct {
-		name       string
-		setup      func(t *testing.T, ctx context.Context) string
-		reconciles int
-		validate   func(t *testing.T, ctx context.Context, resourceName string)
-	}{
-		{
-			name: "basic reconciliation succeeds and creates ServiceAccount",
-			setup: func(t *testing.T, ctx context.Context) string {
-				createFalco(t, ctx, "test-basic", instancev1alpha1.FalcoSpec{})
-				return "test-basic"
-			},
-			reconciles: 3, // Need multiple reconciles to create all resources
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				// Verify ServiceAccount was created
-				sa := &corev1.ServiceAccount{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, sa)
-				require.NoError(t, err)
-				assert.Equal(t, resourceName, sa.Name)
-			},
-		},
-		{
-			name: "non-existent resource does not error and does not requeue",
-			setup: func(t *testing.T, ctx context.Context) string {
-				return "non-existent"
-			},
-			reconciles: 0, // We'll handle reconciliation manually in validate
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				reconciler := newTestReconciler()
-				result, err := reconciler.Reconcile(ctx, reconcile.Request{
-					NamespacedName: types.NamespacedName{Name: resourceName, Namespace: testNamespace},
-				})
-				require.NoError(t, err)
-				assert.Zero(t, result.RequeueAfter, "should not requeue for non-existent resource")
-			},
-		},
-		{
-			name: "finalizer is added",
-			setup: func(t *testing.T, ctx context.Context) string {
-				createFalco(t, ctx, "test-finalizer", instancev1alpha1.FalcoSpec{})
-				return "test-finalizer"
-			},
-			reconciles: 1,
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				fetched := &instancev1alpha1.Falco{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
-				require.NoError(t, err)
-				assert.Contains(t, fetched.Finalizers, finalizer)
-			},
-		},
-		{
-			name: "version is set after reconciliation",
-			setup: func(t *testing.T, ctx context.Context) string {
-				createFalco(t, ctx, "test-version", instancev1alpha1.FalcoSpec{})
-				return "test-version"
-			},
-			reconciles: 3,
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				fetched := &instancev1alpha1.Falco{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
-				require.NoError(t, err)
-				assert.NotEmpty(t, fetched.Spec.Version)
-			},
-		},
-	}
+// TestReconcile_NonExistent verifies that reconciling a non-existent resource returns no error.
+func TestReconcile_NonExistent(t *testing.T) {
+	ctx := context.Background()
+	reconciler := newTestReconciler()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-			resourceName := tt.setup(t, ctx)
-			reconciler := newTestReconciler()
+	result, err := reconciler.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "non-existent", Namespace: testutil.TestNamespace},
+	})
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter, "should not requeue for non-existent resource")
+}
 
-			reconcileN(t, ctx, reconciler, resourceName, tt.reconciles)
-			tt.validate(t, ctx, resourceName)
-		})
-	}
+// TestReconcile_FinalizerAdded verifies that a finalizer is added on the first reconciliation.
+func TestReconcile_FinalizerAdded(t *testing.T) {
+	ctx := context.Background()
+	falco := createFalco(t, ctx, withName("test-finalizer"))
+
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, falco.Name, 1)
+
+	fetched := &instancev1alpha1.Falco{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
+	require.NoError(t, err)
+	assert.Contains(t, fetched.Finalizers, finalizer)
+}
+
+// TestReconcile_VersionSet verifies that version is set after reconciliation.
+func TestReconcile_VersionSet(t *testing.T) {
+	ctx := context.Background()
+	falco := createFalco(t, ctx, withName("test-version"))
+
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, falco.Name, 3)
+
+	fetched := &instancev1alpha1.Falco{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
+	require.NoError(t, err)
+	assert.NotEmpty(t, fetched.Spec.Version)
+}
+
+// TestReconcile_ServiceAccountCreated verifies that a ServiceAccount is created after reconciliation.
+func TestReconcile_ServiceAccountCreated(t *testing.T) {
+	ctx := context.Background()
+	falco := createFalco(t, ctx, withName("test-basic"))
+
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, falco.Name, 3)
+
+	sa := &corev1.ServiceAccount{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, sa)
+	require.NoError(t, err)
+	assert.Equal(t, falco.Name, sa.Name)
 }
 
 // TestReconcile_EmptyCRD tests the default values when creating an empty CRD.
 func TestReconcile_EmptyCRD(t *testing.T) {
 	ctx := context.Background()
-	createFalco(t, ctx, "test-empty-crd", instancev1alpha1.FalcoSpec{})
+	falco := createFalco(t, ctx, withName("test-empty-crd"))
 
 	fetched := &instancev1alpha1.Falco{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: "test-empty-crd", Namespace: testNamespace}, fetched)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 
-	assert.Equal(t, resourceTypeDaemonSet, fetched.Spec.Type, "default type should be DaemonSet")
+	assert.Equal(t, instance.ResourceTypeDaemonSet, fetched.Spec.Type, "default type should be DaemonSet")
 	assert.NotNil(t, fetched.Spec.Replicas, "replicas should not be nil")
 	assert.Equal(t, int32(1), *fetched.Spec.Replicas, "default replicas should be 1")
 	assert.Empty(t, fetched.Spec.Version, "version should be empty initially")
@@ -239,116 +194,74 @@ func TestReconcile_EmptyCRD(t *testing.T) {
 // TestReconcile_Deletion tests the deletion handling and finalizer removal.
 func TestReconcile_Deletion(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-deletion"
-
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      resourceName,
-			Namespace: testNamespace,
-		},
-		Spec: instancev1alpha1.FalcoSpec{},
-	}
-	err := k8sClient.Create(ctx, falco)
-	require.NoError(t, err)
+	falco := createFalco(t, ctx, withName("test-deletion"))
 
 	reconciler := newTestReconciler()
 
 	// Reconcile to add finalizer
-	reconcileN(t, ctx, reconciler, resourceName, 1)
+	reconcileN(t, ctx, reconciler, falco.Name, 1)
 
 	// Verify finalizer was added before deletion
 	fetched := &instancev1alpha1.Falco{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 	assert.Contains(t, fetched.Finalizers, finalizer, "finalizer should be present before deletion")
 
 	// Delete the resource
-	err = k8sClient.Delete(ctx, falco)
+	err = k8sClient.Delete(ctx, fetched)
 	require.NoError(t, err)
 
 	// Reconcile deletion - should remove finalizer and allow deletion
-	reconcileN(t, ctx, reconciler, resourceName, 1)
+	reconcileN(t, ctx, reconciler, falco.Name, 1)
 
 	// Verify resource is deleted (finalizer was removed, allowing deletion to complete)
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
 	assert.True(t, errors.IsNotFound(err), "resource should be deleted after finalizer removal")
 }
 
-// TestReconcile_FullCycle tests the full reconcile cycle for both Deployment and DaemonSet types.
-func TestReconcile_FullCycle(t *testing.T) {
-	replicas := int32(2)
+// TestReconcile_DeploymentFullCycle verifies that a Deployment is created with owner reference.
+func TestReconcile_DeploymentFullCycle(t *testing.T) {
+	ctx := context.Background()
+	falco := createFalco(t, ctx, withName("test-full-deploy"), withType(instance.ResourceTypeDeployment), withReplicas(2))
 
-	tests := []struct {
-		name         string
-		resourceName string
-		spec         instancev1alpha1.FalcoSpec
-		validate     func(t *testing.T, ctx context.Context, resourceName string)
-	}{
-		{
-			name:         "Deployment type creates Deployment with owner reference",
-			resourceName: "test-full-deploy",
-			spec: instancev1alpha1.FalcoSpec{
-				Type:     resourceTypeDeployment,
-				Replicas: &replicas,
-			},
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				deployment := &appsv1.Deployment{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, deployment)
-				require.NoError(t, err)
-				assert.Equal(t, resourceName, deployment.Name)
-				// Verify owner reference is set
-				assert.Len(t, deployment.OwnerReferences, 1, "should have owner reference")
-				assert.Equal(t, "Falco", deployment.OwnerReferences[0].Kind)
-			},
-		},
-		{
-			name:         "DaemonSet type creates DaemonSet with owner reference",
-			resourceName: "test-full-ds",
-			spec: instancev1alpha1.FalcoSpec{
-				Type: resourceTypeDaemonSet,
-			},
-			validate: func(t *testing.T, ctx context.Context, resourceName string) {
-				daemonset := &appsv1.DaemonSet{}
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, daemonset)
-				require.NoError(t, err)
-				assert.Equal(t, resourceName, daemonset.Name)
-				// Verify owner reference is set
-				assert.Len(t, daemonset.OwnerReferences, 1, "should have owner reference")
-				assert.Equal(t, "Falco", daemonset.OwnerReferences[0].Kind)
-			},
-		},
-	}
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, falco.Name, 5)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ctx := context.Background()
-			createFalco(t, ctx, tt.resourceName, tt.spec)
+	deployment := &appsv1.Deployment{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, deployment)
+	require.NoError(t, err)
+	assert.Equal(t, falco.Name, deployment.Name)
+	assert.Len(t, deployment.OwnerReferences, 1, "should have owner reference")
+	assert.Equal(t, "Falco", deployment.OwnerReferences[0].Kind)
+}
 
-			reconciler := newTestReconciler()
-			reconcileN(t, ctx, reconciler, tt.resourceName, 5)
+// TestReconcile_DaemonSetFullCycle verifies that a DaemonSet is created with owner reference.
+func TestReconcile_DaemonSetFullCycle(t *testing.T) {
+	ctx := context.Background()
+	falco := createFalco(t, ctx, withName("test-full-ds"), withType(instance.ResourceTypeDaemonSet))
 
-			tt.validate(t, ctx, tt.resourceName)
-		})
-	}
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, falco.Name, 5)
+
+	daemonset := &appsv1.DaemonSet{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, daemonset)
+	require.NoError(t, err)
+	assert.Equal(t, falco.Name, daemonset.Name)
+	assert.Len(t, daemonset.OwnerReferences, 1, "should have owner reference")
+	assert.Equal(t, "Falco", daemonset.OwnerReferences[0].Kind)
 }
 
 // TestReconcile_UpdateDeployment tests updating an existing Deployment.
 func TestReconcile_UpdateDeployment(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-update-deploy"
-
-	replicas := int32(1)
-	createFalco(t, ctx, resourceName, instancev1alpha1.FalcoSpec{
-		Type:     resourceTypeDeployment,
-		Replicas: &replicas,
-	})
+	falco := createFalco(t, ctx, withName("test-update-deploy"), withType(instance.ResourceTypeDeployment), withReplicas(1))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 5)
+	reconcileN(t, ctx, reconciler, falco.Name, 5)
 
 	// Update replicas
 	fetched := &instancev1alpha1.Falco{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 
 	newReplicas := int32(3)
@@ -357,11 +270,11 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconcile after update
-	reconcileN(t, ctx, reconciler, resourceName, 1)
+	reconcileN(t, ctx, reconciler, falco.Name, 1)
 
 	// Verify Deployment was updated
 	deployment := &appsv1.Deployment{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, deployment)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, deployment)
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), *deployment.Spec.Replicas)
 }
@@ -369,41 +282,35 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 // TestReconcile_SwitchFromDeploymentToDaemonSet tests switching resource type.
 func TestReconcile_SwitchFromDeploymentToDaemonSet(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-switch-type"
-
-	replicas := int32(1)
-	createFalco(t, ctx, resourceName, instancev1alpha1.FalcoSpec{
-		Type:     resourceTypeDeployment,
-		Replicas: &replicas,
-	})
+	falco := createFalco(t, ctx, withName("test-switch-type"), withType(instance.ResourceTypeDeployment), withReplicas(1))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 5)
+	reconcileN(t, ctx, reconciler, falco.Name, 5)
 
 	// Verify Deployment exists
 	deployment := &appsv1.Deployment{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, deployment)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, deployment)
 	require.NoError(t, err)
 
 	// Switch to DaemonSet
 	fetched := &instancev1alpha1.Falco{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, fetched)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 
-	fetched.Spec.Type = resourceTypeDaemonSet
+	fetched.Spec.Type = instance.ResourceTypeDaemonSet
 	err = k8sClient.Update(ctx, fetched)
 	require.NoError(t, err)
 
 	// Reconcile after type switch
-	reconcileN(t, ctx, reconciler, resourceName, 3)
+	reconcileN(t, ctx, reconciler, falco.Name, 3)
 
 	// Verify DaemonSet was created
 	daemonset := &appsv1.DaemonSet{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, daemonset)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, daemonset)
 	require.NoError(t, err)
 
 	// Verify Deployment was deleted
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespace}, deployment)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: falco.Name, Namespace: testutil.TestNamespace}, deployment)
 	assert.True(t, errors.IsNotFound(err), "Deployment should be deleted after type switch")
 }
 
@@ -413,11 +320,11 @@ func applyConfigMap(t *testing.T, ctx context.Context, name string, data map[str
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "ConfigMap"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
-			Namespace: testNamespace,
+			Namespace: testutil.TestNamespace,
 		},
 		Data: data,
 	}
-	u, err := toUnstructured(cm)
+	u, err := instance.ToUnstructured(cm)
 	require.NoError(t, err)
 
 	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner("test-controller")}
@@ -432,7 +339,7 @@ func TestApplyResourceVersionBehavior(t *testing.T) {
 	cmName := "test-rv-behavior"
 
 	t.Cleanup(func() {
-		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: testNamespace}}
+		cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: cmName, Namespace: testutil.TestNamespace}}
 		_ = k8sClient.Delete(ctx, cm)
 	})
 

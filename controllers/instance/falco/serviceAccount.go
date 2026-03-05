@@ -17,34 +17,33 @@
 package falco
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateServiceAccount returns a ServiceAccount for Falco.
-func generateServiceAccount(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(cl, falco,
-		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-			sa := &corev1.ServiceAccount{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "ServiceAccount",
-					APIVersion: "v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      falco.Name,
-					Namespace: falco.Namespace,
-					Labels:    falco.Labels,
-				},
-			}
-			return sa, nil
+func generateServiceAccount(falco *instancev1alpha1.Falco) runtime.Object {
+	return &corev1.ServiceAccount{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ServiceAccount",
+			APIVersion: "v1",
 		},
-		generateOptions{
-			setControllerRef: true,
-			isClusterScoped:  false,
-		})
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+			Labels:    falco.Labels,
+		},
+	}
+}
+
+func (r *Reconciler) ensureServiceAccount(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, falco, fieldManager,
+		generateServiceAccount,
+		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false},
+	)
 }

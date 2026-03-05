@@ -17,43 +17,38 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 )
 
 func TestGenerateService(t *testing.T) {
-	// Create a test scheme.
-	scheme := runtime.NewScheme()
-	_ = corev1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-
 	tests := []struct {
 		name           string
 		falco          *instancev1alpha1.Falco
-		wantErr        bool
 		expectedPorts  []corev1.ServicePort
 		expectedLabels map[string]string
 	}{
 		{
-			name: "successful service generation with defaults",
+			name: "service generation with defaults",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "falco"},
 				},
 			},
-			wantErr: false,
 			expectedPorts: []corev1.ServicePort{
 				{
 					Name:       "web",
@@ -62,9 +57,7 @@ func TestGenerateService(t *testing.T) {
 					TargetPort: intstr.FromInt32(8765),
 				},
 			},
-			expectedLabels: map[string]string{
-				"app": "falco",
-			},
+			expectedLabels: map[string]string{"app": "falco"},
 		},
 		{
 			name: "service with custom labels",
@@ -72,82 +65,48 @@ func TestGenerateService(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app":         "falco",
-						"environment": "test",
-						"custom":      "label",
-					},
+					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 				},
 			},
-			wantErr: false,
-			expectedLabels: map[string]string{
-				"app":         "falco",
-				"environment": "test",
-				"custom":      "label",
-			},
-		},
-		{
-			name:    "nil falco instance",
-			falco:   nil,
-			wantErr: true,
+			expectedLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-			got, err := generateService(cl, tt.falco)
+			result := generateService(tt.falco)
+			require.NotNil(t, result)
 
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
+			svc := result.(*corev1.Service)
+			assert.Equal(t, tt.falco.Name, svc.Name)
+			assert.Equal(t, tt.falco.Namespace, svc.Namespace)
+			assert.Equal(t, tt.expectedLabels, svc.Labels)
+			assert.Equal(t, "Service", svc.Kind)
+			assert.Equal(t, "v1", svc.APIVersion)
+			assert.Equal(t, corev1.ServiceTypeClusterIP, svc.Spec.Type)
 
-			assert.NoError(t, err)
-			assert.NotNil(t, got)
-
-			// Convert unstructured to Service.
-			service := &corev1.Service{}
-			err = runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, service)
-			assert.NoError(t, err)
-
-			// Verify service properties.
-			assert.Equal(t, tt.falco.Name, service.Name)
-			assert.Equal(t, tt.falco.Namespace, service.Namespace)
-			assert.Equal(t, tt.falco.Labels, service.Labels)
-			assert.Equal(t, "Service", service.Kind)
-			assert.Equal(t, "v1", service.APIVersion)
-
-			// Verify service type is ClusterIP by default.
-			assert.Equal(t, corev1.ServiceTypeClusterIP, service.Spec.Type)
-
-			// Verify selector.
 			assert.Equal(t, map[string]string{
 				"app.kubernetes.io/name":     tt.falco.Name,
 				"app.kubernetes.io/instance": tt.falco.Name,
-			}, service.Spec.Selector)
+			}, svc.Spec.Selector)
 
-			// Verify ports if expected.
 			if tt.expectedPorts != nil {
-				assert.Equal(t, tt.expectedPorts, service.Spec.Ports)
-			}
-
-			// Verify labels if expected.
-			if tt.expectedLabels != nil {
-				assert.Equal(t, tt.expectedLabels, service.Labels)
+				assert.Equal(t, tt.expectedPorts, svc.Spec.Ports)
 			}
 		})
 	}
 }
 
-func TestGenerateServiceWithNilClient(t *testing.T) {
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-falco",
-			Namespace: "default",
-		},
-	}
+func TestEnsureService(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
-	_, err := generateService(nil, falco)
-	assert.Error(t, err)
+	require.NoError(t, r.ensureService(context.Background(), falco))
+
+	svc := &corev1.Service{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), svc))
+	assert.Equal(t, falco.Name, svc.Name)
+	assert.NotEmpty(t, svc.Spec.Ports)
 }

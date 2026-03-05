@@ -19,7 +19,6 @@ package metacollector
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -40,10 +39,10 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/instance/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
-
-const testNamespaceIntegration = "default"
 
 var (
 	testEnv   *envtest.Environment
@@ -59,11 +58,11 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
+		CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 		ErrorIfCRDPathMissing: true,
 	}
 
-	if dir := getFirstFoundEnvTestBinaryDir(); dir != "" {
+	if dir := testutil.GetFirstFoundEnvTestBinaryDir(); dir != "" {
 		testEnv.BinaryAssetsDirectory = dir
 	}
 
@@ -88,42 +87,30 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func getFirstFoundEnvTestBinaryDir() string {
-	basePath := filepath.Join("..", "..", "..", "bin", "k8s")
-	entries, err := os.ReadDir(basePath)
-	if err != nil {
-		return ""
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return filepath.Join(basePath, entry.Name())
-		}
-	}
-	return ""
-}
-
 // newTestReconciler creates a new reconciler for integration tests.
 func newTestReconciler() *Reconciler {
 	return NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100))
 }
 
 // createMetacollector creates a Metacollector resource and registers cleanup to run after the test.
-func createMetacollector(t *testing.T, ctx context.Context, name string, opts ...func(*instancev1alpha1.Metacollector)) {
+func createMetacollector(t *testing.T, ctx context.Context, opts ...func(*instancev1alpha1.Metacollector)) *instancev1alpha1.Metacollector {
 	t.Helper()
 
-	mc := newMetacollector(name, opts...)
+	mc := newMetacollector(opts...)
 
 	err := k8sClient.Create(ctx, mc)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
 		fetched := &instancev1alpha1.Metacollector{}
-		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name, Namespace: testNamespaceIntegration}, fetched); err == nil {
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched); err == nil {
 			fetched.Finalizers = nil
 			_ = k8sClient.Update(ctx, fetched)
 			_ = k8sClient.Delete(ctx, fetched)
 		}
 	})
+
+	return mc
 }
 
 // reconcileN runs reconciliation N times.
@@ -131,7 +118,7 @@ func reconcileN(t *testing.T, ctx context.Context, reconciler *Reconciler, name 
 	t.Helper()
 	for range n {
 		_, err := reconciler.Reconcile(ctx, reconcile.Request{
-			NamespacedName: types.NamespacedName{Name: name, Namespace: testNamespaceIntegration},
+			NamespacedName: types.NamespacedName{Name: name, Namespace: testutil.TestNamespace},
 		})
 		require.NoError(t, err)
 	}
@@ -143,7 +130,7 @@ func TestReconcile_NonExistent(t *testing.T) {
 	reconciler := newTestReconciler()
 
 	result, err := reconciler.Reconcile(ctx, reconcile.Request{
-		NamespacedName: types.NamespacedName{Name: "non-existent", Namespace: testNamespaceIntegration},
+		NamespacedName: types.NamespacedName{Name: "non-existent", Namespace: testutil.TestNamespace},
 	})
 	require.NoError(t, err)
 	assert.Zero(t, result.RequeueAfter, "should not requeue for non-existent resource")
@@ -152,23 +139,21 @@ func TestReconcile_NonExistent(t *testing.T) {
 // TestReconcile_FullReconciliation verifies that all sub-resources are created after a full reconciliation.
 func TestReconcile_FullReconciliation(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-full"
-
-	createMetacollector(t, ctx, resourceName)
+	mc := createMetacollector(t, ctx, withName("test-full"))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 5)
+	reconcileN(t, ctx, reconciler, mc.Name, 5)
 
 	// Verify ServiceAccount.
 	sa := &corev1.ServiceAccount{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, sa)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, sa)
 	require.NoError(t, err)
-	assert.Equal(t, resourceName, sa.Name)
+	assert.Equal(t, mc.Name, sa.Name)
 	require.Len(t, sa.OwnerReferences, 1)
 	assert.Equal(t, "Metacollector", sa.OwnerReferences[0].Kind)
 
 	// Verify ClusterRole.
-	uniqueName := GenerateUniqueName(resourceName, testNamespaceIntegration)
+	uniqueName := instance.GenerateUniqueName(mc.Name, testutil.TestNamespace)
 	cr := &rbacv1.ClusterRole{}
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: uniqueName}, cr)
 	require.NoError(t, err)
@@ -179,11 +164,11 @@ func TestReconcile_FullReconciliation(t *testing.T) {
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: uniqueName}, crb)
 	require.NoError(t, err)
 	require.Len(t, crb.Subjects, 1)
-	assert.Equal(t, resourceName, crb.Subjects[0].Name)
+	assert.Equal(t, mc.Name, crb.Subjects[0].Name)
 
 	// Verify Service with 3 ports (metrics, health-probe, broker-grpc).
 	svc := &corev1.Service{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, svc)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, svc)
 	require.NoError(t, err)
 	require.Len(t, svc.Spec.Ports, 3)
 	portNames := make(map[string]int32)
@@ -196,43 +181,41 @@ func TestReconcile_FullReconciliation(t *testing.T) {
 
 	// Verify Deployment.
 	dep := &appsv1.Deployment{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, dep)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, dep)
 	require.NoError(t, err)
 	require.NotEmpty(t, dep.Spec.Template.Spec.Containers)
-	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, DefaultImage)
+	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.MetacollectorImage)
 	require.Len(t, dep.OwnerReferences, 1)
 	assert.Equal(t, "Metacollector", dep.OwnerReferences[0].Kind)
 
 	// Verify finalizer is present.
 	fetched := &instancev1alpha1.Metacollector{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, fetched)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 	assert.Contains(t, fetched.Finalizers, finalizer)
 
 	// Verify status is persisted.
 	testutil.RequireCondition(t, fetched.Status.Conditions,
 		commonv1alpha1.ConditionReconciled.String(),
-		metav1.ConditionTrue, ReasonResourceUpToDate)
+		metav1.ConditionTrue, instance.ReasonResourceUpToDate)
 	assert.Equal(t, int32(1), fetched.Status.DesiredReplicas)
 }
 
 // TestReconcile_Deletion verifies that deletion removes cluster-scoped resources and the finalizer.
 func TestReconcile_Deletion(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-delete"
-
-	createMetacollector(t, ctx, resourceName)
+	mc := createMetacollector(t, ctx, withName("test-delete"))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 3)
+	reconcileN(t, ctx, reconciler, mc.Name, 3)
 
 	// Verify finalizer and ClusterRole/CRB exist.
 	fetched := &instancev1alpha1.Metacollector{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, fetched)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 	assert.Contains(t, fetched.Finalizers, finalizer)
 
-	uniqueName := GenerateUniqueName(resourceName, testNamespaceIntegration)
+	uniqueName := instance.GenerateUniqueName(mc.Name, testutil.TestNamespace)
 	cr := &rbacv1.ClusterRole{}
 	require.NoError(t, k8sClient.Get(ctx, types.NamespacedName{Name: uniqueName}, cr))
 	crb := &rbacv1.ClusterRoleBinding{}
@@ -243,10 +226,10 @@ func TestReconcile_Deletion(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconcile deletion.
-	reconcileN(t, ctx, reconciler, resourceName, 1)
+	reconcileN(t, ctx, reconciler, mc.Name, 1)
 
 	// Verify MC deleted.
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, fetched)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched)
 	assert.True(t, errors.IsNotFound(err), "Metacollector should be deleted after finalizer removal")
 
 	// Verify ClusterRole deleted.
@@ -261,23 +244,21 @@ func TestReconcile_Deletion(t *testing.T) {
 // TestReconcile_UpdateDeployment verifies that updating the spec propagates changes to the Deployment.
 func TestReconcile_UpdateDeployment(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-update"
-
-	createMetacollector(t, ctx, resourceName, withReplicas(1))
+	mc := createMetacollector(t, ctx, withName("test-update"), withReplicas(1))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 5)
+	reconcileN(t, ctx, reconciler, mc.Name, 5)
 
 	// Verify initial replicas.
 	dep := &appsv1.Deployment{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, dep)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, dep)
 	require.NoError(t, err)
 	require.NotNil(t, dep.Spec.Replicas)
 	assert.Equal(t, int32(1), *dep.Spec.Replicas)
 
 	// Update MC replicas to 3.
 	fetched := &instancev1alpha1.Metacollector{}
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, fetched)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 
 	newReplicas := int32(3)
@@ -286,10 +267,10 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reconcile after update.
-	reconcileN(t, ctx, reconciler, resourceName, 1)
+	reconcileN(t, ctx, reconciler, mc.Name, 1)
 
 	// Verify Deployment was updated.
-	err = k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, dep)
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, dep)
 	require.NoError(t, err)
 	require.NotNil(t, dep.Spec.Replicas)
 	assert.Equal(t, int32(3), *dep.Spec.Replicas)
@@ -298,27 +279,25 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 // TestReconcile_StatusPersisted verifies that status conditions are actually persisted to the API server.
 func TestReconcile_StatusPersisted(t *testing.T) {
 	ctx := context.Background()
-	resourceName := "test-status"
-
-	createMetacollector(t, ctx, resourceName)
+	mc := createMetacollector(t, ctx, withName("test-status"))
 
 	reconciler := newTestReconciler()
-	reconcileN(t, ctx, reconciler, resourceName, 5)
+	reconcileN(t, ctx, reconciler, mc.Name, 5)
 
 	// Re-fetch from API — do NOT use the in-memory object.
 	fetched := &instancev1alpha1.Metacollector{}
-	err := k8sClient.Get(ctx, types.NamespacedName{Name: resourceName, Namespace: testNamespaceIntegration}, fetched)
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: mc.Name, Namespace: testutil.TestNamespace}, fetched)
 	require.NoError(t, err)
 
 	// Verify Reconciled condition is persisted with status True.
 	testutil.RequireCondition(t, fetched.Status.Conditions,
 		commonv1alpha1.ConditionReconciled.String(),
-		metav1.ConditionTrue, ReasonResourceUpToDate)
+		metav1.ConditionTrue, instance.ReasonResourceUpToDate)
 
 	// Verify Available condition is present (False/DeploymentUnavailable in envtest since pods don't actually become ready).
 	testutil.RequireCondition(t, fetched.Status.Conditions,
 		commonv1alpha1.ConditionAvailable.String(),
-		metav1.ConditionFalse, ReasonDeploymentUnavailable)
+		metav1.ConditionFalse, instance.ReasonDeploymentUnavailable)
 
 	// Verify DesiredReplicas is set.
 	assert.Equal(t, int32(1), fetched.Status.DesiredReplicas)

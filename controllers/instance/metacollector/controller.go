@@ -35,18 +35,27 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 const (
-	finalizer = "metacollector.falcosecurity.dev/finalizer"
+	containerName = "metacollector"
+	finalizer     = "metacollector.falcosecurity.dev/finalizer"
+	fieldManager  = "metacollector-controller"
 )
+
+// clusterScopedGVKs are the GVKs of cluster-scoped resources managed by the Metacollector controller.
+var clusterScopedGVKs = []schema.GroupVersionKind{
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRoleBinding"},
+	{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
+}
 
 // Reconciler reconciles a Metacollector object.
 type Reconciler struct {
@@ -123,6 +132,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the Metacollector version is set.
+	if ok, err := r.ensureVersion(ctx, mc); ok || err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Ensure the deployment is created.
 	if err := r.ensureDeployment(ctx, mc); err != nil {
 		return ctrl.Result{}, err
@@ -138,85 +152,39 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.Service{}).
-		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(clusterScopedResourceHandler)).
-		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(clusterScopedResourceHandler)).
-		Named("metacollector").
+		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
+		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
+		Named(containerName).
 		Complete(r)
 }
 
 // ensureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, mc *instancev1alpha1.Metacollector) (bool, error) {
-	if !controllerutil.ContainsFinalizer(mc, finalizer) {
-		log.FromContext(ctx).V(3).Info("Setting finalizer", "finalizer", finalizer)
+	return instance.EnsureFinalizer(ctx, r.Client, mc, finalizer)
+}
+
+// ensureVersion ensures the Metacollector version is set on the object and returns true if the object was updated.
+func (r *Reconciler) ensureVersion(ctx context.Context, mc *instancev1alpha1.Metacollector) (bool, error) {
+	version := instance.ResolveVersion(mc.Spec.Version, mc.Spec.PodTemplateSpec, containerName, image.VersionFromTag(image.MetacollectorTag))
+
+	if version != mc.Spec.Version {
+		log.FromContext(ctx).V(3).Info("Setting Metacollector version", "version", version)
 
 		patch := client.MergeFrom(mc.DeepCopy())
-		controllerutil.AddFinalizer(mc, finalizer)
+		mc.Spec.Version = version
 		if err := r.Patch(ctx, mc, patch); err != nil {
-			log.FromContext(ctx).Error(err, "unable to set finalizer", "finalizer", finalizer)
+			log.FromContext(ctx).Error(err, "unable to set Metacollector version", "version", version)
 			return false, err
 		}
-		log.FromContext(ctx).V(3).Info("Finalizer set", "finalizer", finalizer)
 		return true, nil
 	}
+
 	return false, nil
 }
 
 // handleDeletion handles the deletion of the Metacollector instance.
 func (r *Reconciler) handleDeletion(ctx context.Context, mc *instancev1alpha1.Metacollector) (bool, error) {
-	if mc.DeletionTimestamp == nil {
-		return false, nil
-	}
-
-	if !controllerutil.ContainsFinalizer(mc, finalizer) {
-		return true, nil
-	}
-
-	log.FromContext(ctx).Info("Metacollector instance marked for deletion, removing finalizer", "finalizer", finalizer)
-
-	resourceName := GenerateUniqueName(mc.Name, mc.Namespace)
-
-	crb := &unstructured.Unstructured{}
-	crb.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "rbac.authorization.k8s.io",
-		Version: "v1",
-		Kind:    "ClusterRoleBinding",
-	})
-	crb.SetName(resourceName)
-	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonDeletionError,
-			ReasonDeletionError, MessageFormatDeletionError, "ClusterRoleBinding", err.Error())
-		return false, err
-	}
-
-	cr := &unstructured.Unstructured{}
-	cr.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "rbac.authorization.k8s.io",
-		Version: "v1",
-		Kind:    "ClusterRole",
-	})
-	cr.SetName(resourceName)
-	if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "unable to delete clusterrole")
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonDeletionError,
-			ReasonDeletionError, MessageFormatDeletionError, "ClusterRole", err.Error())
-		return false, err
-	}
-
-	patch := client.MergeFrom(mc.DeepCopy())
-	controllerutil.RemoveFinalizer(mc, finalizer)
-	if err := r.Patch(ctx, mc, patch); err != nil && !apierrors.IsNotFound(err) {
-		log.FromContext(ctx).Error(err, "unable to remove finalizer from Metacollector instance")
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonDeletionError,
-			ReasonDeletionError, MessageFormatDeletionError, "Finalizer", err.Error())
-		return false, err
-	}
-
-	log.FromContext(ctx).Info("Metacollector instance deleted")
-	r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, ReasonInstanceDeleted,
-		ReasonInstanceDeleted, MessageInstanceDeleted)
-
-	return true, nil
+	return instance.HandleDeletion(ctx, r.Client, r.recorder, mc, finalizer, clusterScopedGVKs, instance.MessageMetacollectorInstanceDeleted)
 }
 
 // ensureDeployment ensures the Metacollector Deployment is created or updated.
@@ -241,8 +209,8 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
 		conditionStatus = metav1.ConditionFalse
-		conditionReason = ReasonApplyConfigurationError
-		conditionMessage = fmt.Sprintf(MessageFormatApplyConfigurationError, err.Error())
+		conditionReason = instance.ReasonApplyConfigurationError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatApplyConfigurationError, err.Error())
 		return err
 	}
 
@@ -250,8 +218,8 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 	if err != nil {
 		logger.Error(err, "unable to marshal apply configuration")
 		conditionStatus = metav1.ConditionFalse
-		conditionReason = ReasonMarshalConfigurationError
-		conditionMessage = fmt.Sprintf(MessageFormatMarshalConfigurationError, err.Error())
+		conditionReason = instance.ReasonMarshalConfigurationError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatMarshalConfigurationError, err.Error())
 		return err
 	}
 
@@ -260,8 +228,8 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 	if err = ctrl.SetControllerReference(mc, applyConfig, r.Scheme); err != nil {
 		logger.Error(err, "unable to set owner reference")
 		conditionStatus = metav1.ConditionFalse
-		conditionReason = ReasonOwnerReferenceError
-		conditionMessage = fmt.Sprintf(MessageFormatOwnerReferenceError, err.Error())
+		conditionReason = instance.ReasonOwnerReferenceError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatOwnerReferenceError, err.Error())
 		return err
 	}
 
@@ -269,7 +237,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 	existingResource.SetGroupVersionKind(schema.GroupVersionKind{
 		Group:   appsv1.GroupName,
 		Version: appsv1.SchemeGroupVersion.Version,
-		Kind:    "Deployment",
+		Kind:    instance.ResourceTypeDeployment,
 	})
 	resourceExists := true
 	if err = r.Get(ctx, client.ObjectKeyFromObject(mc), existingResource); err != nil {
@@ -278,32 +246,32 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 		} else {
 			logger.Error(err, "unable to fetch existing resource")
 			conditionStatus = metav1.ConditionFalse
-			conditionReason = ReasonExistingResourceError
-			conditionMessage = fmt.Sprintf(MessageFormatExistingResourceError, err.Error())
+			conditionReason = instance.ReasonExistingResourceError
+			conditionMessage = fmt.Sprintf(instance.MessageFormatExistingResourceError, err.Error())
 			return err
 		}
 	}
 
 	var changedFields string
 	if resourceExists {
-		comparison, err := diff(existingResource, applyConfig)
+		comparison, err := instance.Diff(existingResource, applyConfig, fieldManager)
 		if err != nil {
-			if !errors.Is(err, ErrNoManagedFields) {
+			if !errors.Is(err, instance.ErrNoManagedFields) {
 				logger.Error(err, "unable to compare existing resource with desired state")
 				conditionStatus = metav1.ConditionFalse
-				conditionReason = ReasonResourceComparisonError
-				conditionMessage = fmt.Sprintf(MessageFormatResourceComparisonError, err.Error())
+				conditionReason = instance.ReasonResourceComparisonError
+				conditionMessage = fmt.Sprintf(instance.MessageFormatResourceComparisonError, err.Error())
 				return err
 			}
 			logger.V(2).Info("No managed fields found, proceeding with apply to take ownership")
 		} else {
 			if comparison.IsSame() {
 				logger.V(2).Info("Metacollector resource is up to date, skipping apply")
-				conditionReason = ReasonResourceUpToDate
-				conditionMessage = MessageResourceUpToDate
+				conditionReason = instance.ReasonResourceUpToDate
+				conditionMessage = instance.MessageResourceUpToDate
 				return nil
 			}
-			changedFields = formatChangedFields(comparison)
+			changedFields = instance.FormatChangedFields(comparison)
 		}
 	}
 
@@ -316,32 +284,32 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, mc *instancev1alpha1.
 		logger.Error(err, "unable to apply resource")
 		if !resourceExists {
 			conditionStatus = metav1.ConditionFalse
-			conditionReason = ReasonApplyPatchErrorOnCreate
-			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnCreate, err.Error())
-			r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonApplyPatchErrorOnCreate,
-				ReasonApplyPatchErrorOnCreate, MessageFormatApplyPatchErrorOnCreate, err.Error())
+			conditionReason = instance.ReasonApplyPatchErrorOnCreate
+			conditionMessage = fmt.Sprintf(instance.MessageFormatApplyPatchErrorOnCreate, err.Error())
+			r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, instance.ReasonApplyPatchErrorOnCreate,
+				instance.ReasonApplyPatchErrorOnCreate, instance.MessageFormatApplyPatchErrorOnCreate, err.Error())
 		} else {
 			conditionStatus = metav1.ConditionFalse
-			conditionReason = ReasonApplyPatchErrorOnUpdate
-			conditionMessage = fmt.Sprintf(MessageFormatApplyPatchErrorOnUpdate, err.Error())
-			r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonApplyPatchErrorOnUpdate,
-				ReasonApplyPatchErrorOnUpdate, MessageFormatApplyPatchErrorOnUpdate, err.Error())
+			conditionReason = instance.ReasonApplyPatchErrorOnUpdate
+			conditionMessage = fmt.Sprintf(instance.MessageFormatApplyPatchErrorOnUpdate, err.Error())
+			r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, instance.ReasonApplyPatchErrorOnUpdate,
+				instance.ReasonApplyPatchErrorOnUpdate, instance.MessageFormatApplyPatchErrorOnUpdate, err.Error())
 		}
 		return err
 	}
 
 	if !resourceExists {
 		logger.Info("Metacollector resource created")
-		conditionReason = ReasonResourceCreated
-		conditionMessage = MessageResourceCreated
-		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, ReasonResourceCreated,
-			ReasonResourceCreated, MessageResourceCreated)
+		conditionReason = instance.ReasonResourceCreated
+		conditionMessage = instance.MessageResourceCreated
+		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, instance.ReasonResourceCreated,
+			instance.ReasonResourceCreated, instance.MessageResourceCreated)
 	} else {
 		logger.Info("Metacollector resource updated", "changedFields", changedFields)
-		conditionReason = ReasonResourceUpdated
-		conditionMessage = MessageResourceUpdated
-		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, ReasonResourceUpdated,
-			ReasonResourceUpdated, MessageResourceUpdated)
+		conditionReason = instance.ReasonResourceUpdated
+		conditionMessage = instance.MessageResourceUpdated
+		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, instance.ReasonResourceUpdated,
+			instance.ReasonResourceUpdated, instance.MessageResourceUpdated)
 	}
 
 	return nil
@@ -375,13 +343,13 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, mc *instance
 	if err := r.Get(ctx, client.ObjectKeyFromObject(mc), deployment); err != nil {
 		if apierrors.IsNotFound(err) {
 			conditionStatus = metav1.ConditionFalse
-			conditionReason = ReasonDeploymentNotFound
-			conditionMessage = MessageDeploymentNotFound
+			conditionReason = instance.ReasonDeploymentNotFound
+			conditionMessage = instance.MessageDeploymentNotFound
 			return nil
 		}
 		conditionStatus = metav1.ConditionUnknown
-		conditionReason = ReasonDeploymentFetchError
-		conditionMessage = fmt.Sprintf(MessageFormatDeploymentFetchError, err.Error())
+		conditionReason = instance.ReasonDeploymentFetchError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatDeploymentFetchError, err.Error())
 		log.FromContext(ctx).Error(err, "unable to fetch deployment for status")
 		return fmt.Errorf("unable to fetch deployment: %w", err)
 	}
@@ -391,99 +359,15 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, mc *instance
 
 	if desiredReplicas == deployment.Status.ReadyReplicas {
 		conditionStatus = metav1.ConditionTrue
-		conditionReason = ReasonDeploymentAvailable
-		conditionMessage = MessageDeploymentAvailable
+		conditionReason = instance.ReasonDeploymentAvailable
+		conditionMessage = instance.MessageDeploymentAvailable
 	} else {
 		conditionStatus = metav1.ConditionFalse
-		conditionReason = ReasonDeploymentUnavailable
-		conditionMessage = MessageDeploymentUnavailable
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonDeploymentUnavailable,
-			ReasonDeploymentUnavailable, MessageDeploymentUnavailable)
+		conditionReason = instance.ReasonDeploymentUnavailable
+		conditionMessage = instance.MessageDeploymentUnavailable
+		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, instance.ReasonDeploymentUnavailable,
+			instance.ReasonDeploymentUnavailable, instance.MessageDeploymentUnavailable)
 	}
 
 	return nil
-}
-
-// ensureResource is a generic function to ensure a resource exists and is up to date.
-func (r *Reconciler) ensureResource(ctx context.Context, mc *instancev1alpha1.Metacollector,
-	generateFunc func(cl client.Client, mc *instancev1alpha1.Metacollector) (*unstructured.Unstructured, error)) error {
-	logger := log.FromContext(ctx)
-
-	desiredResource, err := generateFunc(r.Client, mc)
-	if err != nil {
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonResourceGenerateError,
-			ReasonResourceGenerateError, MessageFormatResourceGenerateError, err.Error())
-		return fmt.Errorf("unable to generate desired resource: %w", err)
-	}
-
-	resourceType := desiredResource.GetKind()
-
-	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", desiredResource.GetName())
-
-	existingResource := &unstructured.Unstructured{}
-	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
-	resourceExists := true
-	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil {
-		if apierrors.IsNotFound(err) {
-			resourceExists = false
-		} else {
-			return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)
-		}
-	}
-
-	var changedFields string
-	if resourceExists {
-		comparison, err := diff(existingResource, desiredResource)
-		if err != nil {
-			if !errors.Is(err, ErrNoManagedFields) {
-				return fmt.Errorf("unable to compare existing %s with desired state: %w", resourceType, err)
-			}
-			logger.V(3).Info("No managed fields found, proceeding with apply to take ownership", "type", resourceType, "name", desiredResource.GetName())
-		} else {
-			if comparison.IsSame() {
-				logger.V(3).Info(resourceType+" is up to date, skipping apply", "name", desiredResource.GetName())
-				return nil
-			}
-			changedFields = formatChangedFields(comparison)
-		}
-	}
-
-	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
-	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredResource), applyOpts...); err != nil {
-		r.recorder.Eventf(mc, nil, corev1.EventTypeWarning, ReasonResourceApplyError,
-			ReasonResourceApplyError, MessageFormatResourceApplyError, resourceType, err.Error())
-		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
-	}
-
-	if !resourceExists {
-		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
-		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, ReasonSubResourceCreated,
-			ReasonSubResourceCreated, MessageFormatSubResourceCreated, resourceType, desiredResource.GetName())
-	} else {
-		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName(), "changedFields", changedFields)
-		r.recorder.Eventf(mc, nil, corev1.EventTypeNormal, ReasonSubResourceUpdated,
-			ReasonSubResourceUpdated, MessageFormatSubResourceUpdated, resourceType, desiredResource.GetName())
-	}
-
-	return nil
-}
-
-// ensureServiceAccount ensures the Metacollector service account is created or updated.
-func (r *Reconciler) ensureServiceAccount(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
-	return r.ensureResource(ctx, mc, generateServiceAccount)
-}
-
-// ensureClusterRole ensures the Metacollector cluster role is created or updated.
-func (r *Reconciler) ensureClusterRole(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
-	return r.ensureResource(ctx, mc, generateClusterRole)
-}
-
-// ensureClusterRoleBinding ensures the Metacollector cluster role binding is created or updated.
-func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
-	return r.ensureResource(ctx, mc, generateClusterRoleBinding)
-}
-
-// ensureService ensures the Metacollector service is created or updated.
-func (r *Reconciler) ensureService(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
-	return r.ensureResource(ctx, mc, generateService)
 }

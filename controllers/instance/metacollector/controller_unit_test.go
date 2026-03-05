@@ -36,219 +36,14 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/instance/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// newMetacollector creates a basic Metacollector instance for testing.
-func newMetacollector(name string, opts ...func(*instancev1alpha1.Metacollector)) *instancev1alpha1.Metacollector {
-	mc := &instancev1alpha1.Metacollector{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: testutil.Namespace,
-		},
-	}
-	for _, opt := range opts {
-		opt(mc)
-	}
-	return mc
-}
-
-// withReplicas sets the number of replicas.
-func withReplicas(r int32) func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Spec.Replicas = &r
-	}
-}
-
-// withVersion sets the Metacollector version.
-func withVersion(v string) func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Spec.Version = v
-	}
-}
-
-// withLabels sets the labels.
-func withLabels(labels map[string]string) func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Labels = labels
-	}
-}
-
-// withImage sets the container image via PodTemplateSpec.
-func withImage(image string) func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{{Name: "metacollector", Image: image}},
-			},
-		}
-	}
-}
-
-// withFinalizer adds the finalizer to the instance.
-func withFinalizer() func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Finalizers = []string{finalizer}
-	}
-}
-
-// withDeletionTimestamp sets the deletion timestamp.
-func withDeletionTimestamp() func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		now := metav1.Now()
-		mc.DeletionTimestamp = &now
-	}
-}
-
-// withStrategy sets the Deployment strategy.
-func withStrategy(s appsv1.DeploymentStrategy) func(*instancev1alpha1.Metacollector) {
-	return func(mc *instancev1alpha1.Metacollector) {
-		mc.Spec.Strategy = &s
-	}
-}
-
-func TestEnsureServiceAccount(t *testing.T) {
-	scheme := testutil.Scheme(t)
-
-	tests := []struct {
-		name         string
-		mc           *instancev1alpha1.Metacollector
-		existingObjs []client.Object
-		wantLabels   map[string]string
-		wantAnnots   map[string]string
-	}{
-		{
-			name: "creates with correct name and namespace",
-			mc:   newMetacollector("test-mc"),
-		},
-		{
-			name: "preserves existing annotations during update",
-			mc:   newMetacollector("test-mc"),
-			existingObjs: []client.Object{
-				&corev1.ServiceAccount{
-					TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.Namespace, Annotations: map[string]string{"existing": "annotation"}},
-				},
-			},
-			wantAnnots: map[string]string{"existing": "annotation"},
-		},
-		{
-			name: "applies new labels on existing ServiceAccount",
-			mc:   newMetacollector("test-mc", withLabels(map[string]string{"new": "label"})),
-			existingObjs: []client.Object{
-				&corev1.ServiceAccount{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.Namespace, Labels: map[string]string{"old": "label"}},
-				},
-			},
-			wantLabels: map[string]string{"new": "label"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			objs := append([]client.Object{tt.mc}, tt.existingObjs...)
-			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
-
-			err := r.ensureServiceAccount(context.Background(), tt.mc)
-			require.NoError(t, err)
-
-			sa := &corev1.ServiceAccount{}
-			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.mc), sa))
-			assert.Equal(t, tt.mc.Name, sa.Name)
-			assert.Equal(t, tt.mc.Namespace, sa.Namespace)
-			for k, v := range tt.wantLabels {
-				assert.Equal(t, v, sa.Labels[k], "label %s", k)
-			}
-			for k, v := range tt.wantAnnots {
-				assert.Equal(t, v, sa.Annotations[k], "annotation %s", k)
-			}
-		})
-	}
-}
-
-func TestEnsureClusterRole(t *testing.T) {
-	scheme := testutil.Scheme(t)
-	mc := newMetacollector("test-mc")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
-
-	require.NoError(t, r.ensureClusterRole(context.Background(), mc))
-
-	cr := &rbacv1.ClusterRole{}
-	expectedName := GenerateUniqueName(mc.Name, mc.Namespace)
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: expectedName}, cr))
-	assert.Equal(t, expectedName, cr.Name)
-	require.NotEmpty(t, cr.Rules)
-
-	foundAppsRule := false
-	foundCoreRule := false
-	foundDiscoveryRule := false
-	for _, rule := range cr.Rules {
-		for _, group := range rule.APIGroups {
-			switch group {
-			case "apps":
-				foundAppsRule = true
-				assert.Contains(t, rule.Resources, "deployments")
-				assert.Contains(t, rule.Verbs, "get")
-				assert.Contains(t, rule.Verbs, "list")
-				assert.Contains(t, rule.Verbs, "watch")
-			case "":
-				foundCoreRule = true
-				assert.Contains(t, rule.Resources, "pods")
-			case "discovery.k8s.io":
-				foundDiscoveryRule = true
-				assert.Contains(t, rule.Resources, "endpointslices")
-			}
-		}
-	}
-	assert.True(t, foundAppsRule, "ClusterRole should have apps API group rule")
-	assert.True(t, foundCoreRule, "ClusterRole should have core API group rule")
-	assert.True(t, foundDiscoveryRule, "ClusterRole should have discovery.k8s.io API group rule")
-}
-
-func TestEnsureClusterRoleBinding(t *testing.T) {
-	scheme := testutil.Scheme(t)
-	mc := newMetacollector("test-mc")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
-
-	require.NoError(t, r.ensureClusterRoleBinding(context.Background(), mc))
-
-	crb := &rbacv1.ClusterRoleBinding{}
-	expectedName := GenerateUniqueName(mc.Name, mc.Namespace)
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: expectedName}, crb))
-	assert.Equal(t, expectedName, crb.Name)
-	assert.Equal(t, expectedName, crb.RoleRef.Name)
-	require.Len(t, crb.Subjects, 1)
-	assert.Equal(t, mc.Name, crb.Subjects[0].Name)
-	assert.Equal(t, mc.Namespace, crb.Subjects[0].Namespace)
-}
-
-func TestEnsureService(t *testing.T) {
-	scheme := testutil.Scheme(t)
-	mc := newMetacollector("test-mc")
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
-
-	require.NoError(t, r.ensureService(context.Background(), mc))
-
-	svc := &corev1.Service{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(mc), svc))
-	assert.Equal(t, mc.Name, svc.Name)
-	require.Len(t, svc.Spec.Ports, 3)
-	portNames := make(map[string]int32)
-	for _, p := range svc.Spec.Ports {
-		portNames[p.Name] = p.Port
-	}
-	assert.Equal(t, int32(8080), portNames["metrics"])
-	assert.Equal(t, int32(8081), portNames["health-probe"])
-	assert.Equal(t, int32(45000), portNames["broker-grpc"])
-}
-
 func TestEnsureResourceErrors(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	tests := []struct {
 		name     string
@@ -270,7 +65,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mc := newMetacollector("test-mc")
+			mc := newMetacollector(withName("test-mc"))
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc)
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -297,7 +92,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 }
 
 func TestEnsureFinalizer(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	tests := []struct {
 		name        string
@@ -308,17 +103,17 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:        "adds finalizer when not present",
-			mc:          newMetacollector("test"),
+			mc:          newMetacollector(),
 			wantUpdated: true,
 		},
 		{
 			name:        "no-op when finalizer already present",
-			mc:          newMetacollector("test", withFinalizer()),
+			mc:          newMetacollector(withFinalizer()),
 			wantUpdated: false,
 		},
 		{
 			name:     "returns error when patch fails",
-			mc:       newMetacollector("test"),
+			mc:       newMetacollector(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -357,8 +152,83 @@ func TestEnsureFinalizer(t *testing.T) {
 	}
 }
 
+func TestEnsureVersion(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+
+	tests := []struct {
+		name        string
+		mc          *instancev1alpha1.Metacollector
+		patchErr    error
+		wantUpdated bool
+		wantVersion string
+		wantErr     string
+	}{
+		{
+			name:        "sets default version when not set",
+			mc:          newMetacollector(),
+			wantUpdated: true,
+		},
+		{
+			name:        "keeps existing version",
+			mc:          newMetacollector(withVersion("0.2.0")),
+			wantUpdated: false,
+			wantVersion: "0.2.0",
+		},
+		{
+			name:        "extracts version from image",
+			mc:          newMetacollector(withImage("falcosecurity/k8s-metacollector:0.3.0")),
+			wantUpdated: true,
+			wantVersion: "0.3.0",
+		},
+		{
+			name:        "image version takes precedence over spec version",
+			mc:          newMetacollector(withVersion("0.1.0"), withImage("falcosecurity/k8s-metacollector:0.3.0")),
+			wantUpdated: true,
+			wantVersion: "0.3.0",
+		},
+		{
+			name:     "returns error when patch fails",
+			mc:       newMetacollector(),
+			patchErr: fmt.Errorf("injected patch error"),
+			wantErr:  "injected patch error",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mc)
+			if tt.patchErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						return tt.patchErr
+					},
+				})
+			}
+			cl := builder.Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
+
+			updated, err := r.ensureVersion(context.Background(), tt.mc)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.False(t, updated)
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantUpdated, updated)
+			if tt.wantVersion != "" {
+				assert.Equal(t, tt.wantVersion, tt.mc.Spec.Version)
+			} else if tt.wantUpdated {
+				assert.NotEmpty(t, tt.mc.Spec.Version)
+			}
+		})
+	}
+}
+
 func TestHandleDeletion(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	tests := []struct {
 		name                   string
@@ -375,7 +245,7 @@ func TestHandleDeletion(t *testing.T) {
 	}{
 		{
 			name:                   "preserves finalizer and resources when not marked for deletion",
-			mc:                     newMetacollector("test", withFinalizer()),
+			mc:                     newMetacollector(withFinalizer()),
 			createClusterResources: true,
 			wantHandled:            false,
 			wantFinalizerPresent:   true,
@@ -383,7 +253,7 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:                   "handles deletion when cluster resources do not exist",
-			mc:                     newMetacollector("test", withFinalizer(), withDeletionTimestamp()),
+			mc:                     newMetacollector(withFinalizer(), withDeletionTimestamp()),
 			createClusterResources: false,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
@@ -391,7 +261,7 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:                   "removes cluster resources and finalizer during deletion",
-			mc:                     newMetacollector("test", withFinalizer(), withDeletionTimestamp()),
+			mc:                     newMetacollector(withFinalizer(), withDeletionTimestamp()),
 			createClusterResources: true,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
@@ -399,7 +269,7 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:                 "returns early when deleted without finalizer",
-			mc:                   newMetacollector("test", withDeletionTimestamp()),
+			mc:                   newMetacollector(withDeletionTimestamp()),
 			skipMCInClient:       true,
 			wantHandled:          true,
 			wantFinalizerPresent: false,
@@ -407,19 +277,19 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:         "returns error when ClusterRoleBinding deletion fails",
-			mc:           newMetacollector("test", withFinalizer(), withDeletionTimestamp()),
+			mc:           newMetacollector(withFinalizer(), withDeletionTimestamp()),
 			crbDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:      "injected delete error",
 		},
 		{
 			name:        "returns error when ClusterRole deletion fails",
-			mc:          newMetacollector("test", withFinalizer(), withDeletionTimestamp()),
+			mc:          newMetacollector(withFinalizer(), withDeletionTimestamp()),
 			crDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:     "injected delete error",
 		},
 		{
 			name:     "returns error when finalizer removal patch fails",
-			mc:       newMetacollector("test", withFinalizer(), withDeletionTimestamp()),
+			mc:       newMetacollector(withFinalizer(), withDeletionTimestamp()),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -433,8 +303,8 @@ func TestHandleDeletion(t *testing.T) {
 			}
 			if tt.createClusterResources {
 				objs = append(objs,
-					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testutil.Namespace)}},
-					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: GenerateUniqueName("test", testutil.Namespace)}},
+					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
+					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
 				)
 			}
 
@@ -482,8 +352,9 @@ func TestHandleDeletion(t *testing.T) {
 				assert.NotContains(t, tt.mc.Finalizers, finalizer)
 			}
 
-			crErr := cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testutil.Namespace)}, &rbacv1.ClusterRole{})
-			crbErr := cl.Get(context.Background(), client.ObjectKey{Name: GenerateUniqueName("test", testutil.Namespace)}, &rbacv1.ClusterRoleBinding{})
+			uniqueName := instance.GenerateUniqueName(defaultName, testutil.TestNamespace)
+			crErr := cl.Get(context.Background(), client.ObjectKey{Name: uniqueName}, &rbacv1.ClusterRole{})
+			crbErr := cl.Get(context.Background(), client.ObjectKey{Name: uniqueName}, &rbacv1.ClusterRoleBinding{})
 
 			if tt.wantClusterResExist {
 				assert.NoError(t, crErr, "ClusterRole should exist")
@@ -497,7 +368,7 @@ func TestHandleDeletion(t *testing.T) {
 }
 
 func TestComputeAvailableCondition(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	tests := []struct {
 		name                string
@@ -513,54 +384,54 @@ func TestComputeAvailableCondition(t *testing.T) {
 	}{
 		{
 			name: "deployment available",
-			mc:   newMetacollector("test", withReplicas(2)),
+			mc:   newMetacollector(withReplicas(2)),
 			workload: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2, UnavailableReplicas: 0},
 			},
 			wantDesired: 2, wantAvailable: 2, wantUnavailable: 0,
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonDeploymentAvailable,
+			wantConditionReason: instance.ReasonDeploymentAvailable,
 		},
 		{
 			name: "deployment unavailable",
-			mc:   newMetacollector("test", withReplicas(3)),
+			mc:   newMetacollector(withReplicas(3)),
 			workload: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 2},
 			},
 			wantDesired: 3, wantAvailable: 1, wantUnavailable: 2,
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonDeploymentUnavailable,
+			wantConditionReason: instance.ReasonDeploymentUnavailable,
 		},
 		{
 			name:                "deployment not found sets zero availability",
-			mc:                  newMetacollector("test", withReplicas(1)),
+			mc:                  newMetacollector(withReplicas(1)),
 			wantDesired:         1,
 			wantAvailable:       0,
 			wantUnavailable:     0,
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonDeploymentNotFound,
+			wantConditionReason: instance.ReasonDeploymentNotFound,
 		},
 		{
 			name: "defaults to 1 replica when spec.replicas is nil",
-			mc:   newMetacollector("test"),
+			mc:   newMetacollector(),
 			workload: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1},
 			},
 			wantDesired: 1, wantAvailable: 1, wantUnavailable: 0,
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonDeploymentAvailable,
+			wantConditionReason: instance.ReasonDeploymentAvailable,
 		},
 		{
 			name:                "returns error when deployment fetch fails",
-			mc:                  newMetacollector("test", withReplicas(1)),
+			mc:                  newMetacollector(withReplicas(1)),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "unable to fetch deployment",
 			wantDesired:         1,
 			wantConditionStatus: metav1.ConditionUnknown,
-			wantConditionReason: ReasonDeploymentFetchError,
+			wantConditionReason: instance.ReasonDeploymentFetchError,
 		},
 	}
 
@@ -604,7 +475,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 }
 
 func TestEnsureDeployment(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	tests := []struct {
 		name                string
@@ -617,49 +488,49 @@ func TestEnsureDeployment(t *testing.T) {
 	}{
 		{
 			name:                "creates deployment with default values",
-			mc:                  newMetacollector("test-mc"),
+			mc:                  newMetacollector(withName("test-mc")),
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonResourceCreated,
-			wantImage:           DefaultImage + ":" + DefaultVersion,
+			wantConditionReason: instance.ReasonResourceCreated,
+			wantImage:           image.BuildMetacollectorImageStringFromVersion(""),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
 			name:                "creates deployment with custom version",
-			mc:                  newMetacollector("test-mc", withVersion("0.2.0")),
+			mc:                  newMetacollector(withName("test-mc"), withVersion("0.2.0")),
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonResourceCreated,
-			wantImage:           DefaultImage + ":0.2.0",
+			wantConditionReason: instance.ReasonResourceCreated,
+			wantImage:           image.BuildMetacollectorImageStringFromVersion("0.2.0"),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
 			name:                "creates deployment with Recreate strategy",
-			mc:                  newMetacollector("test-mc", withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
+			mc:                  newMetacollector(withName("test-mc"), withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonResourceCreated,
-			wantImage:           DefaultImage + ":" + DefaultVersion,
+			wantConditionReason: instance.ReasonResourceCreated,
+			wantImage:           image.BuildMetacollectorImageStringFromVersion(""),
 			wantStrategyType:    appsv1.RecreateDeploymentStrategyType,
 		},
 		{
 			name: "updates existing deployment",
-			mc:   newMetacollector("test-mc", withVersion("0.3.0")),
+			mc:   newMetacollector(withName("test-mc"), withVersion("0.3.0")),
 			existingObjs: []client.Object{
 				&appsv1.Deployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace},
 					Spec: appsv1.DeploymentSpec{
 						Selector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{"app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
 						},
 						Template: corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "metacollector", Image: DefaultImage + ":" + DefaultVersion}},
+								Containers: []corev1.Container{{Name: containerName, Image: image.BuildMetacollectorImageStringFromVersion("")}},
 							},
 						},
 					},
 				},
 			},
 			wantConditionStatus: metav1.ConditionTrue,
-			wantConditionReason: ReasonResourceUpdated,
-			wantImage:           DefaultImage + ":0.3.0",
+			wantConditionReason: instance.ReasonResourceUpdated,
+			wantImage:           image.BuildMetacollectorImageStringFromVersion("0.3.0"),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 	}
@@ -691,8 +562,8 @@ func TestEnsureDeployment(t *testing.T) {
 // TestEnsureDeploymentWithCustomPodTemplateSpec verifies container merge — structurally
 // different assertions (iterating containers) from the table-driven TestEnsureDeployment.
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
-	scheme := testutil.Scheme(t)
-	mc := newMetacollector("test-mc", withImage("custom-image:latest"))
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	mc := newMetacollector(withName("test-mc"), withImage("custom-image:latest"))
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -712,7 +583,7 @@ func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 }
 
 func TestEnsureDeploymentErrors(t *testing.T) {
-	scheme := testutil.Scheme(t)
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
 	// Scheme missing the Metacollector type — causes ctrl.SetControllerReference to fail.
 	incompleteScheme := runtime.NewScheme()
@@ -733,36 +604,36 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 	}{
 		{
 			name:                "returns error when fetching existing resource fails",
-			mc:                  newMetacollector("test-mc"),
+			mc:                  newMetacollector(withName("test-mc")),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "injected get error",
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonExistingResourceError,
+			wantConditionReason: instance.ReasonExistingResourceError,
 		},
 		{
 			name:                "returns error when SetControllerReference fails",
-			mc:                  newMetacollector("test-mc"),
+			mc:                  newMetacollector(withName("test-mc")),
 			reconcilerScheme:    incompleteScheme,
 			wantErr:             "no kind is registered",
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonOwnerReferenceError,
+			wantConditionReason: instance.ReasonOwnerReferenceError,
 		},
 		{
 			name:                "returns error when Apply fails on create",
-			mc:                  newMetacollector("test-mc"),
+			mc:                  newMetacollector(withName("test-mc")),
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonApplyPatchErrorOnCreate,
+			wantConditionReason: instance.ReasonApplyPatchErrorOnCreate,
 		},
 		{
 			name:                "returns error when Apply fails on update",
-			mc:                  newMetacollector("test-mc"),
+			mc:                  newMetacollector(withName("test-mc")),
 			existingDeployment:  true,
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
-			wantConditionReason: ReasonApplyPatchErrorOnUpdate,
+			wantConditionReason: instance.ReasonApplyPatchErrorOnUpdate,
 		},
 	}
 
@@ -771,14 +642,14 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mc)
 			if tt.existingDeployment {
 				builder = builder.WithObjects(&appsv1.Deployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace},
 					Spec: appsv1.DeploymentSpec{
 						Selector: &metav1.LabelSelector{
 							MatchLabels: map[string]string{"app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
 						},
 						Template: corev1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: "metacollector", Image: "old:version"}},
+								Containers: []corev1.Container{{Name: containerName, Image: "old:version"}},
 							},
 						},
 					},
@@ -819,8 +690,8 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 }
 
 func TestPatchStatus(t *testing.T) {
-	scheme := testutil.Scheme(t)
-	mc := newMetacollector("test-mc")
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	mc := newMetacollector(withName("test-mc"))
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(mc).
@@ -833,7 +704,7 @@ func TestPatchStatus(t *testing.T) {
 
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue,
-			ReasonResourceCreated, MessageResourceCreated, fetched.Generation),
+			instance.ReasonResourceCreated, instance.MessageResourceCreated, fetched.Generation),
 	}
 	fetched.Status.DesiredReplicas = 1
 	fetched.Status.AvailableReplicas = 1
@@ -844,7 +715,7 @@ func TestPatchStatus(t *testing.T) {
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(mc), obj))
 	testutil.RequireCondition(t, obj.Status.Conditions,
 		commonv1alpha1.ConditionReconciled.String(),
-		metav1.ConditionTrue, ReasonResourceCreated)
+		metav1.ConditionTrue, instance.ReasonResourceCreated)
 	assert.Equal(t, int32(1), obj.Status.DesiredReplicas)
 	assert.Equal(t, int32(1), obj.Status.AvailableReplicas)
 }

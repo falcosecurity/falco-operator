@@ -17,57 +17,56 @@
 package falco
 
 import (
+	"context"
+
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
-// generateRole returns a Role for Falco.
-func generateRole(cl client.Client, falco *instancev1alpha1.Falco) (*unstructured.Unstructured, error) {
-	return generateResourceFromFalcoInstance(cl, falco,
-		func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-			role := &rbacv1.Role{
-				TypeMeta: metav1.TypeMeta{
-					Kind:       "Role",
-					APIVersion: "rbac.authorization.k8s.io/v1",
-				},
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      falco.Name,
-					Namespace: falco.Namespace,
-					Labels:    falco.Labels,
-				},
-				Rules: []rbacv1.PolicyRule{
-					{
-						APIGroups: []string{""},
-						Resources: []string{"configmaps"},
-						Verbs:     []string{"get", "list", "watch"},
-					},
-					{
-						APIGroups: []string{""},
-						Resources: []string{"events"},
-						Verbs:     []string{"create", "patch"},
-					},
-					{
-						APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-						Resources: []string{"configs", "rulesfiles", "plugins"},
-						Verbs:     []string{"get", "list", "watch", "update", "patch"},
-					},
-					{
-						APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-						Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
-						Verbs:     []string{"get", "update", "patch"},
-					},
-				},
-			}
-			return role, nil
+func generateRole(falco *instancev1alpha1.Falco) runtime.Object {
+	return &rbacv1.Role{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Role",
+			APIVersion: "rbac.authorization.k8s.io/v1",
 		},
-		generateOptions{
-			setControllerRef: true,
-			isClusterScoped:  false,
-		})
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+			Labels:    falco.Labels,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"configmaps"},
+				Verbs:     []string{"get", "list", "watch"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"events"},
+				Verbs:     []string{"create", "patch"},
+			},
+			{
+				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+				Resources: []string{"configs", "rulesfiles", "plugins"},
+				Verbs:     []string{"get", "list", "watch", "update", "patch"},
+			},
+			{
+				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+				Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
+				Verbs:     []string{"get", "update", "patch"},
+			},
+		},
+	}
+}
+
+func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, falco, fieldManager,
+		generateRole,
+		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false},
+	)
 }

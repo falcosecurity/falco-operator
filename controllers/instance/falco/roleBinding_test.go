@@ -17,131 +17,89 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 )
 
 func TestGenerateRoleBinding(t *testing.T) {
-	// Create a test scheme.
-	scheme := runtime.NewScheme()
-	_ = rbacv1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-
 	tests := []struct {
-		name    string
-		falco   *instancev1alpha1.Falco
-		wantErr bool
+		name       string
+		falco      *instancev1alpha1.Falco
+		wantLabels map[string]string
 	}{
 		{
-			name: "successfully generate role binding",
+			name: "basic role binding",
 			falco: &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "falco"},
 				},
 			},
-			wantErr: false,
+			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
-			name:    "nil falco instance",
-			falco:   nil,
-			wantErr: true,
+			name: "role binding with custom labels",
+			falco: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-falco",
+					Namespace: "default",
+					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
+				},
+			},
+			wantLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create a fake client
-			cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+			result := generateRoleBinding(tt.falco)
+			require.NotNil(t, result)
 
-			// Generate the role binding
-			got, err := generateRoleBinding(cl, tt.falco)
+			rb := result.(*rbacv1.RoleBinding)
+			assert.Equal(t, tt.falco.Namespace, rb.Namespace)
+			assert.Equal(t, tt.wantLabels, rb.Labels)
+			assert.Equal(t, "RoleBinding", rb.Kind)
+			assert.Equal(t, "rbac.authorization.k8s.io/v1", rb.APIVersion)
 
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
+			assert.Equal(t, "Role", rb.RoleRef.Kind)
+			assert.Equal(t, "rbac.authorization.k8s.io", rb.RoleRef.APIGroup)
+			assert.Equal(t, tt.falco.Name, rb.RoleRef.Name)
 
-			assert.NoError(t, err)
-			assert.NotNil(t, got)
-
-			// Convert unstructured to RoleBinding
-			roleBinding := &rbacv1.RoleBinding{}
-			err = runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, roleBinding)
-			assert.NoError(t, err)
-
-			// Verify role binding properties
-			assert.Equal(t, tt.falco.Name, roleBinding.Name)
-			assert.Equal(t, tt.falco.Namespace, roleBinding.Namespace)
-			assert.Equal(t, tt.falco.Labels, roleBinding.Labels)
-			assert.Equal(t, "RoleBinding", roleBinding.Kind)
-			assert.Equal(t, "rbac.authorization.k8s.io/v1", roleBinding.APIVersion)
-
-			// Verify role ref
-			assert.Equal(t, "Role", roleBinding.RoleRef.Kind)
-			assert.Equal(t, "rbac.authorization.k8s.io", roleBinding.RoleRef.APIGroup)
-			assert.Equal(t, tt.falco.Name, roleBinding.RoleRef.Name)
-
-			// Verify subjects
-			assert.Len(t, roleBinding.Subjects, 1)
-			subject := roleBinding.Subjects[0]
-			assert.Equal(t, "ServiceAccount", subject.Kind)
-			assert.Equal(t, tt.falco.Name, subject.Name)
-			assert.Equal(t, tt.falco.Namespace, subject.Namespace)
+			require.Len(t, rb.Subjects, 1)
+			assert.Equal(t, "ServiceAccount", rb.Subjects[0].Kind)
+			assert.Equal(t, tt.falco.Name, rb.Subjects[0].Name)
+			assert.Equal(t, tt.falco.Namespace, rb.Subjects[0].Namespace)
 		})
 	}
 }
 
-func TestGenerateRoleBindingWithNilClient(t *testing.T) {
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-falco",
-			Namespace: "default",
-		},
-	}
+func TestEnsureRoleBinding(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
-	_, err := generateRoleBinding(nil, falco)
-	assert.Error(t, err)
-}
+	require.NoError(t, r.ensureRoleBinding(context.Background(), falco))
 
-func TestGenerateRoleBindingCustomLabels(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = rbacv1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+	rbList := &rbacv1.RoleBindingList{}
+	require.NoError(t, cl.List(context.Background(), rbList, client.InNamespace(falco.Namespace)))
+	require.Len(t, rbList.Items, 1)
 
-	customLabels := map[string]string{
-		"app":         "falco",
-		"environment": "test",
-		"custom":      "label",
-	}
-
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-falco",
-			Namespace: "default",
-			Labels:    customLabels,
-		},
-	}
-
-	got, err := generateRoleBinding(cl, falco)
-	assert.NoError(t, err)
-	assert.NotNil(t, got)
-
-	roleBinding := &rbacv1.RoleBinding{}
-	err = runtime.DefaultUnstructuredConverter.FromUnstructured(got.Object, roleBinding)
-	assert.NoError(t, err)
-
-	// Verify custom labels are properly set
-	assert.Equal(t, customLabels, roleBinding.Labels)
+	rb := rbList.Items[0]
+	assert.Equal(t, "Role", rb.RoleRef.Kind)
+	assert.Equal(t, falco.Name, rb.RoleRef.Name)
+	require.Len(t, rb.Subjects, 1)
+	assert.Equal(t, falco.Name, rb.Subjects[0].Name)
 }

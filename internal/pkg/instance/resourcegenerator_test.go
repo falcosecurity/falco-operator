@@ -14,10 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,167 +28,143 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
-func TestGenerateResourceFromFalcoInstance(t *testing.T) {
-	// Create a test scheme.
+func TestGenerateResource(t *testing.T) {
+	// Create a test scheme with ConfigMap as owner (implements client.Object).
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, rbacv1.AddToScheme(scheme))
-	require.NoError(t, instancev1alpha1.AddToScheme(scheme))
 
 	tests := []struct {
 		name           string
-		falco          *instancev1alpha1.Falco
-		generator      resourceGenerator
-		options        generateOptions
+		obj            *corev1.ConfigMap
+		generator      ResourceGenerator[*corev1.ConfigMap]
+		options        GenerateOptions
 		mockClient     client.Client
 		expectedError  string
 		validateResult func(*testing.T, *unstructured.Unstructured)
 	}{
 		{
-			name:  "nil falco instance",
-			falco: nil,
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-				return nil, nil
+			name: "nil instance",
+			obj:  nil,
+			generator: func(_ *corev1.ConfigMap) runtime.Object {
+				return nil
 			},
-			options:       generateOptions{},
+			options:       GenerateOptions{},
 			mockClient:    fake.NewClientBuilder().WithScheme(scheme).Build(),
-			expectedError: "falco instance cannot be nil",
+			expectedError: "instance cannot be nil",
 		},
 		{
-			name:  "nil client",
-			falco: &instancev1alpha1.Falco{},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-				return nil, nil
+			name: "nil client",
+			obj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 			},
-			options:       generateOptions{},
+			generator: func(_ *corev1.ConfigMap) runtime.Object {
+				return nil
+			},
+			options:       GenerateOptions{},
 			mockClient:    nil,
 			expectedError: "client cannot be nil",
 		},
 		{
-			name:          "nil generator function",
-			falco:         &instancev1alpha1.Falco{},
+			name: "nil generator function",
+			obj: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
+			},
 			generator:     nil,
-			options:       generateOptions{},
+			options:       GenerateOptions{},
 			mockClient:    fake.NewClientBuilder().WithScheme(scheme).Build(),
 			expectedError: "generator function cannot be nil",
 		},
 		{
-			name: "generator error",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-				},
-			},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
-				return nil, fmt.Errorf("generator error")
-			},
-			options:       generateOptions{},
-			mockClient:    fake.NewClientBuilder().WithScheme(scheme).Build(),
-			expectedError: "failed to generate resource: generator error",
-		},
-		{
 			name: "successful namespaced resource generation",
-			falco: &instancev1alpha1.Falco{
+			obj: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
+					Name:      "test-owner",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					UID:       "test-uid",
+					Labels:    map[string]string{"app": "test"},
 				},
 			},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			generator: func(cm *corev1.ConfigMap) runtime.Object {
 				return &corev1.Service{
 					TypeMeta: metav1.TypeMeta{
 						Kind:       "Service",
 						APIVersion: "v1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Labels:    falco.Labels,
-						Name:      falco.Name,
-						Namespace: falco.Namespace,
+						Labels:    cm.Labels,
+						Namespace: cm.Namespace,
 					},
-					Spec: corev1.ServiceSpec{
-						Ports: []corev1.ServicePort{
-							{
-								Port: 8080,
-							},
-						},
-					},
-				}, nil
+				}
 			},
-			options: generateOptions{
-				setControllerRef: true,
-				isClusterScoped:  false,
+			options: GenerateOptions{
+				SetControllerRef: true,
+				IsClusterScoped:  false,
 			},
 			mockClient: fake.NewClientBuilder().WithScheme(scheme).Build(),
 			validateResult: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, "Service", obj.GetKind())
 				assert.Equal(t, "v1", obj.GetAPIVersion())
-				assert.Equal(t, "test-falco", obj.GetName())
-				assert.Equal(t, map[string]string{"app": "falco"}, obj.GetLabels())
+				assert.Equal(t, "test-owner", obj.GetName())
+				assert.Equal(t, map[string]string{"app": "test"}, obj.GetLabels())
 			},
 		},
 		{
 			name: "successful cluster-scoped resource generation",
-			falco: &instancev1alpha1.Falco{
+			obj: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
+					Name:      "test-owner",
 					Namespace: "default",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "test"},
 				},
 			},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			generator: func(cm *corev1.ConfigMap) runtime.Object {
 				return &rbacv1.ClusterRole{
 					TypeMeta: metav1.TypeMeta{
 						Kind:       "ClusterRole",
 						APIVersion: "rbac.authorization.k8s.io/v1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   GenerateUniqueName(falco.Name, falco.Namespace),
-						Labels: falco.Labels,
+						Name:   GenerateUniqueName(cm.Name, cm.Namespace),
+						Labels: cm.Labels,
 					},
-				}, nil
+				}
 			},
-			options: generateOptions{
-				setControllerRef: false,
-				isClusterScoped:  true,
+			options: GenerateOptions{
+				SetControllerRef: false,
+				IsClusterScoped:  true,
 			},
 			mockClient: fake.NewClientBuilder().WithScheme(scheme).Build(),
 			validateResult: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, "ClusterRole", obj.GetKind())
 				assert.Equal(t, "rbac.authorization.k8s.io/v1", obj.GetAPIVersion())
-				assert.Equal(t, "test-falco--default", obj.GetName())
-				assert.Equal(t, map[string]string{"app": "falco"}, obj.GetLabels())
+				assert.Equal(t, "test-owner--default", obj.GetName())
+				assert.Equal(t, map[string]string{"app": "test"}, obj.GetLabels())
 			},
 		},
 		{
 			name: "set controller reference fails",
-			falco: &instancev1alpha1.Falco{
+			obj: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
+					Name:      "test-owner",
 					Namespace: "default",
-					// Namespace intentionally isn't set to trigger the error.
 				},
 			},
-			generator: func(falco *instancev1alpha1.Falco) (runtime.Object, error) {
+			generator: func(_ *corev1.ConfigMap) runtime.Object {
+				// Return a Service without TypeMeta — SetControllerReference
+				// will fail because the owner (ConfigMap) has no UID.
 				return &corev1.Service{
 					TypeMeta: metav1.TypeMeta{
 						Kind:       "Service",
 						APIVersion: "v1",
 					},
-				}, nil
+				}
 			},
-			options: generateOptions{
-				setControllerRef: true,
-				isClusterScoped:  false,
+			options: GenerateOptions{
+				SetControllerRef: true,
+				IsClusterScoped:  false,
 			},
 			mockClient:    fake.NewClientBuilder().WithScheme(scheme).Build(),
 			expectedError: "failed to set controller reference",
@@ -198,9 +173,9 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := generateResourceFromFalcoInstance(
+			result, err := GenerateResource(
 				tt.mockClient,
-				tt.falco,
+				tt.obj,
 				tt.generator,
 				tt.options,
 			)
@@ -224,16 +199,16 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 func TestToUnstructured(t *testing.T) {
 	tests := []struct {
 		name    string
-		obj     interface{}
+		obj     any
 		wantErr bool
 	}{
 		{
 			name: "already unstructured",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name": "test",
 					},
 				},
@@ -262,7 +237,7 @@ func TestToUnstructured(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := toUnstructured(tt.obj)
+			result, err := ToUnstructured(tt.obj)
 			if tt.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, result)

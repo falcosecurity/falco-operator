@@ -17,148 +17,112 @@
 package falco
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func TestGenerateClusterRoleBinding(t *testing.T) {
 	tests := []struct {
-		name           string
-		falco          *instancev1alpha1.Falco
-		expectedFields map[string]interface{}
-		wantErr        bool
+		name       string
+		falco      *instancev1alpha1.Falco
+		wantName   string
+		wantLabels map[string]string
 	}{
 		{
 			name: "basic cluster role binding",
 			falco: &instancev1alpha1.Falco{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "instance.falcosecurity.dev/v1alpha1",
-					Kind:       "Falco",
-				},
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-falco",
 					Namespace: "test-namespace",
-					Labels: map[string]string{
-						"app": "falco",
-					},
+					Labels:    map[string]string{"app": "falco"},
 				},
 			},
-			expectedFields: map[string]interface{}{
-				"apiVersion": "rbac.authorization.k8s.io/v1",
-				"kind":       "ClusterRoleBinding",
-				"metadata": map[string]interface{}{
-					"name": "test-falco--test-namespace",
-					"labels": map[string]interface{}{
-						"app": "falco",
-					},
-				},
-				"subjects": []interface{}{
-					map[string]interface{}{
-						"kind":      "ServiceAccount",
-						"name":      "test-falco",
-						"namespace": "test-namespace",
-					},
-				},
-				"roleRef": map[string]interface{}{
-					"kind":     "ClusterRole",
-					"name":     "test-falco--test-namespace",
-					"apiGroup": "rbac.authorization.k8s.io",
-				},
-			},
-			wantErr: false,
+			wantName:   "test-falco--test-namespace",
+			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
 			name: "cluster role binding with multiple labels",
 			falco: &instancev1alpha1.Falco{
-				TypeMeta: metav1.TypeMeta{
-					APIVersion: "instance.falcosecurity.dev/v1alpha1",
-					Kind:       "Falco",
-				},
 				ObjectMeta: metav1.ObjectMeta{
-
 					Name:      "test-falco",
 					Namespace: "test-namespace",
-					Labels: map[string]string{
-						"app":     "falco",
-						"version": "v1",
-						"env":     "test",
-					},
+					Labels:    map[string]string{"app": "falco", "version": "v1", "env": "test"},
 				},
 			},
-			expectedFields: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"name": "test-falco--test-namespace",
-					"labels": map[string]interface{}{
-						"app":     "falco",
-						"version": "v1",
-						"env":     "test",
-					},
-				},
-			},
-			wantErr: false,
+			wantName:   "test-falco--test-namespace",
+			wantLabels: map[string]string{"app": "falco", "version": "v1", "env": "test"},
 		},
 	}
 
-	scheme := runtime.NewScheme()
-	_ = rbacv1.AddToScheme(scheme)
-	_ = instancev1alpha1.AddToScheme(scheme)
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+			result := generateClusterRoleBinding(tt.falco)
+			require.NotNil(t, result)
 
-			result, err := generateClusterRoleBinding(client, tt.falco)
+			crb := result.(*rbacv1.ClusterRoleBinding)
+			assert.Equal(t, tt.wantName, crb.Name)
+			assert.Equal(t, "ClusterRoleBinding", crb.Kind)
+			assert.Equal(t, "rbac.authorization.k8s.io/v1", crb.APIVersion)
+			assert.Equal(t, tt.wantLabels, crb.Labels)
 
-			if tt.wantErr {
-				assert.Error(t, err)
-				return
-			}
+			require.Len(t, crb.Subjects, 1)
+			assert.Equal(t, "ServiceAccount", crb.Subjects[0].Kind)
+			assert.Equal(t, tt.falco.Name, crb.Subjects[0].Name)
+			assert.Equal(t, tt.falco.Namespace, crb.Subjects[0].Namespace)
 
-			assert.NoError(t, err)
-			assert.NotNil(t, result)
-
-			// Verify TypeMeta.
-			assert.Equal(t, "ClusterRoleBinding", result.GetKind())
-			assert.Equal(t, "rbac.authorization.k8s.io/v1", result.GetAPIVersion())
-
-			// Verify basic metadata.
-			assert.Equal(t, GenerateUniqueName(tt.falco.Name, tt.falco.Namespace), result.GetName())
-			assert.Equal(t, "", result.GetNamespace())
-			assert.Equal(t, tt.falco.Labels, result.GetLabels())
-
-			// Verify subjects.
-			subjects, found, err := unstructured.NestedSlice(result.Object, "subjects")
-			assert.NoError(t, err)
-			assert.True(t, found)
-			assert.Len(t, subjects, 1)
-			subject := subjects[0].(map[string]interface{})
-			assert.Equal(t, "ServiceAccount", subject["kind"])
-			assert.Equal(t, tt.falco.Name, subject["name"])
-			assert.Equal(t, tt.falco.Namespace, subject["namespace"])
-
-			// Verify roleRef.
-			roleRef, found, err := unstructured.NestedMap(result.Object, "roleRef")
-			assert.NoError(t, err)
-			assert.True(t, found)
-			assert.Equal(t, "ClusterRole", roleRef["kind"])
-			assert.Equal(t, GenerateUniqueName(tt.falco.Name, tt.falco.Namespace), roleRef["name"])
-			assert.Equal(t, "rbac.authorization.k8s.io", roleRef["apiGroup"])
-
-			// Verify additional expected fields if specified
-			for key, expectedValue := range tt.expectedFields {
-				value, found, err := unstructured.NestedFieldNoCopy(result.Object, key)
-				assert.NoError(t, err)
-				assert.True(t, found)
-				assert.Equal(t, expectedValue, value)
-			}
+			assert.Equal(t, "ClusterRole", crb.RoleRef.Kind)
+			assert.Equal(t, tt.wantName, crb.RoleRef.Name)
+			assert.Equal(t, "rbac.authorization.k8s.io", crb.RoleRef.APIGroup)
 		})
 	}
+}
+
+func TestGenerateClusterRoleBindingViaGenerateResource(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, rbacv1.AddToScheme(scheme))
+	require.NoError(t, instancev1alpha1.AddToScheme(scheme))
+
+	falco := &instancev1alpha1.Falco{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-falco", Namespace: "test-namespace"},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+	opts := instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true}
+	result, err := instance.GenerateResource(cl, falco, generateClusterRoleBinding, opts)
+	require.NoError(t, err)
+
+	expectedName := instance.GenerateUniqueName("test-falco", "test-namespace")
+	assert.Equal(t, expectedName, result.GetName())
+	assert.Equal(t, "ClusterRoleBinding", result.GetKind())
+}
+
+func TestEnsureClusterRoleBinding(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newFalco()
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+
+	require.NoError(t, r.ensureClusterRoleBinding(context.Background(), falco))
+
+	uniqueName := instance.GenerateUniqueName(falco.Name, falco.Namespace)
+	crb := &rbacv1.ClusterRoleBinding{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: uniqueName}, crb))
+	assert.Equal(t, uniqueName, crb.Name)
+	assert.Equal(t, "ClusterRole", crb.RoleRef.Kind)
+	assert.Equal(t, uniqueName, crb.RoleRef.Name)
+	require.Len(t, crb.Subjects, 1)
+	assert.Equal(t, falco.Name, crb.Subjects[0].Name)
 }

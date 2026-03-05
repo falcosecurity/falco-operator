@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package falco
+package instance
 
 import (
 	"errors"
@@ -28,19 +28,15 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/managedfields"
 )
 
-const (
-	// fieldManager is the name used to identify the controller's managed fields.
-	fieldManager = "falco-controller"
-)
-
 // ErrNoManagedFields is returned when no managed fields are found for the field manager.
 // This is not a fatal error - it indicates the resource was never managed by this controller
 // and should be applied.
 var ErrNoManagedFields = errors.New("no managed fields found for field manager")
 
-// diff calculates the difference between the current and desired objects.
+// Diff calculates the difference between the current and desired objects.
 // Returns a typed.Comparison that contains Added, Modified, and Removed field sets.
-func diff(current runtime.Object, desired *unstructured.Unstructured) (*typed.Comparison, error) {
+// fieldManager identifies which fields belong to this controller.
+func Diff(current runtime.Object, desired *unstructured.Unstructured, fieldManager string) (*typed.Comparison, error) {
 	if current == nil || desired == nil {
 		return nil, fmt.Errorf("current and desired objects cannot be nil")
 	}
@@ -65,8 +61,8 @@ func diff(current runtime.Object, desired *unstructured.Unstructured) (*typed.Co
 	return managedfields.Compare(extracted, desiredCopy)
 }
 
-// formatChangedFields returns a human-readable summary of the changed fields from a comparison.
-func formatChangedFields(comparison *typed.Comparison) string {
+// FormatChangedFields returns a human-readable summary of the changed fields from a comparison.
+func FormatChangedFields(comparison *typed.Comparison) string {
 	if comparison == nil {
 		return ""
 	}
@@ -88,4 +84,22 @@ func formatChangedFields(comparison *typed.Comparison) string {
 	}
 
 	return strings.Join(parts, "; ")
+}
+
+// ToUnstructured converts an object to an unstructured.Unstructured.
+func ToUnstructured(obj any) (*unstructured.Unstructured, error) {
+	// If it's already unstructured, just return it
+	if u, ok := obj.(*unstructured.Unstructured); ok {
+		return u, nil
+	}
+
+	// Convert the typed object to unstructured
+	unstructuredObj := &unstructured.Unstructured{}
+	data, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	if err != nil {
+		return nil, err
+	}
+	unstructuredObj.SetUnstructuredContent(data)
+
+	return unstructuredObj, nil
 }
