@@ -314,7 +314,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 		Priority: artifactPriority,
 	}
 
-	// Fetch the ConfigMap from the same namespace as the Rulesfile CR.
+	// Fetch the ConfigMap from the same namespace as the artifact CR.
 	configMap := &corev1.ConfigMap{}
 	configMapKey := client.ObjectKey{
 		Name:      configMapRef.Name,
@@ -344,15 +344,24 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 		return err
 	}
 
-	// Get the data from the ConfigMap using the standard key.
-	data, ok := configMap.Data[commonv1alpha1.ConfigMapRulesKey]
+	// Get the data from the ConfigMap using the key appropriate for the artifact type.
+	var dataKey string
+	switch artifactType {
+	case TypeConfig:
+		dataKey = commonv1alpha1.ConfigMapConfigKey
+	case TypeRulesfile:
+		dataKey = commonv1alpha1.ConfigMapRulesKey
+	default:
+		return fmt.Errorf("unsupported artifact type for ConfigMap store: %q", artifactType)
+	}
+	data, ok := configMap.Data[dataKey]
 	if !ok {
 		// ConfigMap exists but doesn't have the expected key - this is a user misconfiguration.
 		// Remove any existing artifact and log a warning (not error to avoid log spam).
 		filePath := Path(name, artifactPriority, MediumConfigMap, artifactType)
 		if exists, _ := am.fs.Exists(filePath); exists {
 			logger.Info("ConfigMap key not found, removing artifact from filesystem",
-				"configMap", configMapRef.Name, "expectedKey", commonv1alpha1.ConfigMapRulesKey, "artifact", filePath)
+				"configMap", configMapRef.Name, "expectedKey", dataKey, "artifact", filePath)
 			if removeErr := am.fs.Remove(filePath); removeErr != nil {
 				logger.Error(removeErr, "Failed to remove artifact from filesystem", "artifact", filePath)
 				return removeErr
@@ -360,7 +369,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 			am.removeArtifactFile(name, MediumConfigMap)
 		} else {
 			logger.Info("ConfigMap missing expected key",
-				"configMap", configMapRef.Name, "expectedKey", commonv1alpha1.ConfigMapRulesKey)
+				"configMap", configMapRef.Name, "expectedKey", dataKey)
 		}
 		// Don't return error - user needs to fix the ConfigMap, retrying won't help.
 		// The watch will trigger reconciliation when ConfigMap is updated.
@@ -547,10 +556,20 @@ func Path(name string, artifactPriority int32, medium Medium, artifactType Type)
 				fmt.Sprintf("%s.so", name)),
 		)
 	case TypeConfig:
+		var subPriority int32
+		switch medium {
+		case MediumInline:
+			subPriority = priority.InLineRulesSubPriority
+		case MediumConfigMap:
+			subPriority = priority.CMSubPriority
+		default:
+			subPriority = priority.MaxPriority
+		}
 		return filepath.Clean(
 			filepath.Join(
 				mounts.ConfigDirPath,
-				priority.NameFromPriority(artifactPriority, fmt.Sprintf("%s.yaml", name))),
+				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
+			),
 		)
 
 	default:

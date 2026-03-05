@@ -19,11 +19,8 @@ spec:
       jsonPath: .spec.priority
       name: Priority
       type: integer
-    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
-      name: Reconciled
-      type: string
-    - jsonPath: .status.conditions[?(@.type == 'InlineContent')].status
-      name: InlineContent
+    - jsonPath: .status.conditions[?(@.type == 'Programmed')].status
+      name: Programmed
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -54,12 +51,23 @@ spec:
             description: ConfigSpec defines the desired state of Config.
             properties:
               config:
-                description: Config is the configuration for Falco deployment.
-                type: string
+                description: Config is the configuration for Falco deployment, specified
+                  as a structured object.
+                x-kubernetes-preserve-unknown-fields: true
+              configMapRef:
+                description: ConfigMapRef specifies a reference to a ConfigMap containing
+                  the Falco configuration.
+                properties:
+                  name:
+                    description: Name is the name of the ConfigMap.
+                    type: string
+                required:
+                - name
+                type: object
               priority:
                 default: 50
                 description: |-
-                  Priority specifies the priority of the rulesfile.\
+                  Priority specifies the priority of the config.
                   The higher the value, the higher the priority.
                 format: int32
                 maximum: 99
@@ -112,10 +120,15 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
-            required:
-            - config
             type: object
           status:
+            default:
+              conditions:
+              - lastTransitionTime: "1970-01-01T00:00:00Z"
+                message: Waiting for controller
+                reason: Pending
+                status: Unknown
+                type: Programmed
             description: ConfigStatus defines the observed state of Config.
             properties:
               conditions:

@@ -39,13 +39,12 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 )
 
 const (
 	// rulesfileFinalizerPrefix is the prefix for the finalizer name.
 	rulesfileFinalizerPrefix = "rulesfile.artifact.falcosecurity.dev/finalizer"
-	// configMapRefIndexField is the field used for indexing Rulesfiles by ConfigMap reference.
-	configMapRefIndexField = ".spec.configMapRef.name"
 	// fieldManager is the name used to identify the controller's managed fields.
 	fieldManager = "artifact-rulesfile"
 )
@@ -142,16 +141,6 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Create an index for Rulesfiles by ConfigMap reference for efficient lookups.
-	if err := mgr.GetFieldIndexer().IndexField(
-		context.Background(),
-		&artifactv1alpha1.Rulesfile{},
-		configMapRefIndexField,
-		indexRulesfileByConfigMapRef,
-	); err != nil {
-		return err
-	}
-
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&artifactv1alpha1.Rulesfile{}).
 		Watches(
@@ -162,22 +151,13 @@ func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func indexRulesfileByConfigMapRef(obj client.Object) []string {
-	rulesfile := obj.(*artifactv1alpha1.Rulesfile)
-	if rulesfile.Spec.ConfigMapRef == nil {
-		return nil
-	}
-	return []string{rulesfile.Namespace + "/" + rulesfile.Spec.ConfigMapRef.Name}
-}
-
 // findRulesfilesForConfigMap finds all Rulesfiles that reference a given ConfigMap using the index.
 func (r *RulesfileReconciler) findRulesfilesForConfigMap(ctx context.Context, configMap client.Object) []reconcile.Request {
 	logger := log.FromContext(ctx)
 	rulesfileList := &artifactv1alpha1.RulesfileList{}
 
-	// Use the index to find Rulesfiles that reference this ConfigMap
 	indexKey := configMap.GetNamespace() + "/" + configMap.GetName()
-	if err := r.List(ctx, rulesfileList, client.MatchingFields{configMapRefIndexField: indexKey}); err != nil {
+	if err := r.List(ctx, rulesfileList, client.MatchingFields{index.ConfigMapOnRulesfile: indexKey}); err != nil {
 		logger.Error(err, "unable to list Rulesfiles by ConfigMap index")
 		return []reconcile.Request{}
 	}

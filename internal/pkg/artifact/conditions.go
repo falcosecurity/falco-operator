@@ -42,6 +42,10 @@ const (
 	ReasonInlineConfigStored = "InlineConfigStored"
 	// ReasonInlineConfigStoreFailed indicates inline configuration failed to store.
 	ReasonInlineConfigStoreFailed = "InlineConfigStoreFailed"
+	// ReasonConfigMapConfigStored indicates configuration from a ConfigMap was stored successfully.
+	ReasonConfigMapConfigStored = "ConfigMapConfigStored"
+	// ReasonConfigMapConfigStoreFailed indicates configuration from a ConfigMap failed to store.
+	ReasonConfigMapConfigStoreFailed = "ConfigMapConfigStoreFailed"
 	// ReasonInlinePluginConfigStored indicates the plugin configuration was stored successfully.
 	ReasonInlinePluginConfigStored = "InlinePluginConfigStored"
 	// ReasonInlinePluginConfigStoreFailed indicates the plugin configuration failed to store.
@@ -72,6 +76,8 @@ const (
 	MessageInlineRulesStored = "Inline rules stored successfully"
 	// MessageConfigMapRulesStored is the message when rules from a ConfigMap are stored successfully.
 	MessageConfigMapRulesStored = "ConfigMap rules stored successfully"
+	// MessageConfigMapConfigStored is the message when configuration from a ConfigMap is stored successfully.
+	MessageConfigMapConfigStored = "ConfigMap config stored successfully"
 	// MessageInlineConfigStored is the message when inline configuration is stored successfully.
 	MessageInlineConfigStored = "Inline config content stored successfully"
 	// MessageInlinePluginConfigStored is the message when inline plugin configuration is stored successfully.
@@ -92,6 +98,8 @@ const (
 	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %s"
 	// MessageFormatConfigMapRulesStoreFailed is the format for ConfigMap rules store failure message.
 	MessageFormatConfigMapRulesStoreFailed = "Failed to store ConfigMap rules: %s"
+	// MessageFormatConfigMapConfigStoreFailed is the format for ConfigMap config store failure message.
+	MessageFormatConfigMapConfigStoreFailed = "Failed to store ConfigMap config: %s"
 	// MessageFormatInlineRulesStoreFailed is the format for inline rules store failure message.
 	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %s"
 	// MessageFormatReferenceResolutionFailed is the format for Reference resolution failure message.

@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -39,33 +40,22 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 )
 
 const testConfigName = "test-config"
 
-const testConfigYAML = `engine:
-  ebpf:
-    buf_size_preset: 4
-    drop_failed_exit: false
-    probe: ${HOME}/.falco/falco-bpf.o
+// testConfigJSON is a sample Falco config in JSON format (used for *apiextensionsv1.JSON fields).
+const testConfigJSON = `{"engine":{"kind":"modern_ebpf"},"falco_libs":{"thread_table_size":262144}}`
+
+// testConfigYAML is the expected YAML representation of testConfigJSON after conversion.
+const testConfigYAML = "engine:\n  kind: modern_ebpf\nfalco_libs:\n  thread_table_size: 262144\n"
+
+// testConfigData is used as a ConfigMap data value for config.yaml.
+const testConfigData = `engine:
   kind: modern_ebpf
-  kmod:
-    buf_size_preset: 4
-    drop_failed_exit: false
-  modern_ebpf:
-    buf_size_preset: 4
-    cpus_for_each_buffer: 2
-    drop_failed_exit: false
 falco_libs:
   thread_table_size: 262144
-file_output:
-  enabled: false
-  filename: ./events.txt
-  keep_alive: false
-grpc:
-  bind_address: "unix:///run/falco/falco.sock"
-  enabled: false
-  threadiness: 1
 `
 
 func testFinalizerName() string {
@@ -93,6 +83,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		nodeName:        testutil.NodeName,
+		namespace:       testutil.Namespace,
 	}, cl
 }
 
@@ -103,6 +94,7 @@ func TestNewConfigReconciler(t *testing.T) {
 
 	require.NotNil(t, r)
 	assert.Equal(t, "my-node", r.nodeName)
+	assert.Equal(t, "my-namespace", r.namespace)
 	assert.Equal(t, common.FormatFinalizerName(configFinalizerPrefix, "my-node"), r.finalizer)
 	assert.NotNil(t, r.artifactManager)
 	assert.NotNil(t, r.recorder)
@@ -182,7 +174,7 @@ func TestReconcile(t *testing.T) {
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
-						Config: "engine:\n  kind: modern_ebpf\n",
+						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 					},
 				},
 			},
@@ -199,7 +191,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: testutil.Namespace,
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
-						Config: "engine:\n  kind: modern_ebpf\n",
+						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 					},
 				},
 			},
@@ -216,7 +208,7 @@ func TestReconcile(t *testing.T) {
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
-						Config:   testConfigYAML,
+						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 						Priority: 50,
 					},
 				},
@@ -224,6 +216,60 @@ func TestReconcile(t *testing.T) {
 			req: testutil.Request(testConfigName),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "happy path with configmap ref stores config and sets conditions",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapConfigKey: testConfigData,
+					},
+				},
+				&artifactv1alpha1.Config{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testConfigName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.ConfigSpec{
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
+							Name: "my-config-cm",
+						},
+					},
+				},
+			},
+			req: testutil.Request(testConfigName),
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "configmap ref not found fails reference resolution",
+			objects: []client.Object{
+				&artifactv1alpha1.Config{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testConfigName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.ConfigSpec{
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
+							Name: "missing-cm",
+						},
+					},
+				},
+			},
+			req:     testutil.Request(testConfigName),
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
 			},
 		},
 		{
@@ -268,7 +314,7 @@ func TestReconcile(t *testing.T) {
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
-						Config:   testConfigYAML,
+						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 						Priority: 50,
 					},
 				},
@@ -278,6 +324,39 @@ func TestReconcile(t *testing.T) {
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+			},
+		},
+		{
+			name: "references resolved but configmap store fails sets ResolvedRefs true and Programmed false",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapConfigKey: testConfigData,
+					},
+				},
+				&artifactv1alpha1.Config{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:       testConfigName,
+						Namespace:  testutil.Namespace,
+						Finalizers: []string{testFinalizerName()},
+					},
+					Spec: artifactv1alpha1.ConfigSpec{
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
+							Name: "my-config-cm",
+						},
+					},
+				},
+			},
+			req:      testutil.Request(testConfigName),
+			writeErr: fmt.Errorf("disk full"),
+			wantErr:  true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapConfigStoreFailed},
 			},
 		},
 	}
@@ -345,6 +424,7 @@ func TestReconcile_GetErrorPropagates(t *testing.T) {
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		nodeName:        testutil.NodeName,
+		namespace:       testutil.Namespace,
 	}
 
 	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
@@ -396,65 +476,70 @@ func TestEnsureFinalizer(t *testing.T) {
 	}
 }
 
-func TestEnsureConfig(t *testing.T) {
+func TestEnforceReferenceResolution(t *testing.T) {
 	tests := []struct {
 		name           string
+		objects        []client.Object
 		config         *artifactv1alpha1.Config
-		writeErr       error
 		wantErr        bool
 		wantConditions []testutil.ConditionExpect
 	}{
 		{
-			name: "success stores inline config and sets conditions",
+			name: "no refs removes ResolvedRefs condition",
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
-					Generation: 1,
+					Name:      testConfigName,
+					Namespace: testutil.Namespace,
 				},
+				Status: artifactv1alpha1.ConfigStatus{
+					Conditions: []metav1.Condition{
+						common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, "", 1),
+					},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{},
+		},
+		{
+			name: "configmap exists sets ResolvedRefs true",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+				},
+			},
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.ConfigSpec{
-					Config:   testConfigYAML,
-					Priority: 50,
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 			},
 		},
 		{
-			name: "failure sets error condition on inline content",
+			name: "configmap missing sets ResolvedRefs false and Programmed false",
 			config: &artifactv1alpha1.Config{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
-					Generation: 2,
-				},
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.ConfigSpec{
-					Config:   testConfigYAML,
-					Priority: 50,
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
 				},
 			},
-			writeErr: fmt.Errorf("disk full"),
-			wantErr:  true,
+			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t)
+			r, _ := newTestReconciler(t, tt.objects...)
 
-			if tt.writeErr != nil {
-				mockFS := filesystem.NewMockFileSystem()
-				mockFS.WriteErr = tt.writeErr
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
-					artifact.WithFS(mockFS),
-				)
-			}
-
-			err := r.ensureConfig(context.Background(), tt.config)
+			err := r.enforceReferenceResolution(context.Background(), tt.config)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -465,6 +550,261 @@ func TestEnsureConfig(t *testing.T) {
 			testutil.RequireConditions(t, tt.config.Status.Conditions, tt.wantConditions)
 		})
 	}
+}
+
+func TestEnsureConfig(t *testing.T) {
+	tests := []struct {
+		name           string
+		objects        []client.Object
+		config         *artifactv1alpha1.Config
+		writeErr       error
+		wantErr        bool
+		wantConditions []testutil.ConditionExpect
+		wantFiles      []string
+	}{
+		{
+			name: "success stores inline config and sets conditions",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+					Priority: 50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{testConfigYAML},
+		},
+		{
+			name: "no sources sets Programmed true",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Priority: 50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "non-nil config with empty Raw is treated as no inline config",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:   &apiextensionsv1.JSON{},
+					Priority: 50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "success stores configmap config and sets conditions",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapConfigKey: testConfigData,
+					},
+				},
+			},
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+					Priority:     50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{testConfigData},
+		},
+		{
+			name: "both inline and configmap sources write two files",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapConfigKey: testConfigData,
+					},
+				},
+			},
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:       &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+					Priority:     50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{testConfigYAML, testConfigData},
+		},
+		{
+			name: "malformed YAML in inline config returns error",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:   &apiextensionsv1.JSON{Raw: []byte("\t")},
+					Priority: 50,
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "failure sets error condition on inline content",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 2,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+					Priority: 50,
+				},
+			},
+			writeErr: fmt.Errorf("disk full"),
+			wantErr:  true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+			},
+		},
+		{
+			name: "failure on configmap store sets error condition",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapConfigKey: testConfigData,
+					},
+				},
+			},
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.Namespace,
+					Generation: 2,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+					Priority:     50,
+				},
+			},
+			writeErr: fmt.Errorf("disk full"),
+			wantErr:  true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapConfigStoreFailed},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, cl := newTestReconciler(t, tt.objects...)
+
+			mockFS := filesystem.NewMockFileSystem()
+			if tt.writeErr != nil {
+				mockFS.WriteErr = tt.writeErr
+			}
+			r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				artifact.WithFS(mockFS),
+			)
+
+			err := r.ensureConfig(context.Background(), tt.config)
+
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			testutil.RequireConditions(t, tt.config.Status.Conditions, tt.wantConditions)
+
+			if len(tt.wantFiles) > 0 {
+				require.Len(t, mockFS.Files, len(tt.wantFiles), "unexpected number of files written")
+				gotContents := make([]string, 0, len(mockFS.Files))
+				for _, content := range mockFS.Files {
+					gotContents = append(gotContents, string(content))
+				}
+				assert.ElementsMatch(t, tt.wantFiles, gotContents)
+			}
+		})
+	}
+}
+
+func TestFindConfigsForConfigMap(t *testing.T) {
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "my-config-cm",
+			Namespace: testutil.Namespace,
+		},
+	}
+	config := &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testConfigName,
+			Namespace: testutil.Namespace,
+		},
+		Spec: artifactv1alpha1.ConfigSpec{
+			ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+		},
+	}
+
+	s := testutil.Scheme(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(configMap, config).
+		WithIndex(&artifactv1alpha1.Config{}, index.ConfigMapOnConfig, index.ConfigByConfigMapRef).
+		Build()
+
+	r := &ConfigReconciler{
+		Client:    cl,
+		namespace: testutil.Namespace,
+	}
+
+	requests := r.findConfigsForConfigMap(context.Background(), configMap)
+	require.Len(t, requests, 1)
+	assert.Equal(t, testConfigName, requests[0].Name)
+	assert.Equal(t, testutil.Namespace, requests[0].Namespace)
 }
 
 func TestPatchStatus(t *testing.T) {
