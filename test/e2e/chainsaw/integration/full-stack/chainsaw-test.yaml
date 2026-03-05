@@ -43,6 +43,16 @@ spec:
           value: /etc/falco/config.d/50-full-stack-config.yaml
         - name: expected_content
           value: "json_output"
+    - name: Verify full-stack-config status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: full-stack-config
+        - name: expected_programmed
+          value: "True"
     - name: Verify rules file exists
       use:
         template: ../../common/_step_templates/verify-file-contains.yaml
@@ -51,6 +61,16 @@ spec:
           value: /etc/falco/rules.d/50-03-full-stack-rules-inline.yaml
         - name: expected_content
           value: "Full Stack Test Rule"
+    - name: Verify full-stack-rules status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: full-stack-rules
+        - name: expected_programmed
+          value: "True"
     - name: Verify plugin file downloaded
       use:
         template: ../../common/_step_templates/verify-plugin.yaml
@@ -60,6 +80,16 @@ spec:
       bindings:
         - name: plugin_name
           value: json
+    - name: Verify json plugin status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Plugin
+        - name: artifact_name
+          value: json
+        - name: expected_programmed
+          value: "True"
     # --- Phase 2: Verify artifacts survive type switch to Deployment ---
     - name: Switch Falco to Deployment
       try:
@@ -100,3 +130,13 @@ spec:
           value: /etc/falco/rules.d/50-03-full-stack-rules-inline.yaml
         - name: expected_content
           value: "Full Stack Test Rule"
+    - name: Verify full-stack-rules status after type switch
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: full-stack-rules
+        - name: expected_programmed
+          value: "True"

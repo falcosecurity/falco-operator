@@ -17,7 +17,7 @@ spec:
           metadata:
             name: ($falco_name)
           status:
-            (conditions[?type == 'ConditionReconciled']):
+            (conditions[?type == 'Reconciled']):
               - status: ($expected_reconciled)
-            (conditions[?type == 'ConditionAvailable']):
+            (conditions[?type == 'Available']):
               - status: ($expected_available)

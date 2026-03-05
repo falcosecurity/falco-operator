@@ -70,9 +70,11 @@ test/e2e/chainsaw/
 ├── README.md                               # This file
 ├── TEST_MATRIX.md                          # Full test matrix and coverage tracking
 ├── common/
-│   ├── _step_templates/                    # Reusable step templates (12)
+│   ├── _step_templates/                    # Reusable step templates (14)
 │   │   ├── apply-assert-falco-daemonset.yaml
 │   │   ├── apply-assert-falco-deployment.yaml
+│   │   ├── assert-artifact-resolved-refs.yaml
+│   │   ├── assert-artifact-status.yaml
 │   │   ├── assert-falco-status.yaml
 │   │   ├── verify-content-update.yaml
 │   │   ├── verify-dir-listing.yaml
@@ -207,11 +209,11 @@ All environment variables are documented in a header comment at the top of each 
 | `falco/deployment` | Falco | Deployment create, status, scale |
 | `falco/version` | Falco | Version upgrade, image override |
 | `falco/podtemplate` | Falco | Custom labels, tolerations, resources |
-| `config/lifecycle` | Config | Inline CRUD, priority rename, selector, boundary, delete |
-| `rulesfile/lifecycle` | Rulesfile | Inline, OCI, ConfigMap, multi-source, selector, delete |
-| `rulesfile/edge-cases` | Rulesfile | Missing ConfigMap handling |
-| `plugin/lifecycle` | Plugin | OCI create, multiple, update, selector, delete |
-| `integration/full-stack` | All | Full stack + DaemonSet to Deployment type switch |
+| `config/lifecycle` | Config | Inline CRUD, priority rename, selector, boundary, status, delete |
+| `rulesfile/lifecycle` | Rulesfile | Inline, OCI, ConfigMap, multi-source, selector, status, delete |
+| `rulesfile/edge-cases` | Rulesfile | Missing ConfigMap handling, status failure assertions |
+| `plugin/lifecycle` | Plugin | OCI create, multiple, update, selector, status, delete |
+| `integration/full-stack` | All | Full stack + status assertions + DaemonSet to Deployment type switch |
 | `validation` | All | CRD validation rejection |
 
 ## Chainsaw Gotchas

@@ -43,6 +43,17 @@ spec:
         - name: plugin_name
           value: json
 
+    - name: Verify json plugin status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Plugin
+        - name: artifact_name
+          value: json
+        - name: expected_programmed
+          value: "True"
+
     # --- plugin-multiple ---
     - name: Create second Plugin CR
       try:
@@ -64,6 +75,17 @@ spec:
       bindings:
         - name: plugin_name
           value: dummy
+
+    - name: Verify dummy plugin status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Plugin
+        - name: artifact_name
+          value: dummy
+        - name: expected_programmed
+          value: "True"
 
     - name: Verify json plugin still in config
       use:
@@ -105,6 +127,17 @@ spec:
           value: "updated.example.com"
         - name: old_content
           value: "initial.example.com"
+
+    - name: Verify json plugin status after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Plugin
+        - name: artifact_name
+          value: json
+        - name: expected_programmed
+          value: "True"
 
     # --- plugin-selector: non-matching ---
     - name: Apply Plugin with non-matching selector

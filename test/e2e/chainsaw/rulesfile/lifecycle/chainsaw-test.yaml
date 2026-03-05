@@ -34,6 +34,17 @@ spec:
         - name: expected_content
           value: "Test Inline Rule"
 
+    - name: Verify rulesfile-inline status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-inline
+        - name: expected_programmed
+          value: "True"
+
     # --- rulesfile-inline: update ---
     - name: Update Rulesfile with new inline content
       try:
@@ -50,6 +61,17 @@ spec:
           value: "Updated Inline Rule"
         - name: old_content
           value: "Test Inline Rule"
+
+    - name: Verify rulesfile-inline status after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-inline
+        - name: expected_programmed
+          value: "True"
 
     # --- container-plugin ---
     - name: Install container plugin for OCI rules
@@ -85,6 +107,17 @@ spec:
         - name: min_size
           value: "100"
 
+    - name: Verify rulesfile-oci status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-oci
+        - name: expected_programmed
+          value: "True"
+
     # --- rulesfile-oci: priority update ---
     - name: Update Rulesfile OCI priority
       try:
@@ -99,6 +132,17 @@ spec:
           value: "/etc/falco/rules.d/50-01-rulesfile-oci-oci.yaml"
         - name: new_file_path
           value: "/etc/falco/rules.d/60-01-rulesfile-oci-oci.yaml"
+
+    - name: Verify rulesfile-oci status after priority change
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-oci
+        - name: expected_programmed
+          value: "True"
 
     # --- rulesfile-configmap: create ---
     - name: Create ConfigMap with rules content
@@ -120,6 +164,28 @@ spec:
         - name: expected_content
           value: "Test ConfigMap Rule"
 
+    - name: Verify rulesfile-cm status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm
+        - name: expected_programmed
+          value: "True"
+
+    - name: Verify rulesfile-cm resolved refs after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-resolved-refs.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm
+        - name: expected_resolved_refs
+          value: "True"
+
     # --- rulesfile-configmap: update ---
     - name: Update ConfigMap with new content
       try:
@@ -136,6 +202,28 @@ spec:
           value: "Updated ConfigMap Rule"
         - name: old_content
           value: "Test ConfigMap Rule"
+
+    - name: Verify rulesfile-cm status after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm
+        - name: expected_programmed
+          value: "True"
+
+    - name: Verify rulesfile-cm resolved refs after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-resolved-refs.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm
+        - name: expected_resolved_refs
+          value: "True"
 
     # --- rulesfile-multi-source ---
     - name: Create Rulesfile with OCI and inline sources
@@ -161,6 +249,17 @@ spec:
         - name: expected_content
           value: "Inline Test Rule"
 
+    - name: Verify rulesfile-multi status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-multi
+        - name: expected_programmed
+          value: "True"
+
     # --- rulesfile-all-sources ---
     - name: Create ConfigMap for all-sources test
       try:
@@ -180,6 +279,28 @@ spec:
           value: "/etc/falco/rules.d"
         - name: expected_files
           value: "50-01-rulesfile-all-oci.yaml,50-02-rulesfile-all-configmap.yaml,50-03-rulesfile-all-inline.yaml"
+
+    - name: Verify rulesfile-all status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-all
+        - name: expected_programmed
+          value: "True"
+
+    - name: Verify rulesfile-all resolved refs
+      use:
+        template: ../../common/_step_templates/assert-artifact-resolved-refs.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-all
+        - name: expected_resolved_refs
+          value: "True"
 
     # --- rulesfile-remove-source ---
     - name: Create Rulesfile with OCI and inline for removal test
@@ -232,6 +353,17 @@ spec:
         - name: min_size
           value: "100"
 
+    - name: Verify rulesfile-rm status after source removal
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-rm
+        - name: expected_programmed
+          value: "True"
+
     # --- rulesfile-selector: matching ---
     - name: Apply Rulesfile with matching selector
       try:
@@ -246,6 +378,17 @@ spec:
           value: "/etc/falco/rules.d/50-03-rulesfile-matching-inline.yaml"
         - name: expected_content
           value: "Matching Selector Rule"
+
+    - name: Verify rulesfile-matching status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-matching
+        - name: expected_programmed
+          value: "True"
 
     # --- rulesfile-selector: non-matching ---
     - name: Apply Rulesfile with non-matching selector

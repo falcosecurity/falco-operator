@@ -34,6 +34,17 @@ spec:
         - name: expected_content
           value: "json_output"
 
+    - name: Verify config-test status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-test
+        - name: expected_programmed
+          value: "True"
+
     # --- config-inline: update ---
     - name: Update Config with new content
       try:
@@ -50,6 +61,17 @@ spec:
           value: "json_output: false"
         - name: old_content
           value: "json_output: true"
+
+    - name: Verify config-test status after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-test
+        - name: expected_programmed
+          value: "True"
 
     # --- config-priority: create + rename ---
     - name: Create Config with priority 50
@@ -93,6 +115,17 @@ spec:
         - name: expected_content
           value: "json_output"
 
+    - name: Verify config-priority status after rename
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-priority
+        - name: expected_programmed
+          value: "True"
+
     # --- config-selector: matching ---
     - name: Apply Config with matching selector
       try:
@@ -107,6 +140,17 @@ spec:
           value: "/etc/falco/config.d/50-config-matching.yaml"
         - name: expected_content
           value: "json_output"
+
+    - name: Verify config-matching status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-matching
+        - name: expected_programmed
+          value: "True"
 
     # --- config-selector: non-matching ---
     - name: Apply Config with non-matching selector
@@ -161,6 +205,28 @@ spec:
         - name: expected_content
           value: "log_level: debug"
 
+    - name: Verify config-low status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-low
+        - name: expected_programmed
+          value: "True"
+
+    - name: Verify config-high status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-high
+        - name: expected_programmed
+          value: "True"
+
     # --- config-priority-boundaries ---
     - name: Apply Config with minimum priority (0)
       try:
@@ -176,6 +242,17 @@ spec:
         - name: expected_content
           value: "json_output"
 
+    - name: Verify config-boundary-low status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-boundary-low
+        - name: expected_programmed
+          value: "True"
+
     - name: Apply Config with maximum priority (99)
       try:
         - apply:
@@ -189,6 +266,17 @@ spec:
           value: "/etc/falco/config.d/99-config-boundary-high.yaml"
         - name: expected_content
           value: "log_level"
+
+    - name: Verify config-boundary-high status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-boundary-high
+        - name: expected_programmed
+          value: "True"
 
     # --- config-delete ---
     - name: Delete Config CR

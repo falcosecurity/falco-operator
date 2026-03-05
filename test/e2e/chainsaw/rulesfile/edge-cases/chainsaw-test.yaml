@@ -25,14 +25,12 @@ spec:
         - apply:
             file: rulesfile.yaml
 
-    - name: Verify inline rules file exists
+    - name: Verify inline rules file does NOT exist
       use:
-        template: ../../common/_step_templates/verify-file-contains.yaml
+        template: ../../common/_step_templates/verify-file-deleted.yaml
       bindings:
         - name: file_path
           value: ($inline_file_path)
-        - name: expected_content
-          value: "Inline Fallback Rule"
 
     - name: Verify configmap rules file does NOT exist
       use:
@@ -40,3 +38,25 @@ spec:
       bindings:
         - name: file_path
           value: "/etc/falco/rules.d/50-02-rulesfile-cm-missing-configmap.yaml"
+
+    - name: Verify artifact status reflects failure
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm-missing
+        - name: expected_programmed
+          value: "False"
+
+    - name: Verify ResolvedRefs reflects failure
+      use:
+        template: ../../common/_step_templates/assert-artifact-resolved-refs.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm-missing
+        - name: expected_resolved_refs
+          value: "False"
