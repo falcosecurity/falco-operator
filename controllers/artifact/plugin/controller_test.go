@@ -36,7 +36,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/artifact/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
@@ -47,7 +47,7 @@ import (
 const testPluginName = "test-plugin"
 
 func testFinalizerName() string {
-	return common.FormatFinalizerName(pluginFinalizerPrefix, testutil.NodeName)
+	return common.FormatFinalizerName(pluginFinalizerPrefix, testutil.TestNodeName)
 }
 
 func defaultLibraryPath(name string) string {
@@ -65,7 +65,7 @@ func findPluginConfig(configs []PluginConfig, name string) *PluginConfig {
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, client.Client) {
 	t.Helper()
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
@@ -73,7 +73,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.Namespace,
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 		artifact.WithFS(mockFS),
 		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
 	)
@@ -85,13 +85,13 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		PluginsConfig:   &PluginsConfig{},
-		nodeName:        testutil.NodeName,
+		nodeName:        testutil.TestNodeName,
 		crToConfigName:  make(map[string]string),
 	}, cl
 }
 
 func TestNewPluginReconciler(t *testing.T) {
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 	r := NewPluginReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace")
 
@@ -127,7 +127,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testPluginName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 				},
 			},
@@ -141,7 +141,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 				},
@@ -158,7 +158,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "container",
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.PluginSpec{
@@ -182,7 +182,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 				},
@@ -202,7 +202,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{"some-other-finalizer"},
 					},
 				},
@@ -215,14 +215,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.PluginSpec{
@@ -243,14 +243,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.PluginSpec{
@@ -270,7 +270,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testPluginName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.PluginSpec{
 						Selector: &metav1.LabelSelector{
@@ -288,7 +288,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.PluginSpec{
@@ -314,13 +314,13 @@ func TestReconcile(t *testing.T) {
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-pull-secret",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 				},
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.PluginSpec{
@@ -354,7 +354,7 @@ func TestReconcile(t *testing.T) {
 
 			if tt.pullErr != nil {
 				mockFS := filesystem.NewMockFileSystem()
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
 				)
@@ -419,7 +419,7 @@ func TestHandleDeletion(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 				},
@@ -432,7 +432,7 @@ func TestHandleDeletion(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 				},
@@ -453,7 +453,7 @@ func TestHandleDeletion(t *testing.T) {
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testPluginName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{"some-other-finalizer"},
 					},
 				},
@@ -475,11 +475,11 @@ func TestHandleDeletion(t *testing.T) {
 			}
 
 			plugin := &artifactv1alpha1.Plugin{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, plugin))
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, plugin))
 
 			if tt.triggerDeletion {
 				require.NoError(t, cl.Delete(context.Background(), plugin))
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, plugin))
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, plugin))
 			}
 
 			ok, err := r.handleDeletion(context.Background(), plugin)
@@ -521,14 +521,14 @@ func TestEnsureFinalizers(t *testing.T) {
 			plugin := &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testPluginName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Finalizers: tt.finalizers,
 				},
 			}
 			r, cl := newTestReconciler(t, plugin)
 
 			fetched := &artifactv1alpha1.Plugin{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, fetched))
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, fetched))
 
 			ok, err := r.ensureFinalizers(context.Background(), fetched)
 
@@ -537,7 +537,7 @@ func TestEnsureFinalizers(t *testing.T) {
 
 			if tt.wantOK {
 				updated := &artifactv1alpha1.Plugin{}
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, updated))
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, updated))
 				assert.True(t, controllerutil.ContainsFinalizer(updated, testFinalizerName()))
 			}
 		})
@@ -553,13 +553,13 @@ func TestEnsurePlugin(t *testing.T) {
 		{
 			name: "nil OCI artifact succeeds",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 			},
 		},
 		{
 			name: "nil OCI artifact spec is also fine",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 				Spec:       artifactv1alpha1.PluginSpec{},
 			},
 		},
@@ -596,7 +596,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		{
 			name: "writes config for basic plugin",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.TestNamespace},
 			},
 			crToConfigName:   make(map[string]string),
 			initialConfig:    &PluginsConfig{},
@@ -608,7 +608,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		{
 			name: "writes config with initConfig",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					Config: &artifactv1alpha1.PluginConfig{
 						InitConfig: &apiextensionsv1.JSON{
@@ -625,7 +625,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		{
 			name: "removes stale entry on config name change",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					Config: &artifactv1alpha1.PluginConfig{
 						Name: "new-name",
@@ -647,7 +647,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		{
 			name: "same config name does not remove entry",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.TestNamespace},
 			},
 			crToConfigName: map[string]string{"json": "json"},
 			initialConfig: &PluginsConfig{
@@ -662,7 +662,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			plugin: &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testPluginName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Finalizers: []string{testFinalizerName()},
 				},
 			},
@@ -685,7 +685,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS := filesystem.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{}),
 				)
@@ -1415,7 +1415,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "no registry has no references and removes stale ResolvedRefs",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -1433,7 +1433,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "nil OCIArtifact has no references",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 			},
 			wantNoConditions: true,
 		},
@@ -1441,11 +1441,11 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			name: "auth secret exists sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
 				},
 			},
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -1467,7 +1467,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "auth secret not found sets ResolvedRefs false and Programmed false",
 			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -1521,13 +1521,13 @@ func TestPatchStatus(t *testing.T) {
 	plugin := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testPluginName,
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 	}
 	r, cl := newTestReconciler(t, plugin)
 
 	fetched := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, fetched))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, fetched))
 
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessagePluginReconciled, 1),
@@ -1536,7 +1536,7 @@ func TestPatchStatus(t *testing.T) {
 	require.NoError(t, r.patchStatus(context.Background(), fetched))
 
 	obj := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.Namespace}, obj))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginName, Namespace: testutil.TestNamespace}, obj))
 	testutil.RequireConditions(t, obj.Status.Conditions, []testutil.ConditionExpect{
 		{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 	})

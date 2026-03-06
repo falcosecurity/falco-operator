@@ -47,4 +47,14 @@ resources:
   path: github.com/falcosecurity/falco-operator/api/artifact/v1alpha1
   plural: plugins
   version: v1alpha1
+- api:
+    crdVersion: v1
+    namespaced: true
+  controller: true
+  domain: falcosecurity.dev
+  group: instance
+  kind: Metacollector
+  path: github.com/falcosecurity/falco-operator/api/instance/v1alpha1
+  plural: metacollectors
+  version: v1alpha1
 version: "3"

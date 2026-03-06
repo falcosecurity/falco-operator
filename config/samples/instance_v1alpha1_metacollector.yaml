@@ -1,0 +1,15 @@
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Metacollector
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: metacollector-sample
+spec:
+  # version: "0.1.1"
+  # replicas: 1
+  # strategy:
+  #   type: RollingUpdate
+  #   rollingUpdate:
+  #     maxUnavailable: 1
+  #     maxSurge: 1

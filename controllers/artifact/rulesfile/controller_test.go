@@ -34,7 +34,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/artifact/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
@@ -47,12 +47,12 @@ const testRulesfileName = "test-rulesfile"
 var testInlineRules = "- rule: test_rule\n  desc: test\n  condition: always_true\n  output: test\n  priority: WARNING\n"
 
 func testFinalizerName() string {
-	return common.FormatFinalizerName(rulesfileFinalizerPrefix, testutil.NodeName)
+	return common.FormatFinalizerName(rulesfileFinalizerPrefix, testutil.TestNodeName)
 }
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconciler, client.Client) {
 	t.Helper()
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
@@ -60,7 +60,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconcile
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.Namespace,
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 		artifact.WithFS(mockFS),
 		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
 	)
@@ -71,13 +71,13 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconcile
 		recorder:        events.NewFakeRecorder(100),
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
-		nodeName:        testutil.NodeName,
-		namespace:       testutil.Namespace,
+		nodeName:        testutil.TestNodeName,
+		namespace:       testutil.TestNamespace,
 	}, cl
 }
 
 func TestNewRulesfileReconciler(t *testing.T) {
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 	r := NewRulesfileReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace")
 
@@ -109,14 +109,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testRulesfileName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
 						Selector: &metav1.LabelSelector{
@@ -133,14 +133,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -159,7 +159,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 				},
@@ -174,7 +174,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testRulesfileName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 				},
 			},
@@ -187,7 +187,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -206,7 +206,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -232,7 +232,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testRulesfileName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
 						Selector: &metav1.LabelSelector{
@@ -250,7 +250,7 @@ func TestReconcile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-rules-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
@@ -259,7 +259,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -281,13 +281,13 @@ func TestReconcile(t *testing.T) {
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-pull-secret",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 				},
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -319,7 +319,7 @@ func TestReconcile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-rules-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
@@ -328,7 +328,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testRulesfileName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
@@ -357,7 +357,7 @@ func TestReconcile(t *testing.T) {
 				if tt.writeErr != nil {
 					mockFS.WriteErr = tt.writeErr
 				}
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
 				)
@@ -416,14 +416,14 @@ func TestEnsureFinalizer(t *testing.T) {
 			rf := &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testRulesfileName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Finalizers: tt.finalizers,
 				},
 			}
 			r, cl := newTestReconciler(t, rf)
 
 			fetched := &artifactv1alpha1.Rulesfile{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, fetched))
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.TestNamespace}, fetched))
 
 			ok, err := r.ensureFinalizer(context.Background(), fetched)
 
@@ -432,7 +432,7 @@ func TestEnsureFinalizer(t *testing.T) {
 
 			if tt.wantOK {
 				updated := &artifactv1alpha1.Rulesfile{}
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, updated))
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.TestNamespace}, updated))
 				assert.True(t, controllerutil.ContainsFinalizer(updated, testFinalizerName()))
 			}
 		})
@@ -452,7 +452,7 @@ func TestEnsureRulesfile(t *testing.T) {
 		{
 			name: "OCI pull error sets failure condition",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -471,7 +471,7 @@ func TestEnsureRulesfile(t *testing.T) {
 		{
 			name: "stores inline rules successfully",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					InlineRules: &testInlineRules,
 				},
@@ -486,7 +486,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-rules-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
@@ -494,7 +494,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{
 						Name: "my-rules-cm",
@@ -508,7 +508,7 @@ func TestEnsureRulesfile(t *testing.T) {
 		{
 			name: "inline rules store failure sets condition",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					InlineRules: &testInlineRules,
 				},
@@ -525,7 +525,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-rules-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
@@ -533,7 +533,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{
 						Name: "my-rules-cm",
@@ -549,7 +549,7 @@ func TestEnsureRulesfile(t *testing.T) {
 		{
 			name: "no sources sets programmed without touching resolved refs",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec:       artifactv1alpha1.RulesfileSpec{},
 			},
 			wantConditions: []testutil.ConditionExpect{
@@ -567,7 +567,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				if tt.writeErr != nil {
 					mockFS.WriteErr = tt.writeErr
 				}
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
 				)
@@ -602,7 +602,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "inline only has no references and removes stale ResolvedRefs",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					InlineRules: &testInlineRules,
 				},
@@ -615,7 +615,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "OCI without registry has no references",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -631,11 +631,11 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			name: "ConfigMap ref exists sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
 				},
@@ -647,7 +647,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "ConfigMap ref not found sets ResolvedRefs false and Programmed false",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
 				},
@@ -662,11 +662,11 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			name: "OCI auth secret exists sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -688,7 +688,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "OCI auth secret not found sets ResolvedRefs false and Programmed false",
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{
@@ -713,14 +713,14 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			name: "ConfigMap and auth secret both exist sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
 				},
 				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
@@ -744,11 +744,11 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			name: "ConfigMap exists but auth secret missing fails on auth secret",
 			objects: []client.Object{
 				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.Namespace},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
@@ -803,13 +803,13 @@ func TestPatchStatus(t *testing.T) {
 	rf := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testRulesfileName,
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 	}
 	r, cl := newTestReconciler(t, rf)
 
 	fetched := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, fetched))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.TestNamespace}, fetched))
 
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageRulesfileReconciled, 1),
@@ -818,18 +818,18 @@ func TestPatchStatus(t *testing.T) {
 	require.NoError(t, r.patchStatus(context.Background(), fetched))
 
 	obj := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.Namespace}, obj))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testRulesfileName, Namespace: testutil.TestNamespace}, obj))
 	testutil.RequireConditions(t, obj.Status.Conditions, []testutil.ConditionExpect{
 		{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 	})
 }
 
 func TestFindRulesfilesForConfigMap(t *testing.T) {
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	rf := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testRulesfileName,
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 		Spec: artifactv1alpha1.RulesfileSpec{
 			ConfigMapRef: &commonv1alpha1.ConfigMapRef{
@@ -845,7 +845,7 @@ func TestFindRulesfilesForConfigMap(t *testing.T) {
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.Namespace,
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 		artifact.WithFS(mockFS),
 		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
 	)
@@ -856,8 +856,8 @@ func TestFindRulesfilesForConfigMap(t *testing.T) {
 		recorder:        events.NewFakeRecorder(100),
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
-		nodeName:        testutil.NodeName,
-		namespace:       testutil.Namespace,
+		nodeName:        testutil.TestNodeName,
+		namespace:       testutil.TestNamespace,
 	}
 
 	tests := []struct {
@@ -882,14 +882,14 @@ func TestFindRulesfilesForConfigMap(t *testing.T) {
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      tt.configMapName,
-					Namespace: testutil.Namespace,
+					Namespace: testutil.TestNamespace,
 				},
 			}
 			requests := r.findRulesfilesForConfigMap(context.Background(), cm)
 			require.Len(t, requests, tt.wantCount)
 			if tt.wantCount > 0 {
 				assert.Equal(t, testRulesfileName, requests[0].Name)
-				assert.Equal(t, testutil.Namespace, requests[0].Namespace)
+				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
 			}
 		})
 	}

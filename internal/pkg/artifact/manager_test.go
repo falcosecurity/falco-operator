@@ -24,12 +24,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
@@ -109,15 +109,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority:        50,
 			wantErr:         false,
 			wantWriteCalls:  1,
@@ -150,15 +148,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					"other-key": testData, // ConfigMap exists but doesn't have the required rules.yaml key
-				},
-			},
+				}).
+				Build(),
 			priority:        50,
 			wantErr:         false,
 			wantWriteCalls:  0,
@@ -169,15 +165,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
@@ -194,15 +188,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
@@ -219,15 +211,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 60,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
@@ -244,15 +234,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority:        50,
 			fsWriteErr:      fmt.Errorf("disk full"),
 			wantErr:         true,
@@ -265,15 +253,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
@@ -291,15 +277,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",
@@ -318,15 +302,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 			configMapRef: &commonv1alpha1.ConfigMapRef{
 				Name: testConfigMapName,
 			},
-			configMap: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      testConfigMapName,
-					Namespace: testNamespace,
-				},
-				Data: map[string]string{
+			configMap: builders.NewConfigMap().
+				WithName(testConfigMapName).
+				WithNamespace(testNamespace).
+				WithData(map[string]string{
 					testKey: testData,
-				},
-			},
+				}).
+				Build(),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml",

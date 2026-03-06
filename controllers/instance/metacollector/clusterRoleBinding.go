@@ -1,0 +1,54 @@
+// Copyright (C) 2026 The Falco Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package metacollector
+
+import (
+	"context"
+
+	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
+)
+
+func generateClusterRoleBinding(mc *instancev1alpha1.Metacollector) runtime.Object {
+	resourceName := instance.GenerateUniqueName(mc.Name, mc.Namespace)
+
+	return builders.NewClusterRoleBinding().
+		WithName(resourceName).
+		WithLabels(mc.Labels).
+		AddSubject(rbacv1.Subject{
+			Kind:      "ServiceAccount",
+			Name:      mc.Name,
+			Namespace: mc.Namespace,
+		}).
+		WithRoleRef(rbacv1.RoleRef{
+			Kind:     "ClusterRole",
+			Name:     resourceName,
+			APIGroup: "rbac.authorization.k8s.io",
+		}).
+		Build()
+}
+
+func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, mc *instancev1alpha1.Metacollector) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, mc, fieldManager,
+		generateClusterRoleBinding,
+		instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true},
+	)
+}

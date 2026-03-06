@@ -36,7 +36,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/artifact/testutil"
+	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
@@ -59,12 +59,12 @@ falco_libs:
 `
 
 func testFinalizerName() string {
-	return common.FormatFinalizerName(configFinalizerPrefix, testutil.NodeName)
+	return common.FormatFinalizerName(configFinalizerPrefix, testutil.TestNodeName)
 }
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, client.Client) {
 	t.Helper()
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
@@ -72,7 +72,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.Namespace,
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 		artifact.WithFS(mockFS),
 	)
 
@@ -82,13 +82,13 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 		recorder:        events.NewFakeRecorder(100),
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
-		nodeName:        testutil.NodeName,
-		namespace:       testutil.Namespace,
+		nodeName:        testutil.TestNodeName,
+		namespace:       testutil.TestNamespace,
 	}, cl
 }
 
 func TestNewConfigReconciler(t *testing.T) {
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 	r := NewConfigReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace")
 
@@ -120,14 +120,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testConfigName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Selector: &metav1.LabelSelector{
@@ -144,14 +144,14 @@ func TestReconcile(t *testing.T) {
 			objects: []client.Object{
 				&corev1.Node{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.NodeName,
+						Name:   testutil.TestNodeName,
 						Labels: map[string]string{"role": "worker"},
 					},
 				},
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -170,7 +170,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -188,7 +188,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testConfigName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
@@ -204,7 +204,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -224,7 +224,7 @@ func TestReconcile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
@@ -233,7 +233,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -255,7 +255,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -278,7 +278,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{"some-other-finalizer"},
 					},
 				},
@@ -292,7 +292,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      testConfigName,
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Selector: &metav1.LabelSelector{
@@ -310,7 +310,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -332,7 +332,7 @@ func TestReconcile(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
@@ -341,7 +341,7 @@ func TestReconcile(t *testing.T) {
 				&artifactv1alpha1.Config{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       testConfigName,
-						Namespace:  testutil.Namespace,
+						Namespace:  testutil.TestNamespace,
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.ConfigSpec{
@@ -368,7 +368,7 @@ func TestReconcile(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS := filesystem.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 					artifact.WithFS(mockFS),
 				)
 			}
@@ -405,7 +405,7 @@ func TestReconcile(t *testing.T) {
 }
 
 func TestReconcile_GetErrorPropagates(t *testing.T) {
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -416,15 +416,15 @@ func TestReconcile_GetErrorPropagates(t *testing.T) {
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.Namespace, artifact.WithFS(mockFS))
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace, artifact.WithFS(mockFS))
 	r := &ConfigReconciler{
 		Client:          cl,
 		Scheme:          s,
 		recorder:        events.NewFakeRecorder(100),
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
-		nodeName:        testutil.NodeName,
-		namespace:       testutil.Namespace,
+		nodeName:        testutil.TestNodeName,
+		namespace:       testutil.TestNamespace,
 	}
 
 	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
@@ -453,14 +453,14 @@ func TestEnsureFinalizer(t *testing.T) {
 			config := &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Finalizers: tt.finalizers,
 				},
 			}
 			r, cl := newTestReconciler(t, config)
 
 			fetched := &artifactv1alpha1.Config{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.Namespace}, fetched))
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, fetched))
 
 			ok, err := r.ensureFinalizer(context.Background(), fetched)
 
@@ -469,7 +469,7 @@ func TestEnsureFinalizer(t *testing.T) {
 
 			if tt.wantOK {
 				updated := &artifactv1alpha1.Config{}
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.Namespace}, updated))
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, updated))
 				assert.True(t, controllerutil.ContainsFinalizer(updated, testFinalizerName()))
 			}
 		})
@@ -489,7 +489,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testConfigName,
-					Namespace: testutil.Namespace,
+					Namespace: testutil.TestNamespace,
 				},
 				Status: artifactv1alpha1.ConfigStatus{
 					Conditions: []metav1.Condition{
@@ -505,12 +505,12 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 				},
 			},
 			config: &artifactv1alpha1.Config{
-				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.ConfigSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
 				},
@@ -522,7 +522,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "configmap missing sets ResolvedRefs false and Programmed false",
 			config: &artifactv1alpha1.Config{
-				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.Namespace},
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.ConfigSpec{
 					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
 				},
@@ -567,7 +567,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -585,7 +585,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -601,7 +601,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -619,7 +619,7 @@ func TestEnsureConfig(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
@@ -629,7 +629,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -648,7 +648,7 @@ func TestEnsureConfig(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
@@ -658,7 +658,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -677,7 +677,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 1,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -692,7 +692,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 2,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -712,7 +712,7 @@ func TestEnsureConfig(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
-						Namespace: testutil.Namespace,
+						Namespace: testutil.TestNamespace,
 					},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
@@ -722,7 +722,7 @@ func TestEnsureConfig(t *testing.T) {
 			config: &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       testConfigName,
-					Namespace:  testutil.Namespace,
+					Namespace:  testutil.TestNamespace,
 					Generation: 2,
 				},
 				Spec: artifactv1alpha1.ConfigSpec{
@@ -746,7 +746,7 @@ func TestEnsureConfig(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS.WriteErr = tt.writeErr
 			}
-			r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+			r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
 				artifact.WithFS(mockFS),
 			)
 
@@ -776,20 +776,20 @@ func TestFindConfigsForConfigMap(t *testing.T) {
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-config-cm",
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 	}
 	config := &artifactv1alpha1.Config{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testConfigName,
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 		Spec: artifactv1alpha1.ConfigSpec{
 			ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
 		},
 	}
 
-	s := testutil.Scheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(configMap, config).
@@ -798,26 +798,26 @@ func TestFindConfigsForConfigMap(t *testing.T) {
 
 	r := &ConfigReconciler{
 		Client:    cl,
-		namespace: testutil.Namespace,
+		namespace: testutil.TestNamespace,
 	}
 
 	requests := r.findConfigsForConfigMap(context.Background(), configMap)
 	require.Len(t, requests, 1)
 	assert.Equal(t, testConfigName, requests[0].Name)
-	assert.Equal(t, testutil.Namespace, requests[0].Namespace)
+	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
 }
 
 func TestPatchStatus(t *testing.T) {
 	config := &artifactv1alpha1.Config{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testConfigName,
-			Namespace: testutil.Namespace,
+			Namespace: testutil.TestNamespace,
 		},
 	}
 	r, cl := newTestReconciler(t, config)
 
 	fetched := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.Namespace}, fetched))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, fetched))
 
 	fetched.Status.Conditions = []metav1.Condition{
 		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageConfigReconciled, 1),
@@ -826,7 +826,7 @@ func TestPatchStatus(t *testing.T) {
 	require.NoError(t, r.patchStatus(context.Background(), fetched))
 
 	obj := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.Namespace}, obj))
+	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, obj))
 	testutil.RequireConditions(t, obj.Status.Conditions, []testutil.ConditionExpect{
 		{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 	})

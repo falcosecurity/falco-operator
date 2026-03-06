@@ -74,6 +74,8 @@ rules:
   resources:
   - falcos
   - falcos/status
+  - metacollectors
+  - metacollectors/status
   verbs:
   - create
   - delete
