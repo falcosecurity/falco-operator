@@ -25,3 +25,6 @@ go.work
 *.swp
 *.swo
 *~
+
+# Chainsaw test reports
+chainsaw-report.json

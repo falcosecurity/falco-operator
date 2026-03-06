@@ -1,0 +1,16 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-nonmatching
+spec:
+  priority: 50
+  inlineRules: |
+    - rule: Non-Matching Selector Rule
+      desc: Rule that should NOT be applied
+      condition: evt.type = open
+      output: "Non-matching selector rule triggered"
+      priority: DEBUG
+      enabled: false
+  selector:
+    matchLabels:
+      non-existent-label: does-not-exist

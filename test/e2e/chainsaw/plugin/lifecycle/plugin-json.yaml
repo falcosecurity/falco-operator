@@ -1,0 +1,11 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: json
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/json
+  config:
+    initConfig:
+      sssURL: "https://initial.example.com"

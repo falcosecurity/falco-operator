@@ -1,0 +1,8 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-boundary-low
+spec:
+  priority: 0
+  config: |
+    json_output: true

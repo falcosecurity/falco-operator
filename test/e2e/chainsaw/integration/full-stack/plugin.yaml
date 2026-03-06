@@ -1,0 +1,12 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: json
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/json
+    registry:
+      name: ghcr.io
+  config:
+    name: json

@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-rules-cm
+data:
+  rules.yaml: |
+    - rule: Test ConfigMap Rule
+      desc: A test rule from ConfigMap
+      condition: evt.type = open
+      output: "Test ConfigMap rule triggered"
+      priority: WARNING
+      source: syscall

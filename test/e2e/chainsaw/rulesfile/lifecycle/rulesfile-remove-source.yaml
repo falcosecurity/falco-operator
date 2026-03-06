@@ -1,0 +1,19 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: rulesfile-rm
+spec:
+  priority: 50
+  ociArtifact:
+    image:
+      repository: falcosecurity/rules/falco-rules
+      tag: "3"
+    registry:
+      name: ghcr.io
+  inlineRules: |
+    - rule: Removable Inline Rule
+      desc: A test rule that will be removed
+      condition: evt.type = open
+      output: "Removable inline rule triggered"
+      priority: WARNING
+      source: syscall

@@ -79,13 +79,18 @@ vet: ## Run go vet against code.
 test: manifests generate fmt vet setup-envtest ## Run tests.
 	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
-# The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
-# Prometheus and CertManager are installed by default; skip with:
-# - PROMETHEUS_INSTALL_SKIP=true
-# - CERT_MANAGER_INSTALL_SKIP=true
+# E2E test configuration using Kind cluster
+E2E_FALCO_IMG ?= falcosecurity/falco-operator:e2e
+E2E_ARTIFACT_IMG ?= falcosecurity/artifact-operator:e2e
+CHAINSAW_TEST_DIR ?= ./test/e2e/chainsaw
+CHAINSAW_CONFIG ?= ./test/e2e/chainsaw/.chainsaw.yaml
+
 .PHONY: test-e2e
-test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated environment using Kind.
+test-e2e: chainsaw ## Run chainsaw e2e tests (requires running cluster with operator deployed).
+	$(CHAINSAW) test --config $(CHAINSAW_CONFIG) --test-dir $(CHAINSAW_TEST_DIR)
+
+.PHONY: test-e2e-setup
+test-e2e-setup: manifests generate fmt vet ## Build images and deploy operator to Kind cluster for e2e testing.
 	@command -v kind >/dev/null 2>&1 || { \
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
@@ -94,7 +99,26 @@ test-e2e: manifests generate fmt vet ## Run the e2e tests. Expected an isolated 
 		echo "No Kind cluster is running. Please start a Kind cluster before running the e2e tests."; \
 		exit 1; \
 	}
-	go test ./test/e2e/ -v -ginkgo.v
+	@echo "=== Building artifact-operator image ==="
+	@$(MAKE) docker-build OPERATOR=artifact IMG=$(E2E_ARTIFACT_IMG)
+	@echo "=== Building falco-operator image ==="
+	@$(MAKE) docker-build OPERATOR=falco IMG=$(E2E_FALCO_IMG) ARTIFACT_OPERATOR_IMAGE=$(E2E_ARTIFACT_IMG)
+	@echo "=== Loading images into Kind ==="
+	@kind load docker-image $(E2E_ARTIFACT_IMG)
+	@kind load docker-image $(E2E_FALCO_IMG)
+	@echo "=== Installing CRDs ==="
+	@$(MAKE) install
+	@echo "=== Deploying operator ==="
+	@$(MAKE) deploy IMG=$(E2E_FALCO_IMG)
+	@echo "=== Waiting for operator to be ready ==="
+	@kubectl wait --for=condition=Available deployment/falco-operator -n falco-operator --timeout=120s
+
+.PHONY: test-e2e-teardown
+test-e2e-teardown: ## Undeploy operator after e2e testing.
+	@$(MAKE) undeploy ignore-not-found=true || true
+
+.PHONY: test-e2e-all
+test-e2e-all: test-e2e-setup test-e2e test-e2e-teardown ## Full e2e test lifecycle: setup, test, teardown.
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
@@ -210,6 +234,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
 GCI ?= $(LOCALBIN)/gci
 ADD_LICENSE ?= $(LOCALBIN)/addlicense
+CHAINSAW ?= $(LOCALBIN)/chainsaw
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v5.5.0
@@ -221,6 +246,7 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 GOLANGCI_LINT_VERSION ?= v2.8.0
 GCI_VERSION ?= v0.13.5
 ADD_LICENSE_VERSION ?= v1.1.1
+CHAINSAW_VERSION ?= v0.2.12
 
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
@@ -259,6 +285,11 @@ $(GCI): $(LOCALBIN)
 addlicense: $(ADD_LICENSE) ## Download addlicense locally if necessary
 $(ADD_LICENSE): $(LOCALBIN)
 	$(call go-install-tool,$(ADD_LICENSE),github.com/google/addlicense,$(ADD_LICENSE_VERSION))
+
+.PHONY: chainsaw
+chainsaw: $(CHAINSAW) ## Download chainsaw locally if necessary.
+$(CHAINSAW): $(LOCALBIN)
+	$(call go-install-tool,$(CHAINSAW),github.com/kyverno/chainsaw,$(CHAINSAW_VERSION))
 # go-install-tool will 'go install' any package with custom target and name of binary, if it doesn't exist
 # $1 - target path with name of binary
 # $2 - package url which can be installed

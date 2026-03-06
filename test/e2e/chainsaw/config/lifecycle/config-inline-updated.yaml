@@ -1,0 +1,11 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  name: config-test
+spec:
+  config: |
+    json_output: false
+    json_include_output_property: false
+    log_stderr: true
+    log_syslog: true
+    log_level: debug
