@@ -21,7 +21,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -31,33 +30,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
-
-func TestDeploymentStrategy(t *testing.T) {
-	tests := []struct {
-		name     string
-		mc       *instancev1alpha1.Metacollector
-		wantType appsv1.DeploymentStrategyType
-	}{
-		{
-			name:     "nil strategy defaults to RollingUpdate",
-			mc:       builders.NewMetacollector().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
-			wantType: appsv1.RollingUpdateDeploymentStrategyType,
-		},
-		{
-			name: "custom Recreate strategy",
-			mc: builders.NewMetacollector().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
-			wantType: appsv1.RecreateDeploymentStrategyType,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := instance.DeploymentStrategy(tt.mc.Spec.Strategy)
-			assert.Equal(t, tt.wantType, s.Type)
-		})
-	}
-}
 
 func TestBaseDeployment(t *testing.T) {
 	mc := builders.NewMetacollector().WithName("test-mc").WithNamespace("default").
@@ -79,103 +51,6 @@ func TestBaseDeployment(t *testing.T) {
 	assert.Equal(t, "test-mc", dep.Spec.Template.Labels["app.kubernetes.io/instance"])
 	// Base labels should also be present
 	assert.Equal(t, "metacollector", dep.Spec.Template.Labels["app"])
-}
-
-func TestPodTemplateSpecLabels(t *testing.T) {
-	tests := []struct {
-		name       string
-		appName    string
-		baseLabels map[string]string
-		wantKeys   map[string]string
-	}{
-		{
-			name:    "with nil base labels",
-			appName: "test",
-			wantKeys: map[string]string{
-				"app.kubernetes.io/name":     "test",
-				"app.kubernetes.io/instance": "test",
-			},
-		},
-		{
-			name:       "merges base labels",
-			appName:    "test",
-			baseLabels: map[string]string{"app": "metacollector"},
-			wantKeys: map[string]string{
-				"app.kubernetes.io/name":     "test",
-				"app.kubernetes.io/instance": "test",
-				"app":                        "metacollector",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			labels := instance.PodTemplateSpecLabels(tt.appName, tt.baseLabels)
-			for k, v := range tt.wantKeys {
-				assert.Equal(t, v, labels[k], "label %s", k)
-			}
-		})
-	}
-}
-
-func TestRemoveEmptyContainers(t *testing.T) {
-	tests := []struct {
-		name       string
-		obj        *unstructured.Unstructured
-		wantErr    bool
-		wantRemove bool
-	}{
-		{
-			name: "removes nil containers field",
-			obj: &unstructured.Unstructured{
-				Object: map[string]any{
-					"spec": map[string]any{
-						"template": map[string]any{
-							"spec": map[string]any{
-								"containers": nil,
-							},
-						},
-					},
-				},
-			},
-			wantRemove: true,
-		},
-		{
-			name: "keeps non-nil containers field",
-			obj: &unstructured.Unstructured{
-				Object: map[string]any{
-					"spec": map[string]any{
-						"template": map[string]any{
-							"spec": map[string]any{
-								"containers": []any{
-									map[string]any{"name": "test"},
-								},
-							},
-						},
-					},
-				},
-			},
-			wantRemove: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := instance.RemoveEmptyContainers(tt.obj)
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
-			require.NoError(t, err)
-
-			_, found, _ := unstructured.NestedSlice(tt.obj.Object, "spec", "template", "spec", "containers")
-			if tt.wantRemove {
-				assert.False(t, found, "containers should be removed")
-			} else {
-				assert.True(t, found, "containers should be present")
-			}
-		})
-	}
 }
 
 func TestGenerateApplyConfiguration(t *testing.T) {

@@ -214,7 +214,7 @@ func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*un
 	}
 
 	// Remove the empty containers field if it exists.
-	if instance.RemoveEmptyContainers(resource) != nil {
+	if err := instance.RemoveEmptyContainers(resource); err != nil {
 		return nil, err
 	}
 

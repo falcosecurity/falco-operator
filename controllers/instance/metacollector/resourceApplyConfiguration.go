@@ -109,7 +109,7 @@ func generateUserDefinedResource(mc *instancev1alpha1.Metacollector) (*unstructu
 		Object: unUserResource,
 	}
 
-	if instance.RemoveEmptyContainers(resource) != nil {
+	if err := instance.RemoveEmptyContainers(resource); err != nil {
 		return nil, err
 	}
 

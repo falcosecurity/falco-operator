@@ -190,7 +190,6 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.Role{}).
 		Owns(&rbacv1.RoleBinding{}).
-		Owns(&corev1.ServiceAccount{}).
 		Owns(&corev1.ConfigMap{}).
 		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
