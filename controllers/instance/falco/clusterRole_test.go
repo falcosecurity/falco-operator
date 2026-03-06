@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +30,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
@@ -42,34 +42,19 @@ func TestGenerateClusterRole(t *testing.T) {
 		wantLabels map[string]string
 	}{
 		{
-			name: "basic ClusterRole creation",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
-				},
-			},
+			name:       "basic ClusterRole creation",
+			falco:      builders.NewFalco().WithName("test-falco").WithNamespace("default").WithLabels(map[string]string{"app": "falco"}).Build(),
 			wantName:   "test-falco--default",
 			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
-			name: "ClusterRole with empty namespace",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-falco",
-				},
-			},
+			name:     "ClusterRole with empty namespace",
+			falco:    builders.NewFalco().WithName("test-falco").Build(),
 			wantName: "test-falco--",
 		},
 		{
-			name: "ClusterRole propagates nil labels correctly",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-				},
-			},
+			name:     "ClusterRole propagates nil labels correctly",
+			falco:    builders.NewFalco().WithName("test-falco").WithNamespace("default").Build(),
 			wantName: "test-falco--default",
 		},
 	}
@@ -98,9 +83,7 @@ func TestGenerateClusterRoleViaGenerateResource(t *testing.T) {
 	require.NoError(t, rbacv1.AddToScheme(scheme))
 	require.NoError(t, instancev1alpha1.AddToScheme(scheme))
 
-	falco := &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-falco", Namespace: "default"},
-	}
+	falco := builders.NewFalco().WithName("test-falco").WithNamespace("default").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
 	result, err := instance.GenerateResource(cl, falco, generateClusterRole, instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true})
@@ -113,7 +96,7 @@ func TestGenerateClusterRoleViaGenerateResource(t *testing.T) {
 
 func TestEnsureClusterRole(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco()
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 

@@ -34,6 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func testScheme(t *testing.T) *runtime.Scheme {
@@ -46,20 +48,13 @@ func testScheme(t *testing.T) *runtime.Scheme {
 
 // newConfigMap creates a ConfigMap for use as a client.Object in tests.
 func newConfigMap() *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test",
-			Namespace: "default",
-		},
-	}
+	return builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
 }
 
 // testSAGenerator is a simple ResourceGenerator used by TestEnsureResource.
 func testSAGenerator(cm *corev1.ConfigMap) runtime.Object {
-	return &corev1.ServiceAccount{
-		TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
-		ObjectMeta: metav1.ObjectMeta{Name: cm.Name, Namespace: cm.Namespace},
-	}
+	return builders.NewServiceAccount().
+		WithName(cm.Name).WithNamespace(cm.Namespace).Build()
 }
 
 func TestEnsureResource(t *testing.T) {
@@ -89,9 +84,8 @@ func TestEnsureResource(t *testing.T) {
 		{
 			name: "proceeds when no managed fields found",
 			existing: []client.Object{
-				&corev1.ServiceAccount{
-					ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-				},
+				builders.NewServiceAccount().
+					WithName("test").WithNamespace("default").Build(),
 			},
 		},
 	}
@@ -148,12 +142,8 @@ func TestEnsureFinalizer(t *testing.T) {
 			wantUpdated: true,
 		},
 		{
-			name: "no-op when finalizer already present",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{"test-finalizer"}
-				return cm
-			}(),
+			name:         "no-op when finalizer already present",
+			obj:          builders.NewConfigMap().WithName("test").WithNamespace("default").WithFinalizers([]string{"test-finalizer"}).Build(),
 			hasFinalizer: true,
 			wantUpdated:  false,
 		},
@@ -309,6 +299,8 @@ func TestHandleDeletion(t *testing.T) {
 		{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "ClusterRole"},
 	}
 
+	now := metav1.Now()
+
 	tests := []struct {
 		name                   string
 		obj                    *corev1.ConfigMap
@@ -321,69 +313,42 @@ func TestHandleDeletion(t *testing.T) {
 	}{
 		{
 			name: "not marked for deletion returns early",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{finalizerName}
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithFinalizers([]string{finalizerName}).Build(),
 			wantHandled: false,
 		},
 		{
 			name: "no finalizer returns true",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				now := metav1.Now()
-				cm.DeletionTimestamp = &now
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithDeletionTimestamp(&now).Build(),
 			skipObjInClient: true,
 			wantHandled:     true,
 		},
 		{
 			name: "removes cluster resources and finalizer",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{finalizerName}
-				now := metav1.Now()
-				cm.DeletionTimestamp = &now
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: true,
 			wantHandled:            true,
 		},
 		{
 			name: "handles deletion when cluster resources do not exist",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{finalizerName}
-				now := metav1.Now()
-				cm.DeletionTimestamp = &now
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: false,
 			wantHandled:            true,
 		},
 		{
 			name: "returns error when cluster resource deletion fails",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{finalizerName}
-				now := metav1.Now()
-				cm.DeletionTimestamp = &now
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
 			deleteErr: fmt.Errorf("injected delete error"),
 			wantErr:   "injected delete error",
 		},
 		{
 			name: "returns error when finalizer patch fails",
-			obj: func() *corev1.ConfigMap {
-				cm := newConfigMap()
-				cm.Finalizers = []string{finalizerName}
-				now := metav1.Now()
-				cm.DeletionTimestamp = &now
-				return cm
-			}(),
+			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
+				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -398,8 +363,8 @@ func TestHandleDeletion(t *testing.T) {
 			if tt.createClusterResources {
 				resourceName := GenerateUniqueName("test", "default")
 				objs = append(objs,
-					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: resourceName}},
-					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: resourceName}},
+					builders.NewClusterRole().WithName(resourceName).Build(),
+					builders.NewClusterRoleBinding().WithName(resourceName).Build(),
 				)
 			}
 

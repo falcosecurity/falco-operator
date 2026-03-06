@@ -37,10 +37,13 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
+
+const defaultName = "test"
 
 func TestEnsureFinalizer(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
@@ -54,17 +57,17 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:        "adds finalizer when not present",
-			falco:       newFalco(),
+			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			wantUpdated: true,
 		},
 		{
 			name:        "no-op when finalizer already present",
-			falco:       newFalco(withFinalizer()),
+			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithFinalizers([]string{finalizer}).Build(),
 			wantUpdated: false,
 		},
 		{
 			name:     "returns error when patch fails",
-			falco:    newFalco(),
+			falco:    builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -116,30 +119,32 @@ func TestEnsureVersion(t *testing.T) {
 	}{
 		{
 			name:        "sets default version when not set",
-			falco:       newFalco(),
+			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			wantUpdated: true,
 		},
 		{
 			name:        "keeps existing version",
-			falco:       newFalco(withVersion("0.40.0")),
+			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithVersion("0.40.0").Build(),
 			wantUpdated: false,
 			wantVersion: "0.40.0",
 		},
 		{
-			name:        "extracts version from image",
-			falco:       newFalco(withImage("falcosecurity/falco:0.38.0")),
+			name: "extracts version from image",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithImage(containerName, "falcosecurity/falco:0.38.0").Build(),
 			wantUpdated: true,
 			wantVersion: "0.38.0",
 		},
 		{
-			name:        "image version takes precedence over spec version",
-			falco:       newFalco(withVersion("0.35.0"), withImage("falcosecurity/falco:0.39.0")),
+			name: "image version takes precedence over spec version",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithVersion("0.35.0").WithImage(containerName, "falcosecurity/falco:0.39.0").Build(),
 			wantUpdated: true,
 			wantVersion: "0.39.0",
 		},
 		{
 			name:     "returns error when patch fails",
-			falco:    newFalco(),
+			falco:    builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -180,6 +185,7 @@ func TestEnsureVersion(t *testing.T) {
 
 func TestHandleDeletion(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	now := metav1.Now()
 
 	tests := []struct {
 		name                   string
@@ -196,51 +202,57 @@ func TestHandleDeletion(t *testing.T) {
 	}{
 		{
 			name:                   "preserves finalizer and resources when not marked for deletion",
-			falco:                  newFalco(withFinalizer()),
+			falco:                  builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithFinalizers([]string{finalizer}).Build(),
 			createClusterResources: true,
 			wantHandled:            false,
 			wantFinalizerPresent:   true,
 			wantClusterResExist:    true,
 		},
 		{
-			name:                   "handles deletion when cluster resources do not exist",
-			falco:                  newFalco(withFinalizer(), withDeletionTimestamp()),
+			name: "handles deletion when cluster resources do not exist",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: false,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name:                   "removes cluster resources and finalizer during deletion",
-			falco:                  newFalco(withFinalizer(), withDeletionTimestamp()),
+			name: "removes cluster resources and finalizer during deletion",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: true,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name:                 "returns early when deleted without finalizer",
-			falco:                newFalco(withDeletionTimestamp()),
+			name: "returns early when deleted without finalizer",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithDeletionTimestamp(&now).Build(),
 			skipFalcoInClient:    true,
 			wantHandled:          true,
 			wantFinalizerPresent: false,
 			wantClusterResExist:  false,
 		},
 		{
-			name:         "returns error when ClusterRoleBinding deletion fails",
-			falco:        newFalco(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when ClusterRoleBinding deletion fails",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			crbDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:      "injected delete error",
 		},
 		{
-			name:        "returns error when ClusterRole deletion fails",
-			falco:       newFalco(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when ClusterRole deletion fails",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			crDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:     "injected delete error",
 		},
 		{
-			name:     "returns error when finalizer removal patch fails",
-			falco:    newFalco(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when finalizer removal patch fails",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -254,8 +266,8 @@ func TestHandleDeletion(t *testing.T) {
 			}
 			if tt.createClusterResources {
 				objs = append(objs,
-					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
-					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
+					builders.NewClusterRole().WithName(instance.GenerateUniqueName(defaultName, testutil.TestNamespace)).Build(),
+					builders.NewClusterRoleBinding().WithName(instance.GenerateUniqueName(defaultName, testutil.TestNamespace)).Build(),
 				)
 			}
 
@@ -334,8 +346,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 		wantConditionReason string
 	}{
 		{
-			name:  "deployment available",
-			falco: newFalco(withType(instance.ResourceTypeDeployment), withReplicas(2)),
+			name: "deployment available",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithReplicas(2).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2, UnavailableReplicas: 0},
@@ -345,8 +358,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDeploymentAvailable,
 		},
 		{
-			name:  "deployment unavailable",
-			falco: newFalco(withType(instance.ResourceTypeDeployment), withReplicas(3)),
+			name: "deployment unavailable",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithReplicas(3).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 2},
@@ -356,8 +370,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDeploymentUnavailable,
 		},
 		{
-			name:                "deployment not found sets zero availability",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment), withReplicas(1)),
+			name: "deployment not found sets zero availability",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithReplicas(1).Build(),
 			wantDesired:         1,
 			wantAvailable:       0,
 			wantUnavailable:     0,
@@ -366,7 +381,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:  "defaults to 1 replica when spec.replicas is nil",
-			falco: newFalco(withType(instance.ResourceTypeDeployment)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1},
@@ -376,8 +391,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDeploymentAvailable,
 		},
 		{
-			name:                "returns error when deployment fetch fails",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment), withReplicas(1)),
+			name: "returns error when deployment fetch fails",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithReplicas(1).Build(),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "unable to fetch deployment",
 			wantDesired:         1,
@@ -386,7 +402,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:  "daemonset available",
-			falco: newFalco(withType(instance.ResourceTypeDaemonSet)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDaemonSet).Build(),
 			workload: &appsv1.DaemonSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DaemonSetStatus{DesiredNumberScheduled: 3, NumberAvailable: 3, NumberUnavailable: 0},
@@ -397,7 +413,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:  "daemonset unavailable",
-			falco: newFalco(withType(instance.ResourceTypeDaemonSet)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDaemonSet).Build(),
 			workload: &appsv1.DaemonSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DaemonSetStatus{DesiredNumberScheduled: 5, NumberAvailable: 3, NumberUnavailable: 2},
@@ -407,8 +423,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDaemonSetUnavailable,
 		},
 		{
-			name:                "daemonset not found sets zero availability",
-			falco:               newFalco(withType(instance.ResourceTypeDaemonSet)),
+			name: "daemonset not found sets zero availability",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDaemonSet).Build(),
 			wantDesired:         0, // DaemonSet desired comes from status, not spec
 			wantAvailable:       0,
 			wantUnavailable:     0,
@@ -416,8 +433,9 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDaemonSetNotFound,
 		},
 		{
-			name:                "returns error when daemonset fetch fails",
-			falco:               newFalco(withType(instance.ResourceTypeDaemonSet)),
+			name: "returns error when daemonset fetch fails",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDaemonSet).Build(),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "unable to fetch daemonset",
 			wantConditionStatus: metav1.ConditionUnknown,
@@ -479,38 +497,38 @@ func TestCleanupDualDeployments(t *testing.T) {
 	}{
 		{
 			name:  "preserves Deployment when no DaemonSet exists",
-			falco: newFalco(withType(instance.ResourceTypeDeployment)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			existingObjs: []client.Object{
-				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace}},
+				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
 		},
 		{
 			name:  "deletes DaemonSet when type is Deployment",
-			falco: newFalco(withType(instance.ResourceTypeDeployment)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			existingObjs: []client.Object{
-				&appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace}},
+				builders.NewDaemonSet().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
 			wantDeleted: instance.ResourceTypeDaemonSet,
 		},
 		{
 			name:  "deletes Deployment when type is DaemonSet",
-			falco: newFalco(withType(instance.ResourceTypeDaemonSet)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDaemonSet).Build(),
 			existingObjs: []client.Object{
-				&appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace}},
+				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
 			wantDeleted: instance.ResourceTypeDeployment,
 		},
 		{
 			name:    "returns error when Get fails with non-NotFound",
-			falco:   newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:   builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			getErr:  fmt.Errorf("injected get error"),
 			wantErr: "injected get error",
 		},
 		{
 			name:  "returns error when Delete fails",
-			falco: newFalco(withType(instance.ResourceTypeDeployment)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			existingObjs: []client.Object{
-				&appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace}},
+				builders.NewDaemonSet().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
 			deleteErr: fmt.Errorf("injected delete error"),
 			wantErr:   "injected delete error",
@@ -599,7 +617,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			falco := newFalco()
+			falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco)
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -627,7 +645,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 func TestPatchStatus(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco(withType(instance.ResourceTypeDeployment))
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build()
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(falco).
@@ -668,43 +686,42 @@ func TestEnsureDeployment(t *testing.T) {
 		wantKind            string
 	}{
 		{
-			name:                "creates Deployment with default values",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment)),
+			name: "creates Deployment with default values",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            instance.ResourceTypeDeployment,
 		},
 		{
-			name:                "creates Deployment with custom version",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment), withVersion("0.38.0")),
+			name: "creates Deployment with custom version",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithVersion("0.38.0").Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            instance.ResourceTypeDeployment,
 		},
 		{
-			name:                "creates DaemonSet",
-			falco:               newFalco(withType(instance.ResourceTypeDaemonSet)),
+			name: "creates DaemonSet",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDaemonSet).Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            instance.ResourceTypeDaemonSet,
 		},
 		{
-			name:  "updates existing Deployment",
-			falco: newFalco(withType(instance.ResourceTypeDeployment), withVersion("0.39.0")),
+			name: "updates existing Deployment",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).WithVersion("0.39.0").Build(),
 			existingObjs: []client.Object{
-				&appsv1.Deployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
-					Spec: appsv1.DeploymentSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"app.kubernetes.io/name": "test", "app.kubernetes.io/instance": "test"},
-						},
-						Template: corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: containerName, Image: image.BuildFalcoImageStringFromVersion("0.38.0")}},
-							},
-						},
-					},
-				},
+				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).
+					WithSelector(map[string]string{
+						"app.kubernetes.io/name": "test", "app.kubernetes.io/instance": "test",
+					}).
+					AddContainer(&corev1.Container{
+						Name:  containerName,
+						Image: image.BuildFalcoImageStringFromVersion("0.38.0"),
+					}).Build(),
 			},
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceUpdated,
@@ -752,7 +769,9 @@ func TestEnsureDeployment(t *testing.T) {
 // different assertions (iterating containers) from the table-driven TestEnsureDeployment.
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco(withType(instance.ResourceTypeDeployment), withImage("custom-image:latest"))
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+		WithType(instance.ResourceTypeDeployment).
+		WithImage(containerName, "custom-image:latest").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 
@@ -793,14 +812,14 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 	}{
 		{
 			name:                "returns error when apply configuration generation fails",
-			falco:               newFalco(),
+			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			wantErr:             "unsupported resource type",
 			wantConditionStatus: metav1.ConditionFalse,
 			wantConditionReason: instance.ReasonApplyConfigurationError,
 		},
 		{
 			name:                "returns error when fetching existing resource fails",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "injected get error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -808,7 +827,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when SetControllerReference fails",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			reconcilerScheme:    incompleteScheme,
 			wantErr:             "no kind is registered",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -816,7 +835,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on create",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -824,7 +843,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on update",
-			falco:               newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			existingDeployment:  true,
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",

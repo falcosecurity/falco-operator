@@ -19,26 +19,19 @@ package metacollector
 import (
 	"context"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateServiceAccount(mc *instancev1alpha1.Metacollector) runtime.Object {
-	return &corev1.ServiceAccount{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ServiceAccount",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      mc.Name,
-			Namespace: mc.Namespace,
-			Labels:    mc.Labels,
-		},
-	}
+	return builders.NewServiceAccount().
+		WithName(mc.Name).
+		WithNamespace(mc.Namespace).
+		WithLabels(mc.Labels).
+		Build()
 }
 
 func (r *Reconciler) ensureServiceAccount(ctx context.Context, mc *instancev1alpha1.Metacollector) error {

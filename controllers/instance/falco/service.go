@@ -20,41 +20,31 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateService(falco *instancev1alpha1.Falco) runtime.Object {
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "web",
-					Protocol:   corev1.ProtocolTCP,
-					Port:       8765,
-					TargetPort: intstr.FromInt32(8765),
-				},
-			},
-			Selector: map[string]string{
-				"app.kubernetes.io/name":     falco.Name,
-				"app.kubernetes.io/instance": falco.Name,
-			},
-		},
-	}
+	return builders.NewService().
+		WithName(falco.Name).
+		WithNamespace(falco.Namespace).
+		WithLabels(falco.Labels).
+		WithType(corev1.ServiceTypeClusterIP).
+		WithSelector(map[string]string{
+			"app.kubernetes.io/name":     falco.Name,
+			"app.kubernetes.io/instance": falco.Name,
+		}).
+		AddPort(&corev1.ServicePort{
+			Name:       "web",
+			Protocol:   corev1.ProtocolTCP,
+			Port:       8765,
+			TargetPort: intstr.FromInt32(8765),
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, falco *instancev1alpha1.Falco) error {

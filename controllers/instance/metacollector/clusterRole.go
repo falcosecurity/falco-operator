@@ -20,43 +20,35 @@ import (
 	"context"
 
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateClusterRole(mc *instancev1alpha1.Metacollector) runtime.Object {
 	resourceName := instance.GenerateUniqueName(mc.Name, mc.Namespace)
 
-	return &rbacv1.ClusterRole{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ClusterRole",
-			APIVersion: "rbac.authorization.k8s.io/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: mc.Labels,
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{"apps"},
-				Resources: []string{"daemonsets", "deployments", "replicasets"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"endpoints", "namespaces", "pods", "replicationcontrollers", "services"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{"discovery.k8s.io"},
-				Resources: []string{"endpointslices"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-		},
-	}
+	return builders.NewClusterRole().
+		WithName(resourceName).
+		WithLabels(mc.Labels).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{"apps"},
+			Resources: []string{"daemonsets", "deployments", "replicasets"},
+			Verbs:     []string{"get", "list", "watch"},
+		}).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"endpoints", "namespaces", "pods", "replicationcontrollers", "services"},
+			Verbs:     []string{"get", "list", "watch"},
+		}).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{"discovery.k8s.io"},
+			Resources: []string{"endpointslices"},
+			Verbs:     []string{"get", "list", "watch"},
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureClusterRole(ctx context.Context, mc *instancev1alpha1.Metacollector) error {

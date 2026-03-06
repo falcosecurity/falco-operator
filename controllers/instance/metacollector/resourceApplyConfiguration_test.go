@@ -22,12 +22,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
@@ -40,12 +40,13 @@ func TestDeploymentStrategy(t *testing.T) {
 	}{
 		{
 			name:     "nil strategy defaults to RollingUpdate",
-			mc:       newMetacollector(),
+			mc:       builders.NewMetacollector().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			wantType: appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
-			name:     "custom Recreate strategy",
-			mc:       newMetacollector(withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
+			name: "custom Recreate strategy",
+			mc: builders.NewMetacollector().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
 			wantType: appsv1.RecreateDeploymentStrategyType,
 		},
 	}
@@ -59,16 +60,8 @@ func TestDeploymentStrategy(t *testing.T) {
 }
 
 func TestBaseDeployment(t *testing.T) {
-	mc := &instancev1alpha1.Metacollector{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-mc",
-			Namespace: "default",
-			Labels:    map[string]string{"app": "metacollector"},
-		},
-		Spec: instancev1alpha1.MetacollectorSpec{
-			Version: "0.2.0",
-		},
-	}
+	mc := builders.NewMetacollector().WithName("test-mc").WithNamespace("default").
+		WithLabels(map[string]string{"app": "metacollector"}).WithVersion("0.2.0").Build()
 
 	dep := baseDeployment(mc)
 
@@ -196,12 +189,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	}{
 		{
 			name: "generates valid Deployment configuration",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mc",
-					Namespace: "default",
-				},
-			},
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace("default").Build(),
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, instance.ResourceTypeDeployment, obj.GetKind())
 				assert.Equal(t, "apps/v1", obj.GetAPIVersion())
@@ -210,15 +198,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "generates with custom version",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mc",
-					Namespace: "default",
-				},
-				Spec: instancev1alpha1.MetacollectorSpec{
-					Version: "0.2.0",
-				},
-			},
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace("default").WithVersion("0.2.0").Build(),
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				containers, found, err := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
 				require.NoError(t, err)

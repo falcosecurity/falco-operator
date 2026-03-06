@@ -20,53 +20,43 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateService(mc *instancev1alpha1.Metacollector) runtime.Object {
-	return &corev1.Service{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Service",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      mc.Name,
-			Namespace: mc.Namespace,
-			Labels:    mc.Labels,
-		},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       "metrics",
-					Protocol:   corev1.ProtocolTCP,
-					Port:       8080,
-					TargetPort: intstr.FromInt32(8080),
-				},
-				{
-					Name:       "health-probe",
-					Protocol:   corev1.ProtocolTCP,
-					Port:       8081,
-					TargetPort: intstr.FromInt32(8081),
-				},
-				{
-					Name:       "broker-grpc",
-					Protocol:   corev1.ProtocolTCP,
-					Port:       45000,
-					TargetPort: intstr.FromInt32(45000),
-				},
-			},
-			Selector: map[string]string{
-				"app.kubernetes.io/name":     mc.Name,
-				"app.kubernetes.io/instance": mc.Name,
-			},
-		},
-	}
+	return builders.NewService().
+		WithName(mc.Name).
+		WithNamespace(mc.Namespace).
+		WithLabels(mc.Labels).
+		WithType(corev1.ServiceTypeClusterIP).
+		WithSelector(map[string]string{
+			"app.kubernetes.io/name":     mc.Name,
+			"app.kubernetes.io/instance": mc.Name,
+		}).
+		AddPort(&corev1.ServicePort{
+			Name:       "metrics",
+			Protocol:   corev1.ProtocolTCP,
+			Port:       8080,
+			TargetPort: intstr.FromInt32(8080),
+		}).
+		AddPort(&corev1.ServicePort{
+			Name:       "health-probe",
+			Protocol:   corev1.ProtocolTCP,
+			Port:       8081,
+			TargetPort: intstr.FromInt32(8081),
+		}).
+		AddPort(&corev1.ServicePort{
+			Name:       "broker-grpc",
+			Protocol:   corev1.ProtocolTCP,
+			Port:       45000,
+			TargetPort: intstr.FromInt32(45000),
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureService(ctx context.Context, mc *instancev1alpha1.Metacollector) error {

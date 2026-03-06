@@ -23,13 +23,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateServiceAccount(t *testing.T) {
@@ -39,25 +39,14 @@ func TestGenerateServiceAccount(t *testing.T) {
 		expectedLabels map[string]string
 	}{
 		{
-			name: "basic service account generation",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
-				},
-			},
+			name:           "basic service account generation",
+			falco:          builders.NewFalco().WithName("test-falco").WithNamespace("default").WithLabels(map[string]string{"app": "falco"}).Build(),
 			expectedLabels: map[string]string{"app": "falco"},
 		},
 		{
 			name: "service account with custom labels",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "custom-namespace",
-					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
-				},
-			},
+			falco: builders.NewFalco().WithName("test-falco").WithNamespace("custom-namespace").
+				WithLabels(map[string]string{"app": "falco", "environment": "test", "custom": "label"}).Build(),
 			expectedLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 		},
 	}
@@ -88,15 +77,15 @@ func TestEnsureServiceAccount(t *testing.T) {
 	}{
 		{
 			name:  "creates with correct name and namespace",
-			falco: newFalco(),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 		},
 		{
 			name:  "applies new labels on existing ServiceAccount",
-			falco: newFalco(withLabels(map[string]string{"new": "label"})),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithLabels(map[string]string{"new": "label"}).Build(),
 			existingObjs: []client.Object{
-				&corev1.ServiceAccount{
-					ObjectMeta: metav1.ObjectMeta{Name: defaultName, Namespace: testutil.TestNamespace, Labels: map[string]string{"old": "label"}},
-				},
+				builders.NewServiceAccount().WithName("test").
+					WithNamespace(testutil.TestNamespace).
+					WithLabels(map[string]string{"old": "label"}).Build(),
 			},
 			wantLabels: map[string]string{"new": "label"},
 		},

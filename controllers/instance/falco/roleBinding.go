@@ -21,37 +21,29 @@ import (
 	"fmt"
 
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateRoleBinding(falco *instancev1alpha1.Falco) runtime.Object {
-	return &rbacv1.RoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "RoleBinding",
-			APIVersion: "rbac.authorization.k8s.io/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace:    falco.Namespace,
-			Labels:       falco.Labels,
-			GenerateName: fmt.Sprintf("%s-", falco.Name),
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      falco.Name,
-				Namespace: falco.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
+	return builders.NewRoleBinding().
+		WithGenerateName(fmt.Sprintf("%s-", falco.Name)).
+		WithNamespace(falco.Namespace).
+		WithLabels(falco.Labels).
+		AddSubject(rbacv1.Subject{
+			Kind:      "ServiceAccount",
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+		}).
+		WithRoleRef(rbacv1.RoleRef{
 			Kind:     "Role",
 			Name:     falco.Name,
 			APIGroup: "rbac.authorization.k8s.io",
-		},
-	}
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {

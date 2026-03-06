@@ -21,12 +21,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
@@ -77,121 +77,91 @@ func mergeWorkloadConfiguration(nativeSidecar bool, falco *v1alpha1.Falco) (*uns
 
 // baseDeployment returns the base deployment for Falco with default values + metadata coming from the Falco CR.
 func baseDeployment(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.Deployment {
-	dpl := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app.kubernetes.io/name":     falco.Name,
-					"app.kubernetes.io/instance": falco.Name,
-				},
-			},
-			Replicas: falco.Spec.Replicas,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: instance.PodTemplateSpecLabels(falco.Name, falco.Labels),
-				},
-				Spec: corev1.PodSpec{
-					Tolerations: []corev1.Toleration{
-						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
-						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
-					},
-					ServiceAccountName: falco.Name,
-					Volumes:            falcoVolumes(falco),
-					Containers: []corev1.Container{
-						{
-							Name:            containerName,
-							Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
-							ImagePullPolicy: DefaultFalcoImagePullPolicy,
-							Resources:       DefaultFalcoResources,
-							Ports:           DefaultFalcoPorts,
-							Args:            DefaultFalcoArgs,
-							Env:             DefaultFalcoEnv,
-							VolumeMounts:    falcoVolumeMounts(),
-							LivenessProbe:   DefaultFalcoLivenessProbe,
-							ReadinessProbe:  DefaultFalcoReadinessProbe,
-							SecurityContext: DefaultFalcoSecurityContext,
-						},
-					},
-				},
-			},
-			Strategy: instance.DeploymentStrategy(falco.Spec.Strategy),
-		},
-	}
+	b := builders.NewDeployment().
+		WithName(falco.Name).
+		WithNamespace(falco.Namespace).
+		WithLabels(falco.Labels).
+		WithSelector(map[string]string{
+			"app.kubernetes.io/name":     falco.Name,
+			"app.kubernetes.io/instance": falco.Name,
+		}).
+		WithReplicas(falco.Spec.Replicas).
+		WithPodTemplateLabels(instance.PodTemplateSpecLabels(falco.Name, falco.Labels)).
+		WithTolerations([]corev1.Toleration{
+			{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
+			{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
+		}).
+		WithServiceAccount(falco.Name).
+		WithVolumes(falcoVolumes(falco)).
+		AddContainer(&corev1.Container{
+			Name:            containerName,
+			Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
+			ImagePullPolicy: DefaultFalcoImagePullPolicy,
+			Resources:       DefaultFalcoResources,
+			Ports:           DefaultFalcoPorts,
+			Args:            DefaultFalcoArgs,
+			Env:             DefaultFalcoEnv,
+			VolumeMounts:    falcoVolumeMounts(),
+			LivenessProbe:   DefaultFalcoLivenessProbe,
+			ReadinessProbe:  DefaultFalcoReadinessProbe,
+			SecurityContext: DefaultFalcoSecurityContext,
+		}).
+		WithStrategy(instance.DeploymentStrategy(falco.Spec.Strategy))
 
 	if nativeSidecar {
-		dpl.Spec.Template.Spec.InitContainers = append(dpl.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
+		b.AddInitContainer(&artifactOperatorSidecar)
 	} else {
 		// If the native sidecar is not enabled, we add the artifact operator sidecar to the container list.
 		// And we set the restart policy to nil, otherwise we get a validation error.
 		artifactOperatorSidecar.RestartPolicy = nil
-		dpl.Spec.Template.Spec.Containers = append(dpl.Spec.Template.Spec.Containers, artifactOperatorSidecar)
+		b.AddContainer(&artifactOperatorSidecar)
 	}
 
-	return dpl
+	return b.Build()
 }
 
 // baseDaemonSet returns the base daemonset for Falco with default values and metadata coming from the Falco CR.
 func baseDaemonSet(nativeSidecar bool, falco *v1alpha1.Falco) *appsv1.DaemonSet {
-	ds := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-		Spec: appsv1.DaemonSetSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app.kubernetes.io/name":     falco.Name,
-					"app.kubernetes.io/instance": falco.Name,
-				},
-			},
-			UpdateStrategy: instance.DaemonSetUpdateStrategy(falco.Spec.UpdateStrategy),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: instance.PodTemplateSpecLabels(falco.Name, falco.Labels),
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: falco.Name,
-					Tolerations: []corev1.Toleration{
-						{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
-						{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
-					},
-					Volumes: falcoVolumes(falco),
-					Containers: []corev1.Container{
-						{
-							Name:            containerName,
-							Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
-							ImagePullPolicy: DefaultFalcoImagePullPolicy,
-							Resources:       DefaultFalcoResources,
-							Ports:           DefaultFalcoPorts,
-							Args:            DefaultFalcoArgs,
-							Env:             DefaultFalcoEnv,
-							VolumeMounts:    falcoVolumeMounts(),
-							LivenessProbe:   DefaultFalcoLivenessProbe,
-							ReadinessProbe:  DefaultFalcoReadinessProbe,
-							SecurityContext: DefaultFalcoSecurityContext,
-						},
-					},
-				},
-			},
-		},
-	}
+	b := builders.NewDaemonSet().
+		WithName(falco.Name).
+		WithNamespace(falco.Namespace).
+		WithLabels(falco.Labels).
+		WithSelector(map[string]string{
+			"app.kubernetes.io/name":     falco.Name,
+			"app.kubernetes.io/instance": falco.Name,
+		}).
+		WithUpdateStrategy(instance.DaemonSetUpdateStrategy(falco.Spec.UpdateStrategy)).
+		WithPodTemplateLabels(instance.PodTemplateSpecLabels(falco.Name, falco.Labels)).
+		WithServiceAccount(falco.Name).
+		WithTolerations([]corev1.Toleration{
+			{Key: "node-role.kubernetes.io/master", Effect: corev1.TaintEffectNoSchedule},
+			{Key: "node-role.kubernetes.io/control-plane", Effect: corev1.TaintEffectNoSchedule},
+		}).
+		WithVolumes(falcoVolumes(falco)).
+		AddContainer(&corev1.Container{
+			Name:            containerName,
+			Image:           image.BuildFalcoImageStringFromVersion(falco.Spec.Version),
+			ImagePullPolicy: DefaultFalcoImagePullPolicy,
+			Resources:       DefaultFalcoResources,
+			Ports:           DefaultFalcoPorts,
+			Args:            DefaultFalcoArgs,
+			Env:             DefaultFalcoEnv,
+			VolumeMounts:    falcoVolumeMounts(),
+			LivenessProbe:   DefaultFalcoLivenessProbe,
+			ReadinessProbe:  DefaultFalcoReadinessProbe,
+			SecurityContext: DefaultFalcoSecurityContext,
+		})
 
 	if nativeSidecar {
-		ds.Spec.Template.Spec.InitContainers = append(ds.Spec.Template.Spec.InitContainers, artifactOperatorSidecar)
+		b.AddInitContainer(&artifactOperatorSidecar)
 	} else {
 		// If the native sidecar is not enabled, we add the artifact operator sidecar to the containers list.
 		// And we set the restart policy to nil otherwise we get a validation error.
 		artifactOperatorSidecar.RestartPolicy = nil
-		ds.Spec.Template.Spec.Containers = append(ds.Spec.Template.Spec.Containers, artifactOperatorSidecar)
+		b.AddContainer(&artifactOperatorSidecar)
 	}
 
-	return ds
+	return b.Build()
 }
 
 // generateUserDefinedResource generates a user-defined resource from the falco CR.

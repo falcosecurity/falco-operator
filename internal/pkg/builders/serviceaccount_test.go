@@ -14,5 +14,30 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main is the entrypoint for the instance-operator binary.
-package main
+package builders
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNewServiceAccount_TypeMeta(t *testing.T) {
+	sa := NewServiceAccount().Build()
+	assert.Equal(t, "ServiceAccount", sa.Kind)
+	assert.Equal(t, "v1", sa.APIVersion)
+}
+
+func TestServiceAccountBuilder(t *testing.T) {
+	labels := map[string]string{"app": "test"}
+
+	sa := NewServiceAccount().
+		WithName("my-sa").
+		WithNamespace("ns").
+		WithLabels(labels).
+		Build()
+
+	assert.Equal(t, "my-sa", sa.Name)
+	assert.Equal(t, "ns", sa.Namespace)
+	assert.Equal(t, labels, sa.Labels)
+}

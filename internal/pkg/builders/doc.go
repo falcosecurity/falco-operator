@@ -14,5 +14,5 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package main is the entrypoint for the instance-operator binary.
-package main
+// Package builders provides utility functions for building Kubernetes objects.
+package builders

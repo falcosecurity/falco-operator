@@ -28,6 +28,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
@@ -40,12 +41,14 @@ func TestDeploymentStrategy(t *testing.T) {
 	}{
 		{
 			name:     "nil strategy defaults to RollingUpdate",
-			falco:    newFalco(withType(instance.ResourceTypeDeployment)),
+			falco:    builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			wantType: appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
-			name:     "custom Recreate strategy",
-			falco:    newFalco(withType(instance.ResourceTypeDeployment), withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
+			name: "custom Recreate strategy",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDeployment).
+				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
 			wantType: appsv1.RecreateDeploymentStrategyType,
 		},
 	}
@@ -66,12 +69,14 @@ func TestDaemonSetUpdateStrategy(t *testing.T) {
 	}{
 		{
 			name:     "nil strategy defaults to RollingUpdate",
-			falco:    newFalco(withType(instance.ResourceTypeDaemonSet)),
+			falco:    builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDaemonSet).Build(),
 			wantType: appsv1.RollingUpdateDaemonSetStrategyType,
 		},
 		{
-			name:     "custom OnDelete strategy",
-			falco:    newFalco(withType(instance.ResourceTypeDaemonSet), withUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType})),
+			name: "custom OnDelete strategy",
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(instance.ResourceTypeDaemonSet).
+				WithUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}).Build(),
 			wantType: appsv1.OnDeleteDaemonSetStrategyType,
 		},
 	}
@@ -98,7 +103,7 @@ func TestBaseWorkload(t *testing.T) {
 			name:               "Deployment: non-native sidecar adds artifact operator to containers",
 			kind:               instance.ResourceTypeDeployment,
 			nativeSidecar:      false,
-			falco:              newFalco(withVersion("0.38.0")),
+			falco:              builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithVersion("0.38.0").Build(),
 			wantImage:          image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantInitContainers: 0,
 			wantContainers:     2,
@@ -107,7 +112,7 @@ func TestBaseWorkload(t *testing.T) {
 			name:               "Deployment: native sidecar adds artifact operator to initContainers",
 			kind:               instance.ResourceTypeDeployment,
 			nativeSidecar:      true,
-			falco:              newFalco(withVersion("0.38.0")),
+			falco:              builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithVersion("0.38.0").Build(),
 			wantImage:          image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantInitContainers: 1,
 			wantContainers:     1,
@@ -116,7 +121,7 @@ func TestBaseWorkload(t *testing.T) {
 			name:               "DaemonSet: non-native sidecar adds artifact operator to containers",
 			kind:               instance.ResourceTypeDaemonSet,
 			nativeSidecar:      false,
-			falco:              newFalco(withVersion("0.38.0")),
+			falco:              builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithVersion("0.38.0").Build(),
 			wantImage:          image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantInitContainers: 0,
 			wantContainers:     2,
@@ -125,7 +130,7 @@ func TestBaseWorkload(t *testing.T) {
 			name:               "DaemonSet: native sidecar adds artifact operator to initContainers",
 			kind:               instance.ResourceTypeDaemonSet,
 			nativeSidecar:      true,
-			falco:              newFalco(withVersion("0.38.0")),
+			falco:              builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithVersion("0.38.0").Build(),
 			wantImage:          image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantInitContainers: 1,
 			wantContainers:     1,
@@ -283,7 +288,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	}{
 		{
 			name:  "generates valid Deployment configuration",
-			falco: newFalco(withType(instance.ResourceTypeDeployment)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDeployment).Build(),
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, instance.ResourceTypeDeployment, obj.GetKind())
 				assert.Equal(t, "apps/v1", obj.GetAPIVersion())
@@ -292,7 +297,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name:  "generates valid DaemonSet configuration",
-			falco: newFalco(withType(instance.ResourceTypeDaemonSet)),
+			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(instance.ResourceTypeDaemonSet).Build(),
 			verify: func(t *testing.T, obj *unstructured.Unstructured) {
 				assert.Equal(t, instance.ResourceTypeDaemonSet, obj.GetKind())
 				assert.Equal(t, "apps/v1", obj.GetAPIVersion())

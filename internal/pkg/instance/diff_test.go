@@ -21,12 +21,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/structured-merge-diff/v4/fieldpath"
 	"sigs.k8s.io/structured-merge-diff/v4/typed"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestDiff(t *testing.T) {
@@ -43,29 +42,14 @@ func TestDiff(t *testing.T) {
 	})
 
 	t.Run("nil desired returns error", func(t *testing.T) {
-		current := &corev1.ConfigMap{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "v1",
-				Kind:       "ConfigMap",
-			},
-			ObjectMeta: metav1.ObjectMeta{Name: "test"},
-		}
+		current := builders.NewConfigMap().WithName("test").Build()
 		result, err := Diff(current, nil, "test-controller")
 		assert.Error(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("no managed fields returns ErrNoManagedFields", func(t *testing.T) {
-		current := &appsv1.DaemonSet{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: "apps/v1",
-				Kind:       ResourceTypeDaemonSet,
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name: "test",
-				// No ManagedFields set
-			},
-		}
+		current := builders.NewDaemonSet().WithName("test").Build()
 		desired := &unstructured.Unstructured{
 			Object: map[string]interface{}{
 				"apiVersion": "apps/v1",

@@ -23,13 +23,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateRoleBinding(t *testing.T) {
@@ -39,25 +39,14 @@ func TestGenerateRoleBinding(t *testing.T) {
 		wantLabels map[string]string
 	}{
 		{
-			name: "basic role binding",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
-				},
-			},
+			name:       "basic role binding",
+			falco:      builders.NewFalco().WithName("test-falco").WithNamespace("default").WithLabels(map[string]string{"app": "falco"}).Build(),
 			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
 			name: "role binding with custom labels",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
-				},
-			},
+			falco: builders.NewFalco().WithName("test-falco").WithNamespace("default").
+				WithLabels(map[string]string{"app": "falco", "environment": "test", "custom": "label"}).Build(),
 			wantLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 		},
 	}
@@ -87,7 +76,7 @@ func TestGenerateRoleBinding(t *testing.T) {
 
 func TestEnsureRoleBinding(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco()
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 

@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +30,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateService(t *testing.T) {
@@ -41,14 +41,8 @@ func TestGenerateService(t *testing.T) {
 		expectedLabels map[string]string
 	}{
 		{
-			name: "service generation with defaults",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
-				},
-			},
+			name:  "service generation with defaults",
+			falco: builders.NewFalco().WithName("test-falco").WithNamespace("default").WithLabels(map[string]string{"app": "falco"}).Build(),
 			expectedPorts: []corev1.ServicePort{
 				{
 					Name:       "web",
@@ -61,13 +55,8 @@ func TestGenerateService(t *testing.T) {
 		},
 		{
 			name: "service with custom labels",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco", "environment": "test", "custom": "label"},
-				},
-			},
+			falco: builders.NewFalco().WithName("test-falco").WithNamespace("default").
+				WithLabels(map[string]string{"app": "falco", "environment": "test", "custom": "label"}).Build(),
 			expectedLabels: map[string]string{"app": "falco", "environment": "test", "custom": "label"},
 		},
 	}
@@ -99,7 +88,7 @@ func TestGenerateService(t *testing.T) {
 
 func TestEnsureService(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco()
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 

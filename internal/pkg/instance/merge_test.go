@@ -23,38 +23,29 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestMergeApplyConfiguration(t *testing.T) {
 	tests := []struct {
-		name    string
-		kind    string
-		base    runtime.Object
-		user    *unstructured.Unstructured
-		verify  func(*testing.T, *unstructured.Unstructured)
-		wantErr bool
+		name               string
+		kind               string
+		base               runtime.Object
+		user               *unstructured.Unstructured
+		wantErr            bool
+		wantKind           string
+		wantAPIVersion     string
+		wantContainerImage string
 	}{
 		{
 			name: "merges Deployment with user overrides",
 			kind: ResourceTypeDeployment,
-			base: &appsv1.Deployment{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-				Spec: appsv1.DeploymentSpec{
-					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"app": "test"},
-					},
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{Name: "app", Image: "base:v1"},
-							},
-						},
-					},
-				},
-			},
+			base: builders.NewDeployment().WithName("test").WithNamespace("default").
+				WithSelector(map[string]string{"app": "test"}).
+				AddContainer(&corev1.Container{Name: "app", Image: "base:v1"}).Build(),
 			user: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"metadata": map[string]interface{}{"name": "test", "namespace": "default"},
@@ -69,46 +60,24 @@ func TestMergeApplyConfiguration(t *testing.T) {
 					},
 				},
 			},
-			verify: func(t *testing.T, obj *unstructured.Unstructured) {
-				assert.Equal(t, ResourceTypeDeployment, obj.GetKind())
-				assert.Equal(t, "apps/v1", obj.GetAPIVersion())
-
-				containers, found, err := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
-				require.NoError(t, err)
-				require.True(t, found)
-				require.NotEmpty(t, containers)
-				c0 := containers[0].(map[string]interface{})
-				assert.Equal(t, "user:v2", c0["image"])
-			},
+			wantKind:           ResourceTypeDeployment,
+			wantAPIVersion:     "apps/v1",
+			wantContainerImage: "user:v2",
 		},
 		{
 			name: "merges DaemonSet with user overrides",
 			kind: ResourceTypeDaemonSet,
-			base: &appsv1.DaemonSet{
-				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
-				Spec: appsv1.DaemonSetSpec{
-					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{"app": "test"},
-					},
-					Template: corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{Name: "app", Image: "base:v1"},
-							},
-						},
-					},
-				},
-			},
+			base: builders.NewDaemonSet().WithName("test").WithNamespace("default").
+				WithSelector(map[string]string{"app": "test"}).
+				AddContainer(&corev1.Container{Name: "app", Image: "base:v1"}).Build(),
 			user: &unstructured.Unstructured{
 				Object: map[string]interface{}{
 					"metadata": map[string]interface{}{"name": "test", "namespace": "default"},
 					"spec":     map[string]interface{}{},
 				},
 			},
-			verify: func(t *testing.T, obj *unstructured.Unstructured) {
-				assert.Equal(t, ResourceTypeDaemonSet, obj.GetKind())
-				assert.Equal(t, "apps/v1", obj.GetAPIVersion())
-			},
+			wantKind:       ResourceTypeDaemonSet,
+			wantAPIVersion: "apps/v1",
 		},
 	}
 
@@ -121,7 +90,20 @@ func TestMergeApplyConfiguration(t *testing.T) {
 			}
 			require.NoError(t, err)
 			require.NotNil(t, result)
-			tt.verify(t, result)
+
+			assert.Equal(t, tt.wantKind, result.GetKind())
+			assert.Equal(t, tt.wantAPIVersion, result.GetAPIVersion())
+
+			if tt.wantContainerImage != "" {
+				containers, found, err := unstructured.NestedSlice(
+					result.Object, "spec", "template", "spec", "containers",
+				)
+				require.NoError(t, err)
+				require.True(t, found)
+				require.NotEmpty(t, containers)
+				c0 := containers[0].(map[string]interface{})
+				assert.Equal(t, tt.wantContainerImage, c0["image"])
+			}
 		})
 	}
 }

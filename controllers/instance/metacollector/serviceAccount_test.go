@@ -30,6 +30,7 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateServiceAccount(t *testing.T) {
@@ -40,25 +41,14 @@ func TestGenerateServiceAccount(t *testing.T) {
 		wantLabels map[string]string
 	}{
 		{
-			name: "basic ServiceAccount creation",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mc",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "metacollector"},
-				},
-			},
+			name:       "basic ServiceAccount creation",
+			mc:         builders.NewMetacollector().WithName("test-mc").WithNamespace("default").WithLabels(map[string]string{"app": "metacollector"}).Build(),
 			wantName:   "test-mc",
 			wantLabels: map[string]string{"app": "metacollector"},
 		},
 		{
-			name: "ServiceAccount with nil labels",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mc",
-					Namespace: "default",
-				},
-			},
+			name:     "ServiceAccount with nil labels",
+			mc:       builders.NewMetacollector().WithName("test-mc").WithNamespace("default").Build(),
 			wantName: "test-mc",
 		},
 	}
@@ -89,11 +79,11 @@ func TestEnsureServiceAccount(t *testing.T) {
 	}{
 		{
 			name: "creates with correct name and namespace",
-			mc:   newMetacollector(withName("test-mc")),
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 		},
 		{
 			name: "preserves existing annotations during update",
-			mc:   newMetacollector(withName("test-mc")),
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			existingObjs: []client.Object{
 				&corev1.ServiceAccount{
 					TypeMeta:   metav1.TypeMeta{Kind: "ServiceAccount", APIVersion: "v1"},
@@ -104,11 +94,11 @@ func TestEnsureServiceAccount(t *testing.T) {
 		},
 		{
 			name: "applies new labels on existing ServiceAccount",
-			mc:   newMetacollector(withName("test-mc"), withLabels(map[string]string{"new": "label"})),
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).WithLabels(map[string]string{"new": "label"}).Build(),
 			existingObjs: []client.Object{
-				&corev1.ServiceAccount{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace, Labels: map[string]string{"old": "label"}},
-				},
+				builders.NewServiceAccount().WithName("test-mc").
+					WithNamespace(testutil.TestNamespace).
+					WithLabels(map[string]string{"old": "label"}).Build(),
 			},
 			wantLabels: map[string]string{"new": "label"},
 		},

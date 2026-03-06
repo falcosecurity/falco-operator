@@ -20,48 +20,40 @@ import (
 	"context"
 
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateRole(falco *instancev1alpha1.Falco) runtime.Object {
-	return &rbacv1.Role{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Role",
-			APIVersion: "rbac.authorization.k8s.io/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      falco.Name,
-			Namespace: falco.Namespace,
-			Labels:    falco.Labels,
-		},
-		Rules: []rbacv1.PolicyRule{
-			{
-				APIGroups: []string{""},
-				Resources: []string{"configmaps"},
-				Verbs:     []string{"get", "list", "watch"},
-			},
-			{
-				APIGroups: []string{""},
-				Resources: []string{"events"},
-				Verbs:     []string{"create", "patch"},
-			},
-			{
-				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-				Resources: []string{"configs", "rulesfiles", "plugins"},
-				Verbs:     []string{"get", "list", "watch", "update", "patch"},
-			},
-			{
-				APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-				Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
-				Verbs:     []string{"get", "update", "patch"},
-			},
-		},
-	}
+	return builders.NewRole().
+		WithName(falco.Name).
+		WithNamespace(falco.Namespace).
+		WithLabels(falco.Labels).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"configmaps"},
+			Verbs:     []string{"get", "list", "watch"},
+		}).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{""},
+			Resources: []string{"events"},
+			Verbs:     []string{"create", "patch"},
+		}).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+			Resources: []string{"configs", "rulesfiles", "plugins"},
+			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+		}).
+		AddRule(&rbacv1.PolicyRule{
+			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+			Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
+			Verbs:     []string{"get", "update", "patch"},
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureRole(ctx context.Context, falco *instancev1alpha1.Falco) error {

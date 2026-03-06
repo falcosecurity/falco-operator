@@ -37,10 +37,13 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
+
+const defaultName = "test"
 
 func TestEnsureResourceErrors(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
@@ -65,7 +68,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mc := newMetacollector(withName("test-mc"))
+			mc := builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build()
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc)
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -103,17 +106,17 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:        "adds finalizer when not present",
-			mc:          newMetacollector(),
+			mc:          builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
 			wantUpdated: true,
 		},
 		{
 			name:        "no-op when finalizer already present",
-			mc:          newMetacollector(withFinalizer()),
+			mc:          builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithFinalizers([]string{finalizer}).Build(),
 			wantUpdated: false,
 		},
 		{
 			name:     "returns error when patch fails",
-			mc:       newMetacollector(),
+			mc:       builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -165,30 +168,32 @@ func TestEnsureVersion(t *testing.T) {
 	}{
 		{
 			name:        "sets default version when not set",
-			mc:          newMetacollector(),
+			mc:          builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
 			wantUpdated: true,
 		},
 		{
 			name:        "keeps existing version",
-			mc:          newMetacollector(withVersion("0.2.0")),
+			mc:          builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithVersion("0.2.0").Build(),
 			wantUpdated: false,
 			wantVersion: "0.2.0",
 		},
 		{
-			name:        "extracts version from image",
-			mc:          newMetacollector(withImage("falcosecurity/k8s-metacollector:0.3.0")),
+			name: "extracts version from image",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithImage(containerName, "falcosecurity/k8s-metacollector:0.3.0").Build(),
 			wantUpdated: true,
 			wantVersion: "0.3.0",
 		},
 		{
-			name:        "image version takes precedence over spec version",
-			mc:          newMetacollector(withVersion("0.1.0"), withImage("falcosecurity/k8s-metacollector:0.3.0")),
+			name: "image version takes precedence over spec version",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithVersion("0.1.0").WithImage(containerName, "falcosecurity/k8s-metacollector:0.3.0").Build(),
 			wantUpdated: true,
 			wantVersion: "0.3.0",
 		},
 		{
 			name:     "returns error when patch fails",
-			mc:       newMetacollector(),
+			mc:       builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -230,6 +235,8 @@ func TestEnsureVersion(t *testing.T) {
 func TestHandleDeletion(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
+	now := metav1.Now()
+
 	tests := []struct {
 		name                   string
 		mc                     *instancev1alpha1.Metacollector
@@ -244,24 +251,27 @@ func TestHandleDeletion(t *testing.T) {
 		wantClusterResExist    bool
 	}{
 		{
-			name:                   "preserves finalizer and resources when not marked for deletion",
-			mc:                     newMetacollector(withFinalizer()),
+			name: "preserves finalizer and resources when not marked for deletion",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).Build(),
 			createClusterResources: true,
 			wantHandled:            false,
 			wantFinalizerPresent:   true,
 			wantClusterResExist:    true,
 		},
 		{
-			name:                   "handles deletion when cluster resources do not exist",
-			mc:                     newMetacollector(withFinalizer(), withDeletionTimestamp()),
+			name: "handles deletion when cluster resources do not exist",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: false,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name:                   "removes cluster resources and finalizer during deletion",
-			mc:                     newMetacollector(withFinalizer(), withDeletionTimestamp()),
+			name: "removes cluster resources and finalizer during deletion",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			createClusterResources: true,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
@@ -269,27 +279,30 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:                 "returns early when deleted without finalizer",
-			mc:                   newMetacollector(withDeletionTimestamp()),
+			mc:                   builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithDeletionTimestamp(&now).Build(),
 			skipMCInClient:       true,
 			wantHandled:          true,
 			wantFinalizerPresent: false,
 			wantClusterResExist:  false,
 		},
 		{
-			name:         "returns error when ClusterRoleBinding deletion fails",
-			mc:           newMetacollector(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when ClusterRoleBinding deletion fails",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			crbDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:      "injected delete error",
 		},
 		{
-			name:        "returns error when ClusterRole deletion fails",
-			mc:          newMetacollector(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when ClusterRole deletion fails",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			crDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:     "injected delete error",
 		},
 		{
-			name:     "returns error when finalizer removal patch fails",
-			mc:       newMetacollector(withFinalizer(), withDeletionTimestamp()),
+			name: "returns error when finalizer removal patch fails",
+			mc: builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).
+				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -303,8 +316,8 @@ func TestHandleDeletion(t *testing.T) {
 			}
 			if tt.createClusterResources {
 				objs = append(objs,
-					&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
-					&rbacv1.ClusterRoleBinding{ObjectMeta: metav1.ObjectMeta{Name: instance.GenerateUniqueName(defaultName, testutil.TestNamespace)}},
+					builders.NewClusterRole().WithName(instance.GenerateUniqueName(defaultName, testutil.TestNamespace)).Build(),
+					builders.NewClusterRoleBinding().WithName(instance.GenerateUniqueName(defaultName, testutil.TestNamespace)).Build(),
 				)
 			}
 
@@ -384,7 +397,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 	}{
 		{
 			name: "deployment available",
-			mc:   newMetacollector(withReplicas(2)),
+			mc:   builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithReplicas(2).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2, UnavailableReplicas: 0},
@@ -395,7 +408,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name: "deployment unavailable",
-			mc:   newMetacollector(withReplicas(3)),
+			mc:   builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithReplicas(3).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 2},
@@ -406,7 +419,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:                "deployment not found sets zero availability",
-			mc:                  newMetacollector(withReplicas(1)),
+			mc:                  builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithReplicas(1).Build(),
 			wantDesired:         1,
 			wantAvailable:       0,
 			wantUnavailable:     0,
@@ -415,7 +428,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name: "defaults to 1 replica when spec.replicas is nil",
-			mc:   newMetacollector(),
+			mc:   builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1},
@@ -426,7 +439,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:                "returns error when deployment fetch fails",
-			mc:                  newMetacollector(withReplicas(1)),
+			mc:                  builders.NewMetacollector().WithName(defaultName).WithNamespace(testutil.TestNamespace).WithReplicas(1).Build(),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "unable to fetch deployment",
 			wantDesired:         1,
@@ -488,7 +501,7 @@ func TestEnsureDeployment(t *testing.T) {
 	}{
 		{
 			name:                "creates deployment with default values",
-			mc:                  newMetacollector(withName("test-mc")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           image.BuildMetacollectorImageStringFromVersion(""),
@@ -496,15 +509,16 @@ func TestEnsureDeployment(t *testing.T) {
 		},
 		{
 			name:                "creates deployment with custom version",
-			mc:                  newMetacollector(withName("test-mc"), withVersion("0.2.0")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).WithVersion("0.2.0").Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           image.BuildMetacollectorImageStringFromVersion("0.2.0"),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
-			name:                "creates deployment with Recreate strategy",
-			mc:                  newMetacollector(withName("test-mc"), withStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType})),
+			name: "creates deployment with Recreate strategy",
+			mc: builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).
+				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           image.BuildMetacollectorImageStringFromVersion(""),
@@ -512,21 +526,17 @@ func TestEnsureDeployment(t *testing.T) {
 		},
 		{
 			name: "updates existing deployment",
-			mc:   newMetacollector(withName("test-mc"), withVersion("0.3.0")),
+			mc:   builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).WithVersion("0.3.0").Build(),
 			existingObjs: []client.Object{
-				&appsv1.Deployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace},
-					Spec: appsv1.DeploymentSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
-						},
-						Template: corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: containerName, Image: image.BuildMetacollectorImageStringFromVersion("")}},
-							},
-						},
-					},
-				},
+				builders.NewDeployment().WithName("test-mc").WithNamespace(testutil.TestNamespace).
+					WithSelector(map[string]string{
+						"app.kubernetes.io/name":     "test-mc",
+						"app.kubernetes.io/instance": "test-mc",
+					}).
+					AddContainer(&corev1.Container{
+						Name:  containerName,
+						Image: image.BuildMetacollectorImageStringFromVersion(""),
+					}).Build(),
 			},
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceUpdated,
@@ -563,7 +573,7 @@ func TestEnsureDeployment(t *testing.T) {
 // different assertions (iterating containers) from the table-driven TestEnsureDeployment.
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	mc := newMetacollector(withName("test-mc"), withImage("custom-image:latest"))
+	mc := builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).WithImage(containerName, "custom-image:latest").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -604,7 +614,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 	}{
 		{
 			name:                "returns error when fetching existing resource fails",
-			mc:                  newMetacollector(withName("test-mc")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "injected get error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -612,7 +622,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when SetControllerReference fails",
-			mc:                  newMetacollector(withName("test-mc")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			reconcilerScheme:    incompleteScheme,
 			wantErr:             "no kind is registered",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -620,7 +630,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on create",
-			mc:                  newMetacollector(withName("test-mc")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -628,7 +638,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on update",
-			mc:                  newMetacollector(withName("test-mc")),
+			mc:                  builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build(),
 			existingDeployment:  true,
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
@@ -641,19 +651,16 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.mc)
 			if tt.existingDeployment {
-				builder = builder.WithObjects(&appsv1.Deployment{
-					ObjectMeta: metav1.ObjectMeta{Name: "test-mc", Namespace: testutil.TestNamespace},
-					Spec: appsv1.DeploymentSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
-						},
-						Template: corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{{Name: containerName, Image: "old:version"}},
-							},
-						},
-					},
-				})
+				builder = builder.WithObjects(
+					builders.NewDeployment().WithName("test-mc").WithNamespace(testutil.TestNamespace).
+						WithSelector(map[string]string{
+							"app.kubernetes.io/name":     "test-mc",
+							"app.kubernetes.io/instance": "test-mc",
+						}).
+						AddContainer(&corev1.Container{
+							Name: containerName, Image: "old:version",
+						}).Build(),
+				)
 			}
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -691,7 +698,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 
 func TestPatchStatus(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	mc := newMetacollector(withName("test-mc"))
+	mc := builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(mc).

@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -31,6 +30,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateRole(t *testing.T) {
@@ -40,24 +40,13 @@ func TestGenerateRole(t *testing.T) {
 		wantLabels map[string]string
 	}{
 		{
-			name: "Role with labels",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "falco"},
-				},
-			},
+			name:       "Role with labels",
+			falco:      builders.NewFalco().WithName("test-falco").WithNamespace("default").WithLabels(map[string]string{"app": "falco"}).Build(),
 			wantLabels: map[string]string{"app": "falco"},
 		},
 		{
-			name: "Role with nil labels",
-			falco: &instancev1alpha1.Falco{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-falco",
-					Namespace: "default",
-				},
-			},
+			name:  "Role with nil labels",
+			falco: builders.NewFalco().WithName("test-falco").WithNamespace("default").Build(),
 		},
 	}
 
@@ -104,7 +93,7 @@ func TestGenerateRole(t *testing.T) {
 
 func TestEnsureRole(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := newFalco()
+	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
 

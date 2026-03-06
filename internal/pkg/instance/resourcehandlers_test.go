@@ -21,11 +21,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestClusterScopedResourceHandler(t *testing.T) {
@@ -38,11 +38,7 @@ func TestClusterScopedResourceHandler(t *testing.T) {
 	}{
 		{
 			name: "ClusterRoleBinding with valid name",
-			obj: &rbacv1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "falco-test--default",
-				},
-			},
+			obj:  builders.NewClusterRoleBinding().WithName("falco-test--default").Build(),
 			expected: []reconcile.Request{
 				{
 					NamespacedName: types.NamespacedName{
@@ -54,11 +50,7 @@ func TestClusterScopedResourceHandler(t *testing.T) {
 		},
 		{
 			name: "ClusterRole with valid name",
-			obj: &rbacv1.ClusterRole{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "falco-test--custom-ns",
-				},
-			},
+			obj:  builders.NewClusterRole().WithName("falco-test--custom-ns").Build(),
 			expected: []reconcile.Request{
 				{
 					NamespacedName: types.NamespacedName{
@@ -69,21 +61,13 @@ func TestClusterScopedResourceHandler(t *testing.T) {
 			},
 		},
 		{
-			name: "ClusterRoleBinding with invalid name format",
-			obj: &rbacv1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "invalid-name-format",
-				},
-			},
+			name:     "ClusterRoleBinding with invalid name format",
+			obj:      builders.NewClusterRoleBinding().WithName("invalid-name-format").Build(),
 			expected: nil,
 		},
 		{
-			name: "Unsupported resource type",
-			obj: &rbacv1.Role{ // Using Role as an unsupported type
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-name--default",
-				},
-			},
+			name:     "Unsupported resource type",
+			obj:      builders.NewRole().WithName("test-name--default").Build(),
 			expected: nil,
 		},
 	}
@@ -105,21 +89,13 @@ func TestClusterScopedResourceHandlerEdgeCases(t *testing.T) {
 		expected []reconcile.Request
 	}{
 		{
-			name: "Empty name returns nil",
-			obj: &rbacv1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "",
-				},
-			},
+			name:     "Empty name returns nil",
+			obj:      builders.NewClusterRoleBinding().WithName("").Build(),
 			expected: nil,
 		},
 		{
-			name: "Name with only separator returns nil",
-			obj: &rbacv1.ClusterRoleBinding{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "--",
-				},
-			},
+			name:     "Name with only separator returns nil",
+			obj:      builders.NewClusterRoleBinding().WithName("--").Build(),
 			expected: nil, // ParseUniqueName returns error for "--"
 		},
 	}

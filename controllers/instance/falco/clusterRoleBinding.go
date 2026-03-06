@@ -20,38 +20,30 @@ import (
 	"context"
 
 	rbacv1 "k8s.io/api/rbac/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
 
 func generateClusterRoleBinding(falco *instancev1alpha1.Falco) runtime.Object {
 	resourceName := instance.GenerateUniqueName(falco.Name, falco.Namespace)
 
-	return &rbacv1.ClusterRoleBinding{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "ClusterRoleBinding",
-			APIVersion: "rbac.authorization.k8s.io/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   resourceName,
-			Labels: falco.Labels,
-		},
-		Subjects: []rbacv1.Subject{
-			{
-				Kind:      "ServiceAccount",
-				Name:      falco.Name,
-				Namespace: falco.Namespace,
-			},
-		},
-		RoleRef: rbacv1.RoleRef{
+	return builders.NewClusterRoleBinding().
+		WithName(resourceName).
+		WithLabels(falco.Labels).
+		AddSubject(rbacv1.Subject{
+			Kind:      "ServiceAccount",
+			Name:      falco.Name,
+			Namespace: falco.Namespace,
+		}).
+		WithRoleRef(rbacv1.RoleRef{
 			Kind:     "ClusterRole",
 			Name:     resourceName,
 			APIGroup: "rbac.authorization.k8s.io",
-		},
-	}
+		}).
+		Build()
 }
 
 func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, falco *instancev1alpha1.Falco) error {

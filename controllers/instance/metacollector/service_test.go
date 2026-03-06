@@ -23,13 +23,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateService(t *testing.T) {
@@ -40,14 +40,8 @@ func TestGenerateService(t *testing.T) {
 		wantSelector map[string]string
 	}{
 		{
-			name: "basic Service creation with 3 ports",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-mc",
-					Namespace: "default",
-					Labels:    map[string]string{"app": "metacollector"},
-				},
-			},
+			name:     "basic Service creation with 3 ports",
+			mc:       builders.NewMetacollector().WithName("test-mc").WithNamespace("default").WithLabels(map[string]string{"app": "metacollector"}).Build(),
 			wantName: "test-mc",
 			wantSelector: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -55,13 +49,8 @@ func TestGenerateService(t *testing.T) {
 			},
 		},
 		{
-			name: "Service has correct selector",
-			mc: &instancev1alpha1.Metacollector{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "my-mc",
-					Namespace: "default",
-				},
-			},
+			name:     "Service has correct selector",
+			mc:       builders.NewMetacollector().WithName("my-mc").WithNamespace("default").Build(),
 			wantName: "my-mc",
 			wantSelector: map[string]string{
 				"app.kubernetes.io/name":     "my-mc",
@@ -95,7 +84,7 @@ func TestGenerateService(t *testing.T) {
 
 func TestEnsureService(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	mc := newMetacollector(withName("test-mc"))
+	mc := builders.NewMetacollector().WithName("test-mc").WithNamespace(testutil.TestNamespace).Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(mc).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 

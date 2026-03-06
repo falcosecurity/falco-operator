@@ -20,31 +20,28 @@ import (
 	"context"
 	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
+)
+
+const (
+	configMapKey = "falco.yaml"
 )
 
 // configmapGenerator returns a ResourceGenerator that creates a ConfigMap with the given config.
 func configmapGenerator(config string) instance.ResourceGenerator[*instancev1alpha1.Falco] {
 	return func(falco *instancev1alpha1.Falco) runtime.Object {
-		return &corev1.ConfigMap{
-			TypeMeta: metav1.TypeMeta{
-				Kind:       "ConfigMap",
-				APIVersion: "v1",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      falco.Name,
-				Namespace: falco.Namespace,
-				Labels:    falco.Labels,
-			},
-			Data: map[string]string{
-				"falco.yaml": config,
-			},
-		}
+		return builders.NewConfigMap().
+			WithName(falco.Name).
+			WithNamespace(falco.Namespace).
+			WithLabels(falco.Labels).
+			WithData(map[string]string{
+				configMapKey: config,
+			}).
+			Build()
 	}
 }
 

@@ -40,6 +40,7 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
@@ -93,10 +94,8 @@ func newTestReconciler() *Reconciler {
 }
 
 // createMetacollector creates a Metacollector resource and registers cleanup to run after the test.
-func createMetacollector(t *testing.T, ctx context.Context, opts ...func(*instancev1alpha1.Metacollector)) *instancev1alpha1.Metacollector {
+func createMetacollector(t *testing.T, ctx context.Context, mc *instancev1alpha1.Metacollector) *instancev1alpha1.Metacollector {
 	t.Helper()
-
-	mc := newMetacollector(opts...)
 
 	err := k8sClient.Create(ctx, mc)
 	require.NoError(t, err)
@@ -139,7 +138,7 @@ func TestReconcile_NonExistent(t *testing.T) {
 // TestReconcile_FullReconciliation verifies that all sub-resources are created after a full reconciliation.
 func TestReconcile_FullReconciliation(t *testing.T) {
 	ctx := context.Background()
-	mc := createMetacollector(t, ctx, withName("test-full"))
+	mc := createMetacollector(t, ctx, builders.NewMetacollector().WithName("test-full").WithNamespace(testutil.TestNamespace).Build())
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, mc.Name, 5)
@@ -204,7 +203,7 @@ func TestReconcile_FullReconciliation(t *testing.T) {
 // TestReconcile_Deletion verifies that deletion removes cluster-scoped resources and the finalizer.
 func TestReconcile_Deletion(t *testing.T) {
 	ctx := context.Background()
-	mc := createMetacollector(t, ctx, withName("test-delete"))
+	mc := createMetacollector(t, ctx, builders.NewMetacollector().WithName("test-delete").WithNamespace(testutil.TestNamespace).Build())
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, mc.Name, 3)
@@ -244,7 +243,7 @@ func TestReconcile_Deletion(t *testing.T) {
 // TestReconcile_UpdateDeployment verifies that updating the spec propagates changes to the Deployment.
 func TestReconcile_UpdateDeployment(t *testing.T) {
 	ctx := context.Background()
-	mc := createMetacollector(t, ctx, withName("test-update"), withReplicas(1))
+	mc := createMetacollector(t, ctx, builders.NewMetacollector().WithName("test-update").WithNamespace(testutil.TestNamespace).WithReplicas(1).Build())
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, mc.Name, 5)
@@ -279,7 +278,7 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 // TestReconcile_StatusPersisted verifies that status conditions are actually persisted to the API server.
 func TestReconcile_StatusPersisted(t *testing.T) {
 	ctx := context.Background()
-	mc := createMetacollector(t, ctx, withName("test-status"))
+	mc := createMetacollector(t, ctx, builders.NewMetacollector().WithName("test-status").WithNamespace(testutil.TestNamespace).Build())
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, mc.Name, 5)

@@ -19,12 +19,12 @@ package metacollector
 import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 )
@@ -60,45 +60,31 @@ func mergeDeploymentConfiguration(mc *instancev1alpha1.Metacollector) (*unstruct
 
 // baseDeployment returns the base Deployment for Metacollector with default values.
 func baseDeployment(mc *instancev1alpha1.Metacollector) *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      mc.Name,
-			Namespace: mc.Namespace,
-			Labels:    mc.Labels,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app.kubernetes.io/name":     mc.Name,
-					"app.kubernetes.io/instance": mc.Name,
-				},
-			},
-			Replicas: mc.Spec.Replicas,
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: instance.PodTemplateSpecLabels(mc.Name, mc.Labels),
-				},
-				Spec: corev1.PodSpec{
-					ServiceAccountName: mc.Name,
-					SecurityContext:    DefaultPodSecurityContext,
-					Containers: []corev1.Container{
-						{
-							Name:            containerName,
-							Image:           image.BuildMetacollectorImageStringFromVersion(mc.Spec.Version),
-							ImagePullPolicy: DefaultImagePullPolicy,
-							Args:            DefaultArgs,
-							Ports:           DefaultPorts,
-							Resources:       DefaultResources,
-							LivenessProbe:   DefaultLivenessProbe,
-							ReadinessProbe:  DefaultReadinessProbe,
-							SecurityContext: DefaultSecurityContext,
-						},
-					},
-				},
-			},
-			Strategy: instance.DeploymentStrategy(mc.Spec.Strategy),
-		},
-	}
+	return builders.NewDeployment().
+		WithName(mc.Name).
+		WithNamespace(mc.Namespace).
+		WithLabels(mc.Labels).
+		WithSelector(map[string]string{
+			"app.kubernetes.io/name":     mc.Name,
+			"app.kubernetes.io/instance": mc.Name,
+		}).
+		WithReplicas(mc.Spec.Replicas).
+		WithPodTemplateLabels(instance.PodTemplateSpecLabels(mc.Name, mc.Labels)).
+		WithServiceAccount(mc.Name).
+		WithPodSecurityContext(DefaultPodSecurityContext).
+		AddContainer(&corev1.Container{
+			Name:            containerName,
+			Image:           image.BuildMetacollectorImageStringFromVersion(mc.Spec.Version),
+			ImagePullPolicy: DefaultImagePullPolicy,
+			Args:            DefaultArgs,
+			Ports:           DefaultPorts,
+			Resources:       DefaultResources,
+			LivenessProbe:   DefaultLivenessProbe,
+			ReadinessProbe:  DefaultReadinessProbe,
+			SecurityContext: DefaultSecurityContext,
+		}).
+		WithStrategy(instance.DeploymentStrategy(mc.Spec.Strategy)).
+		Build()
 }
 
 // generateUserDefinedResource generates a user-defined resource from the Metacollector CR.
