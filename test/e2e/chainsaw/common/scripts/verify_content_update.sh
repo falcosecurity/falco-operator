@@ -12,7 +12,7 @@
 #   RETRY_DELAY: (Optional) Delay between retries in seconds. Default: 2.
 #
 # Example:
-#   NAMESPACE=default FILE_PATH=/etc/falco/config.d/50-config-test.yaml \
+#   NAMESPACE=default FILE_PATH=/etc/falco/config.d/50-03-config-test-inline.yaml \
 #   NEW_CONTENT="json_output: false" OLD_CONTENT="json_output: true" \
 #   bash verify_content_update.sh
 

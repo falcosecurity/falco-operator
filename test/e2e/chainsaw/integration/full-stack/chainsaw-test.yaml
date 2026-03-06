@@ -40,7 +40,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: /etc/falco/config.d/50-full-stack-config.yaml
+          value: /etc/falco/config.d/50-03-full-stack-config-inline.yaml
         - name: expected_content
           value: "json_output"
     - name: Verify full-stack-config status
@@ -119,7 +119,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: /etc/falco/config.d/50-full-stack-config.yaml
+          value: /etc/falco/config.d/50-03-full-stack-config-inline.yaml
         - name: expected_content
           value: "json_output"
     - name: Verify rules file survives type switch

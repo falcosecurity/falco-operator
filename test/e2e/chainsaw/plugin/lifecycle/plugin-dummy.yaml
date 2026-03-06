@@ -4,4 +4,5 @@ metadata:
   name: dummy
 spec:
   ociArtifact:
-    reference: ghcr.io/falcosecurity/plugins/plugin/dummy:latest
+    image:
+      repository: falcosecurity/plugins/plugin/dummy

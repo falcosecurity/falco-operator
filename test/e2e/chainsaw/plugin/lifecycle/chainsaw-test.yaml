@@ -100,7 +100,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: /etc/falco/config.d/99-plugins-config.yaml
+          value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
         - name: expected_content
           value: "initial.example.com"
 
@@ -122,7 +122,7 @@ spec:
         template: ../../common/_step_templates/verify-content-update.yaml
       bindings:
         - name: file_path
-          value: /etc/falco/config.d/99-plugins-config.yaml
+          value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
         - name: new_content
           value: "updated.example.com"
         - name: old_content

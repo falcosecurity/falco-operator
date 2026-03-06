@@ -30,7 +30,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-test.yaml"
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -56,7 +56,7 @@ spec:
         template: ../../common/_step_templates/verify-content-update.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-test.yaml"
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"
         - name: new_content
           value: "json_output: false"
         - name: old_content
@@ -84,7 +84,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-priority.yaml"
+          value: "/etc/falco/config.d/50-03-config-priority-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -104,14 +104,14 @@ spec:
         template: ../../common/_step_templates/verify-file-deleted.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-priority.yaml"
+          value: "/etc/falco/config.d/50-03-config-priority-inline.yaml"
 
     - name: Verify new config file at renamed path
       use:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/30-config-priority.yaml"
+          value: "/etc/falco/config.d/30-03-config-priority-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -137,7 +137,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-matching.yaml"
+          value: "/etc/falco/config.d/50-03-config-matching-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -168,7 +168,7 @@ spec:
         template: ../../common/_step_templates/verify-file-deleted.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-nonmatching.yaml"
+          value: "/etc/falco/config.d/50-03-config-nonmatching-inline.yaml"
 
     # --- config-multiple-priorities ---
     - name: Apply both priority configs
@@ -185,14 +185,14 @@ spec:
         - name: dir_path
           value: "/etc/falco/config.d"
         - name: expected_files
-          value: "30-config-low.yaml,70-config-high.yaml"
+          value: "30-03-config-low-inline.yaml,70-03-config-high-inline.yaml"
 
     - name: Verify low-priority config content
       use:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/30-config-low.yaml"
+          value: "/etc/falco/config.d/30-03-config-low-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -201,7 +201,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/70-config-high.yaml"
+          value: "/etc/falco/config.d/70-03-config-high-inline.yaml"
         - name: expected_content
           value: "log_level: debug"
 
@@ -238,7 +238,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/00-config-boundary-low.yaml"
+          value: "/etc/falco/config.d/00-03-config-boundary-low-inline.yaml"
         - name: expected_content
           value: "json_output"
 
@@ -263,7 +263,7 @@ spec:
         template: ../../common/_step_templates/verify-file-contains.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/99-config-boundary-high.yaml"
+          value: "/etc/falco/config.d/99-03-config-boundary-high-inline.yaml"
         - name: expected_content
           value: "log_level"
 
@@ -298,4 +298,4 @@ spec:
         template: ../../common/_step_templates/verify-file-deleted.yaml
       bindings:
         - name: file_path
-          value: "/etc/falco/config.d/50-config-test.yaml"
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"

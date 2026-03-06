@@ -5,7 +5,9 @@ metadata:
 spec:
   priority: 50
   ociArtifact:
-    reference: ghcr.io/falcosecurity/rules/falco-rules:3
+    image:
+      repository: falcosecurity/rules/falco-rules
+      tag: "3"
   configMapRef:
     name: test-rules-all-cm
   inlineRules: |

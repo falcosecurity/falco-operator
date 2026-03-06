@@ -5,4 +5,7 @@ metadata:
 spec:
   priority: 60
   ociArtifact:
-    reference: ghcr.io/falcosecurity/rules/falco-rules:latest
+    image:
+      repository: falcosecurity/rules/falco-rules
+    registry:
+      name: ghcr.io

@@ -11,7 +11,7 @@
 #   RETRY_DELAY: (Optional) Delay between retries in seconds. Default: 2.
 #
 # Example:
-#   NAMESPACE=default FILE_PATH=/etc/falco/config.d/50-config-test.yaml \
+#   NAMESPACE=default FILE_PATH=/etc/falco/config.d/50-03-config-test-inline.yaml \
 #   EXPECTED_CONTENT=json_output bash verify_file_contains.sh
 
 set -o errexit

@@ -135,7 +135,7 @@ Step templates in `common/_step_templates/` encapsulate common operations shared
     template: ../../common/_step_templates/verify-file-contains.yaml
   bindings:
     - name: file_path
-      value: "/etc/falco/config.d/50-config-test.yaml"
+      value: "/etc/falco/config.d/50-03-config-test-inline.yaml"
     - name: expected_content
       value: "json_output"
 ```
@@ -163,7 +163,7 @@ Scripts in `common/scripts/` follow these conventions:
 
 ```bash
 NAMESPACE=default \
-FILE_PATH=/etc/falco/config.d/50-config-test.yaml \
+FILE_PATH=/etc/falco/config.d/50-03-config-test-inline.yaml \
 EXPECTED_CONTENT=json_output \
 bash common/scripts/verify_file_contains.sh
 ```
@@ -176,7 +176,7 @@ All environment variables are documented in a header comment at the top of each 
 ```json
 {
   "error": "Pattern not found in file",
-  "file_path": "/etc/falco/config.d/50-config-test.yaml",
+  "file_path": "/etc/falco/config.d/50-03-config-test-inline.yaml",
   "pattern": "json_output"
 }
 ```
@@ -214,7 +214,7 @@ All environment variables are documented in a header comment at the top of each 
 | `rulesfile/edge-cases` | Rulesfile | Missing ConfigMap handling, status failure assertions |
 | `plugin/lifecycle` | Plugin | OCI create, multiple, update, selector, status, delete |
 | `integration/full-stack` | All | Full stack + status assertions + DaemonSet to Deployment type switch |
-| `validation` | All | CRD validation rejection |
+| `validation` | All | CRD validation: type, priority bounds, OCIArtifact required fields, plainHTTP/tls exclusivity |
 
 ## Chainsaw Gotchas
 
