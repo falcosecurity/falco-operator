@@ -592,6 +592,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		wantCRTrackKey    string
 		wantCRTrackValue  string
 		wantConditions    []testutil.ConditionExpect
+		wantEvents        []string
 	}{
 		{
 			name: "writes config for basic plugin",
@@ -604,6 +605,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			wantConfigName:   "json",
 			wantCRTrackKey:   "json",
 			wantCRTrackValue: "json",
+			wantEvents:       []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "writes config with initConfig",
@@ -621,6 +623,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			initialConfig:     &PluginsConfig{},
 			wantConfigCount:   1,
 			wantHasInitConfig: true,
+			wantEvents:        []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "removes stale entry on config name change",
@@ -643,6 +646,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			wantConfigName:   "new-name",
 			wantCRTrackKey:   "my-plugin",
 			wantCRTrackValue: "new-name",
+			wantEvents:       []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "same config name does not remove entry",
@@ -656,6 +660,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			},
 			wantConfigCount: 1,
 			wantConfigName:  "json",
+			wantEvents:      []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "store inline yaml fails sets error conditions",
@@ -673,6 +678,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlinePluginConfigStoreFailed},
 			},
+			wantEvents: []string{"Warning InlinePluginConfigStoreFailed Failed to store inline plugin config: disk full"},
 		},
 	}
 
@@ -715,6 +721,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 			if len(tt.wantConditions) > 0 {
 				testutil.RequireConditions(t, tt.plugin.Status.Conditions, tt.wantConditions)
 			}
+			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 		})
 	}
 }

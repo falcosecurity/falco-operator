@@ -171,7 +171,7 @@ func (am *Manager) Path(name string, artifactPriority int32, medium Medium, arti
 }
 
 // StoreFromInLineYaml stores an artifact from an inline YAML to the local filesystem.
-func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifactPriority int32, data *string, artifactType Type) error {
+func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifactPriority int32, data *string, artifactType Type) (StoreAction, error) {
 	logger := log.FromContext(ctx)
 
 	// If the data is nil, we remove the artifact from the manager and from filesystem.
@@ -182,10 +182,11 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
 			if err := am.removeArtifact(ctx, name, MediumInline); err != nil {
 				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
-				return err
+				return StoreActionNone, err
 			}
+			return StoreActionRemoved, nil
 		}
-		return nil
+		return StoreActionNone, nil
 	}
 
 	newFile := File{
@@ -194,6 +195,11 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 		Priority: artifactPriority,
 	}
 
+	// wasUpdate tracks whether we replaced an existing file (vs writing a brand-new one).
+	wasUpdate := false
+	// priorityOnlyChange tracks whether only the priority changed (content is the same).
+	priorityOnlyChange := false
+
 	// Check if the artifact is already stored.
 	if file := am.getArtifactFile(name, MediumInline); file != nil {
 		logger.V(4).Info("Artifact already stored", "artifact", file)
@@ -201,7 +207,7 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 		ok, err := am.fs.Exists(file.Path)
 		if err != nil {
 			logger.Error(err, "Failed to check if file exists", "file", file.Path)
-			return err
+			return StoreActionNone, err
 		}
 		// If the file exists we check if the priority has changed or the content has been updated.
 		if ok {
@@ -210,27 +216,31 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 			content, err := am.fs.ReadFile(file.Path)
 			if err != nil {
 				logger.Error(err, "unable to read file", "file", file.Path)
-				return err
+				return StoreActionNone, err
 			}
+			contentSame := string(content) == *data
 			// Check if the content is the same and the priority has not changed.
-			if string(content) == *data && file.Priority == artifactPriority {
+			if contentSame && file.Priority == artifactPriority {
 				logger.V(3).Info("file is up to date", "file", file.Path)
-				return nil
+				return StoreActionUnchanged, nil
 			}
 
-			if file.Priority != artifactPriority {
+			priorityOnlyChange = contentSame && file.Priority != artifactPriority
+			if priorityOnlyChange {
 				logger.Info("Updating artifact file due to priority change",
 					"oldPriority", file.Priority, "newPriority", artifactPriority, "oldFile", file.Path, "newFile", newFile.Path)
+			} else {
+				logger.Info("File is outdated, updating", "file", file.Path)
 			}
 
-			logger.Info("File is outdated, updating", "file", file.Path)
-			// The content is different, remove the file.
+			// Remove the old file before writing the new one.
 			if err := am.fs.Remove(file.Path); err != nil {
 				logger.Error(err, "unable to remove rulesfile", "file", file.Path)
-				return err
+				return StoreActionNone, err
 			}
 			// Remove the file from the manager.
 			am.removeArtifactFile(name, MediumInline)
+			wasUpdate = true
 		} else {
 			// The file is registered in the manager but missing from disk.
 			// Clear the stale registration so addArtifactFile below does not create a duplicate entry.
@@ -241,17 +251,23 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 	// Write the raw YAML to the filesystem.
 	if err := am.fs.WriteFile(newFile.Path, []byte(*data), 0o600); err != nil {
 		logger.Error(err, "unable to write file", "file", newFile.Path)
-		return err
+		return StoreActionNone, err
 	}
 
 	// Add the artifact to the manager.
 	am.addArtifactFile(name, newFile)
 	logger.Info("file correctly written to filesystem", "file", newFile.Path)
-	return nil
+	if wasUpdate {
+		if priorityOnlyChange {
+			return StoreActionPriorityChanged, nil
+		}
+		return StoreActionUpdated, nil
+	}
+	return StoreActionAdded, nil
 }
 
 // StoreFromOCI stores an artifact from an OCI registry to the local filesystem.
-func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriority int32, artifactType Type, artifact *commonv1alpha1.OCIArtifact) error {
+func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriority int32, artifactType Type, artifact *commonv1alpha1.OCIArtifact) (StoreAction, error) {
 	logger := log.FromContext(ctx)
 
 	// If the artifact is nil, we remove the artifact from the manager and from filesystem.
@@ -262,10 +278,11 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
 			if err := am.removeArtifact(ctx, name, MediumOCI); err != nil {
 				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
-				return err
+				return StoreActionNone, err
 			}
+			return StoreActionRemoved, nil
 		}
-		return nil
+		return StoreActionNone, nil
 	}
 	newFile := File{
 		Path:     am.Path(name, artifactPriority, MediumOCI, artifactType),
@@ -280,7 +297,7 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 		ok, err := am.fs.Exists(file.Path)
 		if err != nil {
 			logger.Error(err, "Failed to check if file exists", "file", file.Path)
-			return err
+			return StoreActionNone, err
 		}
 		// If the file exists and the priority has changed, we rename the file reflecting the new priority.
 		if ok && file.Priority != artifactPriority {
@@ -288,8 +305,11 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 				"oldPriority", file.Priority, "newPriority", artifactPriority, "oldFile", file.Path, "newFile", newFile.Path)
 			if err := am.fs.Rename(file.Path, newFile.Path); err != nil {
 				logger.Error(err, "Failed to rename file", "oldFile", file.Path, "newFile", newFile.Path)
-				return err
+				return StoreActionNone, err
 			}
+			am.removeArtifactFile(name, MediumOCI)
+			am.addArtifactFile(name, newFile)
+			return StoreActionPriorityChanged, nil
 		}
 		// If the file does not exist on the filesystem, we remove it from the manager and return an error.
 		// Next time the artifact is requested, it will be fetched from the OCI registry.
@@ -297,10 +317,10 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 			am.removeArtifactFile(name, MediumOCI)
 			err := fmt.Errorf("artifact %q not found on filesystem", file.Path)
 			logger.Error(err, "Failed to find file on filesystem", "file", newFile.Path)
-			return err
+			return StoreActionNone, err
 		}
 
-		return nil
+		return StoreActionUnchanged, nil
 	}
 
 	var dstDir string
@@ -323,7 +343,7 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, authSecretRef)
 	if err != nil {
 		logger.Error(err, "unable to get credentials for the OCI artifact", "authSecretRef", authSecretRef)
-		return err
+		return StoreActionNone, err
 	}
 
 	// Resolve registry TLS options.
@@ -334,10 +354,10 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	res, err := am.ociPuller.Pull(ctx, ref, dstDir, runtime.GOOS, runtime.GOARCH, creds, registryOpts)
 	if err != nil {
 		logger.Error(err, "unable to pull artifact", "reference", ref)
-		return err
+		return StoreActionNone, err
 	}
 	if res == nil {
-		return fmt.Errorf("puller returned nil result for reference %q", ref)
+		return StoreActionNone, fmt.Errorf("puller returned nil result for reference %q", ref)
 	}
 
 	archiveFile := filepath.Clean(filepath.Join(dstDir, res.Filename))
@@ -345,7 +365,7 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	// Extract the rulesfile from the archive.
 	f, err := am.fs.Open(archiveFile)
 	if err != nil {
-		return err
+		return StoreActionNone, err
 	}
 
 	logger.V(4).Info("Extracting OCI artifact", "archive", archiveFile)
@@ -354,32 +374,32 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	files, err := common.ExtractTarGz(ctx, f, dstDir, 0)
 	if err != nil {
 		logger.Error(err, "unable to extract OCI artifact", "filename", archiveFile)
-		return err
+		return StoreActionNone, err
 	}
 
 	// Clean up the archive.
 	if err = am.fs.Remove(archiveFile); err != nil {
 		logger.Error(err, "unable to remove OCI artifact", "filename", archiveFile)
-		return err
+		return StoreActionNone, err
 	}
 
 	logger.V(4).Info("Writing OCI artifact", "filename", newFile.Path)
 	// Rename the artifact to the generated name.
 	if err = am.fs.Rename(files[0], newFile.Path); err != nil {
 		logger.Error(err, "unable to rename artifact", "source", files[0], "destination", newFile.Path)
-		return err
+		return StoreActionNone, err
 	}
 	logger.Info("OCI artifact downloaded and saved", "artifact", newFile.Path)
 
 	// Add the artifact to the manager.
 	am.files[name] = append(am.files[name], newFile)
 
-	return nil
+	return StoreActionAdded, nil
 }
 
 // StoreFromConfigMap stores an artifact from a ConfigMap to the local filesystem.
 // The ConfigMap is fetched from the specified namespace (typically the same namespace as the Rulesfile CR).
-func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace string, artifactPriority int32, configMapRef *commonv1alpha1.ConfigMapRef, artifactType Type) error {
+func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace string, artifactPriority int32, configMapRef *commonv1alpha1.ConfigMapRef, artifactType Type) (StoreAction, error) {
 	logger := log.FromContext(ctx)
 
 	// If the configMapRef is nil, we remove the artifact from the manager and from filesystem.
@@ -390,10 +410,11 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 			logger.Info("Removing artifact from filesystem", "artifact", file.Path)
 			if err := am.removeArtifact(ctx, name, MediumConfigMap); err != nil {
 				logger.Error(err, "Failed to remove artifact from filesystem", "artifact", file.Path)
-				return err
+				return StoreActionNone, err
 			}
+			return StoreActionRemoved, nil
 		}
-		return nil
+		return StoreActionNone, nil
 	}
 
 	newFile := File{
@@ -413,23 +434,28 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 		// If ConfigMap not found, remove the artifact file from filesystem if it exists.
 		// This is an expected state when user deletes the ConfigMap or the ConfigMap is in a different namespace, not a failure.
 		filePath := am.Path(name, artifactPriority, MediumConfigMap, artifactType)
+		removed := false
 		if exists, _ := am.fs.Exists(filePath); exists {
 			logger.Info("ConfigMap not found, removing artifact from filesystem", "configMap", configMapRef.Name, "artifact", filePath)
 			if removeErr := am.fs.Remove(filePath); removeErr != nil {
 				logger.Error(removeErr, "Failed to remove artifact from filesystem", "artifact", filePath)
-				return removeErr
+				return StoreActionNone, removeErr
 			}
 			am.removeArtifactFile(name, MediumConfigMap)
+			removed = true
 		}
 		// Don't return error for "not found" - the ConfigMap was likely deleted intentionally.
 		// The watch will trigger reconciliation when it's recreated.
 		if k8serrors.IsNotFound(err) {
 			logger.V(3).Info("ConfigMap not found, artifact cleaned up", "configMap", configMapRef.Name)
-			return nil
+			if removed {
+				return StoreActionRemoved, nil
+			}
+			return StoreActionNone, nil
 		}
 		// Return other errors (network issues, permission errors, etc.)
 		logger.Error(err, "Failed to get ConfigMap", "configMap", configMapRef.Name)
-		return err
+		return StoreActionNone, err
 	}
 
 	// Get the data from the ConfigMap using the key appropriate for the artifact type.
@@ -440,7 +466,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 	case TypeRulesfile:
 		dataKey = commonv1alpha1.ConfigMapRulesKey
 	default:
-		return fmt.Errorf("unsupported artifact type for ConfigMap store: %q", artifactType)
+		return StoreActionNone, fmt.Errorf("unsupported artifact type for ConfigMap store: %q", artifactType)
 	}
 	data, ok := configMap.Data[dataKey]
 	if !ok {
@@ -452,17 +478,22 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 				"configMap", configMapRef.Name, "expectedKey", dataKey, "artifact", filePath)
 			if removeErr := am.fs.Remove(filePath); removeErr != nil {
 				logger.Error(removeErr, "Failed to remove artifact from filesystem", "artifact", filePath)
-				return removeErr
+				return StoreActionNone, removeErr
 			}
 			am.removeArtifactFile(name, MediumConfigMap)
-		} else {
-			logger.Info("ConfigMap missing expected key",
-				"configMap", configMapRef.Name, "expectedKey", dataKey)
+			// Don't return error - user needs to fix the ConfigMap, retrying won't help.
+			// The watch will trigger reconciliation when ConfigMap is updated.
+			return StoreActionRemoved, nil
 		}
-		// Don't return error - user needs to fix the ConfigMap, retrying won't help.
-		// The watch will trigger reconciliation when ConfigMap is updated.
-		return nil
+		logger.Info("ConfigMap missing expected key",
+			"configMap", configMapRef.Name, "expectedKey", dataKey)
+		return StoreActionNone, nil
 	}
+
+	// wasUpdate tracks whether we replaced an existing file (vs writing a brand-new one).
+	wasUpdate := false
+	// priorityOnlyChange tracks whether only the priority changed (content is the same).
+	priorityOnlyChange := false
 
 	// Check if the artifact is already stored.
 	if file := am.getArtifactFile(name, MediumConfigMap); file != nil {
@@ -471,7 +502,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 		ok, err := am.fs.Exists(file.Path)
 		if err != nil {
 			logger.Error(err, "Failed to check if file exists", "file", file.Path)
-			return err
+			return StoreActionNone, err
 		}
 		// If the file exists we check if the priority has changed or the content has been updated.
 		if ok {
@@ -480,27 +511,31 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 			content, err := am.fs.ReadFile(file.Path)
 			if err != nil {
 				logger.Error(err, "unable to read file", "file", file.Path)
-				return err
+				return StoreActionNone, err
 			}
+			contentSame := string(content) == data
 			// Check if the content is the same and the priority has not changed.
-			if string(content) == data && file.Priority == artifactPriority {
+			if contentSame && file.Priority == artifactPriority {
 				logger.V(3).Info("file is up to date", "file", file.Path)
-				return nil
+				return StoreActionUnchanged, nil
 			}
 
-			if file.Priority != artifactPriority {
+			priorityOnlyChange = contentSame && file.Priority != artifactPriority
+			if priorityOnlyChange {
 				logger.Info("Updating artifact file due to priority change",
 					"oldPriority", file.Priority, "newPriority", artifactPriority, "oldFile", file.Path, "newFile", newFile.Path)
+			} else {
+				logger.Info("File is outdated, updating", "file", file.Path)
 			}
 
-			logger.Info("File is outdated, updating", "file", file.Path)
-			// The content is different, remove the file.
+			// Remove the old file before writing the new one.
 			if err := am.fs.Remove(file.Path); err != nil {
 				logger.Error(err, "unable to remove file", "file", file.Path)
-				return err
+				return StoreActionNone, err
 			}
 			// Remove the file from the manager.
 			am.removeArtifactFile(name, MediumConfigMap)
+			wasUpdate = true
 		} else {
 			// The file is registered in the manager but missing from disk.
 			// Clear the stale registration so addArtifactFile below does not create a duplicate entry.
@@ -511,13 +546,19 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 	// Write the data to the filesystem.
 	if err := am.fs.WriteFile(newFile.Path, []byte(data), 0o600); err != nil {
 		logger.Error(err, "unable to write file", "file", newFile.Path)
-		return err
+		return StoreActionNone, err
 	}
 
 	// Add the artifact to the manager.
 	am.addArtifactFile(name, newFile)
 	logger.Info("ConfigMap data correctly written to filesystem", "file", newFile.Path, "configMap", configMapRef.Name)
-	return nil
+	if wasUpdate {
+		if priorityOnlyChange {
+			return StoreActionPriorityChanged, nil
+		}
+		return StoreActionUpdated, nil
+	}
+	return StoreActionAdded, nil
 }
 
 func (am *Manager) removeArtifact(ctx context.Context, name string, medium Medium) error {
