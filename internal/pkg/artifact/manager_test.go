@@ -134,6 +134,8 @@ func TestStoreFromConfigMap(t *testing.T) {
 		wantWriteCalls  int
 		wantRemoveCalls int
 		wantFilesLen    int
+		wantFile        *File
+		wantAction      StoreAction
 	}{
 		{
 			name: "successfully stores new artifact from ConfigMap",
@@ -153,6 +155,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionAdded,
 		},
 		{
 			name:         "removes artifact when configMapRef is nil",
@@ -165,6 +168,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionRemoved,
 		},
 		{
 			name: "returns nil when ConfigMap not found",
@@ -175,6 +179,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns nil when rules.yaml key not found in ConfigMap",
@@ -194,6 +199,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "skips write when file content is unchanged",
@@ -219,6 +225,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionUnchanged,
 		},
 		{
 			name: "updates file when content changes",
@@ -244,6 +251,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionUpdated,
 		},
 		{
 			name: "updates file when priority changes",
@@ -269,6 +277,8 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 1,
+			wantFile:        &File{Path: "/etc/falco/rules.d/60-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 60},
+			wantAction:      StoreActionPriorityChanged,
 		},
 		{
 			name: "returns error when write fails",
@@ -290,6 +300,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErrMsg:      "disk full",
 			wantWriteCalls:  1,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when Exists check fails",
@@ -316,6 +327,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErrMsg:      "permission denied",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when ReadFile fails",
@@ -343,6 +355,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErrMsg:      "I/O error",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when Remove fails during update",
@@ -370,6 +383,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErrMsg:      "cannot remove file",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:            "removes existing file when ConfigMap is not found",
@@ -378,6 +392,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			existingData:    testData,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionRemoved,
 		},
 		{
 			name:            "returns error when Remove fails on ConfigMap not found",
@@ -389,6 +404,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         true,
 			wantErrMsg:      "cannot remove",
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:           "returns error on non-NotFound client error",
@@ -396,6 +412,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			priority:       50,
 			noCorev1Scheme: true,
 			wantErr:        true,
+			wantAction:     StoreActionNone,
 		},
 		{
 			name:         "stores artifact using config.yaml key for TypeConfig",
@@ -407,6 +424,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			artifactType:   TypeConfig,
 			priority:       50,
 			wantWriteCalls: 1,
+			wantAction:     StoreActionAdded,
 		},
 		{
 			name:         "returns error for unsupported artifact type",
@@ -419,6 +437,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			priority:     50,
 			wantErr:      true,
 			wantErrMsg:   "unsupported artifact type",
+			wantAction:   StoreActionNone,
 		},
 		{
 			name:         "removes existing file when ConfigMap key is not found",
@@ -431,6 +450,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			existingData:    testData,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionRemoved,
 		},
 		{
 			name:         "returns error when Remove fails on missing ConfigMap key",
@@ -446,6 +466,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         true,
 			wantErrMsg:      "cannot remove",
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:         "clears stale registration when file is registered but missing from disk",
@@ -458,6 +479,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			existingFile:   &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
 			wantWriteCalls: 1,
 			wantFilesLen:   1,
+			wantAction:     StoreActionAdded,
 		},
 		{
 			name:            "returns error when removeArtifact fails on nil configMapRef",
@@ -469,6 +491,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantErr:         true,
 			wantErrMsg:      "remove failed",
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 	}
 
@@ -506,7 +529,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			err := manager.StoreFromConfigMap(ctx, testArtifactName, testNamespace, tt.priority, tt.configMapRef, artifactType)
+			action, err := manager.StoreFromConfigMap(ctx, testArtifactName, testNamespace, tt.priority, tt.configMapRef, artifactType)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -515,10 +538,19 @@ func TestStoreFromConfigMap(t *testing.T) {
 				require.NoError(t, err)
 			}
 
+			if tt.wantAction != "" {
+				assert.Equal(t, tt.wantAction, action)
+			}
 			assert.Len(t, mockFS.WriteCalls, tt.wantWriteCalls)
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
 			if tt.wantFilesLen > 0 {
 				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
+			if tt.wantFile != nil {
+				file := manager.getArtifactFile(testArtifactName, tt.wantFile.Medium)
+				require.NotNil(t, file)
+				assert.Equal(t, tt.wantFile.Path, file.Path)
+				assert.Equal(t, tt.wantFile.Priority, file.Priority)
 			}
 		})
 	}
@@ -546,6 +578,8 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		wantWriteCalls  int
 		wantRemoveCalls int
 		wantFilesLen    int
+		wantFile        *File
+		wantAction      StoreAction
 	}{
 		{
 			name:            "successfully stores new artifact from inline YAML",
@@ -554,6 +588,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionAdded,
 		},
 		{
 			name: "removes artifact when data is nil",
@@ -566,6 +601,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionRemoved,
 		},
 		{
 			name:            "does nothing when data is nil and no existing file",
@@ -573,6 +609,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "skips write when file content is unchanged",
@@ -587,6 +624,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionUnchanged,
 		},
 		{
 			name:     "updates file when content changes",
@@ -601,6 +639,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionUpdated,
 		},
 		{
 			name:     "updates file when priority changes",
@@ -615,6 +654,8 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         false,
 			wantWriteCalls:  1,
 			wantRemoveCalls: 1,
+			wantFile:        &File{Path: "/etc/falco/rules.d/60-03-test-artifact-inline.yaml", Medium: MediumInline, Priority: 60},
+			wantAction:      StoreActionPriorityChanged,
 		},
 		{
 			name:            "returns error when write fails",
@@ -625,6 +666,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErrMsg:      "disk full",
 			wantWriteCalls:  1,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "returns error when Exists check fails",
@@ -640,6 +682,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErrMsg:      "permission denied",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "returns error when ReadFile fails",
@@ -656,6 +699,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErrMsg:      "I/O error",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "returns error when Remove fails during update",
@@ -672,6 +716,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErrMsg:      "cannot remove file",
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "clears stale registration when file is registered but missing from disk",
@@ -684,6 +729,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			},
 			wantWriteCalls: 1,
 			wantFilesLen:   1,
+			wantAction:     StoreActionAdded,
 		},
 		{
 			name: "returns error when removeArtifact fails on nil data",
@@ -697,6 +743,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantErr:         true,
 			wantErrMsg:      "remove failed",
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 	}
 
@@ -720,7 +767,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			err := manager.StoreFromInLineYaml(ctx, testArtifactName, tt.priority, tt.data, TypeRulesfile)
+			action, err := manager.StoreFromInLineYaml(ctx, testArtifactName, tt.priority, tt.data, TypeRulesfile)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -729,10 +776,19 @@ func TestStoreFromInLineYaml(t *testing.T) {
 				require.NoError(t, err)
 			}
 
+			if tt.wantAction != "" {
+				assert.Equal(t, tt.wantAction, action)
+			}
 			assert.Len(t, mockFS.WriteCalls, tt.wantWriteCalls)
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
 			if tt.wantFilesLen > 0 {
 				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
+			if tt.wantFile != nil {
+				file := manager.getArtifactFile(testArtifactName, tt.wantFile.Medium)
+				require.NotNil(t, file)
+				assert.Equal(t, tt.wantFile.Path, file.Path)
+				assert.Equal(t, tt.wantFile.Priority, file.Priority)
 			}
 		})
 	}
@@ -1225,7 +1281,9 @@ func TestStoreFromOCI(t *testing.T) {
 		wantRenameCalls int
 		wantRemoveCalls int
 		wantFilesLen    int
+		wantFile        *File
 		wantOpts        *puller.RegistryOptions
+		wantAction      StoreAction
 	}{
 		{
 			name:     "removes artifact when artifact is nil",
@@ -1239,6 +1297,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionRemoved,
 		},
 		{
 			name:            "does nothing when artifact is nil and no existing file",
@@ -1247,6 +1306,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when artifact already stored but file not found on filesystem",
@@ -1265,6 +1325,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "renames file when priority changes",
@@ -1283,6 +1344,8 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 1,
 			wantRemoveCalls: 0,
+			wantFile:        &File{Path: "/etc/falco/rules.d/60-01-test-artifact-oci.yaml", Medium: MediumOCI, Priority: 60},
+			wantAction:      StoreActionPriorityChanged,
 		},
 		{
 			name: "skips pull when file already exists with same priority",
@@ -1301,6 +1364,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionUnchanged,
 		},
 		{
 			name: "returns error when credentials getter fails",
@@ -1319,6 +1383,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when puller fails",
@@ -1333,6 +1398,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   1,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when rename fails during priority change",
@@ -1353,6 +1419,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 1,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when Exists check fails",
@@ -1372,6 +1439,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   0,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "returns error when Open fails after successful pull",
@@ -1389,6 +1457,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   1,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "uses plugin directory for plugin artifact type",
@@ -1406,6 +1475,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   1,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "uses empty directory for unknown artifact type",
@@ -1423,6 +1493,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   1,
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "passes plainHTTP option to puller",
@@ -1444,6 +1515,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
 			wantOpts:        &puller.RegistryOptions{PlainHTTP: true},
+			wantAction:      StoreActionNone,
 		},
 		{
 			name: "passes TLS insecureSkipVerify option to puller",
@@ -1467,6 +1539,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantRenameCalls: 0,
 			wantRemoveCalls: 0,
 			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:         "puller returns nil result",
@@ -1476,6 +1549,7 @@ func TestStoreFromOCI(t *testing.T) {
 			customPuller: nilResultPuller{},
 			wantErr:      true,
 			wantErrMsg:   "nil result",
+			wantAction:   StoreActionNone,
 		},
 		{
 			name:         "successfully pulls, extracts and stores artifact",
@@ -1484,6 +1558,7 @@ func TestStoreFromOCI(t *testing.T) {
 			artifactType: TypeRulesfile,
 			useRealFS:    true,
 			wantFilesLen: 1,
+			wantAction:   StoreActionAdded,
 		},
 		{
 			name:           "returns error when ExtractTarGz fails due to invalid archive content",
@@ -1493,6 +1568,7 @@ func TestStoreFromOCI(t *testing.T) {
 			archiveContent: []byte("not-a-valid-gzip"),
 			wantErr:        true,
 			wantPullCalls:  1,
+			wantAction:     StoreActionNone,
 		},
 		{
 			name:         "returns error when Remove of archive fails after successful extraction",
@@ -1508,6 +1584,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantErrMsg:      "cannot remove archive",
 			wantPullCalls:   1,
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:         "returns error when Rename fails after successful extraction",
@@ -1524,6 +1601,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantPullCalls:   1,
 			wantRemoveCalls: 1,
 			wantRenameCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 		{
 			name:     "returns error when removeArtifact fails on nil artifact",
@@ -1537,6 +1615,7 @@ func TestStoreFromOCI(t *testing.T) {
 			wantErr:         true,
 			wantErrMsg:      "remove failed",
 			wantRemoveCalls: 1,
+			wantAction:      StoreActionNone,
 		},
 	}
 
@@ -1592,7 +1671,7 @@ func TestStoreFromOCI(t *testing.T) {
 			}
 
 			ctx := context.Background()
-			err := manager.StoreFromOCI(ctx, testArtifactName, tt.priority, tt.artifactType, tt.artifact)
+			action, err := manager.StoreFromOCI(ctx, testArtifactName, tt.priority, tt.artifactType, tt.artifact)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1601,6 +1680,9 @@ func TestStoreFromOCI(t *testing.T) {
 				require.NoError(t, err)
 			}
 
+			if tt.wantAction != "" {
+				assert.Equal(t, tt.wantAction, action)
+			}
 			if !tt.useRealFS && tt.customPuller == nil {
 				assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
 				assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
@@ -1612,6 +1694,12 @@ func TestStoreFromOCI(t *testing.T) {
 
 			if tt.wantFilesLen > 0 {
 				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
+			if tt.wantFile != nil {
+				file := manager.getArtifactFile(testArtifactName, tt.wantFile.Medium)
+				require.NotNil(t, file)
+				assert.Equal(t, filepath.Base(tt.wantFile.Path), filepath.Base(file.Path))
+				assert.Equal(t, tt.wantFile.Priority, file.Priority)
 			}
 		})
 	}

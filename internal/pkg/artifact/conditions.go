@@ -18,36 +18,48 @@ package artifact
 
 // Condition reasons.
 const (
-	// ReasonArtifactRemoved indicates the artifact was successfully removed.
-	ReasonArtifactRemoved = "ArtifactRemoved"
 	// ReasonArtifactRemoveFailed indicates the artifact failed to be removed.
 	ReasonArtifactRemoveFailed = "ArtifactRemoveFailed"
+	// ReasonPluginArtifactsRemoved indicates all plugin artifacts (OCI files and config) were removed successfully.
+	ReasonPluginArtifactsRemoved = "PluginArtifactsRemoved"
 	// ReasonReferenceResolved indicates the reference was resolved successfully.
 	ReasonReferenceResolved = "ReferenceResolved"
 	// ReasonReferenceResolutionFailed indicates the reference failed to resolve.
 	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
 	ReasonOCIArtifactStored = "OCIArtifactStored"
+	// ReasonOCIArtifactUpdated indicates the OCI artifact was updated successfully.
+	ReasonOCIArtifactUpdated = "OCIArtifactUpdated"
+	// ReasonOCIArtifactRemoved indicates the OCI artifact was removed from the filesystem.
+	ReasonOCIArtifactRemoved = "OCIArtifactRemoved"
+	// ReasonOCIArtifactPriorityChanged indicates the OCI artifact priority changed and the file was renamed.
+	ReasonOCIArtifactPriorityChanged = "OCIArtifactPriorityChanged"
 	// ReasonOCIArtifactStoreFailed indicates the OCI artifact failed to store.
 	ReasonOCIArtifactStoreFailed = "OCIArtifactStoreFailed"
-	// ReasonInlineRulesStored indicates inline rules were stored successfully.
-	ReasonInlineRulesStored = "InlineRulesStored"
+	// ReasonInlineArtifactStored indicates an inline artifact was stored successfully.
+	ReasonInlineArtifactStored = "InlineArtifactStored"
+	// ReasonInlineArtifactUpdated indicates an inline artifact was updated successfully.
+	ReasonInlineArtifactUpdated = "InlineArtifactUpdated"
+	// ReasonInlineArtifactRemoved indicates an inline artifact was removed from the filesystem.
+	ReasonInlineArtifactRemoved = "InlineArtifactRemoved"
+	// ReasonInlineArtifactPriorityChanged indicates an inline artifact priority changed and the file was renamed.
+	ReasonInlineArtifactPriorityChanged = "InlineArtifactPriorityChanged"
 	// ReasonInlineRulesStoreFailed indicates inline rules failed to store.
 	ReasonInlineRulesStoreFailed = "InlineRulesStoreFailed"
-	// ReasonConfigMapRulesStored indicates rules from a ConfigMap were stored successfully.
-	ReasonConfigMapRulesStored = "ConfigMapRulesStored"
+	// ReasonConfigMapArtifactStored indicates a ConfigMap artifact was stored successfully.
+	ReasonConfigMapArtifactStored = "ConfigMapArtifactStored"
+	// ReasonConfigMapArtifactUpdated indicates a ConfigMap artifact was updated successfully.
+	ReasonConfigMapArtifactUpdated = "ConfigMapArtifactUpdated"
+	// ReasonConfigMapArtifactRemoved indicates a ConfigMap artifact was removed from the filesystem.
+	ReasonConfigMapArtifactRemoved = "ConfigMapArtifactRemoved"
+	// ReasonConfigMapArtifactPriorityChanged indicates a ConfigMap artifact priority changed and the file was renamed.
+	ReasonConfigMapArtifactPriorityChanged = "ConfigMapArtifactPriorityChanged"
 	// ReasonConfigMapRulesStoreFailed indicates rules from a ConfigMap failed to store.
 	ReasonConfigMapRulesStoreFailed = "ConfigMapRulesStoreFailed"
-	// ReasonInlineConfigStored indicates inline configuration was stored successfully.
-	ReasonInlineConfigStored = "InlineConfigStored"
 	// ReasonInlineConfigStoreFailed indicates inline configuration failed to store.
 	ReasonInlineConfigStoreFailed = "InlineConfigStoreFailed"
-	// ReasonConfigMapConfigStored indicates configuration from a ConfigMap was stored successfully.
-	ReasonConfigMapConfigStored = "ConfigMapConfigStored"
 	// ReasonConfigMapConfigStoreFailed indicates configuration from a ConfigMap failed to store.
 	ReasonConfigMapConfigStoreFailed = "ConfigMapConfigStoreFailed"
-	// ReasonInlinePluginConfigStored indicates the plugin configuration was stored successfully.
-	ReasonInlinePluginConfigStored = "InlinePluginConfigStored"
 	// ReasonInlinePluginConfigStoreFailed indicates the plugin configuration failed to store.
 	ReasonInlinePluginConfigStoreFailed = "InlinePluginConfigStoreFailed"
 	// ReasonReconciled indicates the artifact was reconciled successfully.
@@ -62,6 +74,12 @@ const (
 
 // Condition messages.
 const (
+	// MessageOCIArtifactPriorityChanged is the message when an OCI artifact priority changed and the file was renamed.
+	MessageOCIArtifactPriorityChanged = "OCI artifact priority changed, file renamed"
+	// MessageInlineArtifactPriorityChanged is the message when an inline artifact priority changed and the file was renamed.
+	MessageInlineArtifactPriorityChanged = "Inline artifact priority changed, file renamed"
+	// MessageConfigMapArtifactPriorityChanged is the message when a ConfigMap artifact priority changed and the file was renamed.
+	MessageConfigMapArtifactPriorityChanged = "ConfigMap artifact priority changed, file renamed"
 	// MessageConfigReconciled is the message when config is reconciled successfully.
 	MessageConfigReconciled = "Config reconciled successfully"
 	// MessagePluginReconciled is the message when plugin is reconciled successfully.
@@ -72,16 +90,22 @@ const (
 	MessagePluginArtifactsRemoved = "Plugin artifacts removed successfully"
 	// MessageOCIArtifactStored is the message when OCI artifact is stored successfully.
 	MessageOCIArtifactStored = "OCI artifact stored successfully"
-	// MessageInlineRulesStored is the message when inline rules are stored successfully.
-	MessageInlineRulesStored = "Inline rules stored successfully"
-	// MessageConfigMapRulesStored is the message when rules from a ConfigMap are stored successfully.
-	MessageConfigMapRulesStored = "ConfigMap rules stored successfully"
-	// MessageConfigMapConfigStored is the message when configuration from a ConfigMap is stored successfully.
-	MessageConfigMapConfigStored = "ConfigMap config stored successfully"
-	// MessageInlineConfigStored is the message when inline configuration is stored successfully.
-	MessageInlineConfigStored = "Inline config content stored successfully"
-	// MessageInlinePluginConfigStored is the message when inline plugin configuration is stored successfully.
-	MessageInlinePluginConfigStored = "Inline plugin configuration stored successfully"
+	// MessageOCIArtifactUpdated is the message when OCI artifact is updated successfully.
+	MessageOCIArtifactUpdated = "OCI artifact updated successfully"
+	// MessageOCIArtifactRemoved is the message when OCI artifact is removed from the filesystem.
+	MessageOCIArtifactRemoved = "OCI artifact removed from filesystem"
+	// MessageInlineArtifactStored is the message when an inline artifact is stored successfully.
+	MessageInlineArtifactStored = "Inline artifact stored successfully"
+	// MessageInlineArtifactUpdated is the message when an inline artifact is updated successfully.
+	MessageInlineArtifactUpdated = "Inline artifact updated successfully"
+	// MessageInlineArtifactRemoved is the message when an inline artifact is removed from the filesystem.
+	MessageInlineArtifactRemoved = "Inline artifact removed from filesystem"
+	// MessageConfigMapArtifactStored is the message when a ConfigMap artifact is stored successfully.
+	MessageConfigMapArtifactStored = "ConfigMap artifact stored successfully"
+	// MessageConfigMapArtifactUpdated is the message when a ConfigMap artifact is updated successfully.
+	MessageConfigMapArtifactUpdated = "ConfigMap artifact updated successfully"
+	// MessageConfigMapArtifactRemoved is the message when a ConfigMap artifact is removed from the filesystem.
+	MessageConfigMapArtifactRemoved = "ConfigMap artifact removed from filesystem"
 	// MessageProgrammed is the message when the artifact is programmed successfully.
 	MessageProgrammed = "All artifacts sources were programmed successfully"
 	// MessageReferencesResolved is the message when all references are resolved successfully.

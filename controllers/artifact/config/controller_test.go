@@ -561,6 +561,7 @@ func TestEnsureConfig(t *testing.T) {
 		wantErr        bool
 		wantConditions []testutil.ConditionExpect
 		wantFiles      []string
+		wantEvents     []string
 	}{
 		{
 			name: "success stores inline config and sets conditions",
@@ -578,7 +579,8 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{testConfigYAML},
+			wantFiles:  []string{testConfigYAML},
+			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "no sources sets Programmed true",
@@ -595,6 +597,7 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantEvents: []string{},
 		},
 		{
 			name: "non-nil config with empty Raw is treated as no inline config",
@@ -612,6 +615,7 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantEvents: []string{},
 		},
 		{
 			name: "success stores configmap config and sets conditions",
@@ -640,7 +644,8 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{testConfigData},
+			wantFiles:  []string{testConfigData},
+			wantEvents: []string{"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully"},
 		},
 		{
 			name: "both inline and configmap sources write two files",
@@ -671,6 +676,10 @@ func TestEnsureConfig(t *testing.T) {
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 			wantFiles: []string{testConfigYAML, testConfigData},
+			wantEvents: []string{
+				"Normal InlineArtifactStored Inline artifact stored successfully",
+				"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully",
+			},
 		},
 		{
 			name: "malformed YAML in inline config returns error",
@@ -685,7 +694,8 @@ func TestEnsureConfig(t *testing.T) {
 					Priority: 50,
 				},
 			},
-			wantErr: true,
+			wantErr:    true,
+			wantEvents: []string{},
 		},
 		{
 			name: "failure sets error condition on inline content",
@@ -705,6 +715,7 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
 			},
+			wantEvents: []string{"Warning InlineConfigStoreFailed Failed to store config: disk full"},
 		},
 		{
 			name: "failure on configmap store sets error condition",
@@ -735,6 +746,7 @@ func TestEnsureConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapConfigStoreFailed},
 			},
+			wantEvents: []string{"Warning ConfigMapConfigStoreFailed Failed to store ConfigMap config: disk full"},
 		},
 	}
 
@@ -759,6 +771,7 @@ func TestEnsureConfig(t *testing.T) {
 			}
 
 			testutil.RequireConditions(t, tt.config.Status.Conditions, tt.wantConditions)
+			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 
 			if len(tt.wantFiles) > 0 {
 				require.Len(t, mockFS.Files, len(tt.wantFiles), "unexpected number of files written")

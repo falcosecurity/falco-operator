@@ -210,20 +210,17 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
 	// Store OCI artifact if specified; passing nil removes any previously stored OCI artifact.
-	if err = r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
+	ociAction, err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact)
+	if err != nil {
 		logger.Error(err, "unable to store Rulesfile OCI artifact")
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
-			artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
+		artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
 			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
-	if rulesfile.Spec.OCIArtifact != nil {
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
-			artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
-	}
+	artifact.RecordStoreEvent(r.recorder, rulesfile, ociAction, artifact.MediumOCI)
 
 	// Store inline rules if specified.
 	// spec.inlineRules is stored as JSON by the API server; convert to YAML before writing to disk.
@@ -233,28 +230,25 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		return fmt.Errorf("converting inline rules to YAML: %w", err)
 	}
 
-	if err = r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, inlineRulesData, artifact.TypeRulesfile); err != nil {
+	inlineAction, err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, inlineRulesData, artifact.TypeRulesfile)
+	if err != nil {
 		logger.Error(err, "unable to store Rulesfile inline rules")
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
-			artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
+		artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonInlineRulesStoreFailed,
 			fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
-
-	if inlineRulesData != nil {
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonInlineRulesStored,
-			artifact.ReasonInlineRulesStored, artifact.MessageInlineRulesStored)
-	}
+	artifact.RecordStoreEvent(r.recorder, rulesfile, inlineAction, artifact.MediumInline)
 
 	// Store or remove ConfigMap rules. Passing nil cleans up a previously stored file.
-	if err = r.artifactManager.StoreFromConfigMap(
+	cmAction, err := r.artifactManager.StoreFromConfigMap(
 		ctx, rulesfile.Name, rulesfile.Namespace, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile,
-	); err != nil {
+	)
+	if err != nil {
 		logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapRulesStoreFailed,
+		artifact.RecordWarning(r.recorder, rulesfile,
 			artifact.ReasonConfigMapRulesStoreFailed, artifact.MessageFormatConfigMapRulesStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonConfigMapRulesStoreFailed,
@@ -262,10 +256,7 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 		))
 		return err
 	}
-	if rulesfile.Spec.ConfigMapRef != nil {
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapRulesStored,
-			artifact.ReasonConfigMapRulesStored, artifact.MessageConfigMapRulesStored)
-	}
+	artifact.RecordStoreEvent(r.recorder, rulesfile, cmAction, artifact.MediumConfigMap)
 
 	apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
@@ -283,7 +274,7 @@ func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, ru
 		err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, rulesfile.Spec.ConfigMapRef.Name, &corev1.ConfigMap{})
 		if err != nil {
 			logger.Error(err, "ConfigMap reference resolution failed", "configMap", rulesfile.Spec.ConfigMapRef.Name)
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+			artifact.RecordWarning(r.recorder, rulesfile,
 				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
 			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
 				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
@@ -305,7 +296,7 @@ func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, ru
 			err := r.artifactManager.CheckReferenceResolution(ctx, rulesfile.Namespace, secretName, &corev1.Secret{})
 			if err != nil {
 				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
-				r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
+				artifact.RecordWarning(r.recorder, rulesfile,
 					artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
 				apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
 					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
@@ -320,8 +311,7 @@ func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, ru
 	}
 
 	if hasRefs {
-		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonReferenceResolved,
-			artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
+		artifact.RecordNormal(r.recorder, rulesfile, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
 		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewResolvedRefsCondition(
 			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, rulesfile.GetGeneration(),
 		))

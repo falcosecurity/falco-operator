@@ -205,8 +205,7 @@ func (r *ConfigReconciler) enforceReferenceResolution(ctx context.Context, confi
 		err := r.artifactManager.CheckReferenceResolution(ctx, config.Namespace, config.Spec.ConfigMapRef.Name, &corev1.ConfigMap{})
 		if err != nil {
 			logger.Error(err, "ConfigMap reference resolution failed", "configMap", config.Spec.ConfigMapRef.Name)
-			r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
-				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+			artifact.RecordWarning(r.recorder, config, artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
 			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewResolvedRefsCondition(
 				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
 				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, config.Spec.ConfigMapRef.Name), config.GetGeneration()))
@@ -217,8 +216,7 @@ func (r *ConfigReconciler) enforceReferenceResolution(ctx context.Context, confi
 			return err
 		}
 
-		r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonReferenceResolved,
-			artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
+		artifact.RecordNormal(r.recorder, config, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
 		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewResolvedRefsCondition(
 			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, config.GetGeneration(),
 		))
@@ -245,39 +243,32 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 		return fmt.Errorf("converting inline config to YAML: %w", err)
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, config.Name, p, configData, artifact.TypeConfig); err != nil {
+	inlineAction, err := r.artifactManager.StoreFromInLineYaml(ctx, config.Name, p, configData, artifact.TypeConfig)
+	if err != nil {
 		logger.Error(err, "unable to store inline config")
-		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
-			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
+		artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
 			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
-
-	if configData != nil {
-		r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
-			artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
-	}
+	artifact.RecordStoreEvent(r.recorder, config, inlineAction, artifact.MediumInline)
 
 	// Store ConfigMap config if specified.
-	if config.Spec.ConfigMapRef != nil {
-		if err := r.artifactManager.StoreFromConfigMap(
-			ctx, config.Name, config.Namespace, p, config.Spec.ConfigMapRef, artifact.TypeConfig,
-		); err != nil {
-			logger.Error(err, "unable to store config from ConfigMap reference")
-			r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapConfigStoreFailed,
-				artifact.ReasonConfigMapConfigStoreFailed, artifact.MessageFormatConfigMapConfigStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonConfigMapConfigStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapConfigStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
-		r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapConfigStored,
-			artifact.ReasonConfigMapConfigStored, artifact.MessageConfigMapConfigStored)
+	cmAction, err := r.artifactManager.StoreFromConfigMap(
+		ctx, config.Name, config.Namespace, p, config.Spec.ConfigMapRef, artifact.TypeConfig,
+	)
+	if err != nil {
+		logger.Error(err, "unable to store config from ConfigMap reference")
+		artifact.RecordWarning(r.recorder, config, artifact.ReasonConfigMapConfigStoreFailed, artifact.MessageFormatConfigMapConfigStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonConfigMapConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigMapConfigStoreFailed, err.Error()), gen,
+		))
+		return err
 	}
+	artifact.RecordStoreEvent(r.recorder, config, cmAction, artifact.MediumConfigMap)
 
 	apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,

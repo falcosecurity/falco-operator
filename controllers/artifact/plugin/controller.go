@@ -192,19 +192,17 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 
 	apimeta.RemoveStatusCondition(&plugin.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
-	if err = r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact); err != nil {
+	ociAction, err := r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact)
+	if err != nil {
 		logger.Error(err, "unable to store plugin artifact")
-		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
-			artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
+		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
 			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
 		))
 		return err
 	}
-
-	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
-		artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
+	artifact.RecordStoreEvent(r.recorder, plugin, ociAction, artifact.MediumOCI)
 	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
 	))
@@ -224,8 +222,7 @@ func (r *PluginReconciler) enforceReferenceResolution(ctx context.Context, plugi
 			err := r.artifactManager.CheckReferenceResolution(ctx, plugin.Namespace, secretName, &corev1.Secret{})
 			if err != nil {
 				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
-				r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonReferenceResolutionFailed,
-					artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
+				artifact.RecordWarning(r.recorder, plugin, artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
 				apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewResolvedRefsCondition(
 					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
 					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), plugin.GetGeneration()))
@@ -239,8 +236,7 @@ func (r *PluginReconciler) enforceReferenceResolution(ctx context.Context, plugi
 	}
 
 	if hasRefs {
-		r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonReferenceResolved,
-			artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
+		artifact.RecordNormal(r.recorder, plugin, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
 		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewResolvedRefsCondition(
 			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, plugin.GetGeneration(),
 		))
@@ -259,8 +255,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 		if controllerutil.ContainsFinalizer(plugin, r.finalizer) {
 			logger.Info("Plugin instance marked for deletion, cleaning up")
 			if err := r.artifactManager.RemoveAll(ctx, plugin.Name); err != nil {
-				r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonArtifactRemoveFailed,
-					artifact.ReasonArtifactRemoveFailed, artifact.MessageFormatPluginArtifactsRemoveFailed, err.Error())
+				artifact.RecordWarning(r.recorder, plugin, artifact.ReasonArtifactRemoveFailed, artifact.MessageFormatPluginArtifactsRemoveFailed, err.Error())
 				return false, err
 			}
 
@@ -274,8 +269,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, plugin *artifactv
 				return false, err
 			}
 
-			r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonArtifactRemoved,
-				artifact.ReasonArtifactRemoved, artifact.MessagePluginArtifactsRemoved)
+			artifact.RecordNormal(r.recorder, plugin, artifact.ReasonPluginArtifactsRemoved, artifact.MessagePluginArtifactsRemoved)
 
 			// Remove the finalizer.
 			logger.V(3).Info("Removing finalizer", "finalizer", r.finalizer)
@@ -314,7 +308,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	pluginConfigString, err := r.PluginsConfig.toString()
 	if err != nil {
 		logger.Error(err, "unable to convert plugin config to string")
-		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
+		artifact.RecordWarning(r.recorder, plugin,
 			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonInlinePluginConfigStoreFailed,
@@ -323,10 +317,11 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err = r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
-		&pluginConfigString, artifact.TypeConfig); err != nil {
+	configAction, err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
+		&pluginConfigString, artifact.TypeConfig)
+	if err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
-		r.recorder.Eventf(plugin, nil, corev1.EventTypeWarning, artifact.ReasonInlinePluginConfigStoreFailed,
+		artifact.RecordWarning(r.recorder, plugin,
 			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
 		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 			metav1.ConditionFalse, artifact.ReasonInlinePluginConfigStoreFailed,
@@ -334,9 +329,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		))
 		return err
 	}
-
-	r.recorder.Eventf(plugin, nil, corev1.EventTypeNormal, artifact.ReasonInlinePluginConfigStored,
-		artifact.ReasonInlinePluginConfigStored, artifact.MessageInlinePluginConfigStored)
+	artifact.RecordStoreEvent(r.recorder, plugin, configAction, artifact.MediumInline)
 	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
 	))
@@ -364,7 +357,7 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	if err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
+	if _, err := r.artifactManager.StoreFromInLineYaml(ctx, pluginConfigFileName, priority.MaxPriority,
 		&pluginConfigString, artifact.TypeConfig); err != nil {
 		logger.Error(err, "unable to store plugin config", "filename", pluginConfigFileName)
 		return err
