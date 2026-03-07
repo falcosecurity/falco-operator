@@ -25,7 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -90,10 +90,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// Fetch the Falco instance
 	logger.V(2).Info("Fetching falco instance")
 
-	if err := r.Get(ctx, req.NamespacedName, falco); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, falco); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch falco instance")
 		return ctrl.Result{}, err
-	} else if apierrors.IsNotFound(err) {
+	} else if k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -271,7 +271,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		Kind:    "ClusterRoleBinding",
 	})
 	crb.SetName(resourceName)
-	if err := r.Delete(ctx, crb); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, crb); err != nil && !k8serrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to delete clusterrolebinding")
 		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
 			ReasonDeletionError, MessageFormatDeletionError, "ClusterRoleBinding", err.Error())
@@ -285,7 +285,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 		Kind:    "ClusterRole",
 	})
 	cr.SetName(resourceName)
-	if err := r.Delete(ctx, cr); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Delete(ctx, cr); err != nil && !k8serrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to delete clusterrole")
 		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
 			ReasonDeletionError, MessageFormatDeletionError, "ClusterRole", err.Error())
@@ -294,7 +294,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, falco *instancev1alpha1
 
 	patch := client.MergeFrom(falco.DeepCopy())
 	controllerutil.RemoveFinalizer(falco, finalizer)
-	if err := r.Patch(ctx, falco, patch); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Patch(ctx, falco, patch); err != nil && !k8serrors.IsNotFound(err) {
 		log.FromContext(ctx).Error(err, "unable to remove finalizer from Falco instance")
 		r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, ReasonDeletionError,
 			ReasonDeletionError, MessageFormatDeletionError, "Finalizer", err.Error())
@@ -366,7 +366,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 	})
 	resourceExists := true
 	if err = r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource); err != nil {
-		if apierrors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			resourceExists = false
 		} else {
 			logger.Error(err, "unable to fetch existing resource")
@@ -463,7 +463,7 @@ func (r *Reconciler) cleanupDualDeployments(ctx context.Context, falco *instance
 
 		// Try to get the existing resource.
 		err := r.Get(ctx, client.ObjectKeyFromObject(falco), existingResource)
-		if err != nil && !apierrors.IsNotFound(err) {
+		if err != nil && !k8serrors.IsNotFound(err) {
 			logger.Error(err, "unable to fetch existing resource", "kind", t)
 			return err
 		}
@@ -509,7 +509,7 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *insta
 
 		deployment := &appsv1.Deployment{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(falco), deployment); err != nil {
-			if apierrors.IsNotFound(err) {
+			if k8serrors.IsNotFound(err) {
 				conditionStatus = metav1.ConditionFalse
 				conditionReason = ReasonDeploymentNotFound
 				conditionMessage = MessageDeploymentNotFound
@@ -539,7 +539,7 @@ func (r *Reconciler) computeAvailableCondition(ctx context.Context, falco *insta
 	case resourceTypeDaemonSet:
 		daemonset := &appsv1.DaemonSet{}
 		if err := r.Get(ctx, client.ObjectKeyFromObject(falco), daemonset); err != nil {
-			if apierrors.IsNotFound(err) {
+			if k8serrors.IsNotFound(err) {
 				conditionStatus = metav1.ConditionFalse
 				conditionReason = ReasonDaemonSetNotFound
 				conditionMessage = MessageDaemonSetNotFound
@@ -593,7 +593,7 @@ func (r *Reconciler) ensureResource(ctx context.Context, falco *instancev1alpha1
 	existingResource.SetGroupVersionKind(desiredResource.GetObjectKind().GroupVersionKind())
 	resourceExists := true
 	if err = r.Get(ctx, client.ObjectKeyFromObject(desiredResource), existingResource); err != nil {
-		if apierrors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			resourceExists = false
 		} else {
 			return fmt.Errorf("unable to fetch existing %s: %w", resourceType, err)

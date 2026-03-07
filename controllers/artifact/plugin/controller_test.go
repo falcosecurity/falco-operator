@@ -132,8 +132,8 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:             testutil.Request(testPluginName),
-			wantFinalizer:   testutil.BoolPtr(true),
-			wantConfigEmpty: testutil.BoolPtr(true),
+			wantFinalizer:   new(true),
+			wantConfigEmpty: new(true),
 		},
 		{
 			name: "happy path with finalizer already set writes config",
@@ -147,7 +147,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:             testutil.Request(testPluginName),
-			wantConfigEmpty: testutil.BoolPtr(false),
+			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
@@ -171,7 +171,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:             testutil.Request("container"),
-			wantConfigEmpty: testutil.BoolPtr(false),
+			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
@@ -194,7 +194,7 @@ func TestReconcile(t *testing.T) {
 			},
 			preCRTracking:   map[string]string{testPluginName: testPluginName},
 			req:             testutil.Request(testPluginName),
-			wantConfigEmpty: testutil.BoolPtr(true),
+			wantConfigEmpty: new(true),
 		},
 		{
 			name: "deletion without our finalizer is no-op",
@@ -233,7 +233,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:             testutil.Request(testPluginName),
-			wantConfigEmpty: testutil.BoolPtr(false),
+			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
@@ -261,8 +261,8 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:             testutil.Request(testPluginName),
-			wantConfigEmpty: testutil.BoolPtr(true),
-			wantFinalizer:   testutil.BoolPtr(false),
+			wantConfigEmpty: new(true),
+			wantFinalizer:   new(false),
 		},
 		{
 			name: "node not found with selector returns error",
@@ -444,8 +444,8 @@ func TestHandleDeletion(t *testing.T) {
 			},
 			preCRTracking:       map[string]string{testPluginName: testPluginName},
 			wantOK:              true,
-			wantConfigEmpty:     testutil.BoolPtr(true),
-			wantCRTrackingEmpty: testutil.BoolPtr(true),
+			wantConfigEmpty:     new(true),
+			wantCRTrackingEmpty: new(true),
 		},
 		{
 			name: "marked for deletion without our finalizer skips cleanup",
@@ -1127,7 +1127,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 		}
 
 		pc.addConfig(artifact.NewManager(nil, ""), plugin)
-		var initialConfig map[string]interface{}
+		var initialConfig map[string]any
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &initialConfig))
 		assert.Equal(t, "https://initial.example.com", initialConfig["sssURL"])
 
@@ -1141,7 +1141,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 		}
 		pc.addConfig(artifact.NewManager(nil, ""), pluginUpdated)
 		require.Len(t, pc.Configs, 1)
-		var updatedConfig map[string]interface{}
+		var updatedConfig map[string]any
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &updatedConfig))
 		assert.Equal(t, "https://updated.example.com", updatedConfig["sssURL"])
 		assert.Equal(t, []string{"json"}, pc.LoadPlugins)

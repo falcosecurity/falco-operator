@@ -1,15 +1,23 @@
 version: "2"
 run:
+  timeout: 10m
   allow-parallel-runners: true
 linters:
   default: none
   enable:
     - asciicheck
+    - asasalint
+    - bidichk
     - bodyclose
+    - containedctx
     - copyloopvar
     - dogsled
     - dupl
+    - dupword
+    - durationcheck
     - errcheck
+    - errchkjson
+    - errname
     - errorlint
     - exhaustive
     - ginkgolinter
@@ -22,19 +30,29 @@ linters:
     - goprintffuncname
     - gosec
     - govet
+    - importas
     - ineffassign
+    - intrange
     - lll
     - misspell
+    - modernize
     - nakedret
+    - nilerr
     - noctx
     - nolintlint
     - prealloc
+    - predeclared
+    - promlinter
+    - reassign
     - revive
     - rowserrcheck
     - staticcheck
+    - testifylint
     - unconvert
     - unparam
     - unused
+    - usetesting
+    - wastedassign
     - whitespace
   settings:
     dupl:
@@ -71,6 +89,21 @@ linters:
         limitations under the License.
 
         SPDX-License-Identifier: Apache-2.0
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+    importas:
+      alias:
+        - pkg: k8s.io/api/([a-z]+)/(v[\w\d]+)
+          alias: ${1}${2}
+        - pkg: k8s.io/apimachinery/pkg/apis/meta/v1
+          alias: metav1
+        - pkg: k8s.io/apimachinery/pkg/api/errors
+          alias: k8serrors
+        - pkg: sigs.k8s.io/controller-runtime/pkg/log
+          alias: ctrllog
     lll:
       line-length: 150
     misspell:
@@ -81,6 +114,20 @@ linters:
       allow-unused: false
     revive:
       rules:
+        - name: dot-imports
+          disabled: true
+        - name: errorf
+          severity: warning
+          disabled: false
+        - name: error-strings
+          severity: warning
+          disabled: false
+        - name: error-naming
+          severity: warning
+          disabled: false
+        - name: empty-block
+          severity: warning
+          disabled: false
         - name: optimize-operands-order
         - name: identical-branches
         - name: comment-spacings
@@ -94,9 +141,18 @@ linters:
         - name: exported
           arguments:
             - disableStutteringCheck
+    testifylint:
+      enable-all: true
+      disable:
+        - require-error
+    usetesting:
+      os-temp-dir: true
   exclusions:
     generated: lax
     rules:
+      - linters:
+          - errcheck
+        text: Error return value of .((os\.)?std(out|err)\..*|.*Close|.*Flush|os\.Remove(All)?|.*printf?|os\.(Un)?Setenv). is not checked
       - linters:
           - lll
         path: api/*
@@ -116,6 +172,16 @@ linters:
       - linters:
           - gocyclo
         path: main.go
+      - linters:
+          - whitespace
+        path: _test\.go
+      - linters:
+          - noctx
+        path: test/
+      - linters:
+          - revive
+        path: internal/|test/
+        text: 'exported: exported'
     paths:
       - third_party$
       - builtin$
@@ -131,6 +197,7 @@ formatters:
         - standard
         - default
         - prefix(github.com/falcosecurity/falco-operator)
+      custom-order: true
     goimports:
       local-prefixes:
         - github.com/falcosecurity/falco-operator
@@ -140,3 +207,8 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+
+issues:
+  fix: true
+  max-issues-per-linter: 0
+  max-same-issues: 0

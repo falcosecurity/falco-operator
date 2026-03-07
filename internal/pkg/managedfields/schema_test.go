@@ -184,7 +184,7 @@ func TestGetObjectType(t *testing.T) {
 		{
 			name: "Unstructured with valid type",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
 				},
@@ -194,7 +194,7 @@ func TestGetObjectType(t *testing.T) {
 		{
 			name: "object without kind",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "v1",
 				},
 			},
@@ -203,7 +203,7 @@ func TestGetObjectType(t *testing.T) {
 		{
 			name: "unknown type",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "unknown.example.com/v1",
 					"kind":       "UnknownKind",
 				},

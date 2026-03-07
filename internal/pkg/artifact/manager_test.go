@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/utils/ptr"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -43,8 +44,6 @@ func createTestScheme(t *testing.T) *runtime.Scheme {
 	require.NoError(t, corev1.AddToScheme(scheme))
 	return scheme
 }
-
-func boolPtr(b bool) *bool { return &b }
 
 func TestNewManager(t *testing.T) {
 	tests := []struct {
@@ -550,7 +549,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 	}{
 		{
 			name:            "successfully stores new artifact from inline YAML",
-			data:            ptr(testData),
+			data:            ptr.To(testData),
 			priority:        50,
 			wantErr:         false,
 			wantWriteCalls:  1,
@@ -577,7 +576,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "skips write when file content is unchanged",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -591,7 +590,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "updates file when content changes",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -605,7 +604,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "updates file when priority changes",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 60,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -619,7 +618,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:            "returns error when write fails",
-			data:            ptr(testData),
+			data:            ptr.To(testData),
 			priority:        50,
 			fsWriteErr:      fmt.Errorf("disk full"),
 			wantErr:         true,
@@ -629,7 +628,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "returns error when Exists check fails",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -644,7 +643,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "returns error when ReadFile fails",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -660,7 +659,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "returns error when Remove fails during update",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -676,7 +675,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		},
 		{
 			name:     "clears stale registration when file is registered but missing from disk",
-			data:     ptr(testData),
+			data:     ptr.To(testData),
 			priority: 50,
 			existingFile: &File{
 				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
@@ -1192,11 +1191,6 @@ func TestRemoveArtifactFile(t *testing.T) {
 	}
 }
 
-// ptr returns a pointer to the given string.
-func ptr(s string) *string {
-	return &s
-}
-
 func TestStoreFromOCI(t *testing.T) {
 	const (
 		testNamespace    = "test-namespace"
@@ -1435,7 +1429,7 @@ func TestStoreFromOCI(t *testing.T) {
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: testImage,
 				Registry: &commonv1alpha1.RegistryConfig{
-					PlainHTTP: boolPtr(true),
+					PlainHTTP: new(true),
 				},
 			},
 			priority:     50,

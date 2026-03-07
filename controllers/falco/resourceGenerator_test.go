@@ -224,16 +224,16 @@ func TestGenerateResourceFromFalcoInstance(t *testing.T) {
 func TestToUnstructured(t *testing.T) {
 	tests := []struct {
 		name    string
-		obj     interface{}
+		obj     any
 		wantErr bool
 	}{
 		{
 			name: "already unstructured",
 			obj: &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name": "test",
 					},
 				},

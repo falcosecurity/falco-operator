@@ -25,7 +25,7 @@ import (
 	"runtime"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -423,7 +423,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 		}
 		// Don't return error for "not found" - the ConfigMap was likely deleted intentionally.
 		// The watch will trigger reconciliation when it's recreated.
-		if apierrors.IsNotFound(err) {
+		if k8serrors.IsNotFound(err) {
 			logger.V(3).Info("ConfigMap not found, artifact cleaned up", "configMap", configMapRef.Name)
 			return nil
 		}

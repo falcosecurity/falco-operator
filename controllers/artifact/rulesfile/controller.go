@@ -21,7 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -87,10 +87,10 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Fetch the Rulesfile instance.
 	logger.V(2).Info("Fetching Rulesfile instance")
 
-	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch Rulesfile")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
-	} else if apierrors.IsNotFound(err) {
+	} else if k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -184,7 +184,7 @@ func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *ar
 		patch := client.MergeFrom(rulesfile.DeepCopy())
 		controllerutil.AddFinalizer(rulesfile, r.finalizer)
 		if err := r.Patch(ctx, rulesfile, patch); err != nil {
-			if apierrors.IsConflict(err) {
+			if k8serrors.IsConflict(err) {
 				logger.V(3).Info("Conflict while setting finalizer, will retry")
 				return false, err
 			}
@@ -317,7 +317,6 @@ func (r *RulesfileReconciler) enforceReferenceResolution(ctx context.Context, ru
 				return err
 			}
 		}
-
 	}
 
 	if hasRefs {

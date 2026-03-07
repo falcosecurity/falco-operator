@@ -33,7 +33,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -48,10 +48,10 @@ var (
 )
 
 func TestMain(m *testing.M) {
-	logf.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
+	ctrllog.SetLogger(zap.New(zap.WriteTo(os.Stderr), zap.UseDevMode(true)))
 
 	if err := instancev1alpha1.AddToScheme(scheme.Scheme); err != nil {
-		logf.Log.Error(err, "Failed to add scheme")
+		ctrllog.Log.Error(err, "Failed to add scheme")
 		os.Exit(1)
 	}
 
@@ -66,20 +66,20 @@ func TestMain(m *testing.M) {
 
 	cfg, err := testEnv.Start()
 	if err != nil {
-		logf.Log.Error(err, "Failed to start envtest")
+		ctrllog.Log.Error(err, "Failed to start envtest")
 		os.Exit(1)
 	}
 
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
 	if err != nil {
-		logf.Log.Error(err, "Failed to create client")
+		ctrllog.Log.Error(err, "Failed to create client")
 		os.Exit(1)
 	}
 
 	code := m.Run()
 
 	if err := testEnv.Stop(); err != nil {
-		logf.Log.Error(err, "Failed to stop envtest")
+		ctrllog.Log.Error(err, "Failed to stop envtest")
 	}
 
 	os.Exit(code)

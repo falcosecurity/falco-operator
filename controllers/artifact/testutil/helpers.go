@@ -84,8 +84,3 @@ func RequireConditions(t *testing.T, actual []metav1.Condition, expected []Condi
 		RequireCondition(t, actual, exp.Type, exp.Status, exp.Reason)
 	}
 }
-
-// BoolPtr returns a pointer to the given bool value, useful for optional table fields.
-func BoolPtr(b bool) *bool {
-	return &b
-}

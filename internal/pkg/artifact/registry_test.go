@@ -153,7 +153,7 @@ func TestResolveRegistryOptions(t *testing.T) {
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: commonv1alpha1.ImageSpec{Repository: "test", Tag: "latest"},
 				Registry: &commonv1alpha1.RegistryConfig{
-					PlainHTTP: boolPtr(true),
+					PlainHTTP: new(true),
 				},
 			},
 			wantPlainHTTP: true,

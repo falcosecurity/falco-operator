@@ -66,10 +66,10 @@ func TestGenerateClusterRole(t *testing.T) {
 				require.Len(t, rules, 1)
 
 				// Check nodes rule
-				rule0 := rules[0].(map[string]interface{})
-				assert.Equal(t, []interface{}{""}, rule0["apiGroups"])
-				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
-				assert.Equal(t, []interface{}{"get", "list", "watch"}, rule0["verbs"])
+				rule0 := rules[0].(map[string]any)
+				assert.Equal(t, []any{""}, rule0["apiGroups"])
+				assert.Equal(t, []any{"nodes"}, rule0["resources"])
+				assert.Equal(t, []any{"get", "list", "watch"}, rule0["verbs"])
 			},
 			wantErr: false,
 		},
@@ -87,8 +87,8 @@ func TestGenerateClusterRole(t *testing.T) {
 				require.NoError(t, err)
 				require.True(t, found)
 				require.Len(t, rules, 1)
-				rule0 := rules[0].(map[string]interface{})
-				assert.Equal(t, []interface{}{"nodes"}, rule0["resources"])
+				rule0 := rules[0].(map[string]any)
+				assert.Equal(t, []any{"nodes"}, rule0["resources"])
 			},
 			wantErr: false,
 		},

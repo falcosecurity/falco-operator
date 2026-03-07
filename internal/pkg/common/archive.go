@@ -1,4 +1,4 @@
-// Copyright (C) 2025 The Falco Authors
+// Copyright (C) 2026 The Falco Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -93,7 +93,7 @@ func ExtractTarGz(ctx context.Context, gzipStream io.Reader, destDir string, str
 				return nil, err
 			}
 		case tar.TypeReg:
-			outFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode())
+			outFile, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, info.Mode()) //nolint:gosec // path is sanitized against destDir traversal above
 			if err != nil {
 				return nil, err
 			}

@@ -33,7 +33,7 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 	tests := []struct {
 		name           string
 		falco          *instancev1alpha1.Falco
-		expectedFields map[string]interface{}
+		expectedFields map[string]any
 		wantErr        bool
 	}{
 		{
@@ -51,23 +51,23 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 					},
 				},
 			},
-			expectedFields: map[string]interface{}{
+			expectedFields: map[string]any{
 				"apiVersion": "rbac.authorization.k8s.io/v1",
 				"kind":       "ClusterRoleBinding",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name": "test-falco--test-namespace",
-					"labels": map[string]interface{}{
+					"labels": map[string]any{
 						"app": "falco",
 					},
 				},
-				"subjects": []interface{}{
-					map[string]interface{}{
+				"subjects": []any{
+					map[string]any{
 						"kind":      "ServiceAccount",
 						"name":      "test-falco",
 						"namespace": "test-namespace",
 					},
 				},
-				"roleRef": map[string]interface{}{
+				"roleRef": map[string]any{
 					"kind":     "ClusterRole",
 					"name":     "test-falco--test-namespace",
 					"apiGroup": "rbac.authorization.k8s.io",
@@ -93,10 +93,10 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 					},
 				},
 			},
-			expectedFields: map[string]interface{}{
-				"metadata": map[string]interface{}{
+			expectedFields: map[string]any{
+				"metadata": map[string]any{
 					"name": "test-falco--test-namespace",
-					"labels": map[string]interface{}{
+					"labels": map[string]any{
 						"app":     "falco",
 						"version": "v1",
 						"env":     "test",
@@ -131,7 +131,7 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 
 			// Verify basic metadata.
 			assert.Equal(t, GenerateUniqueName(tt.falco.Name, tt.falco.Namespace), result.GetName())
-			assert.Equal(t, "", result.GetNamespace())
+			assert.Empty(t, result.GetNamespace())
 			assert.Equal(t, tt.falco.Labels, result.GetLabels())
 
 			// Verify subjects.
@@ -139,7 +139,7 @@ func TestGenerateClusterRoleBinding(t *testing.T) {
 			assert.NoError(t, err)
 			assert.True(t, found)
 			assert.Len(t, subjects, 1)
-			subject := subjects[0].(map[string]interface{})
+			subject := subjects[0].(map[string]any)
 			assert.Equal(t, "ServiceAccount", subject["kind"])
 			assert.Equal(t, tt.falco.Name, subject["name"])
 			assert.Equal(t, tt.falco.Namespace, subject["namespace"])

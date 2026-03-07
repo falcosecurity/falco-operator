@@ -156,7 +156,7 @@ func TestGenerateConfigmap(t *testing.T) {
 			assert.True(t, exists)
 			assert.Len(t, ownerRefs, 1)
 
-			ownerRef := ownerRefs[0].(map[string]interface{})
+			ownerRef := ownerRefs[0].(map[string]any)
 			assert.Equal(t, tt.falco.Name, ownerRef["name"])
 			assert.Equal(t, tt.falco.Kind, ownerRef["kind"])
 			assert.Equal(t, tt.falco.APIVersion, ownerRef["apiVersion"])
