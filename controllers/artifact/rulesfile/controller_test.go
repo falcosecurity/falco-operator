@@ -465,6 +465,8 @@ func TestEnsureRulesfile(t *testing.T) {
 		wantFiles []string
 		// wantDirEmpty asserts the rulesfile temp dir is empty after the test (real FS only).
 		wantDirEmpty bool
+		// wantEvents is nil to skip the check; otherwise asserts the exact set of events recorded during the main call.
+		wantEvents []string
 	}{
 		{
 			name: "OCI pull error sets failure condition",
@@ -484,6 +486,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactStoreFailed},
 			},
+			wantEvents: []string{"Warning OCIArtifactStoreFailed Failed to store OCI artifact: mock pull error"},
 		},
 		{
 			name: "stores inline rules successfully",
@@ -496,7 +499,8 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{testInlineRulesYAML},
+			wantFiles:  []string{testInlineRulesYAML},
+			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
 		},
 		{
 			name: "stores configmap ref successfully",
@@ -522,7 +526,8 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{testRulesData},
+			wantFiles:  []string{testRulesData},
+			wantEvents: []string{"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully"},
 		},
 		{
 			name: "both inline and configmap sources write two files",
@@ -548,6 +553,10 @@ func TestEnsureRulesfile(t *testing.T) {
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 			wantFiles: []string{testInlineRulesYAML, testRulesData},
+			wantEvents: []string{
+				"Normal InlineArtifactStored Inline artifact stored successfully",
+				"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully",
+			},
 		},
 		{
 			name: "malformed YAML in inline rules returns error",
@@ -557,7 +566,8 @@ func TestEnsureRulesfile(t *testing.T) {
 					InlineRules: &apiextensionsv1.JSON{Raw: []byte("\t")},
 				},
 			},
-			wantErr: true,
+			wantErr:    true,
+			wantEvents: []string{},
 		},
 		{
 			name: "inline rules store failure sets condition",
@@ -572,6 +582,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineRulesStoreFailed},
 			},
+			wantEvents: []string{"Warning InlineRulesStoreFailed Failed to store inline rules: mock write error"},
 		},
 		{
 			name: "configmap ref store fails on filesystem write error",
@@ -599,6 +610,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapRulesStoreFailed},
 			},
+			wantEvents: []string{"Warning ConfigMapRulesStoreFailed Failed to store ConfigMap rules: mock write error"},
 		},
 		{
 			name: "no sources sets programmed without touching resolved refs",
@@ -609,6 +621,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantEvents: []string{},
 		},
 		{
 			name: "non-nil InlineRules with empty Raw is treated as no inline rules",
@@ -622,6 +635,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantEvents: []string{},
 		},
 		{
 			name: "removing inline rules deletes previously written file",
@@ -638,7 +652,8 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{},
+			wantFiles:  []string{},
+			wantEvents: []string{"Normal InlineArtifactRemoved Inline artifact removed from filesystem"},
 		},
 		{
 			name: "removing configmap ref deletes previously written file",
@@ -666,7 +681,8 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-			wantFiles: []string{},
+			wantFiles:  []string{},
+			wantEvents: []string{"Normal ConfigMapArtifactRemoved ConfigMap artifact removed from filesystem"},
 		},
 		{
 			name: "removing OCI artifact deletes previously stored file",
@@ -688,6 +704,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 			wantDirEmpty: true,
+			wantEvents:   []string{"Normal OCIArtifactRemoved OCI artifact removed from filesystem"},
 		},
 	}
 
@@ -727,6 +744,7 @@ func TestEnsureRulesfile(t *testing.T) {
 
 			if tt.preRf != nil {
 				require.NoError(t, r.ensureRulesfile(context.Background(), tt.preRf), "preRf setup failed")
+				testutil.DrainEvents(r.recorder.(*events.FakeRecorder).Events)
 			}
 
 			err := r.ensureRulesfile(context.Background(), tt.rf)
@@ -738,6 +756,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			}
 
 			testutil.RequireConditions(t, tt.rf.Status.Conditions, tt.wantConditions)
+			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 
 			if tt.wantFiles != nil {
 				require.Len(t, mockFS.Files, len(tt.wantFiles), "unexpected number of files written")

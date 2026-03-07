@@ -84,3 +84,39 @@ func RequireConditions(t *testing.T, actual []metav1.Condition, expected []Condi
 		RequireCondition(t, actual, exp.Type, exp.Status, exp.Reason)
 	}
 }
+
+// CollectEvents drains all currently buffered events from the FakeRecorder channel and returns them.
+// It reads until the channel is empty (non-blocking).
+func CollectEvents(ch chan string) []string {
+	var events []string
+	for {
+		select {
+		case e := <-ch:
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+// DrainEvents discards all currently buffered events from the FakeRecorder channel.
+func DrainEvents(ch chan string) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// RequireEvents asserts that the collected events from ch exactly match wantEvents (order-independent).
+// If wantEvents is nil the check is skipped.
+func RequireEvents(t *testing.T, ch chan string, wantEvents []string) {
+	t.Helper()
+	if wantEvents == nil {
+		return
+	}
+	got := CollectEvents(ch)
+	assert.ElementsMatch(t, wantEvents, got)
+}

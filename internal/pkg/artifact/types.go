@@ -28,6 +28,25 @@ const (
 	MediumConfigMap Medium = "configmap"
 )
 
+// StoreAction represents the operation performed by a Store method.
+type StoreAction string
+
+const (
+	// StoreActionNone means the input was absent and no existing artifact was found; no filesystem change occurred.
+	StoreActionNone StoreAction = "None"
+	// StoreActionRemoved means a previously stored artifact was removed from the filesystem.
+	StoreActionRemoved StoreAction = "Removed"
+	// StoreActionAdded means a new artifact was written to the filesystem for the first time.
+	StoreActionAdded StoreAction = "Added"
+	// StoreActionUpdated means an existing artifact was replaced because its content changed.
+	StoreActionUpdated StoreAction = "Updated"
+	// StoreActionUnchanged means the artifact already existed and was up-to-date; nothing was written.
+	StoreActionUnchanged StoreAction = "Unchanged"
+	// StoreActionPriorityChanged means the artifact content is unchanged but the priority changed;
+	// the file was moved/renamed to reflect the new load order.
+	StoreActionPriorityChanged StoreAction = "PriorityChanged"
+)
+
 // File represents a tracked file for any artifact type.
 type File struct {
 	Path     string // Full Path on filesystem
