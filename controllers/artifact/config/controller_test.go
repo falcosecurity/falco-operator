@@ -137,7 +137,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:           testutil.Request(testConfigName),
-			wantFinalizer: testutil.BoolPtr(false),
+			wantFinalizer: new(false),
 		},
 		{
 			name: "selector mismatch with finalizer removes finalizer",
@@ -162,7 +162,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:           testutil.Request(testConfigName),
-			wantFinalizer: testutil.BoolPtr(false),
+			wantFinalizer: new(false),
 		},
 		{
 			name: "deletion with finalizer removes artifacts and finalizer",
@@ -180,7 +180,7 @@ func TestReconcile(t *testing.T) {
 			},
 			req:             testutil.Request(testConfigName),
 			triggerDeletion: true,
-			wantFinalizer:   testutil.BoolPtr(false),
+			wantFinalizer:   new(false),
 		},
 		{
 			name: "sets finalizer on first reconcile and returns early",
@@ -196,7 +196,7 @@ func TestReconcile(t *testing.T) {
 				},
 			},
 			req:           testutil.Request(testConfigName),
-			wantFinalizer: testutil.BoolPtr(true),
+			wantFinalizer: new(true),
 		},
 		{
 			name: "happy path with inline config stores config and sets conditions",

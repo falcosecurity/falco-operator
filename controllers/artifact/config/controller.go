@@ -21,7 +21,7 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -85,10 +85,10 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// Fetch the Config instance.
 	logger.V(2).Info("Fetching Config instance")
 
-	if err := r.Get(ctx, req.NamespacedName, config); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, config); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Error(err, "unable to fetch Config instance")
 		return ctrl.Result{}, err
-	} else if apierrors.IsNotFound(err) {
+	} else if k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -182,7 +182,7 @@ func (r *ConfigReconciler) ensureFinalizer(ctx context.Context, config *artifact
 		patch := client.MergeFrom(config.DeepCopy())
 		controllerutil.AddFinalizer(config, r.finalizer)
 		if err := r.Patch(ctx, config, patch); err != nil {
-			if apierrors.IsConflict(err) {
+			if k8serrors.IsConflict(err) {
 				logger.V(3).Info("Conflict while setting finalizer, will retry")
 				return false, err
 			}

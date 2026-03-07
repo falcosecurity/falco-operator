@@ -32,7 +32,7 @@ import (
 func TestDiff(t *testing.T) {
 	t.Run("nil current returns error", func(t *testing.T) {
 		desired := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "v1",
 				"kind":       "ConfigMap",
 			},
@@ -67,10 +67,10 @@ func TestDiff(t *testing.T) {
 			},
 		}
 		desired := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "apps/v1",
 				"kind":       "DaemonSet",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name": "test",
 				},
 			},
@@ -101,7 +101,7 @@ func TestErrNoManagedFields(t *testing.T) {
 func TestFormatChangedFields(t *testing.T) {
 	t.Run("nil comparison returns empty string", func(t *testing.T) {
 		result := formatChangedFields(nil)
-		assert.Equal(t, "", result)
+		assert.Empty(t, result)
 	})
 
 	t.Run("empty comparison returns no changes", func(t *testing.T) {

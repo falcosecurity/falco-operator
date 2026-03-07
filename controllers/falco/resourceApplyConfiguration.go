@@ -51,7 +51,7 @@ func generateApplyConfiguration(cl client.Client, falco *v1alpha1.Falco,
 			resourceType := falco.Spec.Type
 
 			// Build the default resource.
-			var baseResource interface{}
+			var baseResource any
 			switch resourceType {
 			case resourceTypeDeployment:
 				baseResource = baseDeployment(nativeSidecar, falco)
@@ -89,7 +89,7 @@ func generateApplyConfiguration(cl client.Client, falco *v1alpha1.Falco,
 				return nil, err
 			}
 
-			mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]interface{})
+			mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]any)
 
 			desiredResourceUnstructured := &unstructured.Unstructured{
 				Object: mergedUnstructured,
@@ -254,7 +254,7 @@ func daemonSetUpdateStrategy(falco *v1alpha1.Falco) appsv1.DaemonSetUpdateStrate
 func generateUserDefinedResource(nativeSidecar bool, falco *v1alpha1.Falco) (*unstructured.Unstructured, error) {
 	// Build the default resource from the base one.
 	// We use the base one as a starting point to have the same structure and, then we override the user defined fields.
-	var userResource interface{}
+	var userResource any
 	// Determine the resource type from the Falco object.
 	resourceType := falco.Spec.Type
 

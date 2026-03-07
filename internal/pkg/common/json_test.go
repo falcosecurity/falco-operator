@@ -42,7 +42,7 @@ func TestJSONRawToYAML(t *testing.T) {
 		{
 			name: "valid JSON object is converted to YAML",
 			raw:  &apiextensionsv1.JSON{Raw: []byte(`{"key":"value"}`)},
-			want: strPtr("key: value\n"),
+			want: new("key: value\n"),
 		},
 		{
 			name:    "invalid JSON returns error",
@@ -77,8 +77,4 @@ func TestJSONRawToYAML(t *testing.T) {
 			}
 		})
 	}
-}
-
-func strPtr(s string) *string {
-	return &s
 }

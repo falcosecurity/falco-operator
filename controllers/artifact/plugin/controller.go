@@ -23,11 +23,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -94,10 +95,10 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 
 	// Fetch the Plugin instance.
 	logger.V(2).Info("Fetching Plugin instance")
-	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil && !apierrors.IsNotFound(err) {
+	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil && !k8serrors.IsNotFound(err) {
 		logger.Error(err, "Unable to fetch Plugin")
 		return ctrl.Result{}, err
-	} else if apierrors.IsNotFound(err) {
+	} else if k8serrors.IsNotFound(err) {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -168,7 +169,7 @@ func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifac
 		patch := client.MergeFrom(plugin.DeepCopy())
 		controllerutil.AddFinalizer(plugin, r.finalizer)
 		if err := r.Patch(ctx, plugin, patch); err != nil {
-			if apierrors.IsConflict(err) {
+			if k8serrors.IsConflict(err) {
 				logger.V(3).Info("Conflict while setting finalizer, will retry")
 				return false, err
 			}
@@ -235,7 +236,6 @@ func (r *PluginReconciler) enforceReferenceResolution(ctx context.Context, plugi
 				return err
 			}
 		}
-
 	}
 
 	if hasRefs {
@@ -387,11 +387,11 @@ type InitConfig struct {
 }
 
 // MarshalYAML implements yaml.Marshaler to serialize the JSON content as nested YAML.
-func (c *InitConfig) MarshalYAML() (interface{}, error) {
+func (c *InitConfig) MarshalYAML() (any, error) {
 	if c == nil || c.JSON == nil || len(c.Raw) == 0 {
 		return nil, nil
 	}
-	var data interface{}
+	var data any
 	if err := json.Unmarshal(c.Raw, &data); err != nil {
 		return nil, err
 	}
@@ -462,10 +462,8 @@ func (pc *PluginsConfig) addConfig(am *artifact.Manager, plugin *artifactv1alpha
 	pc.Configs = append(pc.Configs, config)
 
 	// Add to LoadPlugins if not already present (use config.Name for consistency).
-	for _, c := range pc.LoadPlugins {
-		if c == config.Name {
-			return
-		}
+	if slices.Contains(pc.LoadPlugins, config.Name) {
+		return
 	}
 	pc.LoadPlugins = append(pc.LoadPlugins, config.Name)
 }

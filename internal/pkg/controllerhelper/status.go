@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -65,7 +65,7 @@ func PatchStatusSSA(ctx context.Context, c client.Client, scheme *runtime.Scheme
 	}
 
 	if err := c.Status().Apply(ctx, client.ApplyConfigurationFromUnstructured(u), client.FieldOwner(fieldManager), client.ForceOwnership); err != nil {
-		if apierrors.IsConflict(err) {
+		if k8serrors.IsConflict(err) {
 			logger.V(3).Info("Conflict while patching status, will retry")
 			return err
 		}
