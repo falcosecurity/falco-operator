@@ -51,7 +51,7 @@ func testFinalizerName() string {
 }
 
 func defaultLibraryPath(name string) string {
-	return artifact.Path(name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
+	return artifact.NewManager(nil, "").Path(name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
 }
 
 func findPluginConfig(configs []PluginConfig, name string) *PluginConfig {
@@ -968,9 +968,9 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 			pc := tt.initial
 
 			if tt.callTwice {
-				pc.addConfig(tt.plugin)
+				pc.addConfig(artifact.NewManager(nil, ""), tt.plugin)
 			}
-			pc.addConfig(tt.plugin)
+			pc.addConfig(artifact.NewManager(nil, ""), tt.plugin)
 
 			assert.Equal(t, tt.expectedConfigs, pc.Configs)
 			assert.Equal(t, tt.expectedLoad, pc.LoadPlugins)
@@ -1064,7 +1064,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 
-		pc.addConfig(plugin)
+		pc.addConfig(artifact.NewManager(nil, ""), plugin)
 		assert.Len(t, pc.Configs, 1)
 		assert.Equal(t, "json", pc.Configs[0].Name)
 		assert.Equal(t, []string{"json"}, pc.LoadPlugins)
@@ -1086,7 +1086,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 		crToConfigName[plugin.Name] = resolveConfigName(plugin)
-		pc.addConfig(plugin)
+		pc.addConfig(artifact.NewManager(nil, ""), plugin)
 		require.Len(t, pc.Configs, 1)
 		assert.Equal(t, "json", pc.Configs[0].Name)
 		assert.Equal(t, []string{"json"}, pc.LoadPlugins)
@@ -1103,7 +1103,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			pc.removeByName(oldName)
 		}
 		crToConfigName[pluginRenamed.Name] = newName
-		pc.addConfig(pluginRenamed)
+		pc.addConfig(artifact.NewManager(nil, ""), pluginRenamed)
 
 		require.Len(t, pc.Configs, 1)
 		assert.Equal(t, "json-v2", pc.Configs[0].Name)
@@ -1126,7 +1126,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 
-		pc.addConfig(plugin)
+		pc.addConfig(artifact.NewManager(nil, ""), plugin)
 		var initialConfig map[string]interface{}
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &initialConfig))
 		assert.Equal(t, "https://initial.example.com", initialConfig["sssURL"])
@@ -1139,7 +1139,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 				},
 			},
 		}
-		pc.addConfig(pluginUpdated)
+		pc.addConfig(artifact.NewManager(nil, ""), pluginUpdated)
 		require.Len(t, pc.Configs, 1)
 		var updatedConfig map[string]interface{}
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &updatedConfig))

@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/yaml"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -241,26 +240,23 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 
 	// Store inline config if specified.
 	// spec.config is stored as JSON by the API server; convert to YAML before writing to disk.
-	var configData *string
-	if config.Spec.Config != nil && len(config.Spec.Config.Raw) > 0 {
-		yamlBytes, err := yaml.JSONToYAML(config.Spec.Config.Raw)
-		if err != nil {
-			return fmt.Errorf("converting inline config to YAML: %w", err)
-		}
-		s := string(yamlBytes)
-		configData = &s
+	configData, err := common.JSONRawToYAML(config.Spec.Config)
+	if err != nil {
+		return fmt.Errorf("converting inline config to YAML: %w", err)
+	}
 
-		if err := r.artifactManager.StoreFromInLineYaml(ctx, config.Name, p, configData, artifact.TypeConfig); err != nil {
-			logger.Error(err, "unable to store inline config")
-			r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
-				artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
+	if err := r.artifactManager.StoreFromInLineYaml(ctx, config.Name, p, configData, artifact.TypeConfig); err != nil {
+		logger.Error(err, "unable to store inline config")
+		r.recorder.Eventf(config, nil, corev1.EventTypeWarning, artifact.ReasonInlineConfigStoreFailed,
+			artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
 
+	if configData != nil {
 		r.recorder.Eventf(config, nil, corev1.EventTypeNormal, artifact.ReasonInlineConfigStored,
 			artifact.ReasonInlineConfigStored, artifact.MessageInlineConfigStored)
 	}

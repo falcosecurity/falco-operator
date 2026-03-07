@@ -19,6 +19,7 @@
 package v1alpha1
 
 import (
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -28,8 +29,8 @@ import (
 type RulesfileSpec struct {
 	// OCIArtifact specifies the reference to an OCI artifact.
 	OCIArtifact *commonv1alpha1.OCIArtifact `json:"ociArtifact,omitempty"`
-	// InlineRules specifies the rules as a string.
-	InlineRules *string `json:"inlineRules,omitempty"`
+	// InlineRules specifies the rules as a structured object in YAML format.
+	InlineRules *apiextensionsv1.JSON `json:"inlineRules,omitempty"`
 	// ConfigMapRef specifies a reference to a ConfigMap containing the rules.
 	ConfigMapRef *commonv1alpha1.ConfigMapRef `json:"configMapRef,omitempty"`
 	// Priority specifies the priority of the rulesfile.\
@@ -56,10 +57,7 @@ type RulesfileStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority",description="The priority of the rulesfile"
-// +kubebuilder:printcolumn:name="Reconciled",type="string",JSONPath=".status.conditions[?(@.type == 'Reconciled')].status"
-// +kubebuilder:printcolumn:name="OCIArtifact",type="string",JSONPath=".status.conditions[?(@.type == 'OCIArtifact')].status"
-// +kubebuilder:printcolumn:name="InlineContent",type="string",JSONPath=".status.conditions[?(@.type == 'InlineContent')].status"
-// +kubebuilder:printcolumn:name="ConfigMapRef",type="string",JSONPath=".status.conditions[?(@.type == 'ConfigMapRef')].status"
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=".status.conditions[?(@.type == 'Programmed')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Rulesfile is the Schema for the rulesfiles API.
@@ -67,7 +65,9 @@ type Rulesfile struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   RulesfileSpec   `json:"spec,omitempty"`
+	Spec RulesfileSpec `json:"spec,omitempty"`
+
+	// +kubebuilder:default={conditions: {{type: "Programmed", status: "Unknown", reason:"Pending", message:"Waiting for controller", lastTransitionTime: "1970-01-01T00:00:00Z"}}}
 	Status RulesfileStatus `json:"status,omitempty"`
 }
 

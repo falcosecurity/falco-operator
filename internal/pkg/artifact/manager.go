@@ -52,21 +52,27 @@ const (
 
 // Manager manages the lifecycle of artifacts on the filesystem.
 type Manager struct {
-	files     map[string][]File
-	client    client.Client
-	namespace string
-	fs        filesystem.FileSystem
-	ociPuller puller.Puller
+	files        map[string][]File
+	client       client.Client
+	namespace    string
+	fs           filesystem.FileSystem
+	ociPuller    puller.Puller
+	rulesfileDir string
+	pluginDir    string
+	configDir    string
 }
 
 // NewManager creates a new manager.
 func NewManager(cl client.Client, namespace string) *Manager {
 	return &Manager{
-		client:    cl,
-		namespace: namespace,
-		files:     make(map[string][]File),
-		fs:        filesystem.NewOSFileSystem(),
-		ociPuller: puller.NewOciPuller(nil),
+		client:       cl,
+		namespace:    namespace,
+		files:        make(map[string][]File),
+		fs:           filesystem.NewOSFileSystem(),
+		ociPuller:    puller.NewOciPuller(nil),
+		rulesfileDir: mounts.RulesfileDirPath,
+		pluginDir:    mounts.PluginDirPath,
+		configDir:    mounts.ConfigDirPath,
 	}
 }
 
@@ -87,6 +93,30 @@ func WithOCIPuller(p puller.Puller) ManagerOption {
 	}
 }
 
+// WithRulesfileDir overrides the directory used to store rulesfile artifacts (default: mounts.RulesfileDirPath).
+// Useful in tests to redirect output to a temporary directory.
+func WithRulesfileDir(dir string) ManagerOption {
+	return func(m *Manager) {
+		m.rulesfileDir = dir
+	}
+}
+
+// WithPluginDir overrides the directory used to store plugin artifacts (default: mounts.PluginDirPath).
+// Useful in tests to redirect output to a temporary directory.
+func WithPluginDir(dir string) ManagerOption {
+	return func(m *Manager) {
+		m.pluginDir = dir
+	}
+}
+
+// WithConfigDir overrides the directory used to store config artifacts (default: mounts.ConfigDirPath).
+// Useful in tests to redirect output to a temporary directory.
+func WithConfigDir(dir string) ManagerOption {
+	return func(m *Manager) {
+		m.configDir = dir
+	}
+}
+
 // NewManagerWithOptions creates a new manager with custom options (for testing).
 func NewManagerWithOptions(cl client.Client, namespace string, opts ...ManagerOption) *Manager {
 	m := NewManager(cl, namespace)
@@ -94,6 +124,50 @@ func NewManagerWithOptions(cl client.Client, namespace string, opts ...ManagerOp
 		opt(m)
 	}
 	return m
+}
+
+// Path returns the artifact path using the manager's configurable directories.
+func (am *Manager) Path(name string, artifactPriority int32, medium Medium, artifactType Type) string {
+	switch artifactType {
+	case TypeRulesfile:
+		var subPriority int32
+		switch medium {
+		case MediumOCI:
+			subPriority = priority.OCISubPriority
+		case MediumInline:
+			subPriority = priority.InLineRulesSubPriority
+		case MediumConfigMap:
+			subPriority = priority.CMSubPriority
+		default:
+			subPriority = priority.MaxPriority
+		}
+		return filepath.Clean(
+			filepath.Join(
+				am.rulesfileDir,
+				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
+			),
+		)
+	case TypePlugin:
+		return filepath.Clean(filepath.Join(am.pluginDir, fmt.Sprintf("%s.so", name)))
+	case TypeConfig:
+		var subPriority int32
+		switch medium {
+		case MediumInline:
+			subPriority = priority.InLineRulesSubPriority
+		case MediumConfigMap:
+			subPriority = priority.CMSubPriority
+		default:
+			subPriority = priority.MaxPriority
+		}
+		return filepath.Clean(
+			filepath.Join(
+				am.configDir,
+				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
+			),
+		)
+	default:
+		return priority.NameFromPriority(artifactPriority, name)
+	}
 }
 
 // StoreFromInLineYaml stores an artifact from an inline YAML to the local filesystem.
@@ -115,7 +189,7 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 	}
 
 	newFile := File{
-		Path:     Path(name, artifactPriority, MediumInline, artifactType),
+		Path:     am.Path(name, artifactPriority, MediumInline, artifactType),
 		Medium:   MediumInline,
 		Priority: artifactPriority,
 	}
@@ -157,6 +231,10 @@ func (am *Manager) StoreFromInLineYaml(ctx context.Context, name string, artifac
 			}
 			// Remove the file from the manager.
 			am.removeArtifactFile(name, MediumInline)
+		} else {
+			// The file is registered in the manager but missing from disk.
+			// Clear the stale registration so addArtifactFile below does not create a duplicate entry.
+			am.removeArtifactFile(name, MediumInline)
 		}
 	}
 
@@ -190,7 +268,7 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 		return nil
 	}
 	newFile := File{
-		Path:     Path(name, artifactPriority, MediumOCI, artifactType),
+		Path:     am.Path(name, artifactPriority, MediumOCI, artifactType),
 		Medium:   MediumOCI,
 		Priority: artifactPriority,
 	}
@@ -228,7 +306,7 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	var dstDir string
 	switch artifactType {
 	case TypeRulesfile:
-		dstDir = mounts.RulesfileDirPath
+		dstDir = am.rulesfileDir
 	case TypePlugin:
 		dstDir = mounts.PluginDirPath
 	default:
@@ -257,6 +335,9 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	if err != nil {
 		logger.Error(err, "unable to pull artifact", "reference", ref)
 		return err
+	}
+	if res == nil {
+		return fmt.Errorf("puller returned nil result for reference %q", ref)
 	}
 
 	archiveFile := filepath.Clean(filepath.Join(dstDir, res.Filename))
@@ -316,7 +397,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 	}
 
 	newFile := File{
-		Path:     Path(name, artifactPriority, MediumConfigMap, artifactType),
+		Path:     am.Path(name, artifactPriority, MediumConfigMap, artifactType),
 		Medium:   MediumConfigMap,
 		Priority: artifactPriority,
 	}
@@ -331,7 +412,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 	if err := am.client.Get(ctx, configMapKey, configMap); err != nil {
 		// If ConfigMap not found, remove the artifact file from filesystem if it exists.
 		// This is an expected state when user deletes the ConfigMap or the ConfigMap is in a different namespace, not a failure.
-		filePath := Path(name, artifactPriority, MediumConfigMap, artifactType)
+		filePath := am.Path(name, artifactPriority, MediumConfigMap, artifactType)
 		if exists, _ := am.fs.Exists(filePath); exists {
 			logger.Info("ConfigMap not found, removing artifact from filesystem", "configMap", configMapRef.Name, "artifact", filePath)
 			if removeErr := am.fs.Remove(filePath); removeErr != nil {
@@ -365,7 +446,7 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 	if !ok {
 		// ConfigMap exists but doesn't have the expected key - this is a user misconfiguration.
 		// Remove any existing artifact and log a warning (not error to avoid log spam).
-		filePath := Path(name, artifactPriority, MediumConfigMap, artifactType)
+		filePath := am.Path(name, artifactPriority, MediumConfigMap, artifactType)
 		if exists, _ := am.fs.Exists(filePath); exists {
 			logger.Info("ConfigMap key not found, removing artifact from filesystem",
 				"configMap", configMapRef.Name, "expectedKey", dataKey, "artifact", filePath)
@@ -419,6 +500,10 @@ func (am *Manager) StoreFromConfigMap(ctx context.Context, name, namespace strin
 				return err
 			}
 			// Remove the file from the manager.
+			am.removeArtifactFile(name, MediumConfigMap)
+		} else {
+			// The file is registered in the manager but missing from disk.
+			// Clear the stale registration so addArtifactFile below does not create a duplicate entry.
 			am.removeArtifactFile(name, MediumConfigMap)
 		}
 	}
@@ -477,7 +562,6 @@ func (am *Manager) RemoveAll(ctx context.Context, name string) error {
 			logger.Error(err, "unable to remove artifact", "file", file.Path)
 			return err
 		}
-		am.removeArtifactFile(name, file.Medium)
 	}
 
 	// Remove the instance from the manager.
@@ -528,59 +612,15 @@ func (am *Manager) removeArtifactFile(name string, medium Medium) {
 	// Remove the artifact for the given medium.
 	for i, file := range files {
 		if file.Medium == medium {
-			am.files[name] = append(files[:i], files[i+1:]...)
+			files[i] = files[len(files)-1]
+			files = files[:len(files)-1]
+			if len(files) == 0 {
+				delete(am.files, name)
+			} else {
+				am.files[name] = files
+			}
 			return
 		}
-	}
-}
-
-// Path returns the full Path for an artifact file based on its name, priority, and type.
-func Path(name string, artifactPriority int32, medium Medium, artifactType Type) string {
-	switch artifactType {
-	case TypeRulesfile:
-		var subPriority int32
-		switch medium {
-		case MediumOCI:
-			subPriority = priority.OCISubPriority
-		case MediumInline:
-			subPriority = priority.InLineRulesSubPriority
-		case MediumConfigMap:
-			subPriority = priority.CMSubPriority
-		default:
-			// Default to 0 if medium is not OCI, Inline, or ConfigMap.
-			subPriority = priority.MaxPriority
-		}
-		return filepath.Clean(
-			filepath.Join(
-				mounts.RulesfileDirPath,
-				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
-			),
-		)
-	case TypePlugin:
-		return filepath.Clean(
-			filepath.Join(
-				mounts.PluginDirPath,
-				fmt.Sprintf("%s.so", name)),
-		)
-	case TypeConfig:
-		var subPriority int32
-		switch medium {
-		case MediumInline:
-			subPriority = priority.InLineRulesSubPriority
-		case MediumConfigMap:
-			subPriority = priority.CMSubPriority
-		default:
-			subPriority = priority.MaxPriority
-		}
-		return filepath.Clean(
-			filepath.Join(
-				mounts.ConfigDirPath,
-				priority.NameFromPriorityAndSubPriority(artifactPriority, subPriority, fmt.Sprintf("%s-%s.yaml", name, medium)),
-			),
-		)
-
-	default:
-		return priority.NameFromPriority(artifactPriority, name)
 	}
 }
 

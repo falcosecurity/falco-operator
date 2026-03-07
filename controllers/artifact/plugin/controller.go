@@ -306,7 +306,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	}
 	r.crToConfigName[plugin.Name] = configName
 
-	r.PluginsConfig.addConfig(plugin)
+	r.PluginsConfig.addConfig(r.artifactManager, plugin)
 
 	// Clean up conditions before ensuring the plugin config.
 	apimeta.RemoveStatusCondition(&plugin.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
@@ -427,9 +427,9 @@ func resolveConfigName(plugin *artifactv1alpha1.Plugin) string {
 	return plugin.Name
 }
 
-func (pc *PluginsConfig) addConfig(plugin *artifactv1alpha1.Plugin) {
+func (pc *PluginsConfig) addConfig(am *artifact.Manager, plugin *artifactv1alpha1.Plugin) {
 	config := PluginConfig{
-		LibraryPath: artifact.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
+		LibraryPath: am.Path(plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin),
 		Name:        plugin.Name,
 	}
 

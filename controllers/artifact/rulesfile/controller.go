@@ -209,53 +209,60 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	// Clean up conditions before ensuring the rulesfile.
 	apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
-	// Store OCI artifact if specified.
+	// Store OCI artifact if specified; passing nil removes any previously stored OCI artifact.
+	if err = r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
+		logger.Error(err, "unable to store Rulesfile OCI artifact")
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
+			artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
 	if rulesfile.Spec.OCIArtifact != nil {
-		if err = r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact); err != nil {
-			logger.Error(err, "unable to store Rulesfile OCI artifact")
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonOCIArtifactStoreFailed,
-				artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonOCIArtifactStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonOCIArtifactStored,
 			artifact.ReasonOCIArtifactStored, artifact.MessageOCIArtifactStored)
 	}
 
 	// Store inline rules if specified.
-	if rulesfile.Spec.InlineRules != nil {
-		if err = r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, rulesfile.Spec.InlineRules, artifact.TypeRulesfile); err != nil {
-			logger.Error(err, "unable to store Rulesfile inline rules")
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
-				artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonInlineRulesStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
+	// spec.inlineRules is stored as JSON by the API server; convert to YAML before writing to disk.
+	var inlineRulesData *string
+	inlineRulesData, err = common.JSONRawToYAML(rulesfile.Spec.InlineRules)
+	if err != nil {
+		return fmt.Errorf("converting inline rules to YAML: %w", err)
+	}
+
+	if err = r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, inlineRulesData, artifact.TypeRulesfile); err != nil {
+		logger.Error(err, "unable to store Rulesfile inline rules")
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonInlineRulesStoreFailed,
+			artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineRulesStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
+
+	if inlineRulesData != nil {
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonInlineRulesStored,
 			artifact.ReasonInlineRulesStored, artifact.MessageInlineRulesStored)
 	}
 
-	// Store ConfigMap rules if specified.
+	// Store or remove ConfigMap rules. Passing nil cleans up a previously stored file.
+	if err = r.artifactManager.StoreFromConfigMap(
+		ctx, rulesfile.Name, rulesfile.Namespace, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile,
+	); err != nil {
+		logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
+		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapRulesStoreFailed,
+			artifact.ReasonConfigMapRulesStoreFailed, artifact.MessageFormatConfigMapRulesStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonConfigMapRulesStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigMapRulesStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
 	if rulesfile.Spec.ConfigMapRef != nil {
-		err = r.artifactManager.StoreFromConfigMap(
-			ctx, rulesfile.Name, rulesfile.Namespace, p, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile,
-		)
-		if err != nil {
-			logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
-			r.recorder.Eventf(rulesfile, nil, corev1.EventTypeWarning, artifact.ReasonConfigMapRulesStoreFailed,
-				artifact.ReasonConfigMapRulesStoreFailed, artifact.MessageFormatConfigMapRulesStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonConfigMapRulesStoreFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapRulesStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
 		r.recorder.Eventf(rulesfile, nil, corev1.EventTypeNormal, artifact.ReasonConfigMapRulesStored,
 			artifact.ReasonConfigMapRulesStored, artifact.MessageConfigMapRulesStored)
 	}
