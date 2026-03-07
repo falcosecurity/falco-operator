@@ -162,26 +162,7 @@ func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 // ensureFinalizers ensures that the finalizer is set on the Plugin instance.
 func (r *PluginReconciler) ensureFinalizers(ctx context.Context, plugin *artifactv1alpha1.Plugin) (bool, error) {
-	if !controllerutil.ContainsFinalizer(plugin, r.finalizer) {
-		logger := log.FromContext(ctx)
-		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
-
-		patch := client.MergeFrom(plugin.DeepCopy())
-		controllerutil.AddFinalizer(plugin, r.finalizer)
-		if err := r.Patch(ctx, plugin, patch); err != nil {
-			if k8serrors.IsConflict(err) {
-				logger.V(3).Info("Conflict while setting finalizer, will retry")
-				return false, err
-			}
-			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
-			return false, err
-		}
-
-		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
-		return true, nil
-	}
-
-	return false, nil
+	return controllerhelper.EnsureFinalizer(ctx, r.Client, r.finalizer, plugin)
 }
 
 // ensurePlugin ensures that the Plugin artifact is stored correctly.
