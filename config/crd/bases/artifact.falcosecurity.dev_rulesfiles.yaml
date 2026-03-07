@@ -19,17 +19,8 @@ spec:
       jsonPath: .spec.priority
       name: Priority
       type: integer
-    - jsonPath: .status.conditions[?(@.type == 'Reconciled')].status
-      name: Reconciled
-      type: string
-    - jsonPath: .status.conditions[?(@.type == 'OCIArtifact')].status
-      name: OCIArtifact
-      type: string
-    - jsonPath: .status.conditions[?(@.type == 'InlineContent')].status
-      name: InlineContent
-      type: string
-    - jsonPath: .status.conditions[?(@.type == 'ConfigMapRef')].status
-      name: ConfigMapRef
+    - jsonPath: .status.conditions[?(@.type == 'Programmed')].status
+      name: Programmed
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -70,8 +61,9 @@ spec:
                 - name
                 type: object
               inlineRules:
-                description: InlineRules specifies the rules as a string.
-                type: string
+                description: InlineRules specifies the rules as a structured object
+                  in YAML format.
+                x-kubernetes-preserve-unknown-fields: true
               ociArtifact:
                 description: OCIArtifact specifies the reference to an OCI artifact.
                 properties:
@@ -191,6 +183,13 @@ spec:
                 x-kubernetes-map-type: atomic
             type: object
           status:
+            default:
+              conditions:
+              - lastTransitionTime: "1970-01-01T00:00:00Z"
+                message: Waiting for controller
+                reason: Pending
+                status: Unknown
+                type: Programmed
             description: RulesfileStatus defines the observed state of Rulesfile.
             properties:
               conditions:

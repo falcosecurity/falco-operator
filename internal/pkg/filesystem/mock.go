@@ -22,8 +22,8 @@ import (
 	"io/fs"
 )
 
-// mockFileSystem implements FileSystem for testing.
-type mockFileSystem struct {
+// MockFileSystem implements FileSystem for testing.
+type MockFileSystem struct {
 	Files       map[string][]byte
 	StatErr     error
 	ReadErr     error
@@ -51,13 +51,14 @@ type writeCall struct {
 }
 
 // NewMockFileSystem creates a new mock filesystem.
-func NewMockFileSystem() *mockFileSystem {
-	return &mockFileSystem{
+func NewMockFileSystem() *MockFileSystem {
+	return &MockFileSystem{
 		Files: make(map[string][]byte),
 	}
 }
 
-func (m *mockFileSystem) Stat(name string) (fs.FileInfo, error) {
+// Stat returns file info for the named file, or an error if it does not exist.
+func (m *MockFileSystem) Stat(name string) (fs.FileInfo, error) {
 	m.statCalls = append(m.statCalls, name)
 	if m.StatErr != nil {
 		return nil, m.StatErr
@@ -68,7 +69,8 @@ func (m *mockFileSystem) Stat(name string) (fs.FileInfo, error) {
 	return nil, nil
 }
 
-func (m *mockFileSystem) ReadFile(name string) ([]byte, error) {
+// ReadFile reads and returns the contents of the named file.
+func (m *MockFileSystem) ReadFile(name string) ([]byte, error) {
 	m.readCalls = append(m.readCalls, name)
 	if m.ReadErr != nil {
 		return nil, m.ReadErr
@@ -80,7 +82,8 @@ func (m *mockFileSystem) ReadFile(name string) ([]byte, error) {
 	return data, nil
 }
 
-func (m *mockFileSystem) WriteFile(name string, data []byte, perm fs.FileMode) error {
+// WriteFile writes data to the named file with the given permissions.
+func (m *MockFileSystem) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	m.WriteCalls = append(m.WriteCalls, writeCall{name: name, data: data, perm: perm})
 	if m.WriteErr != nil {
 		return m.WriteErr
@@ -89,7 +92,8 @@ func (m *mockFileSystem) WriteFile(name string, data []byte, perm fs.FileMode) e
 	return nil
 }
 
-func (m *mockFileSystem) Remove(name string) error {
+// Remove deletes the named file from the mock filesystem.
+func (m *MockFileSystem) Remove(name string) error {
 	m.RemoveCalls = append(m.RemoveCalls, name)
 	if m.RemoveErr != nil {
 		return m.RemoveErr
@@ -98,7 +102,8 @@ func (m *mockFileSystem) Remove(name string) error {
 	return nil
 }
 
-func (m *mockFileSystem) Rename(oldpath, newpath string) error {
+// Rename renames (moves) oldpath to newpath in the mock filesystem.
+func (m *MockFileSystem) Rename(oldpath, newpath string) error {
 	m.RenameCalls = append(m.RenameCalls, renameCall{oldpath: oldpath, newpath: newpath})
 	if m.RenameErr != nil {
 		return m.RenameErr
@@ -111,7 +116,8 @@ func (m *mockFileSystem) Rename(oldpath, newpath string) error {
 	return fs.ErrNotExist
 }
 
-func (m *mockFileSystem) Open(name string) (io.ReadCloser, error) {
+// Open opens the named file for reading and returns an io.ReadCloser.
+func (m *MockFileSystem) Open(name string) (io.ReadCloser, error) {
 	m.openCalls = append(m.openCalls, name)
 	if m.OpenErr != nil {
 		return nil, m.OpenErr
@@ -143,7 +149,7 @@ func (m *mockReadCloser) Close() error {
 }
 
 // Exists checks if a file exists in the mock filesystem.
-func (m *mockFileSystem) Exists(path string) (bool, error) {
+func (m *MockFileSystem) Exists(path string) (bool, error) {
 	if m.StatErr != nil && !errors.Is(m.StatErr, fs.ErrNotExist) {
 		return false, m.StatErr
 	}

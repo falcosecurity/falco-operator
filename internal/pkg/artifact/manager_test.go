@@ -19,6 +19,7 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -48,6 +50,8 @@ func TestNewManager(t *testing.T) {
 	tests := []struct {
 		name      string
 		namespace string
+		opt       ManagerOption
+		check     func(*Manager) bool
 	}{
 		{
 			name:      "creates manager with namespace",
@@ -61,6 +65,24 @@ func TestNewManager(t *testing.T) {
 			name:      "creates manager with empty namespace",
 			namespace: "",
 		},
+		{
+			name:      "WithRulesfileDir sets custom rulesfile directory",
+			namespace: "ns",
+			opt:       WithRulesfileDir("/custom/rules"),
+			check:     func(m *Manager) bool { return m.rulesfileDir == "/custom/rules" },
+		},
+		{
+			name:      "WithPluginDir sets custom plugin directory",
+			namespace: "ns",
+			opt:       WithPluginDir("/custom/plugins"),
+			check:     func(m *Manager) bool { return m.pluginDir == "/custom/plugins" },
+		},
+		{
+			name:      "WithConfigDir sets custom config directory",
+			namespace: "ns",
+			opt:       WithConfigDir("/custom/config"),
+			check:     func(m *Manager) bool { return m.configDir == "/custom/config" },
+		},
 	}
 
 	for _, tt := range tests {
@@ -68,13 +90,20 @@ func TestNewManager(t *testing.T) {
 			scheme := createTestScheme(t)
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			manager := NewManager(fakeClient, tt.namespace)
+			var opts []ManagerOption
+			if tt.opt != nil {
+				opts = append(opts, tt.opt)
+			}
+			manager := NewManagerWithOptions(fakeClient, tt.namespace, opts...)
 
 			require.NotNil(t, manager)
 			assert.NotNil(t, manager.files)
 			assert.Equal(t, tt.namespace, manager.namespace)
 			assert.NotNil(t, manager.client)
 			assert.NotNil(t, manager.fs)
+			if tt.check != nil {
+				assert.True(t, tt.check(manager))
+			}
 		})
 	}
 }
@@ -92,9 +121,11 @@ func TestStoreFromConfigMap(t *testing.T) {
 		name            string
 		configMapRef    *commonv1alpha1.ConfigMapRef
 		configMap       *corev1.ConfigMap
+		artifactType    Type
 		priority        int32
 		existingFile    *File
 		existingData    string
+		noCorev1Scheme  bool
 		fsWriteErr      error
 		fsRemoveErr     error
 		fsReadErr       error
@@ -103,6 +134,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 		wantErrMsg      string
 		wantWriteCalls  int
 		wantRemoveCalls int
+		wantFilesLen    int
 	}{
 		{
 			name: "successfully stores new artifact from ConfigMap",
@@ -156,7 +188,7 @@ func TestStoreFromConfigMap(t *testing.T) {
 					Namespace: testNamespace,
 				},
 				Data: map[string]string{
-					"other-key": testData, // ConfigMap exists but doesn't have the required rules.yaml key
+					"other-key": testData,
 				},
 			},
 			priority:        50,
@@ -340,11 +372,115 @@ func TestStoreFromConfigMap(t *testing.T) {
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
 		},
+		{
+			name:            "removes existing file when ConfigMap is not found",
+			configMapRef:    &commonv1alpha1.ConfigMapRef{Name: "non-existent"},
+			priority:        50,
+			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			existingData:    testData,
+			wantRemoveCalls: 1,
+		},
+		{
+			name:            "returns error when Remove fails on ConfigMap not found",
+			configMapRef:    &commonv1alpha1.ConfigMapRef{Name: "non-existent"},
+			priority:        50,
+			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			existingData:    testData,
+			fsRemoveErr:     fmt.Errorf("cannot remove"),
+			wantErr:         true,
+			wantErrMsg:      "cannot remove",
+			wantRemoveCalls: 1,
+		},
+		{
+			name:           "returns error on non-NotFound client error",
+			configMapRef:   &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			priority:       50,
+			noCorev1Scheme: true,
+			wantErr:        true,
+		},
+		{
+			name:         "stores artifact using config.yaml key for TypeConfig",
+			configMapRef: &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigMapName, Namespace: testNamespace},
+				Data:       map[string]string{"config.yaml": testData},
+			},
+			artifactType:   TypeConfig,
+			priority:       50,
+			wantWriteCalls: 1,
+		},
+		{
+			name:         "returns error for unsupported artifact type",
+			configMapRef: &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigMapName, Namespace: testNamespace},
+				Data:       map[string]string{"anything": testData},
+			},
+			artifactType: TypePlugin,
+			priority:     50,
+			wantErr:      true,
+			wantErrMsg:   "unsupported artifact type",
+		},
+		{
+			name:         "removes existing file when ConfigMap key is not found",
+			configMapRef: &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigMapName, Namespace: testNamespace},
+				Data:       map[string]string{"other-key": testData},
+			},
+			priority:        50,
+			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			existingData:    testData,
+			wantRemoveCalls: 1,
+		},
+		{
+			name:         "returns error when Remove fails on missing ConfigMap key",
+			configMapRef: &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigMapName, Namespace: testNamespace},
+				Data:       map[string]string{"other-key": testData},
+			},
+			priority:        50,
+			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			existingData:    testData,
+			fsRemoveErr:     fmt.Errorf("cannot remove"),
+			wantErr:         true,
+			wantErrMsg:      "cannot remove",
+			wantRemoveCalls: 1,
+		},
+		{
+			name:         "clears stale registration when file is registered but missing from disk",
+			configMapRef: &commonv1alpha1.ConfigMapRef{Name: testConfigMapName},
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testConfigMapName, Namespace: testNamespace},
+				Data:       map[string]string{"rules.yaml": testData},
+			},
+			priority:       50,
+			existingFile:   &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			wantWriteCalls: 1,
+			wantFilesLen:   1,
+		},
+		{
+			name:            "returns error when removeArtifact fails on nil configMapRef",
+			configMapRef:    nil,
+			priority:        50,
+			existingFile:    &File{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap},
+			existingData:    testData,
+			fsRemoveErr:     fmt.Errorf("remove failed"),
+			wantErr:         true,
+			wantErrMsg:      "remove failed",
+			wantRemoveCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme := createTestScheme(t)
+			var scheme *runtime.Scheme
+			if tt.noCorev1Scheme {
+				scheme = runtime.NewScheme()
+			} else {
+				scheme = createTestScheme(t)
+			}
 			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
 			if tt.configMap != nil {
 				clientBuilder = clientBuilder.WithObjects(tt.configMap)
@@ -358,7 +494,6 @@ func TestStoreFromConfigMap(t *testing.T) {
 			mockFS.StatErr = tt.fsStatErr
 			manager := NewManagerWithOptions(fakeClient, testNamespace, WithFS(mockFS))
 
-			// Setup existing file if specified
 			if tt.existingFile != nil {
 				manager.files[testArtifactName] = []File{*tt.existingFile}
 				if tt.existingData != "" {
@@ -366,8 +501,13 @@ func TestStoreFromConfigMap(t *testing.T) {
 				}
 			}
 
+			artifactType := tt.artifactType
+			if artifactType == "" {
+				artifactType = TypeRulesfile
+			}
+
 			ctx := context.Background()
-			err := manager.StoreFromConfigMap(ctx, testArtifactName, testNamespace, tt.priority, tt.configMapRef, TypeRulesfile)
+			err := manager.StoreFromConfigMap(ctx, testArtifactName, testNamespace, tt.priority, tt.configMapRef, artifactType)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -378,6 +518,9 @@ func TestStoreFromConfigMap(t *testing.T) {
 
 			assert.Len(t, mockFS.WriteCalls, tt.wantWriteCalls)
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
+			if tt.wantFilesLen > 0 {
+				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
 		})
 	}
 }
@@ -403,6 +546,7 @@ func TestStoreFromInLineYaml(t *testing.T) {
 		wantErrMsg      string
 		wantWriteCalls  int
 		wantRemoveCalls int
+		wantFilesLen    int
 	}{
 		{
 			name:            "successfully stores new artifact from inline YAML",
@@ -530,6 +674,31 @@ func TestStoreFromInLineYaml(t *testing.T) {
 			wantWriteCalls:  0,
 			wantRemoveCalls: 1,
 		},
+		{
+			name:     "clears stale registration when file is registered but missing from disk",
+			data:     ptr(testData),
+			priority: 50,
+			existingFile: &File{
+				Path:     "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
+				Medium:   MediumInline,
+				Priority: 50,
+			},
+			wantWriteCalls: 1,
+			wantFilesLen:   1,
+		},
+		{
+			name: "returns error when removeArtifact fails on nil data",
+			data: nil,
+			existingFile: &File{
+				Path:   "/etc/falco/rules.d/50-03-test-artifact-inline.yaml",
+				Medium: MediumInline,
+			},
+			existingData:    "content",
+			fsRemoveErr:     fmt.Errorf("remove failed"),
+			wantErr:         true,
+			wantErrMsg:      "remove failed",
+			wantRemoveCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -563,6 +732,9 @@ func TestStoreFromInLineYaml(t *testing.T) {
 
 			assert.Len(t, mockFS.WriteCalls, tt.wantWriteCalls)
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
+			if tt.wantFilesLen > 0 {
+				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
 		})
 	}
 }
@@ -614,6 +786,15 @@ func TestRemoveAll(t *testing.T) {
 			wantErr:         true,
 			wantRemoveCalls: 1,
 		},
+		{
+			name:         "succeeds when registered file does not exist on disk",
+			artifactName: "test-artifact",
+			existingFiles: []File{
+				{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
+			},
+			wantErr:         false,
+			wantRemoveCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -628,9 +809,6 @@ func TestRemoveAll(t *testing.T) {
 
 			if tt.existingFiles != nil {
 				manager.files[tt.artifactName] = tt.existingFiles
-				for _, f := range tt.existingFiles {
-					mockFS.Files[f.Path] = []byte("content")
-				}
 			}
 
 			ctx := context.Background()
@@ -720,11 +898,19 @@ func TestPath(t *testing.T) {
 			artifactType: Type("unknown"),
 			wantContains: "50-my-artifact",
 		},
+		{
+			name:         "config type with OCI medium uses default subpriority",
+			artifactName: "my-config",
+			priority:     50,
+			Medium:       MediumOCI,
+			artifactType: TypeConfig,
+			wantContains: "50-99-my-config-oci.yaml",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := Path(tt.artifactName, tt.priority, tt.Medium, tt.artifactType)
+			result := NewManager(nil, "").Path(tt.artifactName, tt.priority, tt.Medium, tt.artifactType)
 			assert.Contains(t, result, tt.wantContains)
 		})
 	}
@@ -823,30 +1009,6 @@ func TestRemoveArtifact(t *testing.T) {
 			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
 		})
 	}
-}
-
-func TestRemoveAllIgnoresNotExistError(t *testing.T) {
-	const testNamespace = "test-namespace"
-
-	scheme := createTestScheme(t)
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	mockFS := filesystem.NewMockFileSystem()
-	// The file doesn't exist in the mock, so Remove will return os.ErrNotExist
-	// RemoveAll should ignore this error
-
-	manager := NewManagerWithOptions(fakeClient, testNamespace, WithFS(mockFS))
-	manager.files["test-artifact"] = []File{
-		{Path: "/etc/falco/rules.d/50-02-test-artifact-configmap.yaml", Medium: MediumConfigMap, Priority: 50},
-	}
-	// Note: we don't add the file to mockFS.files, so Remove will return os.ErrNotExist
-
-	ctx := context.Background()
-	err := manager.RemoveAll(ctx, "test-artifact")
-
-	// Should not return error even though file doesn't exist
-	require.NoError(t, err)
-	assert.Len(t, mockFS.RemoveCalls, 1)
 }
 
 func TestGetArtifactFile(t *testing.T) {
@@ -1049,14 +1211,18 @@ func TestStoreFromOCI(t *testing.T) {
 	tests := []struct {
 		name            string
 		artifact        *commonv1alpha1.OCIArtifact
-		objects         []client.Object // extra k8s objects for the fake client
+		objects         []client.Object
 		priority        int32
 		artifactType    Type
 		existingFile    *File
 		existingData    string
 		pullerResult    *puller.RegistryResult
 		pullerErr       error
+		archiveContent  []byte
+		useRealFS       bool
+		customPuller    puller.Puller
 		fsRenameErr     error
+		fsRemoveErr     error
 		fsStatErr       error
 		fsOpenErr       error
 		wantErr         bool
@@ -1064,7 +1230,8 @@ func TestStoreFromOCI(t *testing.T) {
 		wantPullCalls   int
 		wantRenameCalls int
 		wantRemoveCalls int
-		wantOpts        *puller.RegistryOptions // expected opts received by mock puller
+		wantFilesLen    int
+		wantOpts        *puller.RegistryOptions
 	}{
 		{
 			name:     "removes artifact when artifact is nil",
@@ -1099,7 +1266,6 @@ func TestStoreFromOCI(t *testing.T) {
 				Medium:   MediumOCI,
 				Priority: 50,
 			},
-			// No existingData means file doesn't exist
 			wantErr:         true,
 			wantErrMsg:      "not found on filesystem",
 			wantPullCalls:   0,
@@ -1308,6 +1474,76 @@ func TestStoreFromOCI(t *testing.T) {
 			wantRemoveCalls: 0,
 			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
 		},
+		{
+			name:         "puller returns nil result",
+			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			customPuller: nilResultPuller{},
+			wantErr:      true,
+			wantErrMsg:   "nil result",
+		},
+		{
+			name:         "successfully pulls, extracts and stores artifact",
+			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			useRealFS:    true,
+			wantFilesLen: 1,
+		},
+		{
+			name:           "returns error when ExtractTarGz fails due to invalid archive content",
+			artifact:       &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:       50,
+			artifactType:   TypeRulesfile,
+			archiveContent: []byte("not-a-valid-gzip"),
+			wantErr:        true,
+			wantPullCalls:  1,
+		},
+		{
+			name:         "returns error when Remove of archive fails after successful extraction",
+			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			archiveContent: func() []byte {
+				data, _ := puller.MakeTarGz("rules.yaml", []byte("fake"))
+				return data
+			}(),
+			fsRemoveErr:     fmt.Errorf("cannot remove archive"),
+			wantErr:         true,
+			wantErrMsg:      "cannot remove archive",
+			wantPullCalls:   1,
+			wantRemoveCalls: 1,
+		},
+		{
+			name:         "returns error when Rename fails after successful extraction",
+			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			archiveContent: func() []byte {
+				data, _ := puller.MakeTarGz("rules.yaml", []byte("fake"))
+				return data
+			}(),
+			fsRenameErr:     fmt.Errorf("cannot rename file"),
+			wantErr:         true,
+			wantErrMsg:      "cannot rename file",
+			wantPullCalls:   1,
+			wantRemoveCalls: 1,
+			wantRenameCalls: 1,
+		},
+		{
+			name:     "returns error when removeArtifact fails on nil artifact",
+			artifact: nil,
+			existingFile: &File{
+				Path:   "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium: MediumOCI,
+			},
+			existingData:    "content",
+			fsRemoveErr:     fmt.Errorf("remove failed"),
+			wantErr:         true,
+			wantErrMsg:      "remove failed",
+			wantRemoveCalls: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1318,28 +1554,45 @@ func TestStoreFromOCI(t *testing.T) {
 				clientBuilder = clientBuilder.WithObjects(obj)
 			}
 			fakeClient := clientBuilder.Build()
+			tmpDir := t.TempDir()
 
 			mockFS := filesystem.NewMockFileSystem()
 			mockFS.RenameErr = tt.fsRenameErr
 			mockFS.StatErr = tt.fsStatErr
 			mockFS.OpenErr = tt.fsOpenErr
+			mockFS.RemoveErr = tt.fsRemoveErr
 
 			mockPuller := &puller.MockOCIPuller{
 				Result:  tt.pullerResult,
 				PullErr: tt.pullerErr,
 			}
+			if tt.archiveContent != nil {
+				mockPuller.Result = &puller.RegistryResult{Filename: "falco-rules.tar.gz"}
+				mockFS.Files[filepath.Join(tmpDir, "falco-rules.tar.gz")] = tt.archiveContent
+			}
 
-			manager := NewManagerWithOptions(
-				fakeClient,
-				testNamespace,
-				WithFS(mockFS),
-				WithOCIPuller(mockPuller),
-			)
+			var thePuller puller.Puller = mockPuller
+			if tt.customPuller != nil {
+				thePuller = tt.customPuller
+			}
 
-			// Setup existing file if specified
+			var managerOpts []ManagerOption
+			if tt.useRealFS {
+				realFS := filesystem.NewOSFileSystem()
+				realPuller := &puller.MockOCIPuller{
+					Result: &puller.RegistryResult{Filename: "falco-rules.tar.gz"},
+					FS:     realFS,
+				}
+				managerOpts = []ManagerOption{WithFS(realFS), WithRulesfileDir(tmpDir), WithOCIPuller(realPuller)}
+			} else {
+				managerOpts = []ManagerOption{WithFS(mockFS), WithRulesfileDir(tmpDir), WithOCIPuller(thePuller)}
+			}
+
+			manager := NewManagerWithOptions(fakeClient, testNamespace, managerOpts...)
+
 			if tt.existingFile != nil {
 				manager.files[testArtifactName] = []File{*tt.existingFile}
-				if tt.existingData != "" {
+				if tt.existingData != "" && !tt.useRealFS {
 					mockFS.Files[tt.existingFile.Path] = []byte(tt.existingData)
 				}
 			}
@@ -1354,13 +1607,67 @@ func TestStoreFromOCI(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
-			assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
-			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
+			if !tt.useRealFS && tt.customPuller == nil {
+				assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
+				assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
+				assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
+				if tt.wantOpts != nil && len(mockPuller.PullCalls) > 0 {
+					assert.Equal(t, tt.wantOpts, mockPuller.PullCalls[0].Opts)
+				}
+			}
 
-			// Verify registry options passed to the puller.
-			if tt.wantOpts != nil && len(mockPuller.PullCalls) > 0 {
-				assert.Equal(t, tt.wantOpts, mockPuller.PullCalls[0].Opts)
+			if tt.wantFilesLen > 0 {
+				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
+			}
+		})
+	}
+}
+
+// nilResultPuller always returns (nil, nil) to exercise the nil-result guard in StoreFromOCI.
+type nilResultPuller struct{}
+
+func (nilResultPuller) Pull(_ context.Context, _, _, _, _ string, _ auth.CredentialFunc, _ *puller.RegistryOptions) (*puller.RegistryResult, error) {
+	return nil, nil
+}
+
+func TestCheckReferenceResolution(t *testing.T) {
+	const testNamespace = "test-namespace"
+
+	tests := []struct {
+		name       string
+		objects    []client.Object
+		lookupName string
+		wantErr    bool
+	}{
+		{
+			name: "returns nil when resource exists",
+			objects: []client.Object{
+				&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "my-secret", Namespace: testNamespace}},
+			},
+			lookupName: "my-secret",
+			wantErr:    false,
+		},
+		{
+			name:       "returns error when resource does not exist",
+			lookupName: "non-existent",
+			wantErr:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := createTestScheme(t)
+			clientBuilder := fake.NewClientBuilder().WithScheme(scheme)
+			for _, obj := range tt.objects {
+				clientBuilder = clientBuilder.WithObjects(obj)
+			}
+			manager := NewManager(clientBuilder.Build(), testNamespace)
+
+			err := manager.CheckReferenceResolution(context.Background(), testNamespace, tt.lookupName, &corev1.Secret{})
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
 			}
 		})
 	}

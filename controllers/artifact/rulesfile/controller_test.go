@@ -19,11 +19,13 @@ package rulesfile
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -44,7 +46,14 @@ import (
 
 const testRulesfileName = "test-rulesfile"
 
-var testInlineRules = "- rule: test_rule\n  desc: test\n  condition: always_true\n  output: test\n  priority: WARNING\n"
+// testInlineRulesJSON is sample Falco rules in JSON format (used for *apiextensionsv1.JSON fields).
+const testInlineRulesJSON = `[{"rule":"test_rule","desc":"test","condition":"always_true","output":"test","priority":"WARNING"}]`
+
+// testInlineRulesYAML is the expected YAML representation of testInlineRulesJSON after conversion.
+const testInlineRulesYAML = "- condition: always_true\n  desc: test\n  output: test\n  priority: WARNING\n  rule: test_rule\n"
+
+// testRulesData is used as a ConfigMap data value for rules.yaml.
+const testRulesData = "- rule: test_rule\n  desc: test\n  condition: always_true\n  output: test\n  priority: WARNING\n"
 
 func testFinalizerName() string {
 	return common.FormatFinalizerName(rulesfileFinalizerPrefix, testutil.NodeName)
@@ -191,7 +200,7 @@ func TestReconcile(t *testing.T) {
 						Finalizers: []string{testFinalizerName()},
 					},
 					Spec: artifactv1alpha1.RulesfileSpec{
-						InlineRules: &testInlineRules,
+						InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
 					},
 				},
 			},
@@ -253,7 +262,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: testutil.Namespace,
 					},
 					Data: map[string]string{
-						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
 					},
 				},
 				&artifactv1alpha1.Rulesfile{
@@ -322,7 +331,7 @@ func TestReconcile(t *testing.T) {
 						Namespace: testutil.Namespace,
 					},
 					Data: map[string]string{
-						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
 					},
 				},
 				&artifactv1alpha1.Rulesfile{
@@ -441,13 +450,21 @@ func TestEnsureFinalizer(t *testing.T) {
 
 func TestEnsureRulesfile(t *testing.T) {
 	tests := []struct {
-		name           string
-		objects        []client.Object
-		rf             *artifactv1alpha1.Rulesfile
-		writeErr       error
-		pullErr        error
+		name     string
+		objects  []client.Object
+		preRf    *artifactv1alpha1.Rulesfile // reconciled first to set up prior state
+		rf       *artifactv1alpha1.Rulesfile
+		writeErr error
+		pullErr  error
+		// useRealFS uses a real OS filesystem backed by a temp dir instead of the mock FS.
+		// Required for test cases that exercise the full OCI pull path (ExtractTarGz uses os.* directly).
+		useRealFS      bool
 		wantErr        bool
 		wantConditions []testutil.ConditionExpect
+		// wantFiles is nil to skip the check; an empty slice asserts no files remain (mock FS only).
+		wantFiles []string
+		// wantDirEmpty asserts the rulesfile temp dir is empty after the test (real FS only).
+		wantDirEmpty bool
 	}{
 		{
 			name: "OCI pull error sets failure condition",
@@ -473,12 +490,13 @@ func TestEnsureRulesfile(t *testing.T) {
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
-					InlineRules: &testInlineRules,
+					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantFiles: []string{testInlineRulesYAML},
 		},
 		{
 			name: "stores configmap ref successfully",
@@ -489,7 +507,7 @@ func TestEnsureRulesfile(t *testing.T) {
 						Namespace: testutil.Namespace,
 					},
 					Data: map[string]string{
-						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
 					},
 				},
 			},
@@ -504,13 +522,49 @@ func TestEnsureRulesfile(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
+			wantFiles: []string{testRulesData},
+		},
+		{
+			name: "both inline and configmap sources write two files",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-rules-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
+					},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					InlineRules:  &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{testInlineRulesYAML, testRulesData},
+		},
+		{
+			name: "malformed YAML in inline rules returns error",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					InlineRules: &apiextensionsv1.JSON{Raw: []byte("\t")},
+				},
+			},
+			wantErr: true,
 		},
 		{
 			name: "inline rules store failure sets condition",
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
-					InlineRules: &testInlineRules,
+					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
 				},
 			},
 			writeErr: fmt.Errorf("mock write error"),
@@ -528,7 +582,7 @@ func TestEnsureRulesfile(t *testing.T) {
 						Namespace: testutil.Namespace,
 					},
 					Data: map[string]string{
-						commonv1alpha1.ConfigMapRulesKey: testInlineRules,
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
 					},
 				},
 			},
@@ -556,21 +610,123 @@ func TestEnsureRulesfile(t *testing.T) {
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
+		{
+			name: "non-nil InlineRules with empty Raw is treated as no inline rules",
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace, Generation: 1},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					InlineRules: &apiextensionsv1.JSON{},
+					Priority:    50,
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+		},
+		{
+			name: "removing inline rules deletes previously written file",
+			preRf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec:       artifactv1alpha1.RulesfileSpec{},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{},
+		},
+		{
+			name: "removing configmap ref deletes previously written file",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-rules-cm",
+						Namespace: testutil.Namespace,
+					},
+					Data: map[string]string{
+						commonv1alpha1.ConfigMapRulesKey: testRulesData,
+					},
+				},
+			},
+			preRf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec:       artifactv1alpha1.RulesfileSpec{},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantFiles: []string{},
+		},
+		{
+			name: "removing OCI artifact deletes previously stored file",
+			preRf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Image: commonv1alpha1.ImageSpec{Repository: "ghcr.io/falcosecurity/rules/falco-rules", Tag: "latest"},
+					},
+				},
+			},
+			rf: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
+				Spec:       artifactv1alpha1.RulesfileSpec{},
+			},
+			// ExtractTarGz uses os.* directly, so the full OCI path needs a real FS with an injectable dir.
+			useRealFS: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+			},
+			wantDirEmpty: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, cl := newTestReconciler(t, tt.objects...)
 
-			if tt.writeErr != nil || tt.pullErr != nil {
-				mockFS := filesystem.NewMockFileSystem()
+			var managerOpts []artifact.ManagerOption
+			var mockFS *filesystem.MockFileSystem
+			var tmpDir string
+
+			if tt.useRealFS {
+				// ExtractTarGz calls os.* directly, so tests that exercise the full
+				// OCI pull-and-extract path need a real FS backed by a temp directory.
+				realFS := filesystem.NewOSFileSystem()
+				tmpDir = t.TempDir()
+				managerOpts = append(managerOpts,
+					artifact.WithFS(realFS),
+					artifact.WithRulesfileDir(tmpDir),
+					artifact.WithOCIPuller(&puller.MockOCIPuller{
+						Result: &puller.RegistryResult{Filename: "falco-rules.tar.gz"},
+						FS:     realFS,
+					}),
+				)
+			} else {
+				mockFS = filesystem.NewMockFileSystem()
 				if tt.writeErr != nil {
 					mockFS.WriteErr = tt.writeErr
 				}
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace,
+				managerOpts = append(managerOpts,
 					artifact.WithFS(mockFS),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
 				)
+			}
+
+			r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.Namespace, managerOpts...)
+
+			if tt.preRf != nil {
+				require.NoError(t, r.ensureRulesfile(context.Background(), tt.preRf), "preRf setup failed")
 			}
 
 			err := r.ensureRulesfile(context.Background(), tt.rf)
@@ -581,8 +737,21 @@ func TestEnsureRulesfile(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			if len(tt.wantConditions) > 0 {
-				testutil.RequireConditions(t, tt.rf.Status.Conditions, tt.wantConditions)
+			testutil.RequireConditions(t, tt.rf.Status.Conditions, tt.wantConditions)
+
+			if tt.wantFiles != nil {
+				require.Len(t, mockFS.Files, len(tt.wantFiles), "unexpected number of files written")
+				gotContents := make([]string, 0, len(mockFS.Files))
+				for _, content := range mockFS.Files {
+					gotContents = append(gotContents, string(content))
+				}
+				assert.ElementsMatch(t, tt.wantFiles, gotContents)
+			}
+
+			if tt.wantDirEmpty {
+				entries, err := os.ReadDir(tmpDir)
+				require.NoError(t, err)
+				assert.Empty(t, entries, "expected rulesfile dir to be empty after cleanup")
 			}
 		})
 	}
@@ -604,7 +773,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.Namespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
-					InlineRules: &testInlineRules,
+					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
 				},
 			},
 			presetConditions: []metav1.Condition{
