@@ -1,12 +1,13 @@
----
-# ConfigMap containing the Falco rules
-apiVersion: v1
-kind: ConfigMap
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
 metadata:
-  name: custom-falco-rules
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: rulesfile-inline
   namespace: default
-data:
-  rules.yaml: |
+spec:
+  inlineRules:
     - rule: Terminal shell in container
       desc: A shell was used as the entrypoint/exec point into a container with an attached terminal.
       condition: >
@@ -38,19 +39,4 @@ data:
         container_id=%container.id image=%container.image.repository)
       priority: ERROR
       tags: [filesystem, mitre_persistence, T1543]
-
----
-# Rulesfile loading rules from the ConfigMap above.
-# The ConfigMap must have a key named "rules.yaml" containing the rules content.
-apiVersion: artifact.falcosecurity.dev/v1alpha1
-kind: Rulesfile
-metadata:
-  labels:
-    app.kubernetes.io/name: falco-operator
-    app.kubernetes.io/managed-by: kustomize
-  name: rulesfile-configmap
-  namespace: default
-spec:
-  configMapRef:
-    name: custom-falco-rules
   priority: 50

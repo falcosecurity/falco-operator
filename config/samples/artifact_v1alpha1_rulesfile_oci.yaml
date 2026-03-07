@@ -4,14 +4,13 @@ metadata:
   labels:
     app.kubernetes.io/name: falco-operator
     app.kubernetes.io/managed-by: kustomize
-  name: rulesfile-sample
+  name: rulesfile-oci
+  namespace: default
 spec:
   ociArtifact:
     image:
-      repository: falcosecurity/falco-rules
+      repository: falcosecurity/rules/falco-rules
       tag: latest
     registry:
       name: ghcr.io
-      auth:
-        secretRef:
-          secretName: my-pull-secret
+  priority: 50
