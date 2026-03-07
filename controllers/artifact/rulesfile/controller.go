@@ -29,7 +29,6 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -177,26 +176,7 @@ func (r *RulesfileReconciler) findRulesfilesForConfigMap(ctx context.Context, co
 
 // ensureFinalizer ensures the finalizer is set.
 func (r *RulesfileReconciler) ensureFinalizer(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) (bool, error) {
-	if !controllerutil.ContainsFinalizer(rulesfile, r.finalizer) {
-		logger := log.FromContext(ctx)
-		logger.V(3).Info("Setting finalizer", "finalizer", r.finalizer)
-
-		patch := client.MergeFrom(rulesfile.DeepCopy())
-		controllerutil.AddFinalizer(rulesfile, r.finalizer)
-		if err := r.Patch(ctx, rulesfile, patch); err != nil {
-			if k8serrors.IsConflict(err) {
-				logger.V(3).Info("Conflict while setting finalizer, will retry")
-				return false, err
-			}
-			logger.Error(err, "unable to set finalizer", "finalizer", r.finalizer)
-			return false, err
-		}
-
-		logger.V(3).Info("Finalizer set", "finalizer", r.finalizer)
-		return true, nil
-	}
-
-	return false, nil
+	return controllerhelper.EnsureFinalizer(ctx, r.Client, r.finalizer, rulesfile)
 }
 
 // ensureRulesfile ensures the rulesfile artifacts are stored on the filesystem.
