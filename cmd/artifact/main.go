@@ -237,7 +237,7 @@ func main() {
 	if err = config.NewConfigReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
-		mgr.GetEventRecorder("config-controller"),
+		mgr.GetEventRecorder("config-controller/" + nodeName),
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
@@ -248,7 +248,7 @@ func main() {
 	if err := rulesfile.NewRulesfileReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
-		mgr.GetEventRecorder("rulesfile-controller"),
+		mgr.GetEventRecorder("rulesfile-controller/" + nodeName),
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
@@ -259,7 +259,7 @@ func main() {
 	if err := plugin.NewPluginReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
-		mgr.GetEventRecorder("plugin-controller"),
+		mgr.GetEventRecorder("plugin-controller/" + nodeName),
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
