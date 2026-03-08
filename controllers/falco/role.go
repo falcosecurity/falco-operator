@@ -48,9 +48,9 @@ func generateRole(cl client.Client, falco *instancev1alpha1.Falco) (*unstructure
 						Verbs:     []string{"get", "list", "watch"},
 					},
 					{
-						APIGroups: []string{""},
+						APIGroups: []string{"events.k8s.io"},
 						Resources: []string{"events"},
-						Verbs:     []string{"create", "patch"},
+						Verbs:     []string{"create", "patch", "update"},
 					},
 					{
 						APIGroups: []string{artifactv1alpha1.GroupVersion.Group},

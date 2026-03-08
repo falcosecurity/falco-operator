@@ -95,9 +95,9 @@ func TestGenerateRole(t *testing.T) {
 
 			// Verify events rule
 			assert.Contains(t, role.Rules, rbacv1.PolicyRule{
-				APIGroups: []string{""},
+				APIGroups: []string{"events.k8s.io"},
 				Resources: []string{"events"},
-				Verbs:     []string{"create", "patch"},
+				Verbs:     []string{"create", "patch", "update"},
 			})
 
 			// Verify artifact rule
