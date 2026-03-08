@@ -14,18 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package common
-
-import "fmt"
-
-const (
-	// ConfigmapInUseFinalizer is the finalizer placed on ConfigMaps that are referenced
-	// by at least one Rulesfile or Config artifact resource.
-	// Its presence blocks ConfigMap deletion until all references are cleared.
-	ConfigmapInUseFinalizer = "artifact.falcosecurity.dev/configmap-in-use"
-)
-
-// FormatFinalizerName creates a finalizer name by combining a prefix and suffix with a hyphen.
-func FormatFinalizerName(prefix, suffix string) string {
-	return fmt.Sprintf("%s-%s", prefix, suffix)
-}
+// Package configmap implements the reference protection controller for ConfigMaps.
+// It ensures ConfigMaps referenced by artifact resources cannot be deleted until
+// all references are cleared.
+package configmap
