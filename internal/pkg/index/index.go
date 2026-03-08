@@ -36,11 +36,27 @@ type Entry struct {
 }
 
 // All aggregates all field indexes defined in this package.
-var All []Entry = append(ConfigIndexes, RulesfileIndexes...)
+var All []Entry = append(append(ConfigIndexes, RulesfileIndexes...), PluginIndexes...)
 
 // IndexByConfigMapRef returns a client.IndexerFunc that indexes objects by their ConfigMapRef name.
 // The getRef function extracts the ConfigMapRef from the typed object; return nil when not set.
 func IndexByConfigMapRef[T client.Object](getRef func(T) *commonv1alpha1.ConfigMapRef) client.IndexerFunc {
+	return func(obj client.Object) []string {
+		typed, ok := obj.(T)
+		if !ok {
+			return nil
+		}
+		ref := getRef(typed)
+		if ref == nil {
+			return nil
+		}
+		return []string{typed.GetNamespace() + "/" + ref.Name}
+	}
+}
+
+// IndexBySecretRef returns a client.IndexerFunc that indexes objects by their nested SecretRef name.
+// The getRef function extracts the SecretRef from the typed object; return nil when not set.
+func IndexBySecretRef[T client.Object](getRef func(T) *commonv1alpha1.SecretRef) client.IndexerFunc {
 	return func(obj client.Object) []string {
 		typed, ok := obj.(T)
 		if !ok {

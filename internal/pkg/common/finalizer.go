@@ -23,6 +23,11 @@ const (
 	// by at least one Rulesfile or Config artifact resource.
 	// Its presence blocks ConfigMap deletion until all references are cleared.
 	ConfigmapInUseFinalizer = "artifact.falcosecurity.dev/configmap-in-use"
+
+	// SecretInUseFinalizer is the finalizer placed on Secrets that are referenced
+	// by at least one Rulesfile or Plugin artifact resource via spec.ociArtifact.registry.auth.secretRef.
+	// Its presence blocks Secret deletion until all references are cleared.
+	SecretInUseFinalizer = "artifact.falcosecurity.dev/secret-in-use"
 )
 
 // FormatFinalizerName creates a finalizer name by combining a prefix and suffix with a hyphen.

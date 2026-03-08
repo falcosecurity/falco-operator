@@ -27,56 +27,24 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 )
 
-func TestRulesfileByConfigMapRef(t *testing.T) {
+func TestPluginBySecretRef(t *testing.T) {
 	tests := []struct {
-		name      string
-		rulesfile *artifactv1alpha1.Rulesfile
-		want      []string
-	}{
-		{
-			name: "no configmap ref returns nil",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-			},
-			want: nil,
-		},
-		{
-			name: "with configmap ref returns index key",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-rules-cm"},
-				},
-			},
-			want: []string{testNamespace + "/my-rules-cm"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, index.RulesfileByConfigMapRef(tt.rulesfile))
-		})
-	}
-}
-
-func TestRulesfileBySecretRef(t *testing.T) {
-	tests := []struct {
-		name      string
-		rulesfile *artifactv1alpha1.Rulesfile
-		want      []string
+		name   string
+		plugin *artifactv1alpha1.Plugin
+		want   []string
 	}{
 		{
 			name: "nil OCIArtifact returns nil",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
 			},
 			want: nil,
 		},
 		{
 			name: "nil Registry returns nil",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{Repository: "my-repo"},
 					},
@@ -86,9 +54,9 @@ func TestRulesfileBySecretRef(t *testing.T) {
 		},
 		{
 			name: "nil Auth returns nil",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image:    commonv1alpha1.ImageSpec{Repository: "my-repo"},
 						Registry: &commonv1alpha1.RegistryConfig{Name: "ghcr.io"},
@@ -99,9 +67,9 @@ func TestRulesfileBySecretRef(t *testing.T) {
 		},
 		{
 			name: "nil SecretRef returns nil",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{Repository: "my-repo"},
 						Registry: &commonv1alpha1.RegistryConfig{
@@ -115,9 +83,9 @@ func TestRulesfileBySecretRef(t *testing.T) {
 		},
 		{
 			name: "with secret ref returns index key",
-			rulesfile: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
 					OCIArtifact: &commonv1alpha1.OCIArtifact{
 						Image: commonv1alpha1.ImageSpec{Repository: "my-repo"},
 						Registry: &commonv1alpha1.RegistryConfig{
@@ -135,14 +103,14 @@ func TestRulesfileBySecretRef(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, index.RulesfileBySecretRef(tt.rulesfile))
+			assert.Equal(t, tt.want, index.PluginBySecretRef(tt.plugin))
 		})
 	}
 }
 
-func TestRulesfileBySecretRef_WrongType(t *testing.T) {
-	plugin := &artifactv1alpha1.Plugin{
-		ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+func TestPluginBySecretRef_WrongType(t *testing.T) {
+	rulesfile := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rulesfile", Namespace: testNamespace},
 	}
-	assert.Nil(t, index.RulesfileBySecretRef(plugin))
+	assert.Nil(t, index.PluginBySecretRef(rulesfile))
 }

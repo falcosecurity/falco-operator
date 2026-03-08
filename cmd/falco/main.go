@@ -38,6 +38,7 @@ import (
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/falco"
 	configmapctr "github.com/falcosecurity/falco-operator/controllers/reference/configmap"
+	secretctr "github.com/falcosecurity/falco-operator/controllers/reference/secret"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
@@ -233,6 +234,13 @@ func main() {
 		mgr.GetClient(), mgr.GetScheme(),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", configmapctr.ControllerName)
+		os.Exit(1)
+	}
+
+	if err := secretctr.NewSecretReconciler(
+		mgr.GetClient(), mgr.GetScheme(),
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", secretctr.ControllerName)
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

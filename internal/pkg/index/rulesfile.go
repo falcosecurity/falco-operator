@@ -21,13 +21,28 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
-// ConfigMapOnRulesfile is the index field name for Rulesfile resources indexed by their ConfigMapRef.
-const ConfigMapOnRulesfile = "ConfigMapOnRulesfile"
+const (
+	// ConfigMapOnRulesfile is the index field name for Rulesfile resources indexed by their ConfigMapRef.
+	ConfigMapOnRulesfile = "ConfigMapOnRulesfile"
+	// SecretOnRulesfile is the index field name for Rulesfile resources indexed by their SecretRef.
+	SecretOnRulesfile = "SecretOnRulesfile"
+)
 
 // RulesfileByConfigMapRef indexes Rulesfile resources by their .spec.configMapRef.name.
 var RulesfileByConfigMapRef = IndexByConfigMapRef(
 	func(rf *artifactv1alpha1.Rulesfile) *commonv1alpha1.ConfigMapRef {
 		return rf.Spec.ConfigMapRef
+	},
+)
+
+// RulesfileBySecretRef indexes Rulesfile resources by their .spec.ociArtifact.registry.auth.secretRef.name.
+var RulesfileBySecretRef = IndexBySecretRef(
+	func(rf *artifactv1alpha1.Rulesfile) *commonv1alpha1.SecretRef {
+		if rf.Spec.OCIArtifact == nil || rf.Spec.OCIArtifact.Registry == nil ||
+			rf.Spec.OCIArtifact.Registry.Auth == nil {
+			return nil
+		}
+		return rf.Spec.OCIArtifact.Registry.Auth.SecretRef
 	},
 )
 
@@ -37,5 +52,10 @@ var RulesfileIndexes = []Entry{
 		Object:         &artifactv1alpha1.Rulesfile{},
 		Field:          ConfigMapOnRulesfile,
 		ExtractValueFn: RulesfileByConfigMapRef,
+	},
+	{
+		Object:         &artifactv1alpha1.Rulesfile{},
+		Field:          SecretOnRulesfile,
+		ExtractValueFn: RulesfileBySecretRef,
 	},
 }
