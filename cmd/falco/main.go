@@ -34,9 +34,12 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/falco"
+	configmapctr "github.com/falcosecurity/falco-operator/controllers/reference/configmap"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -49,6 +52,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(instancev1alpha1.AddToScheme(scheme))
+	utilruntime.Must(artifactv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -209,10 +213,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := ctrl.SetupSignalHandler()
+
+	for _, idx := range index.All {
+		if err := mgr.GetFieldIndexer().IndexField(ctx, idx.Object, idx.Field, idx.ExtractValueFn); err != nil {
+			setupLog.Error(err, "unable to register field index", "field", idx.Field)
+			os.Exit(1)
+		}
+	}
+
 	if err = falco.NewReconciler(
 		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"), sidecarEnabled,
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
+		os.Exit(1)
+	}
+
+	if err := configmapctr.NewConfigMapReconciler(
+		mgr.GetClient(), mgr.GetScheme(),
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", configmapctr.ControllerName)
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder
@@ -243,7 +263,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

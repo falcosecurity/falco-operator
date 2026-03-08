@@ -18,9 +18,13 @@ package controllerhelper
 
 import (
 	"context"
+	"fmt"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
@@ -49,4 +53,44 @@ func EnsureFinalizer(ctx context.Context, cl client.Client, finalizer string, ob
 
 	logger.V(3).Info("Finalizer set", "finalizer", finalizer)
 	return true, nil
+}
+
+// EnsureInUseFinalizer adds or removes a single finalizer on obj via server-side apply,
+// based on whether the object is currently referenced (isReferenced).
+//
+// When isReferenced is true the finalizer is added; when false it is removed.
+// A no-op guard avoids any API call when the current state already matches the desired state.
+func EnsureInUseFinalizer(ctx context.Context, c client.Client, scheme *runtime.Scheme,
+	finalizer, fieldManager string, obj client.Object, isReferenced bool) error {
+	logger := log.FromContext(ctx)
+
+	// Nothing to do when state already matches.
+	if isReferenced == controllerutil.ContainsFinalizer(obj, finalizer) {
+		return nil
+	}
+
+	gvk, err := apiutil.GVKForObject(obj, scheme)
+	if err != nil {
+		return fmt.Errorf("resolving GVK for %T: %w", obj, err)
+	}
+
+	u := &unstructured.Unstructured{}
+	u.SetGroupVersionKind(gvk)
+	u.SetName(obj.GetName())
+	u.SetNamespace(obj.GetNamespace())
+
+	if isReferenced {
+		logger.Info("Adding in-use finalizer", "finalizer", finalizer)
+		u.SetFinalizers([]string{finalizer})
+	} else {
+		logger.Info("Removing in-use finalizer", "finalizer", finalizer)
+		u.SetFinalizers([]string{})
+	}
+
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
+	if err := c.Apply(ctx, client.ApplyConfigurationFromUnstructured(u), applyOpts...); err != nil {
+		return fmt.Errorf("applying finalizer on %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
+	}
+
+	return nil
 }
