@@ -162,7 +162,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 		},
 		{
 			name:          "isReferenced=true, finalizer already present -> no-op, returns nil",
-			initialCM:     newFinalizerCM(testFinalizerInUse),
+			initialCM:     newFinalizerCM(testFinalizer),
 			isReferenced:  true,
 			wantFinalizer: true,
 		},
