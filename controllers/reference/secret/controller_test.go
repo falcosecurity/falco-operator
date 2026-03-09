@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,13 +48,31 @@ func newScheme(t *testing.T) *runtime.Scheme {
 }
 
 func newSecret(name string, finalizers ...string) *corev1.Secret {
-	return &corev1.Secret{
+	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
 			Namespace:  "default",
 			Finalizers: finalizers,
 		},
 	}
+
+	// If finalizers are provided, simulate managed fields as if they were applied by our controller
+	if len(finalizers) > 0 {
+		secret.ManagedFields = []metav1.ManagedFieldsEntry{
+			{
+				Manager:    ControllerName,
+				Operation:  metav1.ManagedFieldsOperationApply,
+				APIVersion: "v1",
+				Time:       &metav1.Time{Time: metav1.Now().Time},
+				FieldsType: "FieldsV1",
+				FieldsV1: &metav1.FieldsV1{
+					Raw: []byte(`{"f:metadata":{"f:finalizers":{".":{},"v:\"` + common.SecretInUseFinalizer + `\"":{}}}}`),
+				},
+			},
+		}
+	}
+
+	return secret
 }
 
 // ociWithSecret builds a minimal OCIArtifact that references the given Secret name.
@@ -81,6 +100,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		wantErr              string
 		wantFinalizer        string
 		finalizerShouldExist bool
+		shouldNotExist       bool
 	}{
 		{
 			name:    "Secret not found",
@@ -137,7 +157,7 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 		},
 		{
 			name: "Not referenced, removes finalizer",
-			objects: []client.Object{newSecret("sec5"), &artifactv1alpha1.Rulesfile{
+			objects: []client.Object{newSecret("sec5", common.SecretInUseFinalizer), &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rf-sec5"},
 				Spec:       artifactv1alpha1.RulesfileSpec{OCIArtifact: ociWithSecret("sec5")},
 			}},
@@ -152,16 +172,28 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 			finalizerShouldExist: false,
 		},
 		{
-			name: "Referenced, deleting, blocks deletion",
+			name: "Deleting + not referenced, removes finalizer",
 			objects: []client.Object{func() *corev1.Secret {
 				sec := newSecret("sec6", common.SecretInUseFinalizer)
 				sec.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
 				return sec
+			}()},
+			request:              ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "sec6"}},
+			wantFinalizer:        common.SecretInUseFinalizer,
+			finalizerShouldExist: false,
+			shouldNotExist:       true,
+		},
+		{
+			name: "Referenced, deleting, blocks deletion",
+			objects: []client.Object{func() *corev1.Secret {
+				sec := newSecret("sec7", common.SecretInUseFinalizer)
+				sec.DeletionTimestamp = &metav1.Time{Time: metav1.Now().Time}
+				return sec
 			}(), &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rf2"},
-				Spec:       artifactv1alpha1.RulesfileSpec{OCIArtifact: ociWithSecret("sec6")},
+				Spec:       artifactv1alpha1.RulesfileSpec{OCIArtifact: ociWithSecret("sec7")},
 			}},
-			request: ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "sec6"}},
+			request: ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "sec7"}},
 		},
 		{
 			name: "Apply error propagates",
@@ -213,9 +245,14 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, ctrl.Result{}, res)
-				if tt.wantFinalizer != "" {
+				if tt.shouldNotExist {
 					secOut := &corev1.Secret{}
-					require.NoError(t, cl.Get(ctx, types.NamespacedName{Namespace: tt.request.Namespace, Name: tt.request.Name}, secOut))
+					err := cl.Get(ctx, types.NamespacedName{Namespace: tt.request.Namespace, Name: tt.request.Name}, secOut)
+					assert.True(t, k8serrors.IsNotFound(err), "Expected secret to not exist after finalizer removal during deletion")
+				} else if tt.wantFinalizer != "" {
+					secOut := &corev1.Secret{}
+					err := cl.Get(ctx, types.NamespacedName{Namespace: tt.request.Namespace, Name: tt.request.Name}, secOut)
+					assert.NoError(t, err)
 					if tt.finalizerShouldExist {
 						assert.Contains(t, secOut.Finalizers, tt.wantFinalizer)
 					} else {
