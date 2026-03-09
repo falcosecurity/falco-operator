@@ -344,3 +344,47 @@ func TestConfigMapReconciler_findConfigMapsForRulesfile(t *testing.T) {
 		})
 	}
 }
+
+func TestConfigMapReconciler_findConfigMapsForConfig(t *testing.T) {
+	s := newScheme(t)
+	r := NewConfigMapReconciler(nil, s)
+
+	tests := []struct {
+		name string
+		obj  client.Object
+		want []ctrl.Request
+	}{
+		{
+			name: "not a Config",
+			obj:  newCM("cmX"),
+			want: nil,
+		},
+		{
+			name: "nil ConfigMapRef",
+			obj: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "cfgX"},
+				Spec:       artifactv1alpha1.ConfigSpec{},
+			},
+			want: nil,
+		},
+		{
+			name: "valid ConfigMapRef",
+			obj: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "cfgY"},
+				Spec: artifactv1alpha1.ConfigSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "cmY"},
+				},
+			},
+			want: []ctrl.Request{
+				{NamespacedName: client.ObjectKey{Namespace: "default", Name: "cmY"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.findConfigMapsForConfig(context.Background(), tt.obj)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
