@@ -1,0 +1,21 @@
+# Step template for asserting ResolvedRefs condition on artifact CRDs.
+#
+# Required bindings:
+#   - artifact_kind: Kind of the artifact (Rulesfile, Plugin).
+#   - artifact_name: Name of the artifact instance.
+#   - expected_resolved_refs: Expected status of the ResolvedRefs condition (True/False).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-artifact-resolved-refs
+spec:
+  try:
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: ($artifact_kind)
+          metadata:
+            name: ($artifact_name)
+          status:
+            (conditions[?type == 'ResolvedRefs']):
+              - status: ($expected_resolved_refs)

@@ -1,0 +1,44 @@
+# Step template for creating a Component instance and asserting readiness.
+#
+# Required bindings:
+#   - component_name: Name of the Component instance.
+#   - component_type: Component type (e.g. metacollector).
+#   - component_replicas: Number of replicas to deploy.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-component
+spec:
+  try:
+    # 1. Apply the Component CR.
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+          spec:
+            component:
+              type: ($component_type)
+            replicas: ($component_replicas)
+
+    # 2. Assert the Deployment is created and ready.
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: ($component_name)
+          status:
+            availableReplicas: ($component_replicas)
+            readyReplicas: ($component_replicas)
+
+    # 3. Assert Component CR reflects Deployment type.
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+          status:
+            resourceType: Deployment

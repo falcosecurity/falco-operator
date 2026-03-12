@@ -1,0 +1,21 @@
+# Step template for asserting artifact CRD status conditions.
+#
+# Required bindings:
+#   - artifact_kind: Kind of the artifact (Config, Rulesfile, Plugin).
+#   - artifact_name: Name of the artifact instance.
+#   - expected_programmed: Expected status of the Programmed condition (True/False).
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-artifact-status
+spec:
+  try:
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: ($artifact_kind)
+          metadata:
+            name: ($artifact_name)
+          status:
+            (conditions[?type == 'Programmed']):
+              - status: ($expected_programmed)

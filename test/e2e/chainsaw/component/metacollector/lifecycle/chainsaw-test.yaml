@@ -1,0 +1,136 @@
+# Test: Component CRD lifecycle — create, idempotent, sub-resources, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metacollector-lifecycle
+spec:
+  description: "Component (metacollector) lifecycle: create → idempotent → sub-resources → delete"
+  bindings:
+    - name: component_name
+      value: mc-test
+    - name: component_type
+      value: metacollector
+    - name: component_replicas
+      value: 1
+  steps:
+    # --- component-create ---
+    - name: Create Component as metacollector
+      use:
+        template: ../../../common/_step_templates/apply-assert-component.yaml
+    - name: Assert Component status conditions
+      use:
+        template: ../../../common/_step_templates/assert-component-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+        - name: expected_replicas
+          value: 1
+        - name: expected_version
+          value: "0.1.2"
+    # --- component-sub-resources ---
+    - name: Verify sub-resources exist
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: (join('--', [$component_name, $namespace]))
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('--', [$component_name, $namespace]))
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+    # --- component-idempotent ---
+    - name: Re-apply the same Component resource
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+              spec:
+                component:
+                  type: ($component_type)
+                replicas: ($component_replicas)
+    - name: Assert status stable after re-apply
+      use:
+        template: ../../../common/_step_templates/assert-component-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+        - name: expected_replicas
+          value: 1
+        - name: expected_version
+          value: "0.1.2"
+    - name: Verify Deployment stable after re-apply
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+    # --- component-delete ---
+    - name: Delete Component CR
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              name: ($component_name)
+    - name: Verify namespaced resources are gone
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+    - name: Verify cluster-scoped resources are gone
+      try:
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: (join('--', [$component_name, $namespace]))
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('--', [$component_name, $namespace]))
