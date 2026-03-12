@@ -117,7 +117,7 @@ jobs:
       image_name: ${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}
       component_name: "artifact"
 
-  falco-operator-image:
+  instance-operator-image:
     if: ${{ github.event_name == 'push' }}
     needs: [docker-configure, artifact-operator-image]
     uses: ./.github/workflows/docker-image.yml
@@ -127,7 +127,7 @@ jobs:
       commit: ${{ needs.docker-configure.outputs.commit }}
       build_date: ${{ needs.docker-configure.outputs.build_date }}
       image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
-      component_name: "falco"
+      component_name: "instance"
       artifact_operator_image: "${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
 
   provenance-for-images-artifact:
@@ -147,8 +147,8 @@ jobs:
       registry-username: ${{ secrets.DOCKERHUB_USER }}
       registry-password: ${{ secrets.DOCKERHUB_SECRET }}
 
-  provenance-for-images-falco:
-    needs: [docker-configure, falco-operator-image]
+  provenance-for-images-instance:
+    needs: [docker-configure, instance-operator-image]
     permissions:
       actions: read # for detecting the Github Actions environment.
       id-token: write # for creating OIDC tokens for signing.
@@ -159,14 +159,14 @@ jobs:
       # The image digest is used to prevent TOCTOU issues.
       # This is an output of the docker/build-push-action
       # See: https://github.com/slsa-framework/slsa-verifier#toctou-attacks
-      digest: ${{ needs.falco-operator-image.outputs.digest }}
+      digest: ${{ needs.instance-operator-image.outputs.digest }}
     secrets:
       registry-username: ${{ secrets.DOCKERHUB_USER }}
       registry-password: ${{ secrets.DOCKERHUB_SECRET }}
 
   # Generate install.yaml with properly tagged images and attach to release
   generate-install-yaml:
-    needs: [docker-configure, falco-operator-image]
+    needs: [docker-configure, instance-operator-image]
     runs-on: ubuntu-22.04
     permissions:
       contents: write # To upload assets to the release
