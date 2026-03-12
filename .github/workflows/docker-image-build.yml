@@ -21,7 +21,7 @@ jobs:
           echo "commit=${{ github.sha }}" >> $GITHUB_OUTPUT
           echo "build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_OUTPUT
 
-  falco-operator:
+  instance-operator:
     if: ${{ github.event_name == 'push' }}
     needs: docker-configure
     uses: ./.github/workflows/docker-image.yml
@@ -31,7 +31,7 @@ jobs:
       commit: ${{ needs.docker-configure.outputs.commit }}
       build_date: ${{ needs.docker-configure.outputs.build_date }}
       image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
-      component_name: "falco"
+      component_name: "instance"
 
   artifact-operator:
     if: ${{ github.event_name == 'push' }}

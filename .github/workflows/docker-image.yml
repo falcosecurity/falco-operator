@@ -29,7 +29,7 @@ on:
         default: false
         type: boolean
       artifact_operator_image:
-        description: "The artifact-operator image to inject as sidecar (only for falco-operator)"
+        description: "The artifact-operator image to inject as sidecar (only for instance-operator)"
         required: false
         default: ""
         type: string
