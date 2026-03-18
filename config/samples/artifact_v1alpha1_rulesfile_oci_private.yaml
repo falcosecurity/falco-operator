@@ -1,0 +1,21 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: rulesfile-private
+  namespace: default
+spec:
+  ociArtifact:
+    image:
+      repository: my-org/falco-rules
+      tag: v1.0.0
+    registry:
+      name: registry.example.com
+      auth:
+        secretRef:
+          name: registry-credentials
+      tls:
+        insecureSkipVerify: false
+  priority: 40

@@ -1,8 +1,17 @@
 ## Append samples of your project ##
 resources:
 - instance_v1alpha1_falco.yaml
+- instance_v1alpha1_falco_custom.yaml
 - instance_v1alpha1_component.yaml
-- artifact_v1alpha1_config.yaml
-- artifact_v1alpha1_rulesfile.yaml
+- artifact_v1alpha1_config_structured.yaml
+- artifact_v1alpha1_config_configmapref.yaml
+- artifact_v1alpha1_config_both.yaml
+- artifact_v1alpha1_config_selector.yaml
+- artifact_v1alpha1_rulesfile_oci.yaml
+- artifact_v1alpha1_rulesfile_oci_private.yaml
+- artifact_v1alpha1_rulesfile_inline.yaml
+- artifact_v1alpha1_rulesfile_configmap.yaml
+- artifact_v1alpha1_rulesfile_all.yaml
 - artifact_v1alpha1_plugin.yaml
+- artifact_v1alpha1_plugin_full.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

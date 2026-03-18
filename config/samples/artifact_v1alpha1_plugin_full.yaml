@@ -1,0 +1,19 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: plugin-container-full
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/container
+      tag: latest
+    registry:
+      name: ghcr.io
+  config:
+    name: container
+    initConfig:
+      label_max_len: 100
+      with_size: false
