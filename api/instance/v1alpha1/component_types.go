@@ -23,12 +23,16 @@ import (
 )
 
 // ComponentType defines the type of component to deploy.
-// +kubebuilder:validation:Enum=metacollector
+// +kubebuilder:validation:Enum=metacollector;falcosidekick;"falcosidekick-ui"
 type ComponentType string
 
 const (
 	// ComponentTypeMetacollector represents the k8s-metacollector component.
 	ComponentTypeMetacollector ComponentType = "metacollector"
+	// ComponentTypeFalcosidekick represents the Falcosidekick fan-out daemon.
+	ComponentTypeFalcosidekick ComponentType = "falcosidekick"
+	// ComponentTypeFalcosidekickUI represents the Falcosidekick UI dashboard.
+	ComponentTypeFalcosidekickUI ComponentType = "falcosidekick-ui"
 )
 
 // ComponentInfo identifies which component to deploy and at which version.

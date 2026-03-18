@@ -109,6 +109,24 @@ func TestGenerateWorkload(t *testing.T) {
 			wantContainers:     1,
 			wantTolerations:    0,
 		},
+		{
+			name:               "Falcosidekick Deployment",
+			kind:               ResourceTypeDeployment,
+			defs:               FalcosidekickDefaults,
+			nativeSidecar:      false,
+			wantInitContainers: 0,
+			wantContainers:     1,
+			wantTolerations:    0,
+		},
+		{
+			name:               "Falcosidekick UI Deployment has wait-redis init container",
+			kind:               ResourceTypeDeployment,
+			defs:               FalcosidekickUIDefaults,
+			nativeSidecar:      false,
+			wantInitContainers: 1,
+			wantContainers:     1,
+			wantTolerations:    0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -229,6 +247,18 @@ func TestGenerateWorkloadErrors(t *testing.T) {
 			name:         "metacollector does not support DaemonSet",
 			resourceType: ResourceTypeDaemonSet,
 			defs:         MetacollectorDefaults,
+			wantErrMsg:   "not supported",
+		},
+		{
+			name:         "falcosidekick does not support DaemonSet",
+			resourceType: ResourceTypeDaemonSet,
+			defs:         FalcosidekickDefaults,
+			wantErrMsg:   "not supported",
+		},
+		{
+			name:         "falcosidekick-ui does not support DaemonSet",
+			resourceType: ResourceTypeDaemonSet,
+			defs:         FalcosidekickUIDefaults,
 			wantErrMsg:   "not supported",
 		},
 		{
@@ -450,6 +480,14 @@ func TestForgeMainContainer(t *testing.T) {
 			name: "Metacollector main container",
 			defs: MetacollectorDefaults,
 		},
+		{
+			name: "Falcosidekick main container",
+			defs: FalcosidekickDefaults,
+		},
+		{
+			name: "Falcosidekick UI main container",
+			defs: FalcosidekickUIDefaults,
+		},
 	}
 
 	for _, tt := range tests {
@@ -462,6 +500,7 @@ func TestForgeMainContainer(t *testing.T) {
 			assert.Equal(t, tt.defs.DefaultCommand, c.Command)
 			assert.Equal(t, tt.defs.DefaultArgs, c.Args)
 			assert.Equal(t, tt.defs.EnvVars, c.Env)
+			assert.Equal(t, tt.defs.StartupProbe, c.StartupProbe)
 			assert.Equal(t, tt.defs.LivenessProbe, c.LivenessProbe)
 			assert.Equal(t, tt.defs.ReadinessProbe, c.ReadinessProbe)
 			assert.Equal(t, tt.defs.SecurityContext, c.SecurityContext)

@@ -51,6 +51,19 @@ var FalcoDefaults = &InstanceDefaults{
 	DefaultPorts: []corev1.ContainerPort{
 		{ContainerPort: 8765, Name: "web", Protocol: corev1.ProtocolTCP},
 	},
+	StartupProbe: &corev1.Probe{
+		InitialDelaySeconds: 3,
+		TimeoutSeconds:      5,
+		PeriodSeconds:       5,
+		FailureThreshold:    20,
+		SuccessThreshold:    1,
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path: "/healthz",
+				Port: intstr.FromInt32(8765),
+			},
+		},
+	},
 	DefaultResources: corev1.ResourceRequirements{
 		Limits: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("1000m"),
@@ -62,7 +75,7 @@ var FalcoDefaults = &InstanceDefaults{
 		},
 	},
 	LivenessProbe: &corev1.Probe{
-		InitialDelaySeconds: 60,
+		InitialDelaySeconds: 0,
 		TimeoutSeconds:      5,
 		PeriodSeconds:       15,
 		FailureThreshold:    3,
@@ -75,7 +88,7 @@ var FalcoDefaults = &InstanceDefaults{
 		},
 	},
 	ReadinessProbe: &corev1.Probe{
-		InitialDelaySeconds: 30,
+		InitialDelaySeconds: 0,
 		TimeoutSeconds:      5,
 		PeriodSeconds:       15,
 		FailureThreshold:    3,
@@ -150,6 +163,7 @@ var FalcoDefaults = &InstanceDefaults{
 		{Name: "docker-socket", MountPath: "/host/var/run/"},
 		{Name: "containerd-socket", MountPath: "/host/run/containerd/"},
 		{Name: "crio-socket", MountPath: "/host/run/crio/"},
+		{Name: "host-containerd-socket", MountPath: "/host/run/host-containerd/"},
 		{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
 		{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
 		{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
@@ -165,6 +179,7 @@ var FalcoDefaults = &InstanceDefaults{
 		{Name: "docker-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run"}}},
 		{Name: "containerd-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
 		{Name: "crio-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/crio"}}},
+		{Name: "host-containerd-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/host-containerd"}}},
 		{Name: "proc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/proc"}}},
 		{Name: mounts.ConfigMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: mounts.RulesfileMountName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
@@ -243,7 +258,8 @@ var FalcoDefaults = &InstanceDefaults{
 }
 
 // Falco configuration strings, keyed by workload type.
-var daemonsetFalcoConfig = `append_output: []
+var daemonsetFalcoConfig = `append_output:
+- suggested_output: true
 base_syscalls:
   custom_set: []
   repair: false
@@ -256,8 +272,10 @@ container_engines:
   cri:
     enabled: true
     sockets:
-    - /run/k3s/containerd/containerd.sock
+    - /run/containerd/containerd.sock
     - /run/crio/crio.sock
+    - /run/k3s/containerd/containerd.sock
+    - /run/host-containerd/containerd.sock
   docker:
     enabled: true
   libvirt_lxc:
@@ -281,6 +299,9 @@ engine:
     drop_failed_exit: false
 falco_libs:
   thread_table_size: 262144
+  thread_table_auto_purging_interval_s: 300
+  thread_table_auto_purging_thread_timeout_s: 300
+  snaplen: 80
 file_output:
   enabled: false
   filename: ./events.txt
@@ -306,6 +327,7 @@ http_output:
   url: ""
   user_agent: falcosecurity/falco
 json_include_message_property: false
+json_include_output_fields_property: true
 json_include_output_property: true
 json_include_tags_property: true
 json_output: false
@@ -332,6 +354,7 @@ output_timeout: 2000
 outputs_queue:
   capacity: 0
 plugins: []
+plugins_hostinfo: true
 priority: debug
 program_output:
   enabled: false
@@ -366,7 +389,8 @@ webserver:
   threadiness: 0
 `
 
-var deploymentFalcoConfig = `append_output: []
+var deploymentFalcoConfig = `append_output:
+- suggested_output: true
 base_syscalls:
   custom_set: []
   repair: false
@@ -379,8 +403,10 @@ container_engines:
   cri:
     enabled: false
     sockets:
-    - /run/k3s/containerd/containerd.sock
+    - /run/containerd/containerd.sock
     - /run/crio/crio.sock
+    - /run/k3s/containerd/containerd.sock
+    - /run/host-containerd/containerd.sock
   docker:
     enabled: false
   libvirt_lxc:
@@ -404,6 +430,9 @@ engine:
     drop_failed_exit: false
 falco_libs:
   thread_table_size: 262144
+  thread_table_auto_purging_interval_s: 300
+  thread_table_auto_purging_thread_timeout_s: 300
+  snaplen: 80
 file_output:
   enabled: false
   filename: ./events.txt
@@ -429,6 +458,7 @@ http_output:
   url: ""
   user_agent: falcosecurity/falco
 json_include_message_property: false
+json_include_output_fields_property: true
 json_include_output_property: true
 json_include_tags_property: true
 json_output: false
@@ -455,6 +485,7 @@ output_timeout: 2000
 outputs_queue:
   capacity: 0
 plugins: []
+plugins_hostinfo: true
 priority: debug
 program_output:
   enabled: false

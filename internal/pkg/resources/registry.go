@@ -25,6 +25,10 @@ func GetDefaults(typeName string) (*InstanceDefaults, error) {
 		return FalcoDefaults, nil
 	case MetacollectorTypeName:
 		return MetacollectorDefaults, nil
+	case FalcosidekickTypeName:
+		return FalcosidekickDefaults, nil
+	case FalcosidekickUITypeName:
+		return FalcosidekickUIDefaults, nil
 	default:
 		return nil, fmt.Errorf("unknown instance type %q", typeName)
 	}

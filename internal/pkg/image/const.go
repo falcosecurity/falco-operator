@@ -31,4 +31,23 @@ const (
 	MetacollectorImage = "k8s-metacollector"
 	// MetacollectorTag the default tag used for k8s-metacollector.
 	MetacollectorTag = "0.1.1"
+
+	// FalcosidekickImage the default image name used for Falcosidekick.
+	FalcosidekickImage = "falcosidekick"
+	// FalcosidekickTag the default tag used for Falcosidekick.
+	FalcosidekickTag = "2.32.0"
+
+	// FalcosidekickUIImage the default image name used for Falcosidekick UI.
+	FalcosidekickUIImage = "falcosidekick-ui"
+	// FalcosidekickUITag the default tag used for Falcosidekick UI.
+	FalcosidekickUITag = "2.2.0"
+
+	// RedisRegistry the default registry used for Redis.
+	RedisRegistry = "docker.io"
+	// RedisRepository the default repository used for Redis.
+	RedisRepository = "redis"
+	// RedisImage the default image name used for Redis.
+	RedisImage = "redis-stack"
+	// RedisTag the default tag used for Redis.
+	RedisTag = "7.2.0-v11"
 )

@@ -59,6 +59,7 @@ func generateDeployment(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeS
 		AddContainer(forgeMainContainer(defs)).
 		WithStrategy(forgeDeploymentStrategy(defs.DeploymentStrategy))
 
+	addInitContainers(b, defs)
 	addSidecarContainers(b, nativeSidecar, defs)
 
 	return b.Build()
@@ -78,9 +79,23 @@ func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeSi
 		AddContainer(forgeMainContainer(defs)).
 		WithUpdateStrategy(forgeDaemonSetUpdateStrategy(defs.DaemonSetUpdateStrategy))
 
+	addInitContainers(b, defs)
 	addSidecarContainers(b, nativeSidecar, defs)
 
 	return b.Build()
+}
+
+// addInitContainers adds true init containers (run to completion) from defaults.
+func addInitContainers(b any, defs *InstanceDefaults) {
+	for i := range defs.InitContainers {
+		initC := defs.InitContainers[i]
+		switch builder := b.(type) {
+		case *builders.DeploymentBuilder:
+			builder.AddInitContainer(&initC)
+		case *builders.DaemonSetBuilder:
+			builder.AddInitContainer(&initC)
+		}
+	}
 }
 
 // addSidecarContainers adds the sidecar containers from defaults to the builder.
