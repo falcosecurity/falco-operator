@@ -1,0 +1,17 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Config
+metadata:
+  labels:
+    app.kubernetes.io/name: falco-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: config-debug-node
+  namespace: default
+spec:
+  config:
+    libs_logger:
+      enabled: true
+      severity: debug
+  priority: 90
+  selector:
+    matchLabels:
+      kubernetes.io/hostname: "node1"
