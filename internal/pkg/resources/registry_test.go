@@ -41,6 +41,16 @@ func TestGetDefaults(t *testing.T) {
 			wantDefs: MetacollectorDefaults,
 		},
 		{
+			name:     "returns falcosidekick defaults",
+			typeName: FalcosidekickTypeName,
+			wantDefs: FalcosidekickDefaults,
+		},
+		{
+			name:     "returns falcosidekick-ui defaults",
+			typeName: FalcosidekickUITypeName,
+			wantDefs: FalcosidekickUIDefaults,
+		},
+		{
 			name:     "returns error for unknown type",
 			typeName: "unknown",
 			wantErr:  true,

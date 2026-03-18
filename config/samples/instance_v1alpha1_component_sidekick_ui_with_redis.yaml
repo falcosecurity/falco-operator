@@ -1,0 +1,80 @@
+# Complete example: Falcosidekick UI with a bundled Redis instance.
+# This deploys a Redis StatefulSet + Service, then the UI Component.
+---
+# Redis StatefulSet (persistent storage for event data)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: falcosidekick-ui-redis
+  labels:
+    app.kubernetes.io/name: falcosidekick-ui-redis
+spec:
+  serviceName: falcosidekick-ui-redis
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: falcosidekick-ui-redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: falcosidekick-ui-redis
+    spec:
+      containers:
+        - name: redis
+          image: docker.io/redis/redis-stack:7.2.0-v11
+          ports:
+            - containerPort: 6379
+              name: redis
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: 6379
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+  volumeClaimTemplates:
+    - metadata:
+        name: redis-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Redis headless Service (matches the default address: falcosidekick-ui-redis:6379)
+apiVersion: v1
+kind: Service
+metadata:
+  name: falcosidekick-ui-redis
+  labels:
+    app.kubernetes.io/name: falcosidekick-ui-redis
+spec:
+  type: ClusterIP
+  ports:
+    - port: 6379
+      targetPort: 6379
+      protocol: TCP
+      name: redis
+  selector:
+    app.kubernetes.io/name: falcosidekick-ui-redis
+---
+# Falcosidekick UI Component (uses default Redis address: falcosidekick-ui-redis:6379)
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Component
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: falco-operator
+  name: sidekick-ui
+spec:
+  component:
+    type: falcosidekick-ui
+    version: "2.2.0"
+  replicas: 2

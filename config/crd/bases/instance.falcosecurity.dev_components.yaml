@@ -77,6 +77,8 @@ spec:
                     description: Type specifies which component to deploy.
                     enum:
                     - metacollector
+                    - falcosidekick
+                    - falcosidekick-ui
                     type: string
                   version:
                     description: |-

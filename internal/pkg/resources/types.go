@@ -56,6 +56,7 @@ type InstanceDefaults struct {
 	ImagePullPolicy      corev1.PullPolicy
 	DefaultPorts         []corev1.ContainerPort
 	DefaultResources     corev1.ResourceRequirements
+	StartupProbe         *corev1.Probe
 	LivenessProbe        *corev1.Probe
 	ReadinessProbe       *corev1.Probe
 	SecurityContext      *corev1.SecurityContext
@@ -82,6 +83,9 @@ type InstanceDefaults struct {
 
 	// ConfigMapVolume defines how to mount the instance ConfigMap (nil = no ConfigMap volume).
 	ConfigMapVolume *ConfigMapVolumeConfig
+
+	// InitContainers are added as true init containers (run to completion before main).
+	InitContainers []corev1.Container
 
 	// Sidecar containers (nil = no sidecar).
 	SidecarContainers []corev1.Container

@@ -34,6 +34,7 @@ func forgeMainContainer(defs *InstanceDefaults) *corev1.Container {
 		Args:            defs.DefaultArgs,
 		Env:             defs.EnvVars,
 		VolumeMounts:    forgeVolumeMounts(defs),
+		StartupProbe:    defs.StartupProbe,
 		LivenessProbe:   defs.LivenessProbe,
 		ReadinessProbe:  defs.ReadinessProbe,
 		SecurityContext: defs.SecurityContext,

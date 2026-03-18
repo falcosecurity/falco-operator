@@ -1,0 +1,29 @@
+# Falcosidekick UI requires a Redis instance.
+# This sample shows how to point to your own Redis using podTemplateSpec.
+# The wait-redis init container will block until Redis is reachable.
+# If Redis is not available, the pod stays in Init:0/1 state.
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Component
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: falco-operator
+  name: sidekick-ui
+spec:
+  component:
+    type: falcosidekick-ui
+    version: "2.2.0"
+  replicas: 2
+  podTemplateSpec:
+    spec:
+      # Override the init container to point to your Redis instance.
+      initContainers:
+        - name: wait-redis
+          env:
+            - name: REDIS_ADDR
+              value: "my-redis-service:6379"  # <-- replace with your Redis address
+      # Override the main container args to point to your Redis instance.
+      containers:
+        - name: falcosidekick-ui
+          args:
+            - "-r"
+            - "my-redis-service:6379"  # <-- replace with your Redis address
