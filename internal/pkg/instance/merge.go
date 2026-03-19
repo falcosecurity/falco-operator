@@ -17,11 +17,14 @@
 package instance
 
 import (
+	"fmt"
+
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
 )
 
@@ -59,5 +62,33 @@ func MergeApplyConfiguration(kind string, baseResource runtime.Object, userOverr
 		Kind:    kind,
 	})
 
+	if err := enforceStrategyConstraints(result); err != nil {
+		return nil, fmt.Errorf("enforcing strategy constraints: %w", err)
+	}
+
 	return result, nil
+}
+
+// enforceStrategyConstraints enforces Kubernetes strategy field
+// constraints on the merged apply configuration.
+func enforceStrategyConstraints(obj *unstructured.Unstructured) error {
+	switch obj.GetKind() {
+	case resources.ResourceTypeDeployment:
+		strategyType, found, err := unstructured.NestedString(obj.Object, "spec", "strategy", "type")
+		if err != nil {
+			return err
+		}
+		if found && strategyType == string(appsv1.RecreateDeploymentStrategyType) {
+			unstructured.RemoveNestedField(obj.Object, "spec", "strategy", "rollingUpdate")
+		}
+	case resources.ResourceTypeDaemonSet:
+		strategyType, found, err := unstructured.NestedString(obj.Object, "spec", "updateStrategy", "type")
+		if err != nil {
+			return err
+		}
+		if found && strategyType == string(appsv1.OnDeleteDaemonSetStrategyType) {
+			unstructured.RemoveNestedField(obj.Object, "spec", "updateStrategy", "rollingUpdate")
+		}
+	}
+	return nil
 }

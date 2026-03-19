@@ -96,7 +96,8 @@ func forgeDeploymentStrategy(strategy *appsv1.DeploymentStrategy) appsv1.Deploym
 		return *strategy
 	}
 	return appsv1.DeploymentStrategy{
-		Type: appsv1.RollingUpdateDeploymentStrategyType,
+		Type:          appsv1.RollingUpdateDeploymentStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDeployment{},
 	}
 }
 
@@ -106,6 +107,7 @@ func forgeDaemonSetUpdateStrategy(strategy *appsv1.DaemonSetUpdateStrategy) apps
 		return *strategy
 	}
 	return appsv1.DaemonSetUpdateStrategy{
-		Type: appsv1.RollingUpdateDaemonSetStrategyType,
+		Type:          appsv1.RollingUpdateDaemonSetStrategyType,
+		RollingUpdate: &appsv1.RollingUpdateDaemonSet{},
 	}
 }

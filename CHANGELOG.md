@@ -32,6 +32,8 @@ Released on YYYY-MM-DD
 * Added RBAC `patch` verb for artifacts; fixed Kubernetes 1.32+ schema compatibility. [[`7c7962e`](https://github.com/falcosecurity/falco-operator/commit/7c7962e)]
 * Fixed ConfigMap indexer and restored artifact constants. [[`6936c53`](https://github.com/falcosecurity/falco-operator/commit/6936c53)]
 * Added ConfigMap watch permission to artifact operator. [[`ff5217c`](https://github.com/falcosecurity/falco-operator/commit/ff5217c)]
+* Fixed SSA strategy switch to `Recreate`/`OnDelete` failing due to K8s-defaulted `rollingUpdate` not being owned by the field manager.
+* Fixed invalid user input on SSA apply causing `ERROR` stack traces and infinite requeue instead of setting condition and stopping.
 * Fixed diff error handling in controllers. [[`5fce1c9`](https://github.com/falcosecurity/falco-operator/commit/5fce1c9)]
 * Prevented spurious updates via managed fields comparison. [[`49921ce`](https://github.com/falcosecurity/falco-operator/commit/49921ce)]
 * Fixed RBAC permissions for event recording. [[`a31f127`](https://github.com/falcosecurity/falco-operator/commit/a31f127)]

@@ -29,6 +29,141 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
+func TestEnforceStrategyConstraints(t *testing.T) {
+	tests := []struct {
+		name                    string
+		obj                     *unstructured.Unstructured
+		wantRollingUpdateAbsent bool
+		strategyPath            []string
+	}{
+		{
+			name: "Deployment Recreate removes rollingUpdate",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDeployment,
+				"spec": map[string]any{
+					"strategy": map[string]any{
+						"type": "Recreate",
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: true,
+			strategyPath:            []string{"spec", "strategy"},
+		},
+		{
+			name: "Deployment Recreate removes existing rollingUpdate",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDeployment,
+				"spec": map[string]any{
+					"strategy": map[string]any{
+						"type": "Recreate",
+						"rollingUpdate": map[string]any{
+							"maxSurge":       "25%",
+							"maxUnavailable": "25%",
+						},
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: true,
+			strategyPath:            []string{"spec", "strategy"},
+		},
+		{
+			name: "Deployment RollingUpdate does not touch rollingUpdate",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDeployment,
+				"spec": map[string]any{
+					"strategy": map[string]any{
+						"type": "RollingUpdate",
+						"rollingUpdate": map[string]any{
+							"maxSurge": "50%",
+						},
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: false,
+			strategyPath:            []string{"spec", "strategy"},
+		},
+		{
+			name: "Deployment without strategy is a no-op",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDeployment,
+				"spec": map[string]any{},
+			}},
+			wantRollingUpdateAbsent: false,
+			strategyPath:            []string{"spec", "strategy"},
+		},
+		{
+			name: "DaemonSet OnDelete sets rollingUpdate to null",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDaemonSet,
+				"spec": map[string]any{
+					"updateStrategy": map[string]any{
+						"type": "OnDelete",
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: true,
+			strategyPath:            []string{"spec", "updateStrategy"},
+		},
+		{
+			name: "DaemonSet OnDelete removes existing rollingUpdate",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDaemonSet,
+				"spec": map[string]any{
+					"updateStrategy": map[string]any{
+						"type": "OnDelete",
+						"rollingUpdate": map[string]any{
+							"maxUnavailable": 1,
+						},
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: true,
+			strategyPath:            []string{"spec", "updateStrategy"},
+		},
+		{
+			name: "DaemonSet RollingUpdate does not touch rollingUpdate",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": resources.ResourceTypeDaemonSet,
+				"spec": map[string]any{
+					"updateStrategy": map[string]any{
+						"type": "RollingUpdate",
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: false,
+			strategyPath:            []string{"spec", "updateStrategy"},
+		},
+		{
+			name: "unknown kind is a no-op",
+			obj: &unstructured.Unstructured{Object: map[string]any{
+				"kind": "StatefulSet",
+				"spec": map[string]any{
+					"updateStrategy": map[string]any{
+						"type": "OnDelete",
+					},
+				},
+			}},
+			wantRollingUpdateAbsent: false,
+			strategyPath:            []string{"spec", "updateStrategy"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := enforceStrategyConstraints(tt.obj)
+			require.NoError(t, err)
+
+			path := make([]string, len(tt.strategyPath)+1)
+			copy(path, tt.strategyPath)
+			path[len(path)-1] = "rollingUpdate"
+			_, found, _ := unstructured.NestedFieldNoCopy(tt.obj.Object, path...)
+			if tt.wantRollingUpdateAbsent {
+				assert.False(t, found, "rollingUpdate must be absent so SSA drops ownership and removes it from the live object")
+			}
+		})
+	}
+}
+
 func TestMergeApplyConfiguration(t *testing.T) {
 	tests := []struct {
 		name               string
