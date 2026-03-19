@@ -8,13 +8,13 @@ The Falco Operator manages Falco deployments, companion components, and runtime 
 
 ### Falco Operator (Instance Controller)
 
-The Falco Operator is the primary component that users install and interact with. It runs as a Deployment in the `falco-operator` namespace and watches for Custom Resources in the `instance.falcosecurity.dev` and `artifact.falcosecurity.dev` API groups.
+The Falco Operator is the primary component that users install and interact with. It runs as a DaemonSet (by default) in the `falco-operator` namespace and watches for Custom Resources in the `instance.falcosecurity.dev` and `artifact.falcosecurity.dev` API groups.
 
 The instance operator binary registers four controllers:
 1. **Falco controller** — Reconciles `Falco` CRs
 2. **Component controller** — Reconciles `Component` CRs
-3. **ConfigMap reference controller** — Manages ConfigMap finalizers
-4. **Secret reference controller** — Manages Secret finalizers
+3. **ConfigMap reference controller** — Manages referenced ConfigMap finalizers
+4. **Secret reference controller** — Manages referenced Secret finalizers
 
 **Responsibilities:**
 - Reconcile `Falco` CRs into DaemonSets or Deployments
@@ -58,11 +58,11 @@ The Artifact Operator runs as a **native sidecar container** (Kubernetes 1.29+) 
 ### Interaction Between Components
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────────┐
 │                     Kubernetes API Server                        │
 │                                                                  │
 │  Falco CR   Component CR   Rulesfile CR   Plugin CR   Config CR  │
-└─────┬───────────┬──────────────┬────────────┬──────────┬────────┘
+└─────┬───────────┬──────────────┬────────────┬──────────┬─────────┘
       │           │              │            │          │
       ▼           ▼              ▼            ▼          ▼
 ┌──────────────────────┐
@@ -72,22 +72,22 @@ The Artifact Operator runs as a **native sidecar container** (Kubernetes 1.29+) 
 └───┬──────────┬───────┘
     │          │ creates
     │          ▼
-    │  ┌─────────────────────────────────────────────────┐
-    │  │  Falco Pod (per node or replica)                 │
-    │  │                                                  │
-    │  │  ┌──────────────────┐  ┌──────────────────────┐  │
-    │  │  │ Artifact Operator│  │   Falco Container    │  │
-    │  │  │ (native sidecar) │  │                      │  │
-    │  │  │                  │  │   modern_ebpf /      │  │
-    │  │  │ Watches artifact │  │   nodriver           │  │
-    │  │  │ CRs, downloads   │  │                      │  │
-    │  │  │ OCI artifacts,   │  │  Reads:              │  │
-    │  │  │ writes to shared │  │   /etc/falco/rules.d │  │
-    │  │  │ volumes ─────────┼──┼─► /etc/falco/config.d│  │
+    │  ┌───────────────────────────────────────────────────┐
+    │  │  Falco Pod (per node or replica)                  │
+    │  │                                                   │
+    │  │  ┌──────────────────┐  ┌───────────────────────┐  │
+    │  │  │ Artifact Operator│  │   Falco Container     │  │
+    │  │  │ (native sidecar) │  │                       │  │
+    │  │  │                  │  │   modern_ebpf /       │  │
+    │  │  │ Watches artifact │  │   nodriver            │  │
+    │  │  │ CRs, downloads   │  │                       │  │
+    │  │  │ OCI artifacts,   │  │  Reads:               │  │
+    │  │  │ writes to shared │  │   /etc/falco/rules.d  │  │
+    │  │  │ volumes ─────────┼──┼─► /etc/falco/config.d │  │
     │  │  │                  │  │   /usr/share/falco/   │  │
     │  │  │                  │  │     plugins/          │  │
-    │  │  └──────────────────┘  └──────────────────────┘  │
-    │  └──────────────────────────────────────────────────┘
+    │  │  └──────────────────┘  └───────────────────────┘  │
+    │  └───────────────────────────────────────────────────┘
     │ creates
     ▼
 ┌──────────────────────────────┐
