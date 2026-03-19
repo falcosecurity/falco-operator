@@ -9,9 +9,9 @@ The Kubernetes-native way to deploy and manage [Falco](https://falco.org). The F
 
 ## Overview
 
-The Falco Operator brings three components that work together:
+The Falco Operator brings two components that work together:
 
-- **Falco Operator** — Manages the lifecycle of Falco instances (DaemonSet or Deployment mode) and companion components (e.g., k8s-metacollector)
+- **Falco Operator** — Manages the lifecycle of Falco instances (DaemonSet or Deployment mode) and companion components (e.g., k8s-metacollector, falcosidekick, falcosidekick-ui)
 - **Artifact Operator** — Manages rules, plugins, and configuration fragments (runs as a native sidecar in each Falco pod)
 
 Five Custom Resource Definitions provide a declarative API:

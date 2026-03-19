@@ -54,7 +54,7 @@ export OPERATOR_VERSION=v0.2.0
 kubectl apply -f "https://github.com/falcosecurity/falco-operator/releases/download/${OPERATOR_VERSION}/install.yaml"
 ```
 
-> **Important**: Before upgrading, always check the [CHANGELOG](../CHANGELOG.md) and the [migration guide](migration-guide.md) for your target version. Major releases may include breaking API changes that require updating your custom resources before or after the upgrade.
+> **Important**: Before upgrading, always check the [CHANGELOG](../CHANGELOG.md) and the [migration guide](migration-guide.md) for your target version. Minor releases may still include breaking API changes that require updating your custom resources before or after the upgrade.
 
 ## Uninstall
 

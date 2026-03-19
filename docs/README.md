@@ -9,15 +9,18 @@ Complete documentation for the [Falco Operator](https://github.com/falcosecurity
 | [Installation](installation.md) | Install the operator and prerequisites |
 | [Getting Started](getting-started.md) | Deploy Falco and add rules in minutes |
 | [Architecture](architecture.md) | Components, interactions, and design decisions |
-| **CRD Reference** | |
+| [Configuration](configuration.md) | Default settings and customization |
+| [Migration Guide](migration-guide.md) | Upgrade from v0.1.x to v0.2.0 |
+| [Contributing](contributing.md) | Development setup, testing, and PR guidelines |
+
+| CRD Reference | Description |
+|-------------------|-------------|
 | &nbsp;&nbsp;[Falco](crds/falco.md) | Falco instance lifecycle management |
 | &nbsp;&nbsp;[Rulesfile](crds/rulesfile.md) | Detection rules from OCI, inline, or ConfigMap |
 | &nbsp;&nbsp;[Plugin](crds/plugin.md) | Plugin management from OCI registries |
 | &nbsp;&nbsp;[Config](crds/config.md) | Configuration fragments |
 | &nbsp;&nbsp;[Component](crds/component.md) | Companion components (e.g., k8s-metacollector) |
-| [Configuration](configuration.md) | Default settings and customization |
-| [Migration Guide](migration-guide.md) | Upgrade from v0.1.x to v0.2.0 |
-| [Contributing](contributing.md) | Development setup, testing, and PR guidelines |
+
 
 ## Quick Links
 
