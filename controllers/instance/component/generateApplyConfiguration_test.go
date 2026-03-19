@@ -267,6 +267,12 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			if tt.wantStrategyType != "" {
 				strategyType, _, _ := unstructured.NestedString(result.Object, "spec", "strategy", "type")
 				assert.Equal(t, tt.wantStrategyType, strategyType)
+
+				// Verify mutually exclusive fields: Recreate must NOT have rollingUpdate.
+				if strategyType == string(appsv1.RecreateDeploymentStrategyType) {
+					_, found, _ := unstructured.NestedMap(result.Object, "spec", "strategy", "rollingUpdate")
+					assert.False(t, found, "rollingUpdate must be absent for Recreate strategy so SSA removes it")
+				}
 			}
 		})
 	}

@@ -260,7 +260,6 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, comp *instancev1alpha
 
 	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
 	if err = r.Apply(ctx, client.ApplyConfigurationFromUnstructured(applyConfig), applyOpts...); err != nil {
-		logger.Error(err, "unable to apply resource", "type", comp.Spec.Component.Type)
 		if !resourceExists {
 			conditionStatus = metav1.ConditionFalse
 			conditionReason = instance.ReasonApplyPatchErrorOnCreate
@@ -274,6 +273,13 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, comp *instancev1alpha
 			r.recorder.Eventf(comp, nil, corev1.EventTypeWarning, instance.ReasonApplyPatchErrorOnUpdate,
 				instance.ReasonApplyPatchErrorOnUpdate, instance.MessageFormatApplyPatchErrorOnUpdate, err.Error())
 		}
+		// Validation errors are terminal — the user must fix the CR spec.
+		// Don't requeue; the next reconciliation will be triggered by the CR update.
+		if k8serrors.IsInvalid(err) {
+			logger.Info("Apply rejected by API server due to invalid input", "type", comp.Spec.Component.Type, "error", err.Error())
+			return nil
+		}
+		logger.Error(err, "unable to apply resource", "type", comp.Spec.Component.Type)
 		return err
 	}
 

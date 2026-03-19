@@ -211,6 +211,12 @@ func EnsureResource(ctx context.Context, cl client.Client, recorder events.Event
 	if err := cl.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredResource), applyOpts...); err != nil {
 		recorder.Eventf(owner, nil, corev1.EventTypeWarning, ReasonResourceApplyError,
 			ReasonResourceApplyError, MessageFormatResourceApplyError, resourceType, err.Error())
+		// Validation errors are terminal — the user must fix the CR spec.
+		// Return nil so controller-runtime does not requeue with stack trace spam.
+		if k8serrors.IsInvalid(err) {
+			logger.Info("Apply rejected by API server due to invalid input", "type", resourceType, "name", desiredResource.GetName(), "error", err.Error())
+			return nil
+		}
 		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
 	}
 
