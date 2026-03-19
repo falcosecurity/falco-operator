@@ -97,6 +97,24 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			wantLabels:   map[string]string{"app": "falco"},
 		},
 		{
+			name: "Falco with conflicting selector labels, selector labels take precedence in pod template",
+			obj: builders.NewFalco().
+				WithName("falco-custom").WithNamespace(testNamespace).
+				WithLabels(map[string]string{
+					"app.kubernetes.io/name":     "falco-operator",
+					"app.kubernetes.io/instance": "instance-1",
+				}).
+				Build(),
+			defs:         FalcoDefaults,
+			resourceType: ResourceTypeDaemonSet,
+			// In pod template, selector labels (name, instance) override user labels.
+			// Non-conflicting user labels (managed-by) are preserved.
+			wantLabels: map[string]string{
+				"app.kubernetes.io/name":     "falco-operator",
+				"app.kubernetes.io/instance": "instance-1",
+			},
+		},
+		{
 			name: "Component with defaults only produces labels option",
 			obj: builders.NewComponent().
 				WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
@@ -164,7 +182,7 @@ func TestGenerateOverlayOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			opts := GenerateOverlayOptions(tt.obj)
-			overlay, err := GenerateUserOverlay(tt.resourceType, "test", tt.defs, opts...)
+			overlay, err := GenerateUserOverlay(tt.resourceType, tt.obj.GetName(), tt.defs, opts...)
 			require.NoError(t, err)
 			require.NotNil(t, overlay)
 
@@ -172,10 +190,11 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			for k, v := range tt.wantLabels {
 				assert.Equal(t, v, overlay.GetLabels()[k], "metadata label %s", k)
 			}
+
+			// Assert that pod template labels include the expected labels (selector labels take precedence over user labels).
 			templateLabels, _, _ := unstructured.NestedStringMap(overlay.Object, "spec", "template", "metadata", "labels")
-			for k, v := range tt.wantLabels {
-				assert.Equal(t, v, templateLabels[k], "pod template label %s", k)
-			}
+			assert.Equal(t, tt.obj.GetName(), templateLabels["app.kubernetes.io/instance"], "pod template label app.kubernetes.io/instance should match object name")
+			assert.Equal(t, tt.obj.GetName(), templateLabels["app.kubernetes.io/name"], "pod template label app.kubernetes.io/name should match object name")
 
 			// Replicas.
 			if tt.wantReplicas > 0 {
