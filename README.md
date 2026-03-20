@@ -37,7 +37,7 @@ For details, see the [Architecture documentation](docs/architecture.md).
 ### Install the operator
 
 ```bash
-kubectl apply -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
 ```
 
 ### Deploy Falco
@@ -92,7 +92,6 @@ For the complete walkthrough, see the [Getting Started guide](docs/getting-start
 | [Configuration](docs/configuration.md) | Defaults and customization |
 | [Migration Guide](docs/migration-guide.md) | Upgrade from v0.1.x to v0.2.0 |
 | [Contributing](docs/contributing.md) | Development, testing, PR guidelines |
-| [Changelog](CHANGELOG.md) | Release history |
 
 ## Key Features
 

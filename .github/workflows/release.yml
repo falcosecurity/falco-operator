@@ -22,7 +22,7 @@ jobs:
         run: git fetch --force --tags
 
       - name: Setup Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
         with:
           go-version-file: 'go.mod'
           check-latest: true
@@ -177,7 +177,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
         with:
           go-version-file: 'go.mod'
           check-latest: true
@@ -186,8 +186,9 @@ jobs:
         run: |
           make build-installer IMG="${{ vars.FALCO_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
 
-      - name: Upload install.yaml to release
+      - name: Upload install.yaml and quickstart.yaml to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ github.ref_name }}" config/dist/install.yaml --clobber
+          gh release upload "${{ github.ref_name }}" config/dist/quickstart.yaml --clobber
