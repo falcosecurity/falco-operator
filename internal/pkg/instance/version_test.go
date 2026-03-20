@@ -172,7 +172,7 @@ func TestResolveVersion(t *testing.T) {
 			name: "empty containers slice falls back to spec.version",
 			obj: &instancev1alpha1.Falco{
 				Spec: instancev1alpha1.FalcoSpec{
-					Version: new("0.41.0"),
+					Version: new("0.43.0"),
 					PodTemplateSpec: &corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{},
@@ -181,7 +181,7 @@ func TestResolveVersion(t *testing.T) {
 				},
 			},
 			defs: resources.FalcoDefaults,
-			want: "0.41.0",
+			want: "0.43.0",
 		},
 		{
 			name: "empty containers slice and nil version falls back to default",

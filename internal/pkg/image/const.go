@@ -25,7 +25,7 @@ const (
 	// FalcoImage the default image name used for Falco.
 	FalcoImage = "falco"
 	// FalcoTag the default tag used for Falco.
-	FalcoTag = "0.41.0"
+	FalcoTag = "0.43.0"
 
 	// MetacollectorImage the default image name used for k8s-metacollector.
 	MetacollectorImage = "k8s-metacollector"

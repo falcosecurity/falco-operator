@@ -18,6 +18,7 @@ builds:
       -X github.com/falcosecurity/falco-operator/internal/pkg/version.BuildDate={{ .Date }}
       -X github.com/falcosecurity/falco-operator/internal/pkg/version.GitCommit={{ .Commit }}
       -X github.com/falcosecurity/falco-operator/internal/pkg/version.SemVersion={{ if .IsSnapshot }}{{ .Commit }}{{ else }}{{ .Version }}{{ end }}
+      -X github.com/falcosecurity/falco-operator/internal/pkg/version.ArtifactOperatorImage=docker.io/falcosecurity/artifact-operator:{{ if .IsSnapshot }}latest{{ else }}v{{ .Version }}{{ end }}
       -s
       -w
     main: ./cmd/instance/main.go

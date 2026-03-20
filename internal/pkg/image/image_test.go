@@ -132,13 +132,13 @@ func TestVersionFromTag(t *testing.T) {
 	}{
 		{
 			name: "simple version",
-			tag:  "0.41.0",
-			want: "0.41.0",
+			tag:  "0.43.0",
+			want: "0.43.0",
 		},
 		{
 			name: "version with suffix",
-			tag:  "0.41.0-rc1",
-			want: "0.41.0",
+			tag:  "0.43.0-rc1",
+			want: "0.43.0",
 		},
 		{
 			name: "FalcoTag",
