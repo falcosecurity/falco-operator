@@ -39,8 +39,8 @@ kubectl delete falco --all --all-namespaces
 Apply the new install manifest, which includes updated CRDs and the new operator version:
 
 ```bash
-export OPERATOR_VERSION=v0.2.0
-kubectl apply -f "https://github.com/falcosecurity/falco-operator/releases/download/${OPERATOR_VERSION}/install.yaml"
+export RELEASE=v0.2.0
+kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
 ```
 
 This adds the new `Component` CRD and updates all existing CRDs with new fields, conditions, and print columns.
@@ -58,6 +58,7 @@ The `ociArtifact` structure has been completely redesigned. The flat `reference`
 ### Rulesfile
 
 **Before (v0.1.x):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
@@ -69,6 +70,7 @@ spec:
 ```
 
 **After (v0.2.0):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
@@ -86,6 +88,7 @@ spec:
 ### Plugin
 
 **Before (v0.1.x):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Plugin
@@ -100,6 +103,7 @@ spec:
 ```
 
 **After (v0.2.0):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Plugin
@@ -120,6 +124,7 @@ spec:
 ### With private registry credentials
 
 **Before (v0.1.x):**
+
 ```yaml
 spec:
   ociArtifact:
@@ -131,6 +136,7 @@ spec:
 ```
 
 **After (v0.2.0):**
+
 ```yaml
 spec:
   ociArtifact:
@@ -150,12 +156,12 @@ spec:
 
 Given a reference like `ghcr.io/falcosecurity/rules/falco-rules:latest`:
 
-| v0.1.x field | v0.2.0 field | Value |
-|-------------|-------------|-------|
-| `reference` (full string) | — | *(removed)* |
-| — | `registry.name` | `ghcr.io` |
-| — | `image.repository` | `falcosecurity/rules/falco-rules` |
-| — | `image.tag` | `latest` |
+| v0.1.x field              | v0.2.0 field       | Value                             |
+| ------------------------- | ------------------ | --------------------------------- |
+| `reference` (full string) | —                  | _(removed)_                       |
+| —                         | `registry.name`    | `ghcr.io`                         |
+| —                         | `image.repository` | `falcosecurity/rules/falco-rules` |
+| —                         | `image.tag`        | `latest`                          |
 
 ### Config resources
 
@@ -164,6 +170,7 @@ Given a reference like `ghcr.io/falcosecurity/rules/falco-rules:latest`:
 The `spec.config` field changed from a YAML string to a structured YAML object.
 
 **Before (v0.1.x):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Config
@@ -177,6 +184,7 @@ spec:
 ```
 
 **After (v0.2.0):**
+
 ```yaml
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Config
@@ -198,6 +206,7 @@ spec:
 The `spec.inlineRules` field changed from a YAML string to a structured YAML list.
 
 **Before (v0.1.x):**
+
 ```yaml
 spec:
   inlineRules: |-
@@ -210,6 +219,7 @@ spec:
 ```
 
 **After (v0.2.0):**
+
 ```yaml
 spec:
   inlineRules:
@@ -227,10 +237,10 @@ spec:
 
 ### Condition type names changed
 
-| v0.1.x | v0.2.0 |
-|--------|--------|
+| v0.1.x                | v0.2.0       |
+| --------------------- | ------------ |
 | `ConditionReconciled` | `Reconciled` |
-| `ConditionAvailable` | `Available` |
+| `ConditionAvailable`  | `Available`  |
 
 Update any monitoring queries, alerts, or scripts that filter on `.status.conditions[].type`.
 
@@ -257,16 +267,16 @@ kubectl get configs
 
 ## Summary of All Breaking Changes
 
-| # | Change | Severity | CRD Re-apply | CR Update |
-|---|--------|----------|:---:|:---:|
-| 1 | `ociArtifact.reference` → `ociArtifact.image` + `ociArtifact.registry` | **Critical** | Yes | Yes |
-| 2 | `ociArtifact.pullSecret` → `ociArtifact.registry.auth.secretRef` | **Critical** | Yes | Yes |
-| 3 | Config `spec.config`: string → structured YAML | **Critical** | Yes | Yes |
-| 4 | Rulesfile `spec.inlineRules`: string → structured YAML | **High** | Yes | Yes |
-| 5 | Plugin `spec.config.initConfig`: `map[string]string` → JSON | **Medium** | Yes | Maybe |
-| 6 | Condition types: `ConditionX` → `X` | **Medium** | Yes | No |
-| 7 | Falco shortName: `prom` → `falco` | **Medium** | Yes | No |
-| 8 | Falco printcolumns: `spec` → `status` source | **Low** | Yes | No |
-| 9 | Artifact CRD printcolumns overhaul | **Low** | Yes | No |
-| 10 | RBAC permissions expanded | **Low** | Yes | No |
-| 11 | `FalcoSpec.Type`/`Version`: value → pointer, schema defaults removed | **Low** | Yes | No |
+| #   | Change                                                                 | Severity     | CRD Re-apply | CR Update |
+| --- | ---------------------------------------------------------------------- | ------------ | :----------: | :-------: |
+| 1   | `ociArtifact.reference` → `ociArtifact.image` + `ociArtifact.registry` | **Critical** |     Yes      |    Yes    |
+| 2   | `ociArtifact.pullSecret` → `ociArtifact.registry.auth.secretRef`       | **Critical** |     Yes      |    Yes    |
+| 3   | Config `spec.config`: string → structured YAML                         | **Critical** |     Yes      |    Yes    |
+| 4   | Rulesfile `spec.inlineRules`: string → structured YAML                 | **High**     |     Yes      |    Yes    |
+| 5   | Plugin `spec.config.initConfig`: `map[string]string` → JSON            | **Medium**   |     Yes      |   Maybe   |
+| 6   | Condition types: `ConditionX` → `X`                                    | **Medium**   |     Yes      |    No     |
+| 7   | Falco shortName: `prom` → `falco`                                      | **Medium**   |     Yes      |    No     |
+| 8   | Falco printcolumns: `spec` → `status` source                           | **Low**      |     Yes      |    No     |
+| 9   | Artifact CRD printcolumns overhaul                                     | **Low**      |     Yes      |    No     |
+| 10  | RBAC permissions expanded                                              | **Low**      |     Yes      |    No     |
+| 11  | `FalcoSpec.Type`/`Version`: value → pointer, schema defaults removed   | **Low**      |     Yes      |    No     |

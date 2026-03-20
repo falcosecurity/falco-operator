@@ -11,32 +11,32 @@
 Install the Falco Operator using the single-manifest installer from the latest release:
 
 ```bash
-kubectl apply -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
 ```
 
 To install a specific version:
 
 ```bash
-export OPERATOR_VERSION=v0.2.0
-kubectl apply -f "https://github.com/falcosecurity/falco-operator/releases/download/${OPERATOR_VERSION}/install.yaml"
+export RELEASE=v0.2.0
+kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
 ```
 
 ### What gets created
 
 The installer deploys the following resources:
 
-| Resource | Name | Description |
-|----------|------|-------------|
-| Namespace | `falco-operator` | Dedicated namespace for the operator |
-| CRD | `falcos.instance.falcosecurity.dev` | Falco instance management |
-| CRD | `components.instance.falcosecurity.dev` | Companion component management |
-| CRD | `configs.artifact.falcosecurity.dev` | Configuration management |
-| CRD | `plugins.artifact.falcosecurity.dev` | Plugin management |
-| CRD | `rulesfiles.artifact.falcosecurity.dev` | Rules management |
-| ServiceAccount | `falco-operator` | Operator identity |
-| ClusterRole | `falco-operator-role` | Required permissions |
-| ClusterRoleBinding | `falco-operator-rolebinding` | Permission binding |
-| Deployment | `falco-operator` | The operator itself |
+| Resource           | Name                                    | Description                          |
+| ------------------ | --------------------------------------- | ------------------------------------ |
+| Namespace          | `falco-operator`                        | Dedicated namespace for the operator |
+| CRD                | `falcos.instance.falcosecurity.dev`     | Falco instance management            |
+| CRD                | `components.instance.falcosecurity.dev` | Companion component management       |
+| CRD                | `configs.artifact.falcosecurity.dev`    | Configuration management             |
+| CRD                | `plugins.artifact.falcosecurity.dev`    | Plugin management                    |
+| CRD                | `rulesfiles.artifact.falcosecurity.dev` | Rules management                     |
+| ServiceAccount     | `falco-operator`                        | Operator identity                    |
+| ClusterRole        | `falco-operator-role`                   | Required permissions                 |
+| ClusterRoleBinding | `falco-operator-rolebinding`            | Permission binding                   |
+| Deployment         | `falco-operator`                        | The operator itself                  |
 
 ### Verify installation
 
@@ -50,8 +50,8 @@ kubectl wait pods --for=condition=Ready --all -n falco-operator
 To upgrade to a new version, re-apply the installer manifest:
 
 ```bash
-export OPERATOR_VERSION=v0.2.0
-kubectl apply -f "https://github.com/falcosecurity/falco-operator/releases/download/${OPERATOR_VERSION}/install.yaml"
+export RELEASE=v0.2.0
+kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
 ```
 
 > **Important**: Before upgrading, always check the [CHANGELOG](../CHANGELOG.md) and the [migration guide](migration-guide.md) for your target version. Minor releases may still include breaking API changes that require updating your custom resources before or after the upgrade.
@@ -80,14 +80,14 @@ kubectl delete -f https://github.com/falcosecurity/falco-operator/releases/lates
 
 The operator requires the following RBAC permissions:
 
-| API Group | Resources | Verbs |
-|-----------|-----------|-------|
-| `""` (core) | pods, nodes, configmaps, secrets, serviceaccounts, services, endpoints, namespaces, replicationcontrollers | get, list, watch, create, update, patch, delete |
-| `""` (core), `events.k8s.io` | events | create, patch, update |
-| `apps` | daemonsets, deployments, replicasets | get, list, watch, create, update, patch, delete |
-| `rbac.authorization.k8s.io` | roles, rolebindings, clusterroles, clusterrolebindings | get, list, watch, create, update, patch, delete |
-| `discovery.k8s.io` | endpointslices | get, list, watch |
-| `instance.falcosecurity.dev` | falcos, falcos/status, falcos/finalizers, components, components/status, components/finalizers | get, list, watch, create, update, patch, delete |
+| API Group                    | Resources                                                                                                                                      | Verbs                                           |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `""` (core)                  | pods, nodes, configmaps, secrets, serviceaccounts, services, endpoints, namespaces, replicationcontrollers                                     | get, list, watch, create, update, patch, delete |
+| `""` (core), `events.k8s.io` | events                                                                                                                                         | create, patch, update                           |
+| `apps`                       | daemonsets, deployments, replicasets                                                                                                           | get, list, watch, create, update, patch, delete |
+| `rbac.authorization.k8s.io`  | roles, rolebindings, clusterroles, clusterrolebindings                                                                                         | get, list, watch, create, update, patch, delete |
+| `discovery.k8s.io`           | endpointslices                                                                                                                                 | get, list, watch                                |
+| `instance.falcosecurity.dev` | falcos, falcos/status, falcos/finalizers, components, components/status, components/finalizers                                                 | get, list, watch, create, update, patch, delete |
 | `artifact.falcosecurity.dev` | configs, configs/status, configs/finalizers, plugins, plugins/status, plugins/finalizers, rulesfiles, rulesfiles/status, rulesfiles/finalizers | get, list, watch, create, update, patch, delete |
 
 ## Next Steps

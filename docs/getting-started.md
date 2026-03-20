@@ -1,19 +1,59 @@
 # Getting Started
 
-This guide walks you through deploying Falco using the operator and configuring detection rules.
+This guide walks you through deploying Falco using the operator.
 
 ## 1. Install the Operator
 
-If you haven't already, install the operator:
-
 ```bash
-kubectl apply -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
 kubectl wait pods --for=condition=Ready --all -n falco-operator
 ```
 
 See [Installation](installation.md) for details.
 
-## 2. Deploy a Falco Instance
+Then choose how you want to get started:
+
+## Full Stack Quickstart
+
+Deploy the entire Falco ecosystem in the `falco` namespace with one command:
+
+```bash
+kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/quickstart.yaml
+```
+
+This deploys the entire Falco ecosystem in the `falco` namespace: Falco DaemonSet, container and k8smeta plugins, detection rules, Falcosidekick, Falcosidekick UI with Redis, and k8s-metacollector - all pre-wired.
+
+Verify everything is running:
+
+```bash
+kubectl get falco,plugins,rulesfiles,configs,components -n falco
+kubectl get pods -n falco
+```
+
+To uninstall (order matters - artifacts first, then instances):
+
+```bash
+# 1. Artifacts first (so the sidecar can process finalizer cleanup)
+kubectl delete configs,rulesfiles,plugins --all -n falco
+# 2. Instances and components
+kubectl delete components,falcos --all -n falco
+# 3. Infrastructure
+kubectl delete statefulset falcosidekick-ui-redis -n falco
+kubectl delete svc falcosidekick-ui-redis -n falco
+# 4. Namespace and operator
+kubectl delete namespace falco
+kubectl delete -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+```
+
+> To configure Falcosidekick outputs (Slack, Elasticsearch, S3, etc.), see the [Falcosidekick documentation](https://github.com/falcosecurity/falcosidekick#outputs).
+
+If you prefer to deploy components individually and customize each one, follow the step-by-step guide below.
+
+---
+
+## Step-by-Step Guide
+
+### 2. Deploy a Falco Instance
 
 Create a Falco instance with default settings:
 
@@ -153,23 +193,6 @@ EOF
 ```
 
 For the web dashboard, see the [Falcosidekick UI component reference](crds/component.md#falcosidekick-ui-with-redis).
-
-## Deployment Mode: Plugin-only
-
-For workloads that only need plugin-based event sources (no kernel instrumentation), use Deployment mode:
-
-```bash
-cat <<EOF | kubectl apply -f -
-apiVersion: instance.falcosecurity.dev/v1alpha1
-kind: Falco
-metadata:
-  name: falco-plugins
-  namespace: falco-plugins
-spec:
-  type: Deployment
-  replicas: 1
-EOF
-```
 
 ## What's Next
 
