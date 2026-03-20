@@ -100,7 +100,7 @@ type FalcoStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
-// +kubebuilder:resource:path=falcos,categories="falcosecurity",shortName="falco"
+// +kubebuilder:resource:path=falcos,categories=instances,shortName="falco"
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".status.resourceType",description="The type of Kubernetes resource to deploy Falco"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".status.version",description="The version of Falco"
 // +kubebuilder:printcolumn:name="Desired",type="integer",JSONPath=".status.desiredReplicas",description="The desired number of replicas"

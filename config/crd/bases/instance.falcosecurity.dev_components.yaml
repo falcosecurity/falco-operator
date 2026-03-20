@@ -8,6 +8,8 @@ metadata:
 spec:
   group: instance.falcosecurity.dev
   names:
+    categories:
+    - instances
     kind: Component
     listKind: ComponentList
     plural: components

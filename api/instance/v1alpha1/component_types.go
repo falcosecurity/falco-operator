@@ -105,7 +105,7 @@ type ComponentStatus struct {
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:resource:path=components
+// +kubebuilder:resource:path=components,categories=instances
 
 // Component is the Schema for the components API.
 type Component struct {
