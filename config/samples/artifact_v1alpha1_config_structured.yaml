@@ -2,8 +2,7 @@ apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Config
 metadata:
   labels:
-    app.kubernetes.io/name: falco-operator
-    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/managed-by: falco-operator
   name: config-structured
 spec:
   config:
