@@ -3,6 +3,9 @@ resources:
 - instance_v1alpha1_falco.yaml
 - instance_v1alpha1_falco_custom.yaml
 - instance_v1alpha1_component.yaml
+- instance_v1alpha1_component_sidekick.yaml
+- instance_v1alpha1_component_sidekick_ui.yaml
+- instance_v1alpha1_component_sidekick_ui_with_redis.yaml
 - artifact_v1alpha1_config_structured.yaml
 - artifact_v1alpha1_config_configmapref.yaml
 - artifact_v1alpha1_config_both.yaml
