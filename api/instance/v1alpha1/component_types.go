@@ -81,7 +81,7 @@ type ComponentStatus struct {
 	DesiredReplicas int32 `json:"desiredReplicas,omitempty" protobuf:"varint,1,opt,name=desiredReplicas"`
 	// Total number of available pods (ready for at least minReadySeconds) targeted by the deployment.
 	// +optional
-	AvailableReplicas int32 `json:"availableReplicas" protobuf:"varint,2,opt,name=availableReplicas"`
+	AvailableReplicas int32 `json:"availableReplicas,omitempty" protobuf:"varint,2,opt,name=availableReplicas"`
 	// Total number of unavailable pods targeted by the deployment.
 	// +optional
 	UnavailableReplicas int32 `json:"unavailableReplicas,omitempty" protobuf:"varint,3,opt,name=unavailableReplicas"`

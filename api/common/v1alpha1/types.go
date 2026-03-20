@@ -26,7 +26,7 @@ const (
 	// service.
 	// The possible status values for this condition type are:
 	// - True: all pods are running and ready, the service is fully available.
-	// - Degraded: some pods aren't ready, the service is partially available.
+	// - False (reason: Degraded): some pods aren't ready, the service is partially available.
 	// - False: no pods are running, the service is totally unavailable.
 	// - Unknown: the operator couldn't determine the condition status.
 	ConditionAvailable ConditionType = "Available"
@@ -76,6 +76,7 @@ type OCIArtifact struct {
 	Image ImageSpec `json:"image"`
 
 	// Registry contains inline registry configuration for authentication, TLS, and hostname.
+	// +optional
 	Registry *RegistryConfig `json:"registry,omitempty"`
 }
 
@@ -111,6 +112,7 @@ type TLSConfig struct {
 // +kubebuilder:object:generate=true
 type RegistryAuth struct {
 	// SecretRef references a Secret containing registry credentials.
+	// +optional
 	SecretRef *SecretRef `json:"secretRef,omitempty"`
 }
 
@@ -119,17 +121,21 @@ type RegistryAuth struct {
 // +kubebuilder:validation:XValidation:rule="!(has(self.plainHTTP) && self.plainHTTP && has(self.tls))",message="plainHTTP and tls are mutually exclusive"
 type RegistryConfig struct {
 	// Name is the registry hostname (e.g. "ghcr.io").
+	// +optional
 	Name string `json:"name,omitempty"`
 
 	// Auth contains authentication configuration.
+	// +optional
 	Auth *RegistryAuth `json:"auth,omitempty"`
 
 	// PlainHTTP allows connections to registries over plain HTTP (no TLS).
 	// Mutually exclusive with tls.
+	// +optional
 	PlainHTTP *bool `json:"plainHTTP,omitempty"`
 
 	// TLS contains TLS transport configuration.
 	// Mutually exclusive with plainHTTP.
+	// +optional
 	TLS *TLSConfig `json:"tls,omitempty"`
 }
 

@@ -82,7 +82,7 @@ type FalcoStatus struct {
 	// Or the number of nodes that should be running the  daemon pod and have one or more of the daemon pod running and
 	// available (ready for at least spec.minReadySeconds)
 	// +optional
-	AvailableReplicas int32 `json:"availableReplicas" protobuf:"varint,11,opt,name=availableReplicas"`
+	AvailableReplicas int32 `json:"availableReplicas,omitempty" protobuf:"varint,11,opt,name=availableReplicas"`
 
 	// Total number of unavailable pods targeted by falco deployment/daemonset. This is the total number of
 	// pods that are still required for the deployment to have 100% available capacity or the number of nodes
