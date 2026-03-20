@@ -128,7 +128,7 @@ spec:
               priority:
                 default: 50
                 description: |-
-                  Priority specifies the priority of the rulesfile.\
+                  Priority specifies the priority of the rulesfile.
                   The higher the value, the higher the priority.
                 format: int32
                 maximum: 99

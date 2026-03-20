@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package controller defines controllers' logic.
+// Package v1alpha1 contains API Schema definitions for the artifact v1alpha1 API group.
 
 package v1alpha1
 
@@ -33,7 +33,7 @@ type RulesfileSpec struct {
 	InlineRules *apiextensionsv1.JSON `json:"inlineRules,omitempty"`
 	// ConfigMapRef specifies a reference to a ConfigMap containing the rules.
 	ConfigMapRef *commonv1alpha1.ConfigMapRef `json:"configMapRef,omitempty"`
-	// Priority specifies the priority of the rulesfile.\
+	// Priority specifies the priority of the rulesfile.
 	// The higher the value, the higher the priority.
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=99
