@@ -8,6 +8,8 @@ metadata:
 spec:
   group: artifact.falcosecurity.dev
   names:
+    categories:
+    - artifacts
     kind: Config
     listKind: ConfigList
     plural: configs
