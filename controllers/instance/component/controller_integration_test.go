@@ -334,6 +334,53 @@ func TestReconcile_StatusInfo(t *testing.T) {
 	assert.Equal(t, resources.MetacollectorDefaults.ResourceType, fetched.Status.ResourceType)
 }
 
+// TestReconcile_FalcosidekickRoleCreation verifies that components with RoleRules
+// get a namespace-scoped Role and RoleBinding, and components without ClusterRoleRules
+// do NOT get an empty ClusterRole.
+func TestReconcile_FalcosidekickRoleCreation(t *testing.T) {
+	ctx := context.Background()
+	comp := createComponent(t, ctx, builders.NewComponent().
+		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
+		WithName("test-sidekick-rbac").WithNamespace(testutil.TestNamespace).Build())
+
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, comp.Name, 5)
+
+	// Verify Role exists with endpoint get permission.
+	role := &rbacv1.Role{}
+	err := k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, role)
+	require.NoError(t, err, "Role should exist for falcosidekick")
+	require.NotEmpty(t, role.Rules, "Role should have rules")
+	assert.Contains(t, role.Rules[0].Resources, "endpoints", "Role should grant access to endpoints")
+	assert.Contains(t, role.Rules[0].Verbs, "get", "Role should grant get verb")
+
+	// Verify RoleBinding exists.
+	rb := &rbacv1.RoleBinding{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, rb)
+	require.NoError(t, err, "RoleBinding should exist for falcosidekick")
+	require.Len(t, rb.Subjects, 1)
+	assert.Equal(t, comp.Name, rb.Subjects[0].Name)
+
+	// Verify ClusterRole does NOT exist (falcosidekick has no ClusterRoleRules).
+	uniqueName := resources.GenerateUniqueName(comp.Name, testutil.TestNamespace)
+	cr := &rbacv1.ClusterRole{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: uniqueName}, cr)
+	assert.True(t, errors.IsNotFound(err), "ClusterRole should NOT exist for falcosidekick (no ClusterRoleRules)")
+
+	// Verify Service exists with port 2801.
+	svc := &corev1.Service{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, svc)
+	require.NoError(t, err)
+	require.Len(t, svc.Spec.Ports, 1)
+	assert.Equal(t, int32(2801), svc.Spec.Ports[0].Port)
+
+	// Verify Deployment.
+	dep := &appsv1.Deployment{}
+	err = k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, dep)
+	require.NoError(t, err)
+	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.FalcosidekickImage)
+}
+
 // TestReconcile_RecoveryAfterSubResourceDeletion verifies that the controller
 // recreates a sub-resource (ServiceAccount) that was deleted externally.
 func TestReconcile_RecoveryAfterSubResourceDeletion(t *testing.T) {

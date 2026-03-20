@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
@@ -49,6 +50,118 @@ func newMetacollectorComponent(name string) *builders.ComponentBuilder {
 	return builders.NewComponent().
 		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
 		WithName(name).WithNamespace(testutil.TestNamespace)
+}
+
+func newFalcosidekickComponent(name string) *builders.ComponentBuilder {
+	return builders.NewComponent().
+		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
+		WithName(name).WithNamespace(testutil.TestNamespace)
+}
+
+func TestReconcile_RBACConditionalCreation(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+
+	tests := []struct {
+		name                  string
+		comp                  *instancev1alpha1.Component
+		wantRoleExists        bool
+		wantRoleBindingExists bool
+		wantClusterRoleExists bool
+		wantClusterRBExists   bool
+		wantRoleRules         int
+		wantClusterRoleRules  int
+		wantErr               bool
+		wantErrMsg            string
+	}{
+		{
+			name:                  "metacollector gets ClusterRole but no Role",
+			comp:                  newMetacollectorComponent("test-mc-rbac").Build(),
+			wantRoleExists:        false,
+			wantRoleBindingExists: false,
+			wantClusterRoleExists: true,
+			wantClusterRBExists:   true,
+			wantClusterRoleRules:  3,
+		},
+		{
+			name:                  "falcosidekick gets Role but no ClusterRole",
+			comp:                  newFalcosidekickComponent("test-sk-rbac").Build(),
+			wantRoleExists:        true,
+			wantRoleBindingExists: true,
+			wantClusterRoleExists: false,
+			wantClusterRBExists:   false,
+			wantRoleRules:         1,
+		},
+		{
+			name: "unknown component type returns error",
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-unknown").Build()
+				c.Spec.Component.Type = "nonexistent"
+				return c
+			}(),
+			wantErr:    true,
+			wantErrMsg: "unknown instance type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(tt.comp).WithStatusSubresource(tt.comp).Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
+
+			_, err := r.Reconcile(context.Background(), reconcile.Request{
+				NamespacedName: client.ObjectKeyFromObject(tt.comp),
+			})
+
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrMsg)
+				return
+			}
+			require.NoError(t, err)
+
+			// Verify Role.
+			role := &rbacv1.Role{}
+			roleErr := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.comp), role)
+			if tt.wantRoleExists {
+				require.NoError(t, roleErr, "Role should exist")
+				assert.Len(t, role.Rules, tt.wantRoleRules)
+			} else {
+				assert.Error(t, roleErr, "Role should NOT exist")
+			}
+
+			// Verify RoleBinding.
+			rb := &rbacv1.RoleBinding{}
+			rbErr := cl.Get(context.Background(), client.ObjectKeyFromObject(tt.comp), rb)
+			if tt.wantRoleBindingExists {
+				require.NoError(t, rbErr, "RoleBinding should exist")
+				require.Len(t, rb.Subjects, 1)
+				assert.Equal(t, tt.comp.Name, rb.Subjects[0].Name)
+			} else {
+				assert.Error(t, rbErr, "RoleBinding should NOT exist")
+			}
+
+			// Verify ClusterRole.
+			uniqueName := resources.GenerateUniqueName(tt.comp.Name, testutil.TestNamespace)
+			cr := &rbacv1.ClusterRole{}
+			crErr := cl.Get(context.Background(), client.ObjectKey{Name: uniqueName}, cr)
+			if tt.wantClusterRoleExists {
+				require.NoError(t, crErr, "ClusterRole should exist")
+				assert.Len(t, cr.Rules, tt.wantClusterRoleRules)
+			} else {
+				assert.Error(t, crErr, "ClusterRole should NOT exist")
+			}
+
+			// Verify ClusterRoleBinding.
+			crb := &rbacv1.ClusterRoleBinding{}
+			crbErr := cl.Get(context.Background(), client.ObjectKey{Name: uniqueName}, crb)
+			if tt.wantClusterRBExists {
+				require.NoError(t, crbErr, "ClusterRoleBinding should exist")
+			} else {
+				assert.Error(t, crbErr, "ClusterRoleBinding should NOT exist")
+			}
+		})
+	}
 }
 
 func TestEnsureResourceErrors(t *testing.T) {
