@@ -532,7 +532,7 @@ func TestEnsureDeployment(t *testing.T) {
 		wantKind            string
 	}{
 		{
-			name: "creates Deployment with default values",
+			name: "creates Deployment with default values and default Falco version",
 			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).Build(),
 			wantConditionStatus: metav1.ConditionTrue,
@@ -600,12 +600,16 @@ func TestEnsureDeployment(t *testing.T) {
 				dep := &appsv1.Deployment{}
 				require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.falco), dep))
 				require.NotEmpty(t, dep.Spec.Template.Spec.Containers)
-				version := ""
+				actualImage := dep.Spec.Template.Spec.Containers[0].Image
 				if tt.falco.Spec.Version != nil {
-					version = *tt.falco.Spec.Version
+					wantImage := image.BuildFalcoImageStringFromVersion(*tt.falco.Spec.Version)
+					assert.Equal(t, wantImage, actualImage)
+				} else {
+					// When no version is specified, the controller must use the default from FalcoDefaults.
+					wantImage := image.BuildImageString(image.Registry, image.Repository, image.FalcoImage, resources.FalcoDefaults.ImageTag)
+					assert.Equal(t, wantImage, actualImage,
+						"default Falco image must use FalcoDefaults.ImageTag when spec.version is nil")
 				}
-				wantImage := image.BuildFalcoImageStringFromVersion(version)
-				assert.Equal(t, wantImage, dep.Spec.Template.Spec.Containers[0].Image)
 				require.Len(t, dep.GetOwnerReferences(), 1)
 				assert.Equal(t, tt.falco.Name, dep.GetOwnerReferences()[0].Name)
 			default:
