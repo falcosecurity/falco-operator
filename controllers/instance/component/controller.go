@@ -125,14 +125,24 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	// Ensure the clusterrole is created.
-	if err := r.ensureClusterRole(ctx, comp, defs); err != nil {
-		return ctrl.Result{}, err
+	// Ensure namespace-scoped RBAC (Role/RoleBinding) if the component defines RoleRules.
+	if len(defs.RoleRules) > 0 {
+		if err := r.ensureRole(ctx, comp, defs); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.ensureRoleBinding(ctx, comp); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
-	// Ensure the clusterrolebinding is created.
-	if err := r.ensureClusterRoleBinding(ctx, comp); err != nil {
-		return ctrl.Result{}, err
+	// Ensure cluster-scoped RBAC (ClusterRole/ClusterRoleBinding) if the component defines ClusterRoleRules.
+	if len(defs.ClusterRoleRules) > 0 {
+		if err := r.ensureClusterRole(ctx, comp, defs); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.ensureClusterRoleBinding(ctx, comp); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 
 	// Ensure the service is created.
@@ -343,6 +353,20 @@ func (r *Reconciler) handleDeletion(ctx context.Context, comp *instancev1alpha1.
 func (r *Reconciler) ensureServiceAccount(ctx context.Context, comp *instancev1alpha1.Component) error {
 	return instance.EnsureResource(ctx, r.Client, r.recorder, comp, fieldManager,
 		resources.GenerateServiceAccount(comp),
+		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false})
+}
+
+// ensureRole ensures the namespace-scoped Role is created or updated.
+func (r *Reconciler) ensureRole(ctx context.Context, comp *instancev1alpha1.Component, defs *resources.InstanceDefaults) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, comp, fieldManager,
+		resources.GenerateRole(comp, defs),
+		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false})
+}
+
+// ensureRoleBinding ensures the namespace-scoped RoleBinding is created or updated.
+func (r *Reconciler) ensureRoleBinding(ctx context.Context, comp *instancev1alpha1.Component) error {
+	return instance.EnsureResource(ctx, r.Client, r.recorder, comp, fieldManager,
+		resources.GenerateRoleBinding(comp),
 		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false})
 }
 
