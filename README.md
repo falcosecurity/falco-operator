@@ -37,7 +37,12 @@ For details, see the [Architecture documentation](docs/architecture.md).
 ### Install the operator
 
 ```bash
-kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
+fi
 ```
 
 ### Deploy Falco
@@ -57,6 +62,20 @@ EOF
 ```bash
 cat <<EOF | kubectl apply -f -
 apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: container
+  labels:
+    app.kubernetes.io/managed-by: falco-operator
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/container
+      tag: latest
+    registry:
+      name: ghcr.io
+---
+apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
 metadata:
   name: falco-rules
@@ -75,7 +94,7 @@ EOF
 
 ```bash
 kubectl get falco
-kubectl get rulesfiles
+kubectl get rulesfiles,plugins
 kubectl logs -l app.kubernetes.io/name=falco -c falco --tail=10
 ```
 
