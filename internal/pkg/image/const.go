@@ -30,7 +30,7 @@ const (
 	// MetacollectorImage the default image name used for k8s-metacollector.
 	MetacollectorImage = "k8s-metacollector"
 	// MetacollectorTag the default tag used for k8s-metacollector.
-	MetacollectorTag = "0.1.1"
+	MetacollectorTag = "0.1.2"
 
 	// FalcosidekickImage the default image name used for Falcosidekick.
 	FalcosidekickImage = "falcosidekick"
