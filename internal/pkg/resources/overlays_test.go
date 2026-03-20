@@ -159,6 +159,30 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			wantLabels:   map[string]string{"app": "metacollector"},
 		},
 		{
+			name: "Falcosidekick component with defaults",
+			obj: builders.NewComponent().
+				WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
+				WithName("test-sk").WithNamespace(testNamespace).
+				WithLabels(map[string]string{"app": "sidekick"}).
+				Build(),
+			defs:         FalcosidekickDefaults,
+			resourceType: ResourceTypeDeployment,
+			wantLabels:   map[string]string{"app": "sidekick"},
+		},
+		{
+			name: "Falcosidekick-UI component with custom replicas",
+			obj: builders.NewComponent().
+				WithComponentType(instancev1alpha1.ComponentTypeFalcosidekickUI).
+				WithName("test-ui").WithNamespace(testNamespace).
+				WithLabels(map[string]string{"app": "sidekick-ui"}).
+				WithReplicas(3).
+				Build(),
+			defs:         FalcosidekickUIDefaults,
+			resourceType: ResourceTypeDeployment,
+			wantLabels:   map[string]string{"app": "sidekick-ui"},
+			wantReplicas: 3,
+		},
+		{
 			name: "unknown object type produces only labels option",
 			obj: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{

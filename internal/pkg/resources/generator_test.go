@@ -68,6 +68,16 @@ func TestGenerateService(t *testing.T) {
 			defs:          MetacollectorDefaults,
 			wantPortCount: 3,
 		},
+		{
+			name:          "falcosidekick service has 1 port on 2801",
+			defs:          FalcosidekickDefaults,
+			wantPortCount: 1,
+		},
+		{
+			name:          "falcosidekick-ui service has 1 port on 2802",
+			defs:          FalcosidekickUIDefaults,
+			wantPortCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -114,6 +124,16 @@ func TestGenerateClusterRole(t *testing.T) {
 			name:          "metacollector cluster role has 3 rules",
 			defs:          MetacollectorDefaults,
 			wantRuleCount: 3,
+		},
+		{
+			name:          "falcosidekick cluster role has 0 rules",
+			defs:          FalcosidekickDefaults,
+			wantRuleCount: 0,
+		},
+		{
+			name:          "falcosidekick-ui cluster role has 0 rules",
+			defs:          FalcosidekickUIDefaults,
+			wantRuleCount: 0,
 		},
 	}
 
@@ -166,6 +186,16 @@ func TestGenerateRole(t *testing.T) {
 		{
 			name:          "metacollector role has no rules",
 			defs:          MetacollectorDefaults,
+			wantRuleCount: 0,
+		},
+		{
+			name:          "falcosidekick role has 1 rule for endpoints",
+			defs:          FalcosidekickDefaults,
+			wantRuleCount: 1,
+		},
+		{
+			name:          "falcosidekick-ui role has no rules",
+			defs:          FalcosidekickUIDefaults,
 			wantRuleCount: 0,
 		},
 	}

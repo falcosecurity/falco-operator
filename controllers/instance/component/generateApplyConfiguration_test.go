@@ -28,10 +28,27 @@ import (
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
-var mcDefs = resources.MetacollectorDefaults
+var (
+	mcDefs = resources.MetacollectorDefaults
+	skDefs = resources.FalcosidekickDefaults
+	uiDefs = resources.FalcosidekickUIDefaults
+)
+
+func newSidekickComponent(name string) *builders.ComponentBuilder {
+	return builders.NewComponent().
+		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
+		WithName(name).WithNamespace(testutil.TestNamespace)
+}
+
+func newSidekickUIComponent(name string) *builders.ComponentBuilder {
+	return builders.NewComponent().
+		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekickUI).
+		WithName(name).WithNamespace(testutil.TestNamespace)
+}
 
 // mustGetContainers extracts the containers list from an unstructured workload.
 func mustGetContainers(t *testing.T, obj *unstructured.Unstructured) []any {
@@ -59,7 +76,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	tests := []struct {
 		name                string
 		comp                *instancev1alpha1.Component
+		defs                *resources.InstanceDefaults
 		wantContainerCount  int
+		wantInitContainers  int
 		wantMainImage       string
 		wantTolerationCount int
 		wantPodLabels       map[string]string
@@ -70,6 +89,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	}{
 		{
 			name:                "default metacollector produces expected base",
+			defs:                mcDefs,
 			comp:                newMetacollectorComponent("test-mc").Build(),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
@@ -84,6 +104,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name:                "custom version overrides container image",
+			defs:                mcDefs,
 			comp:                newMetacollectorComponent("test-mc").WithVersion("0.2.0").Build(),
 			wantContainerCount:  1,
 			wantMainImage:       fmt.Sprintf("%s:%s", mcDefs.ImageRepository, "0.2.0"),
@@ -98,6 +119,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name:                "custom replicas are propagated",
+			defs:                mcDefs,
 			comp:                newMetacollectorComponent("test-mc").WithReplicas(5).Build(),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
@@ -112,6 +134,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "Recreate strategy overrides default RollingUpdate",
+			defs: mcDefs,
 			comp: newMetacollectorComponent("test-mc").
 				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
 			wantContainerCount:  1,
@@ -127,6 +150,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "CR labels propagate to pod template",
+			defs: mcDefs,
 			comp: newMetacollectorComponent("test-mc").
 				WithLabels(map[string]string{"team": "security", "env": "prod"}).Build(),
 			wantContainerCount:  1,
@@ -144,6 +168,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "custom PodTemplateSpec merges with base preserving probes",
+			defs: mcDefs,
 			comp: newMetacollectorComponent("test-mc").
 				WithImage(mcDefs.ContainerName, "custom-repo/metacollector:custom").Build(),
 			wantContainerCount:  1,
@@ -159,6 +184,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "version is ignored when PodTemplateSpec provides main container",
+			defs: mcDefs,
 			comp: newMetacollectorComponent("test-mc").
 				WithVersion("0.2.0").
 				WithImage(mcDefs.ContainerName, "custom-repo/metacollector:custom").Build(),
@@ -175,6 +201,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "version applies when PodTemplateSpec has only pod-level fields",
+			defs: mcDefs,
 			comp: newMetacollectorComponent("test-mc").
 				WithVersion("0.2.0").
 				WithPodTemplateSpec(&corev1.PodTemplateSpec{
@@ -193,11 +220,38 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			wantStrategyType:   string(appsv1.RollingUpdateDeploymentStrategyType),
 			wantVolumeMinCount: 0,
 		},
+		{
+			name:               "default falcosidekick produces expected base",
+			defs:               skDefs,
+			comp:               newSidekickComponent("test-sk").Build(),
+			wantContainerCount: 1,
+			wantMainImage:      skDefs.ImageRepository + ":" + skDefs.ImageTag,
+			wantPodLabels: map[string]string{
+				"app.kubernetes.io/name":     "test-sk",
+				"app.kubernetes.io/instance": "test-sk",
+			},
+			wantReplicas:     2,
+			wantStrategyType: string(appsv1.RollingUpdateDeploymentStrategyType),
+		},
+		{
+			name:               "falcosidekick-ui has wait-redis init container",
+			defs:               uiDefs,
+			comp:               newSidekickUIComponent("test-ui").Build(),
+			wantContainerCount: 1,
+			wantInitContainers: 1,
+			wantMainImage:      uiDefs.ImageRepository + ":" + uiDefs.ImageTag,
+			wantPodLabels: map[string]string{
+				"app.kubernetes.io/name":     "test-ui",
+				"app.kubernetes.io/instance": "test-ui",
+			},
+			wantReplicas:     2,
+			wantStrategyType: string(appsv1.RollingUpdateDeploymentStrategyType),
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := generateApplyConfiguration(tt.comp, mcDefs)
+			result, err := generateApplyConfiguration(tt.comp, tt.defs)
 
 			if tt.wantErr != "" {
 				require.Error(t, err)
@@ -222,19 +276,27 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			// Containers.
 			containers := mustGetContainers(t, result)
 			assert.Len(t, containers, tt.wantContainerCount)
-			mainContainer := mustFindContainer(t, containers, mcDefs.ContainerName)
+			mainContainer := mustFindContainer(t, containers, tt.defs.ContainerName)
 			assert.Equal(t, tt.wantMainImage, mainContainer["image"])
+
+			// Init containers.
+			if tt.wantInitContainers > 0 {
+				initContainers, _, _ := unstructured.NestedSlice(result.Object, "spec", "template", "spec", "initContainers")
+				assert.Len(t, initContainers, tt.wantInitContainers)
+			}
 
 			// Probes survive merge.
 			assert.NotNil(t, mainContainer["livenessProbe"], "livenessProbe should survive merge")
 			assert.NotNil(t, mainContainer["readinessProbe"], "readinessProbe should survive merge")
 
-			// SecurityContext survives merge.
-			assert.NotNil(t, mainContainer["securityContext"], "securityContext should survive merge")
+			// SecurityContext survives merge (only when defaults define it).
+			if tt.defs.SecurityContext != nil {
+				assert.NotNil(t, mainContainer["securityContext"], "securityContext should survive merge")
+			}
 
 			// Ports survive merge.
 			ports, _, _ := unstructured.NestedSlice(mainContainer, "ports")
-			assert.Len(t, ports, len(mcDefs.DefaultPorts))
+			assert.Len(t, ports, len(tt.defs.DefaultPorts))
 
 			// Resources survive merge.
 			assert.NotNil(t, mainContainer["resources"], "resources should survive merge")
