@@ -9,7 +9,7 @@ spec:
   group: instance.falcosecurity.dev
   names:
     categories:
-    - falcosecurity
+    - instances
     kind: Falco
     listKind: FalcoList
     plural: falcos
