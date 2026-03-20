@@ -52,6 +52,7 @@ type ConfigStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
+// +kubebuilder:resource:path=configs,categories=artifacts
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority",description="The priority of the config"
 // +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=".status.conditions[?(@.type == 'Programmed')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
