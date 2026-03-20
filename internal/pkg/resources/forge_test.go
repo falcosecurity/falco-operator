@@ -403,6 +403,20 @@ func TestForgePodTemplateSpecLabels(t *testing.T) {
 				"team":                       "security",
 			},
 		},
+		{
+			name:    "selector labels override conflicting user labels",
+			appName: "my-falco",
+			baseLabels: map[string]string{
+				"app.kubernetes.io/name":     "wrong-value",
+				"app.kubernetes.io/instance": "also-wrong",
+				"custom-label":               "preserved",
+			},
+			wantKeys: map[string]string{
+				"app.kubernetes.io/name":     "my-falco",
+				"app.kubernetes.io/instance": "my-falco",
+				"custom-label":               "preserved",
+			},
+		},
 	}
 
 	for _, tt := range tests {
