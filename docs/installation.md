@@ -8,17 +8,15 @@
 
 ## Install
 
-Install the Falco Operator using the single-manifest installer from the latest release:
+Install the Falco Operator using the single-manifest installer:
 
 ```bash
-kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
-```
-
-To install a specific version:
-
-```bash
-export RELEASE=v0.2.0
-kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
+fi
 ```
 
 ### What gets created
@@ -50,8 +48,12 @@ kubectl wait pods --for=condition=Ready --all -n falco-operator
 To upgrade to a new version, re-apply the installer manifest:
 
 ```bash
-export RELEASE=v0.2.0
-kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
+fi"
 ```
 
 > **Important**: Before upgrading, always check the [CHANGELOG](../CHANGELOG.md) and the [migration guide](migration-guide.md) for your target version. Minor releases may still include breaking API changes that require updating your custom resources before or after the upgrade.

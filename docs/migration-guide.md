@@ -39,8 +39,12 @@ kubectl delete falco --all --all-namespaces
 Apply the new install manifest, which includes updated CRDs and the new operator version:
 
 ```bash
-export RELEASE=v0.2.0
-kubectl apply --server-side -f "https://github.com/falcosecurity/falco-operator/releases/download/${RELEASE}/install.yaml"
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
+fi
 ```
 
 This adds the new `Component` CRD and updates all existing CRDs with new fields, conditions, and print columns.
