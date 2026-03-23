@@ -5,7 +5,12 @@ This guide walks you through deploying Falco using the operator.
 ## 1. Install the Operator
 
 ```bash
-kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
+fi
 kubectl wait pods --for=condition=Ready --all -n falco-operator
 ```
 
@@ -18,7 +23,12 @@ Then choose how you want to get started:
 Deploy the entire Falco ecosystem in the `falco` namespace with one command:
 
 ```bash
-kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/quickstart.yaml
+VERSION=latest
+if [ "$VERSION" = "latest" ]; then
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/quickstart.yaml
+else
+  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/quickstart.yaml
+fi
 ```
 
 This deploys the entire Falco ecosystem in the `falco` namespace: Falco DaemonSet, container and k8smeta plugins, detection rules, Falcosidekick, Falcosidekick UI with Redis, and k8s-metacollector - all pre-wired.
