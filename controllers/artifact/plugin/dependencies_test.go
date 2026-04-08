@@ -262,6 +262,24 @@ func TestDependencyReferenceCandidates(t *testing.T) {
 		want      []string
 	}{
 		{
+			name:      "registry qualified dependency",
+			parentRef: "ghcr.io/falcosecurity/plugins/plugin/root:1.0.0",
+			depName:   "quay.io/falcosecurity/plugins/plugin/json",
+			depVer:    "0.7.3",
+			want: []string{
+				"quay.io/falcosecurity/plugins/plugin/json:0.7.3",
+			},
+		},
+		{
+			name:      "repository path dependency keeps parent registry",
+			parentRef: "ghcr.io/falcosecurity/plugins/plugin/root:1.0.0",
+			depName:   "falcosecurity/plugins/ruleset/k8saudit",
+			depVer:    "0.16.1",
+			want: []string{
+				"ghcr.io/falcosecurity/plugins/ruleset/k8saudit:0.16.1",
+			},
+		},
+		{
 			name:      "ruleset parent also tries plugin sibling",
 			parentRef: "ghcr.io/falcosecurity/plugins/ruleset/aws:0.1.0",
 			depName:   "cloudtrail",

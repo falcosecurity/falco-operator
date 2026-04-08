@@ -287,6 +287,16 @@ func dependencyReferenceCandidates(parentRef, depName, depVersion string) ([]str
 	}
 
 	var refs []string
+	if looksLikeRegistryQualified(depName) {
+		reg, repo, _, err := splitReference(depName)
+		if err == nil {
+			addRef(buildReference(reg, repo, depVersion), &refs)
+		}
+	}
+	if strings.Contains(depName, "/") && !looksLikeRegistryQualified(depName) {
+		addRef(buildReference(parentRegistry, depName, depVersion), &refs)
+	}
+
 	if !strings.Contains(depName, "/") {
 		parentDir := path.Dir(parentRepository)
 		if parentDir == "." {
@@ -319,6 +329,14 @@ func dependencyReferenceCandidates(parentRef, depName, depVersion string) ([]str
 	}
 
 	return refs, nil
+}
+
+func looksLikeRegistryQualified(name string) bool {
+	first, _, ok := strings.Cut(name, "/")
+	if !ok {
+		return false
+	}
+	return strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost"
 }
 
 func buildReference(registry, repository, version string) string {
