@@ -13,7 +13,6 @@ rules:
   resources:
   - configmaps
   - pods
-  - secrets
   - serviceaccounts
   - services
   verbs:
@@ -42,6 +41,15 @@ rules:
   verbs:
   - create
   - patch
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
 - apiGroups:
   - apps
   resources:
@@ -73,8 +81,6 @@ rules:
   - rulesfiles
   - rulesfiles/status
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
