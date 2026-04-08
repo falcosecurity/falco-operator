@@ -35,11 +35,16 @@ type MockOCIPuller struct {
 	Result *RegistryResult
 	// PullErr is returned instead of pulling when set.
 	PullErr error
+	// InspectResult is returned on a successful inspect. Falls back to Result when nil.
+	InspectResult *RegistryResult
+	// InspectErr is returned instead of inspecting when set.
+	InspectErr error
 	// FS is the filesystem used to write the archive on a successful pull.
 	// When set, Pull writes a minimal valid tar.gz archive to destDir/Result.Filename
 	// so that the caller (e.g. Manager.StoreFromOCI) can open and extract it.
-	FS        filesystem.FileSystem
-	PullCalls []PullCall
+	FS           filesystem.FileSystem
+	PullCalls    []PullCall
+	InspectCalls []InspectCall
 }
 
 // PullCall records the arguments of a Pull invocation.
@@ -49,6 +54,14 @@ type PullCall struct {
 	OS      string
 	Arch    string
 	Opts    *RegistryOptions
+}
+
+// InspectCall records the arguments of an Inspect invocation.
+type InspectCall struct {
+	Ref  string
+	OS   string
+	Arch string
+	Opts *RegistryOptions
 }
 
 // Pull records the call and returns the preset result or error.
@@ -76,6 +89,21 @@ func (m *MockOCIPuller) Pull(ctx context.Context, ref, destDir, os, arch string,
 		}
 	}
 	return m.Result, nil
+}
+
+// Inspect records the call and returns the preset inspect result or error.
+func (m *MockOCIPuller) Inspect(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error) {
+	m.InspectCalls = append(m.InspectCalls, InspectCall{Ref: ref, OS: os, Arch: arch, Opts: opts})
+	if m.InspectErr != nil {
+		return nil, m.InspectErr
+	}
+	if m.InspectResult != nil {
+		return m.InspectResult, nil
+	}
+	if m.Result != nil {
+		return m.Result, nil
+	}
+	return nil, fmt.Errorf("MockOCIPuller: InspectResult/Result is not set for ref %q", ref)
 }
 
 // MakeTarGz creates a minimal valid tar.gz archive containing a single file

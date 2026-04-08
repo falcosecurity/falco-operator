@@ -184,6 +184,17 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		return err
 	}
 	artifact.RecordStoreEvent(r.recorder, plugin, ociAction, artifact.MediumOCI)
+
+	if err := r.ensurePluginDependencies(ctx, plugin); err != nil {
+		logger.Error(err, "unable to ensure plugin dependencies")
+		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonProgramFailed, "Failed to resolve plugin dependencies: %s", err.Error())
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonProgramFailed,
+			fmt.Sprintf("Failed to resolve plugin dependencies: %s", err.Error()), gen,
+		))
+		return err
+	}
+
 	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
 	))

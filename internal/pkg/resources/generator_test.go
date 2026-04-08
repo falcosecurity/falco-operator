@@ -179,9 +179,9 @@ func TestGenerateRole(t *testing.T) {
 		wantRuleCount int
 	}{
 		{
-			name:          "falco role has 4 rules",
+			name:          "falco role has 5 rules",
 			defs:          FalcoDefaults,
-			wantRuleCount: 4,
+			wantRuleCount: 5,
 		},
 		{
 			name:          "metacollector role has no rules",
@@ -233,6 +233,29 @@ func TestGenerateRoleBinding(t *testing.T) {
 	assert.Equal(t, "Role", rb.RoleRef.Kind)
 	assert.Equal(t, testName, rb.RoleRef.Name)
 	assert.Equal(t, "rbac.authorization.k8s.io", rb.RoleRef.APIGroup)
+}
+
+func TestFalcoDefaultsRoleRules_DependencyLifecycleVerbs(t *testing.T) {
+	var configsRule *rbacv1.PolicyRule
+	var dependenciesRule *rbacv1.PolicyRule
+
+	for i := range FalcoDefaults.RoleRules {
+		rule := &FalcoDefaults.RoleRules[i]
+		switch {
+		case len(rule.Resources) == 1 && rule.Resources[0] == "configs":
+			configsRule = rule
+		case len(rule.Resources) == 2 &&
+			((rule.Resources[0] == "rulesfiles" && rule.Resources[1] == "plugins") ||
+				(rule.Resources[0] == "plugins" && rule.Resources[1] == "rulesfiles")):
+			dependenciesRule = rule
+		}
+	}
+
+	require.NotNil(t, configsRule, "expected a dedicated rule for configs")
+	assert.ElementsMatch(t, []string{"get", "list", "watch", "update", "patch"}, configsRule.Verbs)
+
+	require.NotNil(t, dependenciesRule, "expected a dedicated rule for dependency artifacts")
+	assert.ElementsMatch(t, []string{"get", "list", "watch", "create", "update", "patch", "delete"}, dependenciesRule.Verbs)
 }
 
 func TestGenerateConfigMap(t *testing.T) {

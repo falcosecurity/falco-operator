@@ -36,6 +36,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
+	"oras.land/oras-go/v2/registry/remote/auth"
 )
 
 // Type represents different types of artifacts.
@@ -333,21 +334,10 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 		dstDir = ""
 	}
 
-	// Resolve auth credentials.
-	var authSecretRef *commonv1alpha1.SecretRef
-	if artifact.Registry != nil && artifact.Registry.Auth != nil {
-		authSecretRef = artifact.Registry.Auth.SecretRef
-	}
-
-	logger.V(4).Info("Getting credentials from auth secret ref", "authSecretRef", authSecretRef)
-	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, authSecretRef)
+	creds, registryOpts, err := am.resolvePullConfig(ctx, artifact)
 	if err != nil {
-		logger.Error(err, "unable to get credentials for the OCI artifact", "authSecretRef", authSecretRef)
 		return StoreActionNone, err
 	}
-
-	// Resolve registry TLS options.
-	registryOpts := ResolveRegistryOptions(artifact)
 
 	ref := ResolveReference(artifact)
 	logger.Info("Pulling OCI artifact", "reference", ref)
@@ -395,6 +385,37 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 	am.files[name] = append(am.files[name], newFile)
 
 	return StoreActionAdded, nil
+}
+
+// InspectOCI fetches artifact metadata (type, config, digest information) for the OCI artifact.
+func (am *Manager) InspectOCI(ctx context.Context, artifact *commonv1alpha1.OCIArtifact) (*puller.RegistryResult, error) {
+	if artifact == nil {
+		return nil, nil
+	}
+	return am.InspectFromReference(ctx, ResolveReference(artifact), artifact)
+}
+
+// InspectFromReference fetches artifact metadata for an explicit OCI reference using credentials/options
+// sourced from the provided OCIArtifact registry config.
+func (am *Manager) InspectFromReference(ctx context.Context, ref string, artifact *commonv1alpha1.OCIArtifact) (*puller.RegistryResult, error) {
+	logger := log.FromContext(ctx)
+
+	creds, registryOpts, err := am.resolvePullConfig(ctx, artifact)
+	if err != nil {
+		return nil, err
+	}
+
+	logger.V(4).Info("Inspecting OCI artifact", "reference", ref)
+	res, err := am.ociPuller.Inspect(ctx, ref, runtime.GOOS, runtime.GOARCH, creds, registryOpts)
+	if err != nil {
+		logger.Error(err, "unable to inspect OCI artifact", "reference", ref)
+		return nil, err
+	}
+	if res == nil {
+		return nil, fmt.Errorf("puller returned nil result while inspecting reference %q", ref)
+	}
+
+	return res, nil
 }
 
 // StoreFromConfigMap stores an artifact from a ConfigMap to the local filesystem.
@@ -681,4 +702,26 @@ func (am *Manager) CheckReferenceResolution(ctx context.Context, namespace, name
 	}
 
 	return nil
+}
+
+func (am *Manager) resolvePullConfig(ctx context.Context, artifact *commonv1alpha1.OCIArtifact) (auth.CredentialFunc, *puller.RegistryOptions, error) {
+	logger := log.FromContext(ctx)
+
+	// Resolve auth credentials.
+	var authSecretRef *commonv1alpha1.SecretRef
+	if artifact != nil && artifact.Registry != nil && artifact.Registry.Auth != nil {
+		authSecretRef = artifact.Registry.Auth.SecretRef
+	}
+
+	logger.V(4).Info("Getting credentials from auth secret ref", "authSecretRef", authSecretRef)
+	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, authSecretRef)
+	if err != nil {
+		logger.Error(err, "unable to get credentials for the OCI artifact", "authSecretRef", authSecretRef)
+		return nil, nil, err
+	}
+
+	// Resolve registry TLS options.
+	registryOpts := ResolveRegistryOptions(artifact)
+
+	return creds, registryOpts, nil
 }

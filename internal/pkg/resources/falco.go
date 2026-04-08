@@ -145,8 +145,13 @@ var FalcoDefaults = &InstanceDefaults{
 		},
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-			Resources: []string{"configs", "rulesfiles", "plugins"},
+			Resources: []string{"configs"},
 			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+		},
+		{
+			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+			Resources: []string{"rulesfiles", "plugins"},
+			Verbs:     []string{"get", "list", "watch", "create", "update", "patch", "delete"},
 		},
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},

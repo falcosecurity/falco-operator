@@ -1700,6 +1700,10 @@ func (nilResultPuller) Pull(_ context.Context, _, _, _, _ string, _ auth.Credent
 	return nil, nil
 }
 
+func (nilResultPuller) Inspect(_ context.Context, _, _, _ string, _ auth.CredentialFunc, _ *puller.RegistryOptions) (*puller.RegistryResult, error) {
+	return nil, nil
+}
+
 func TestCheckReferenceResolution(t *testing.T) {
 	const testNamespace = "test-namespace"
 
