@@ -1,0 +1,17 @@
+apiVersion: v2
+name: falco-operator
+description: A Helm chart for deploying the Falco Operator
+home: https://github.com/falcosecurity/falco-operator
+sources:
+  - https://github.com/falcosecurity/falco-operator
+keywords:
+  - falco
+  - security
+  - monitoring
+  - operator
+maintainers:
+  - name: The Falco Authors
+    email: cncf-falco-dev@lists.cncf.io
+type: application
+version: 0.1.0
+appVersion: "v0.2.1"

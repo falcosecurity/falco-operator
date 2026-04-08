@@ -1,0 +1,102 @@
+# Default values for falco-operator.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# -- Number of replicas for the operator
+replicaCount: 1
+
+image:
+  # -- Repository for the Falco Operator image
+  repository: falcosecurity/falco-operator
+  # -- Image pull policy
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag whose default is the chart appVersion
+  tag: ""
+
+# -- Image pull secrets
+imagePullSecrets: []
+
+# -- Name override for the chart
+nameOverride: ""
+# -- Full name override for the chart
+fullnameOverride: ""
+
+# -- Service account configuration
+serviceAccount:
+  # -- Specifies whether a service account should be created
+  create: true
+  # -- Annotations to add to the service account
+  annotations: {}
+  # -- The name of the service account to use
+  name: ""
+
+# -- RBAC configuration
+rbac:
+  # -- Specifies whether RBAC resources should be created
+  create: true
+
+# -- Pod annotations
+podAnnotations: {}
+# -- Pod labels
+podLabels: {}
+
+# -- Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# -- Liveness probe configuration
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 15
+  periodSeconds: 20
+
+# -- Readiness probe configuration
+readinessProbe:
+  httpGet:
+    path: /readyz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+# -- Additional volumes
+volumes: []
+
+# -- Additional volume mounts
+volumeMounts: []
+
+# -- Extra environment variables
+extraEnv: []
+  # - name: ARTIFACT_OPERATOR_IMAGE
+  #   value: "docker.io/falcosecurity/artifact-operator:latest"
+
+# -- Node selector
+nodeSelector: {}
+
+# -- Tolerations
+tolerations: []
+
+# -- Affinity rules
+affinity: {}
+
+# -- Priority class name
+priorityClassName: ""
