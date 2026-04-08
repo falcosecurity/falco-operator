@@ -1,6 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= falcosecurity/falco-operator:latest
-RELEASE ?= v0.0.1
+RELEASE ?= v0.2.1
 COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= instance
@@ -58,6 +58,19 @@ help: ## Display this help.
 .PHONY: manifests
 manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=falco-operator-role crd:generateEmbeddedObjectMeta=true paths="./..." output:crd:artifacts:config=config/crd/bases output:rbac:artifacts:config=config/rbac
+
+.PHONY: helm-crds
+helm-crds: ## Copy CRDs to Helm chart directory.
+	@rm -f chart/falco-operator/crds/*.yaml
+	@cp config/crd/bases/*.yaml chart/falco-operator/crds/
+	@echo "CRDs synced to chart/falco-operator/crds/"
+
+.PHONY: helm-rbac
+helm-rbac: ## Generate Helm RBAC template from config/rbac/role.yaml.
+	hack/update-helm-rbac.sh
+
+.PHONY: helm-sync
+helm-sync: manifests helm-crds helm-rbac ## Generate manifests and sync all resources to Helm chart.
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

@@ -1,0 +1,59 @@
+name: Helm Chart Check
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  helm-check:
+    name: Verify Helm Chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Verify CRDs are in sync
+        run: |
+          echo "Checking if CRDs in chart match config/crd/bases..."
+
+          # Compare each CRD file
+          for crd in config/crd/bases/*.yaml; do
+            filename=$(basename "$crd")
+            chart_crd="chart/falco-operator/crds/$filename"
+
+            if [[ ! -f "$chart_crd" ]]; then
+              echo "❌ Missing CRD in chart: $chart_crd"
+              echo "   Run 'make helm-crds' to update"
+              exit 1
+            fi
+
+            if ! diff -q "$crd" "$chart_crd" > /dev/null 2>&1; then
+              echo "❌ CRD out of sync: $filename"
+              echo "   Run 'make helm-crds' to update"
+              exit 1
+            fi
+          done
+
+          echo "✅ All CRDs are in sync"
+
+      - name: Verify RBAC is in sync
+        run: |
+          echo "Checking if RBAC in chart matches config/rbac/role.yaml..."
+
+          # Extract rules from source role.yaml
+          yq '.rules' config/rbac/role.yaml > /tmp/source_rules.yaml
+
+          # Render the helm template and extract rules from the ClusterRole
+          helm template falco-operator chart/falco-operator --set rbac.create=true | \
+            yq 'select(.kind == "ClusterRole" and .metadata.name == "falco-operator-role") | .rules' > /tmp/helm_rules.yaml
+
+          if ! diff -q /tmp/source_rules.yaml /tmp/helm_rules.yaml > /dev/null 2>&1; then
+            echo "❌ RBAC rules are out of sync"
+            echo "   Run 'make helm-rbac' to update"
+            diff /tmp/source_rules.yaml /tmp/helm_rules.yaml || true
+            exit 1
+          fi
+
+          echo "✅ RBAC is in sync"
