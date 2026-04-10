@@ -20,12 +20,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
+	"unsafe"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -149,6 +152,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request(testPluginName),
 			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
@@ -173,6 +177,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request("container"),
 			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
@@ -235,6 +240,7 @@ func TestReconcile(t *testing.T) {
 			req:             testutil.Request(testPluginName),
 			wantConfigEmpty: new(false),
 			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
@@ -576,6 +582,318 @@ func TestEnsurePlugin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func seedStoredOCIArtifact(t *testing.T, am *artifact.Manager, fs *filesystem.MockFileSystem, pluginName string) {
+	t.Helper()
+
+	path := am.Path(pluginName, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
+	fs.Files[path] = []byte("cached-plugin-binary")
+
+	filesField := reflect.ValueOf(am).Elem().FieldByName("files")
+	require.True(t, filesField.IsValid(), "manager files field must exist")
+	filesMapPtr := (*map[string][]artifact.File)(unsafe.Pointer(filesField.UnsafeAddr()))
+	(*filesMapPtr)[pluginName] = []artifact.File{
+		{
+			Path:     path,
+			Medium:   artifact.MediumOCI,
+			Priority: priority.DefaultPriority,
+		},
+	}
+}
+
+func TestReconcile_DependencyValidationConditions(t *testing.T) {
+	newPlugin := func(name, tag string) *artifactv1alpha1.Plugin {
+		return &artifactv1alpha1.Plugin{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       name,
+				Namespace:  testutil.TestNamespace,
+				Finalizers: []string{testFinalizerName()},
+			},
+			Spec: artifactv1alpha1.PluginSpec{
+				OCIArtifact: &commonv1alpha1.OCIArtifact{
+					Image: commonv1alpha1.ImageSpec{
+						Repository: "falcosecurity/plugins/plugin/" + name,
+						Tag:        tag,
+					},
+					Registry: &commonv1alpha1.RegistryConfig{Name: "ghcr.io"},
+				},
+			},
+		}
+	}
+
+	newInspectResult := func(deps ...puller.ArtifactDependency) *puller.RegistryResult {
+		return &puller.RegistryResult{
+			RootDigest: "sha256:root",
+			Digest:     "sha256:manifest",
+			Config: puller.ArtifactConfig{
+				Name:         "cloudtrail",
+				Version:      "0.12.0",
+				Dependencies: deps,
+			},
+			Type:     puller.Plugin,
+			Filename: "cloudtrail.tgz",
+		}
+	}
+
+	pluginNames := func(t *testing.T, cl client.Client) []string {
+		t.Helper()
+		list := &artifactv1alpha1.PluginList{}
+		require.NoError(t, cl.List(context.Background(), list))
+		names := make([]string, 0, len(list.Items))
+		for i := range list.Items {
+			names = append(names, list.Items[i].Name)
+		}
+		return names
+	}
+
+	t.Run("missing dependencies sets DependenciesSatisfied false and does not fail reconcile", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		r, cl := newTestReconciler(t, mainPlugin)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+				puller.ArtifactDependency{Name: "k8smeta", Version: "0.3.0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+				puller.ArtifactDependency{Name: "k8smeta", Version: "0.3.0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err, "missing dependencies should not fail reconcile")
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionFalse, depsCond.Status)
+		assert.Equal(t, artifact.ReasonMissingDependencies, depsCond.Reason)
+		assert.Contains(t, depsCond.Message, "json")
+		assert.Contains(t, depsCond.Message, "k8smeta")
+
+		programmed := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+		require.NotNil(t, programmed)
+		assert.Equal(t, metav1.ConditionTrue, programmed.Status)
+
+		assert.ElementsMatch(t, []string{"cloudtrail"}, pluginNames(t, cl))
+		require.Len(t, mockPuller.InspectCalls, 1)
+		assert.Equal(t, "ghcr.io/falcosecurity/plugins/plugin/cloudtrail:0.12.0", mockPuller.InspectCalls[0].Ref)
+	})
+
+	t.Run("dependency with mismatching version is treated as missing", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		mismatchingDep := newPlugin("json", "0.6.0")
+		r, cl := newTestReconciler(t, mainPlugin, mismatchingDep)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionFalse, depsCond.Status)
+		assert.Equal(t, artifact.ReasonMissingDependencies, depsCond.Reason)
+		assert.Contains(t, depsCond.Message, "json")
+
+		assert.ElementsMatch(t, []string{"cloudtrail", "json"}, pluginNames(t, cl))
+	})
+
+	t.Run("dependency with matching version sets DependenciesSatisfied true", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		matchingDep := newPlugin("json", "0.7.0")
+		r, cl := newTestReconciler(t, mainPlugin, matchingDep)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionTrue, depsCond.Status)
+		assert.NotEqual(t, artifact.ReasonMissingDependencies, depsCond.Reason)
+
+		assert.ElementsMatch(t, []string{"cloudtrail", "json"}, pluginNames(t, cl))
+	})
+
+	t.Run("dependency is resolved by spec.config.name when CR name differs", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		depWithConfigName := newPlugin("json-cr", "0.7.0")
+		depWithConfigName.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "json"}
+		r, cl := newTestReconciler(t, mainPlugin, depWithConfigName)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionTrue, depsCond.Status)
+		assert.ElementsMatch(t, []string{"cloudtrail", "json-cr"}, pluginNames(t, cl))
+	})
+
+	t.Run("dependency does not match CR metadata name when spec.config.name differs", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		depWithDifferentConfigName := newPlugin("json", "0.7.0")
+		depWithDifferentConfigName.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "json-renamed"}
+		r, cl := newTestReconciler(t, mainPlugin, depWithDifferentConfigName)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7.0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionFalse, depsCond.Status)
+		assert.Equal(t, artifact.ReasonMissingDependencies, depsCond.Reason)
+		assert.Contains(t, depsCond.Message, "json")
+	})
+
+	t.Run("dependency with partial major version requirement matches same major", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		matchingDep := newPlugin("json", "0.7.4")
+		r, cl := newTestReconciler(t, mainPlugin, matchingDep)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionTrue, depsCond.Status)
+	})
+
+	t.Run("dependency with partial minor version requirement matches same major/minor", func(t *testing.T) {
+		mainPlugin := newPlugin("cloudtrail", "0.12.0")
+		matchingDep := newPlugin("json", "0.7.4")
+		r, cl := newTestReconciler(t, mainPlugin, matchingDep)
+
+		mockFS := filesystem.NewMockFileSystem()
+		mockPuller := &puller.MockOCIPuller{
+			Result: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7"},
+			),
+			InspectResult: newInspectResult(
+				puller.ArtifactDependency{Name: "json", Version: "0.7"},
+			),
+		}
+		r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(mockFS),
+			artifact.WithOCIPuller(mockPuller),
+		)
+		seedStoredOCIArtifact(t, r.artifactManager, mockFS, mainPlugin.Name)
+
+		result, err := r.Reconcile(context.Background(), testutil.Request(mainPlugin.Name))
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		updated := &artifactv1alpha1.Plugin{}
+		require.NoError(t, cl.Get(context.Background(), testutil.Request(mainPlugin.Name).NamespacedName, updated))
+
+		depsCond := apimeta.FindStatusCondition(updated.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+		require.NotNil(t, depsCond)
+		assert.Equal(t, metav1.ConditionTrue, depsCond.Status)
+	})
 }
 
 func TestEnsurePluginConfig(t *testing.T) {

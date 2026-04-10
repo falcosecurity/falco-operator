@@ -70,6 +70,10 @@ const (
 	ReasonProgrammed = "Programmed"
 	// ReasonProgramFailed indicates the artifact failed to program.
 	ReasonProgramFailed = "ProgramFailed"
+	// ReasonDependenciesSatisfied indicates all plugin dependencies are satisfied.
+	ReasonDependenciesSatisfied = "DependenciesSatisfied"
+	// ReasonMissingDependencies indicates one or more plugin dependencies are missing.
+	ReasonMissingDependencies = "MissingDependencies"
 )
 
 // Condition messages.
@@ -110,6 +114,8 @@ const (
 	MessageProgrammed = "All artifacts sources were programmed successfully"
 	// MessageReferencesResolved is the message when all references are resolved successfully.
 	MessageReferencesResolved = "All references were resolved successfully"
+	// MessageDependenciesSatisfied is the message when plugin dependencies are satisfied.
+	MessageDependenciesSatisfied = "All dependencies are satisfied"
 )
 
 // Condition message formats (for use with fmt.Sprintf).
@@ -132,4 +138,6 @@ const (
 	MessageFormatReferenceResolved = "Reference %q resolved successfully"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.
 	MessageFormatInlinePluginConfigStoreFailed = "Failed to store inline plugin config: %v"
+	// MessageFormatDependenciesNotFound is the format for missing dependency message.
+	MessageFormatDependenciesNotFound = "Dependencies not found: %s"
 )

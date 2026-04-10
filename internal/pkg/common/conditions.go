@@ -57,3 +57,8 @@ func NewAvailableCondition(status metav1.ConditionStatus, reason, message string
 func NewProgrammedCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
 	return NewCondition(commonv1alpha1.ConditionProgrammed, status, reason, message, generation)
 }
+
+// NewDependenciesSatisfiedCondition creates a ConditionDependenciesSatisfied condition.
+func NewDependenciesSatisfiedCondition(status metav1.ConditionStatus, reason, message string, generation int64) metav1.Condition {
+	return NewCondition(commonv1alpha1.ConditionDependenciesSatisfied, status, reason, message, generation)
+}

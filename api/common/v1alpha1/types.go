@@ -47,6 +47,12 @@ const (
 	// - True: the artifact was programmed successfully.
 	// - False: the artifact could not be programmed.
 	ConditionProgrammed ConditionType = "Programmed"
+	// ConditionDependenciesSatisfied indicates whether the plugin dependencies are present.
+	// The possible status values for this condition type are:
+	// - True: all required dependencies are satisfied.
+	// - False: one or more required dependencies are missing.
+	// - Unknown: the operator couldn't determine dependency status.
+	ConditionDependenciesSatisfied ConditionType = "DependenciesSatisfied"
 )
 
 // String returns the string representation of the condition type.

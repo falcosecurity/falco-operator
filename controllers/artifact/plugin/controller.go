@@ -24,6 +24,9 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"sort"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
@@ -185,6 +188,9 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	}
 	artifact.RecordStoreEvent(r.recorder, plugin, ociAction, artifact.MediumOCI)
 
+	if err := r.validateDependencies(ctx, plugin); err != nil {
+		return err
+	}
 
 	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed, gen,
@@ -347,6 +353,167 @@ func (r *PluginReconciler) removePluginConfig(ctx context.Context, plugin *artif
 	}
 
 	return nil
+}
+
+func (r *PluginReconciler) validateDependencies(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
+	logger := log.FromContext(ctx)
+	logger.Info("Validating plugin dependencies")
+	gen := plugin.GetGeneration()
+
+	inspectResult, err := r.artifactManager.InspectOCI(ctx, plugin.Spec.OCIArtifact)
+	if err != nil {
+		logger.Error(err, "unable to get plugin dependencies")
+		return err
+	}
+	if inspectResult == nil {
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewDependenciesSatisfiedCondition(
+			metav1.ConditionTrue,
+			artifact.ReasonDependenciesSatisfied,
+			artifact.MessageDependenciesSatisfied,
+			gen,
+		))
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	missingDeps := make([]string, 0, len(inspectResult.Config.Dependencies))
+
+	pluginList := &artifactv1alpha1.PluginList{}
+	if err := r.List(ctx, pluginList, client.InNamespace(plugin.Namespace)); err != nil {
+		logger.Error(err, "unable to list plugins for dependency validation")
+		return err
+	}
+
+	pluginsByConfigName := make(map[string][]*artifactv1alpha1.Plugin, len(pluginList.Items))
+	for i := range pluginList.Items {
+		p := &pluginList.Items[i]
+		cfgName := resolveConfigName(p)
+		pluginsByConfigName[cfgName] = append(pluginsByConfigName[cfgName], p)
+	}
+
+	for _, dep := range inspectResult.Config.Dependencies {
+		if dep.Name == "" {
+			continue
+		}
+
+		requiredVersion := dep.Version
+		if requiredVersion == "" {
+			requiredVersion = "latest"
+		}
+		reqKey := dep.Name + ":" + requiredVersion
+		if _, ok := seen[reqKey]; ok {
+			continue
+		}
+		seen[reqKey] = struct{}{}
+
+		candidates, ok := pluginsByConfigName[dep.Name]
+		if !ok || len(candidates) == 0 {
+			missingDeps = append(missingDeps, dep.Name)
+			continue
+		}
+
+		matched := false
+		for _, depPlugin := range candidates {
+			depPluginVersion := "latest"
+			if depPlugin.Spec.OCIArtifact != nil && depPlugin.Spec.OCIArtifact.Image.Tag != "" {
+				depPluginVersion = depPlugin.Spec.OCIArtifact.Image.Tag
+			}
+
+			if versionMatchesRequirement(requiredVersion, depPluginVersion) {
+				matched = true
+				break
+			}
+		}
+
+		if !matched {
+			missingDeps = append(missingDeps, dep.Name)
+		}
+	}
+
+	if len(missingDeps) > 0 {
+		sort.Strings(missingDeps)
+		logger.V(1).Info("plugin has missing dependencies", "dependencies", missingDeps)
+		apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewDependenciesSatisfiedCondition(
+			metav1.ConditionFalse,
+			artifact.ReasonMissingDependencies,
+			fmt.Sprintf(artifact.MessageFormatDependenciesNotFound, strings.Join(missingDeps, ", ")),
+			gen,
+		))
+		return nil
+	}
+
+	apimeta.SetStatusCondition(&plugin.Status.Conditions, common.NewDependenciesSatisfiedCondition(
+		metav1.ConditionTrue,
+		artifact.ReasonDependenciesSatisfied,
+		artifact.MessageDependenciesSatisfied,
+		gen,
+	))
+
+	return nil
+}
+
+func versionMatchesRequirement(required, actual string) bool {
+	if required == actual {
+		return true
+	}
+
+	requiredParts, reqSemver := parseSemverPrefix(required)
+	actualParts, actSemver := parseSemverPrefix(actual)
+	if !reqSemver || !actSemver {
+		return false
+	}
+	if len(requiredParts) > len(actualParts) {
+		return false
+	}
+
+	for i := range requiredParts {
+		if requiredParts[i] != actualParts[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func parseSemverPrefix(version string) ([]int, bool) {
+	if version == "" {
+		return nil, false
+	}
+
+	trimmed := strings.TrimPrefix(version, "v")
+	trimmed = stripSemverMetadata(trimmed)
+	if trimmed == "" {
+		return nil, false
+	}
+
+	rawParts := strings.Split(trimmed, ".")
+	if len(rawParts) == 0 || len(rawParts) > 3 {
+		return nil, false
+	}
+
+	parts := make([]int, 0, len(rawParts))
+	for _, raw := range rawParts {
+		if raw == "" {
+			return nil, false
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return nil, false
+		}
+		parts = append(parts, n)
+	}
+
+	return parts, true
+}
+
+func stripSemverMetadata(version string) string {
+	if i := strings.Index(version, "+"); i >= 0 {
+		version = version[:i]
+	}
+	if i := strings.Index(version, "-"); i >= 0 {
+		version = version[:i]
+	}
+	return version
 }
 
 // PluginConfig is the configuration for a plugin.
