@@ -38,9 +38,13 @@ import (
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -159,8 +163,40 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&artifactv1alpha1.Plugin{}).
+		Watches(
+			&artifactv1alpha1.Plugin{},
+			handler.EnqueueRequestsFromMapFunc(r.findPluginsForPluginChange),
+			builder.WithPredicates(predicate.GenerationChangedPredicate{}),
+		).
 		Named("artifact-plugin").
 		Complete(r)
+}
+
+// findPluginsForPluginChange enqueues all Plugins in the same namespace so
+// dependency status is recomputed when a dependency Plugin changes.
+func (r *PluginReconciler) findPluginsForPluginChange(ctx context.Context, obj client.Object) []reconcile.Request {
+	plugin, ok := obj.(*artifactv1alpha1.Plugin)
+	if !ok {
+		return nil
+	}
+
+	pluginList := &artifactv1alpha1.PluginList{}
+	if err := r.List(ctx, pluginList, client.InNamespace(plugin.Namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "unable to list Plugins for dependency fan-out reconcile", "namespace", plugin.Namespace)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(pluginList.Items))
+	for i := range pluginList.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Name:      pluginList.Items[i].Name,
+				Namespace: pluginList.Items[i].Namespace,
+			},
+		})
+	}
+
+	return requests
 }
 
 // ensureFinalizers ensures that the finalizer is set on the Plugin instance.
