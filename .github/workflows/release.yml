@@ -190,5 +190,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" config/dist/install.yaml --clobber
-          gh release upload "${{ github.ref_name }}" config/dist/quickstart.yaml --clobber
+          gh release upload "${{ github.ref_name }}" dist/install.yaml --clobber
+          gh release upload "${{ github.ref_name }}" examples/quickstart.yaml --clobber

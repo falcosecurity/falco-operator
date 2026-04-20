@@ -131,7 +131,7 @@ func RequireEvents(t *testing.T, ch chan string, wantEvents []string) {
 // CRDDirPath returns the CRD directory path relative to an instance controller package
 // (controllers/instance/X/).
 func CRDDirPath() string {
-	return filepath.Join("..", "..", "..", "config", "crd", "bases")
+	return filepath.Join("..", "..", "..", "chart", "falco-operator", "crds")
 }
 
 // GetFirstFoundEnvTestBinaryDir returns the first found envtest binary directory, or empty string if not found.

@@ -22,7 +22,7 @@ cd falco-operator
 Install development tools:
 
 ```bash
-make kustomize controller-gen envtest golangci-lint
+make controller-gen envtest golangci-lint
 ```
 
 ## Project Structure
@@ -62,13 +62,10 @@ falco-operator/
 │   ├── resources/                # Pod/container generation, defaults, overlays
 │   ├── scheme/                   # Kubernetes scheme setup
 │   └── version/                  # Version info (injected via ldflags)
-├── config/                       # Kustomize manifests
-│   ├── crd/bases/                # Generated CRD YAMLs (5 CRDs)
-│   ├── default/                  # Main kustomize overlay
-│   ├── dist/                     # Generated install.yaml
-│   ├── manager/                  # Operator deployment manifest
-│   ├── rbac/                     # RBAC manifests
-│   └── samples/                  # Example CRs
+├── chart/
+│   └── falco-operator/           # Helm chart (CRDs, templates, values)
+├── examples/                     # Example CRs and quickstart manifest
+├── dist/                         # Generated install.yaml (build output)
 ├── build/
 │   └── Dockerfile                # Shared Dockerfile for both operator binaries
 ├── .goreleaser.yml               # Release configuration
@@ -111,7 +108,7 @@ OPERATOR=artifact make docker-build IMG=falcosecurity/artifact-operator:dev
 make build-installer IMG=falcosecurity/falco-operator:dev
 ```
 
-This generates `config/dist/install.yaml` via kustomize, aggregating CRDs, RBAC, and the operator Deployment.
+This generates `dist/install.yaml` via `helm template`, aggregating CRDs, RBAC, and the operator Deployment.
 
 ## Code Generation
 
@@ -122,9 +119,9 @@ make manifests generate
 ```
 
 This updates:
-- CRD YAMLs in `config/crd/bases/`
+- CRD YAMLs in `chart/falco-operator/crds/`
 - `zz_generated.deepcopy.go` files
-- RBAC manifests in `config/rbac/`
+- RBAC rules in `chart/falco-operator/files/ClusterRole.yaml`
 
 ## Testing
 

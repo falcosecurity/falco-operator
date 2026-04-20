@@ -165,12 +165,10 @@ docker-buildx: ## Build and push docker image for the manager for cross-platform
 	- $(CONTAINER_TOOL) buildx rm falco-operator-builder
 
 .PHONY: build-installer
-build-installer: manifests generate kustomize ## Generate a consolidated YAML with CRDs and deployment.
-	mkdir -p config/dist
-	@cp config/manager/kustomization.yaml config/manager/kustomization.yaml.bak
-	cd config/manager && $(KUSTOMIZE) edit set image falcosecurity/falco-operator=${IMG}
-	$(KUSTOMIZE) build config/default > config/dist/install.yaml
-	@mv config/manager/kustomization.yaml.bak config/manager/kustomization.yaml
+build-installer: manifests generate ## Generate a consolidated YAML with CRDs and deployment via Helm.
+	mkdir -p dist
+	@img="$(IMG)"; \
+	helm template falco-operator chart/falco-operator --namespace falco-operator --include-crds --set image.repository="$${img%:*}" --set-string image.tag="$${img##*:}" > dist/install.yaml
 
 ##@ Deployment
 
@@ -179,21 +177,21 @@ ifndef ignore-not-found
 endif
 
 .PHONY: install
-install: manifests kustomize ## Install CRDs into the K8s cluster specified in ~/.kube/config.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) apply --server-side=true -f -
+install: manifests ## Install CRDs into the K8s cluster specified in ~/.kube/config.
+	$(KUBECTL) apply --server-side=true -f chart/falco-operator/crds/
 
 .PHONY: uninstall
-uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/crd | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+uninstall: ## Uninstall CRDs from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
+	$(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f chart/falco-operator/crds/
 
 .PHONY: deploy
-deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
-	cd config/manager && $(KUSTOMIZE) edit set image falcosecurity/falco-operator=${IMG}
-	$(KUSTOMIZE) build config/default | $(KUBECTL) apply --server-side=true -f -
+deploy: manifests ## Deploy operator to the K8s cluster specified in ~/.kube/config via Helm.
+	@img="$(IMG)"; \
+	helm upgrade --install falco-operator chart/falco-operator --namespace falco-operator --create-namespace --set image.repository="$${img%:*}" --set-string image.tag="$${img##*:}"
 
 .PHONY: undeploy
-undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.
-	$(KUSTOMIZE) build config/default | $(KUBECTL) delete --ignore-not-found=$(ignore-not-found) -f -
+undeploy: ## Undeploy operator from the K8s cluster specified in ~/.kube/config via Helm.
+	helm uninstall falco-operator --namespace falco-operator --ignore-not-found
 
 ##@ Dependencies
 
@@ -204,7 +202,6 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
-KUSTOMIZE ?= $(LOCALBIN)/kustomize
 CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
 ENVTEST ?= $(LOCALBIN)/setup-envtest
 GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
@@ -212,7 +209,6 @@ GCI ?= $(LOCALBIN)/gci
 ADD_LICENSE ?= $(LOCALBIN)/addlicense
 
 ## Tool Versions
-KUSTOMIZE_VERSION ?= v5.5.0
 CONTROLLER_TOOLS_VERSION ?= v0.17.0
 #ENVTEST_VERSION is the version of controller-runtime release branch to fetch the envtest setup script (i.e. release-0.20)
 ENVTEST_VERSION ?= $(shell go list -m -f "{{ .Version }}" sigs.k8s.io/controller-runtime | awk -F'[v.]' '{printf "release-%d.%d", $$2, $$3}')
@@ -221,11 +217,6 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 GOLANGCI_LINT_VERSION ?= v2.11.1
 GCI_VERSION ?= v0.13.5
 ADD_LICENSE_VERSION ?= v1.1.1
-
-.PHONY: kustomize
-kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
-$(KUSTOMIZE): $(LOCALBIN)
-	$(call go-install-tool,$(KUSTOMIZE),sigs.k8s.io/kustomize/kustomize/v5,$(KUSTOMIZE_VERSION))
 
 .PHONY: controller-gen
 controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary.

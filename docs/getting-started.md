@@ -5,6 +5,8 @@ This guide walks you through deploying Falco using the operator.
 ## 1. Install the Operator
 
 ```bash
+kubectl create namespace falco-operator
+
 VERSION=latest
 if [ "$VERSION" = "latest" ]; then
   kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
@@ -53,6 +55,7 @@ kubectl delete svc falcosidekick-ui-redis -n falco
 # 4. Namespace and operator
 kubectl delete namespace falco
 kubectl delete -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+kubectl delete namespace falco-operator
 ```
 
 > To configure Falcosidekick outputs (Slack, Elasticsearch, S3, etc.), see the [Falcosidekick documentation](https://github.com/falcosecurity/falcosidekick#outputs).

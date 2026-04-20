@@ -207,4 +207,4 @@ spec:
 - All component types are Deployment-only (no DaemonSet support).
 - The Component controller shares reconciliation logic with the Falco controller: ServiceAccount, ClusterRole, ClusterRoleBinding, Service, and Deployment are created automatically.
 - Use `podTemplateSpec` to customize any aspect of the component pod (resource limits, node selectors, tolerations, extra env vars, etc.).
-- Sample manifests are available in [`config/samples/`](https://github.com/falcosecurity/falco-operator/tree/main/config/samples).
+- Sample manifests are available in [`examples/`](https://github.com/falcosecurity/falco-operator/tree/main/examples).

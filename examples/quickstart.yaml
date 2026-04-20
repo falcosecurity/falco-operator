@@ -13,6 +13,7 @@
 #   Falco configuration     - Wires HTTP output to Falcosidekick + stdout for testing
 #
 # Prerequisites:
+#   kubectl create namespace falco-operator
 #   kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
 #
 # Install:
