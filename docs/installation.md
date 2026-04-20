@@ -8,9 +8,11 @@
 
 ## Install
 
-Install the Falco Operator using the single-manifest installer:
+Create the operator namespace, then apply the single-manifest installer:
 
 ```bash
+kubectl create namespace falco-operator
+
 VERSION=latest
 if [ "$VERSION" = "latest" ]; then
   kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
@@ -21,11 +23,10 @@ fi
 
 ### What gets created
 
-The installer deploys the following resources:
+The installer deploys the following resources into the `falco-operator` namespace:
 
 | Resource           | Name                                    | Description                          |
 | ------------------ | --------------------------------------- | ------------------------------------ |
-| Namespace          | `falco-operator`                        | Dedicated namespace for the operator |
 | CRD                | `falcos.instance.falcosecurity.dev`     | Falco instance management            |
 | CRD                | `components.instance.falcosecurity.dev` | Companion component management       |
 | CRD                | `configs.artifact.falcosecurity.dev`    | Configuration management             |
@@ -74,6 +75,9 @@ kubectl delete falco --all --all-namespaces
 
 # 3. Remove the operator and CRDs
 kubectl delete -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+
+# 4. Remove the operator namespace
+kubectl delete namespace falco-operator
 ```
 
 > **Important**: Deleting Falco instances before artifacts will terminate the Artifact Operator sidecar, leaving artifact finalizers unresolved. Always delete artifact resources first.

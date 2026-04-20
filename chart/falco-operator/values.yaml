@@ -12,6 +12,8 @@ image:
   pullPolicy: IfNotPresent
   # -- Overrides the image tag whose default is the chart appVersion
   tag: ""
+  # -- Optional image digest (e.g. sha256:abc...). When set, takes precedence over tag and renders repository@digest.
+  digest: ""
 
 # -- Image pull secrets
 imagePullSecrets: []
@@ -83,6 +85,11 @@ volumes: []
 
 # -- Additional volume mounts
 volumeMounts: []
+
+# -- Additional CLI arguments passed to the operator binary
+extraArgs: []
+  # - --metrics-bind-address=:8443
+  # - --metrics-secure=false
 
 # -- Extra environment variables
 extraEnv: []

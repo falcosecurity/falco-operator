@@ -37,6 +37,8 @@ For details, see the [Architecture documentation](docs/architecture.md).
 ### Install the operator
 
 ```bash
+kubectl create namespace falco-operator
+
 VERSION=latest
 if [ "$VERSION" = "latest" ]; then
   kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
