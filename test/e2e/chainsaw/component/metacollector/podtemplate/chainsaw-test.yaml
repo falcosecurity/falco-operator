@@ -1,0 +1,94 @@
+# Test: Component podtemplate — custom labels and deployment strategy.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metacollector-podtemplate
+spec:
+  description: "Component (metacollector) podtemplate: custom labels → deployment strategy"
+  bindings:
+    - name: component_name
+      value: mc-custom
+    - name: component_type
+      value: metacollector
+    - name: component_replicas
+      value: 1
+  steps:
+    # --- custom-labels ---
+    - name: Create Component with custom pod labels
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+              spec:
+                component:
+                  type: ($component_type)
+                replicas: ($component_replicas)
+                podTemplateSpec:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                    annotations:
+                      custom-annotation: test-annotation
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+              status:
+                availableReplicas: ($component_replicas)
+                readyReplicas: ($component_replicas)
+    - name: Assert pod has custom label
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                    annotations:
+                      custom-annotation: test-annotation
+    - name: Assert Component status
+      use:
+        template: ../../../common/_step_templates/assert-component-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+        - name: expected_replicas
+          value: 1
+        - name: expected_version
+          value: "0.1.2"
+    # --- deployment-strategy ---
+    - name: Patch deployment strategy to Recreate
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+              spec:
+                strategy:
+                  type: Recreate
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+              spec:
+                strategy:
+                  type: Recreate
+              status:
+                availableReplicas: ($component_replicas)
+                readyReplicas: ($component_replicas)

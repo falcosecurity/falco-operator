@@ -1,0 +1,29 @@
+# Step template for asserting Component CR status conditions.
+#
+# Required bindings:
+#   - component_name: Name of the Component instance.
+#   - expected_reconciled: Expected status of the Reconciled condition (True/False).
+#   - expected_available: Expected status of the Available condition (True/False).
+#   - expected_replicas: Expected desiredReplicas and availableReplicas count.
+#   - expected_version: Expected version in status.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-component-status
+spec:
+  try:
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+          status:
+            resourceType: Deployment
+            version: ($expected_version)
+            desiredReplicas: ($expected_replicas)
+            availableReplicas: ($expected_replicas)
+            (conditions[?type == 'Reconciled']):
+              - status: ($expected_reconciled)
+            (conditions[?type == 'Available']):
+              - status: ($expected_available)

@@ -1,0 +1,101 @@
+# Test: Falcosidekick Component lifecycle — create, status, sub-resources, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falcosidekick-lifecycle
+spec:
+  description: "Component (falcosidekick) lifecycle: create → sub-resources → delete"
+  bindings:
+    - name: component_name
+      value: sk-test
+    - name: component_type
+      value: falcosidekick
+    - name: component_replicas
+      value: 2
+  steps:
+    # --- create ---
+    - name: Create Component as falcosidekick
+      use:
+        template: ../../../common/_step_templates/apply-assert-component.yaml
+    - name: Assert Component status conditions
+      use:
+        template: ../../../common/_step_templates/assert-component-status.yaml
+      bindings:
+        - name: expected_reconciled
+          value: "True"
+        - name: expected_available
+          value: "True"
+        - name: expected_replicas
+          value: 2
+        - name: expected_version
+          value: "2.32.0"
+    # --- sub-resources ---
+    - name: Verify sub-resources exist
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($component_name)
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($component_name)
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+              spec:
+                ports:
+                  - port: 2801
+    # --- delete ---
+    - name: Delete Component CR
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              name: ($component_name)
+    - name: Verify namespaced resources are gone
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($component_name)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($component_name)

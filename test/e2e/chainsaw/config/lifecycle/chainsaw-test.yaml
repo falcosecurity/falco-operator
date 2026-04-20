@@ -1,0 +1,301 @@
+# Test: Config CRD lifecycle — inline CRUD, priority rename, selector, multi-priority, delete.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-lifecycle
+spec:
+  description: "Config lifecycle: inline → priority → selector → multi-priority → delete"
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    # --- Shared setup ---
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    # --- config-inline: create ---
+    - name: Create Config with inline configuration
+      try:
+        - apply:
+            file: config-inline.yaml
+
+    - name: Verify inline config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify config-test status after create
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-test
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-inline: update ---
+    - name: Update Config with new content
+      try:
+        - apply:
+            file: config-inline-updated.yaml
+
+    - name: Verify config file was updated
+      use:
+        template: ../../common/_step_templates/verify-content-update.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"
+        - name: new_content
+          value: "json_output: false"
+        - name: old_content
+          value: "json_output: true"
+
+    - name: Verify config-test status after update
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-test
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-priority: create + rename ---
+    - name: Create Config with priority 50
+      try:
+        - apply:
+            file: config-priority.yaml
+
+    - name: Verify config at priority-50 path
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-priority-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Update Config priority to 30
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: config-priority
+              spec:
+                priority: 30
+
+    - name: Verify old config file deleted
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-priority-inline.yaml"
+
+    - name: Verify new config file at renamed path
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/30-03-config-priority-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify config-priority status after rename
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-priority
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-selector: matching ---
+    - name: Apply Config with matching selector
+      try:
+        - apply:
+            file: config-matching.yaml
+
+    - name: Verify matching config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-matching-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify config-matching status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-matching
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-selector: non-matching ---
+    - name: Apply Config with non-matching selector
+      try:
+        - apply:
+            file: config-nonmatching.yaml
+
+    - name: Wait for potential file write
+      try:
+        - sleep:
+            duration: 5s
+
+    - name: Verify non-matching config file does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-nonmatching-inline.yaml"
+
+    # --- config-multiple-priorities ---
+    - name: Apply both priority configs
+      try:
+        - apply:
+            file: config-low.yaml
+        - apply:
+            file: config-high.yaml
+
+    - name: Verify both config files exist
+      use:
+        template: ../../common/_step_templates/verify-dir-listing.yaml
+      bindings:
+        - name: dir_path
+          value: "/etc/falco/config.d"
+        - name: expected_files
+          value: "30-03-config-low-inline.yaml,70-03-config-high-inline.yaml"
+
+    - name: Verify low-priority config content
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/30-03-config-low-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify high-priority config content
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/70-03-config-high-inline.yaml"
+        - name: expected_content
+          value: "log_level: debug"
+
+    - name: Verify config-low status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-low
+        - name: expected_programmed
+          value: "True"
+
+    - name: Verify config-high status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-high
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-priority-boundaries ---
+    - name: Apply Config with minimum priority (0)
+      try:
+        - apply:
+            file: config-boundary-low.yaml
+
+    - name: Verify priority-0 config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/00-03-config-boundary-low-inline.yaml"
+        - name: expected_content
+          value: "json_output"
+
+    - name: Verify config-boundary-low status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-boundary-low
+        - name: expected_programmed
+          value: "True"
+
+    - name: Apply Config with maximum priority (99)
+      try:
+        - apply:
+            file: config-boundary-high.yaml
+
+    - name: Verify priority-99 config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/99-03-config-boundary-high-inline.yaml"
+        - name: expected_content
+          value: "log_level"
+
+    - name: Verify config-boundary-high status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: config-boundary-high
+        - name: expected_programmed
+          value: "True"
+
+    # --- config-delete ---
+    - name: Delete Config CR
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: config-test
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: config-test
+
+    - name: Verify config file removed
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/config.d/50-03-config-test-inline.yaml"

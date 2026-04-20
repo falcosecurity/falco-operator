@@ -1,0 +1,172 @@
+# Test: Full stack — Falco + Config + Rulesfile + Plugin all together.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: full-stack
+spec:
+  description: Test Falco with Config, Rulesfile, and Plugin together
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: plugin_dir
+      value: "/usr/share/falco/plugins"
+    - name: min_size
+      value: "1000"
+    - name: falco_replicas
+      value: 1
+  steps:
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod to be ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Create Config CR
+      try:
+        - apply:
+            file: config.yaml
+    - name: Create Rulesfile CR
+      try:
+        - apply:
+            file: rulesfile.yaml
+    - name: Create Plugin CR
+      try:
+        - apply:
+            file: plugin.yaml
+    - name: Verify config file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/config.d/50-03-full-stack-config-inline.yaml
+        - name: expected_content
+          value: "json_output"
+    - name: Verify full-stack-config status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Config
+        - name: artifact_name
+          value: full-stack-config
+        - name: expected_programmed
+          value: "True"
+    - name: Verify rules file exists
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/rules.d/50-03-full-stack-rules-inline.yaml
+        - name: expected_content
+          value: "Full Stack Test Rule"
+    - name: Verify full-stack-rules status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: full-stack-rules
+        - name: expected_programmed
+          value: "True"
+    - name: Verify plugin file downloaded
+      use:
+        template: ../../common/_step_templates/verify-plugin.yaml
+    - name: Verify plugin config generated
+      use:
+        template: ../../common/_step_templates/verify-plugin-config.yaml
+      bindings:
+        - name: plugin_name
+          value: json
+    - name: Verify json plugin status
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Plugin
+        - name: artifact_name
+          value: json
+        - name: expected_programmed
+          value: "True"
+    # --- Phase 2: Verify artifacts survive type switch to Deployment ---
+    - name: Switch Falco to Deployment
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+              spec:
+                type: Deployment
+                replicas: ($falco_replicas)
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+              status:
+                availableReplicas: ($falco_replicas)
+                readyReplicas: ($falco_replicas)
+    - name: Wait for Deployment pod ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+    - name: Verify config file survives type switch
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/config.d/50-03-full-stack-config-inline.yaml
+        - name: expected_content
+          value: "json_output"
+    - name: Verify rules file survives type switch
+      use:
+        template: ../../common/_step_templates/verify-file-contains.yaml
+      bindings:
+        - name: file_path
+          value: /etc/falco/rules.d/50-03-full-stack-rules-inline.yaml
+        - name: expected_content
+          value: "Full Stack Test Rule"
+    - name: Verify full-stack-rules status after type switch
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: full-stack-rules
+        - name: expected_programmed
+          value: "True"
+    # --- Phase 3: Component (metacollector) coexists with Falco ---
+    - name: Create Component (metacollector)
+      try:
+        - apply:
+            file: component.yaml
+    - name: Assert Component Deployment ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: mc-fullstack
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+    - name: Assert Component status
+      try:
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: mc-fullstack
+              status:
+                resourceType: Deployment
+                (conditions[?type == 'Reconciled']):
+                  - status: "True"
+                (conditions[?type == 'Available']):
+                  - status: "True"

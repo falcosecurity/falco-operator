@@ -1,0 +1,62 @@
+# Test: Rulesfile with missing ConfigMap — graceful handling.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-edge-cases
+spec:
+  description: Test Rulesfile edge cases (missing ConfigMap)
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+    - name: inline_file_path
+      value: "/etc/falco/rules.d/50-03-rulesfile-cm-missing-inline.yaml"
+  steps:
+    - name: Create Falco instance
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-daemonset.yaml
+    - name: Wait for Falco pod
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Create Rulesfile with missing ConfigMap and inline rules
+      try:
+        - apply:
+            file: rulesfile.yaml
+
+    - name: Verify inline rules file does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: ($inline_file_path)
+
+    - name: Verify configmap rules file does NOT exist
+      use:
+        template: ../../common/_step_templates/verify-file-deleted.yaml
+      bindings:
+        - name: file_path
+          value: "/etc/falco/rules.d/50-02-rulesfile-cm-missing-configmap.yaml"
+
+    - name: Verify artifact status reflects failure
+      use:
+        template: ../../common/_step_templates/assert-artifact-status.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm-missing
+        - name: expected_programmed
+          value: "False"
+
+    - name: Verify ResolvedRefs reflects failure
+      use:
+        template: ../../common/_step_templates/assert-artifact-resolved-refs.yaml
+      bindings:
+        - name: artifact_kind
+          value: Rulesfile
+        - name: artifact_name
+          value: rulesfile-cm-missing
+        - name: expected_resolved_refs
+          value: "False"

@@ -1,0 +1,7 @@
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Component
+metadata:
+  name: mc-fullstack
+spec:
+  component:
+    type: metacollector

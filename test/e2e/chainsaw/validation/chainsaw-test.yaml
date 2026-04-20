@@ -1,0 +1,173 @@
+# Test: CRD validation rejects invalid resources.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: validation
+spec:
+  description: Test CRD validation rejects invalid resources
+  bindings:
+    - name: falco_name
+      value: falco-test
+    - name: falco_version
+      value: "0.43.0"
+  steps:
+    - name: Reject invalid Falco type
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: invalid-type
+              spec:
+                type: StatefulSet
+            expect:
+              - check:
+                  ($error != null): true
+    - name: Reject Config priority over 99
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-high
+              spec:
+                priority: 100
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true
+    - name: Reject Config priority below 0
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-low
+              spec:
+                priority: -1
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true
+
+    # --- OCIArtifact API validation ---
+    - name: Reject Rulesfile ociArtifact without image.repository
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: invalid-oci-no-repo
+              spec:
+                priority: 50
+                ociArtifact:
+                  image: {}
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject Plugin ociArtifact without image
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: invalid-oci-no-image
+              spec:
+                ociArtifact: {}
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject Rulesfile with plainHTTP and tls both set
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: invalid-oci-plainhttp-tls
+              spec:
+                priority: 50
+                ociArtifact:
+                  image:
+                    repository: falcosecurity/rules/falco-rules
+                  registry:
+                    plainHTTP: true
+                    tls:
+                      insecureSkipVerify: true
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject Plugin with plainHTTP and tls both set
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: invalid-plugin-plainhttp-tls
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falcosecurity/plugins/plugin/json
+                  registry:
+                    plainHTTP: true
+                    tls:
+                      insecureSkipVerify: true
+            expect:
+              - check:
+                  ($error != null): true
+
+    # --- Component CRD validation ---
+    - name: Reject invalid Component type
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: invalid-type
+              spec:
+                component:
+                  type: invalid
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject Component replicas zero
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: invalid-replicas
+              spec:
+                component:
+                  type: metacollector
+                replicas: 0
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject Falco replicas zero
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: invalid-replicas
+              spec:
+                type: Deployment
+                replicas: 0
+            expect:
+              - check:
+                  ($error != null): true

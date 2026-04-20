@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: falcosecurity/falco-operator
   newName: falcosecurity/falco-operator
-  newTag: latest
+  newTag: e2e

@@ -1,0 +1,13 @@
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  name: plugin-nonmatching
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/json
+    registry:
+      name: ghcr.io
+  selector:
+    matchLabels:
+      non-existent-label: does-not-exist

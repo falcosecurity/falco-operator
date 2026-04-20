@@ -1,0 +1,20 @@
+# Step template for waiting until a Falco pod is Ready.
+# Since each test runs in its own ephemeral namespace with a single Falco instance,
+# we wait for all pods in the namespace to be ready.
+#
+# Note: The `wait` operation does NOT support bindings or templating.
+# Omitting `name` and `selector` makes it wait for ALL pods in the test namespace.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: wait-falco-pod-ready
+spec:
+  try:
+    - wait:
+        apiVersion: v1
+        kind: Pod
+        timeout: 90s
+        for:
+          condition:
+            name: Ready
+            value: "true"
