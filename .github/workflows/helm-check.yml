@@ -14,46 +14,75 @@ jobs:
       - name: Checkout the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Setup Go
+        uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: 'go.mod'
+          check-latest: true
+
+      - name: Regenerate manifests into a temp directory
+        run: |
+          TMPDIR=$(mktemp -d)
+          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
+          mkdir -p "$TMPDIR/crds" "$TMPDIR/files"
+          make controller-gen
+          "$(go env GOPATH)/bin/controller-gen" \
+            rbac:roleName=falco-operator-role \
+            crd:generateEmbeddedObjectMeta=true \
+            paths="./..." \
+            output:crd:artifacts:config="$TMPDIR/crds" \
+            output:rbac:stdout | sed -n '/^rules:/,$p' > "$TMPDIR/files/ClusterRole.yaml"
+
       - name: Verify CRDs are in sync
         run: |
-          echo "Checking if CRDs in chart match config/crd/bases..."
+          echo "Checking chart/falco-operator/crds/ against freshly-generated CRDs..."
 
-          # Compare each CRD file
-          for crd in config/crd/bases/*.yaml; do
+          for crd in "$TMPDIR"/crds/*.yaml; do
             filename=$(basename "$crd")
             chart_crd="chart/falco-operator/crds/$filename"
 
             if [[ ! -f "$chart_crd" ]]; then
-              echo "❌ Missing CRD in chart: $chart_crd"
-              echo "   Run 'make helm-crds' to update"
+              echo "Missing CRD in chart: $chart_crd"
+              echo "Run 'make manifests' and commit the result."
               exit 1
             fi
 
             if ! diff -q "$crd" "$chart_crd" > /dev/null 2>&1; then
-              echo "❌ CRD out of sync: $filename"
-              echo "   Run 'make helm-crds' to update"
+              echo "CRD out of sync: $filename"
+              echo "Run 'make manifests' and commit the result."
+              diff "$crd" "$chart_crd" || true
               exit 1
             fi
           done
 
-          echo "✅ All CRDs are in sync"
+          for chart_crd in chart/falco-operator/crds/*.yaml; do
+            filename=$(basename "$chart_crd")
+            if [[ ! -f "$TMPDIR/crds/$filename" ]]; then
+              echo "Stale CRD in chart (no longer produced by controller-gen): $chart_crd"
+              echo "Run 'make manifests' and remove stale files."
+              exit 1
+            fi
+          done
+
+          echo "All CRDs are in sync"
 
       - name: Verify RBAC is in sync
         run: |
-          echo "Checking if RBAC in chart matches config/rbac/role.yaml..."
+          echo "Checking chart/falco-operator/files/ClusterRole.yaml against freshly-generated rules..."
 
-          # Extract rules from source role.yaml
-          yq '.rules' config/rbac/role.yaml > /tmp/source_rules.yaml
+          chart_rules="chart/falco-operator/files/ClusterRole.yaml"
 
-          # Render the helm template and extract rules from the ClusterRole
-          helm template falco-operator chart/falco-operator --set rbac.create=true | \
-            yq 'select(.kind == "ClusterRole" and .metadata.name == "falco-operator-role") | .rules' > /tmp/helm_rules.yaml
-
-          if ! diff -q /tmp/source_rules.yaml /tmp/helm_rules.yaml > /dev/null 2>&1; then
-            echo "❌ RBAC rules are out of sync"
-            echo "   Run 'make helm-rbac' to update"
-            diff /tmp/source_rules.yaml /tmp/helm_rules.yaml || true
+          if [[ ! -f "$chart_rules" ]]; then
+            echo "Missing file: $chart_rules"
+            echo "Run 'make manifests' and commit the result."
             exit 1
           fi
 
-          echo "✅ RBAC is in sync"
+          if ! diff -q "$TMPDIR/files/ClusterRole.yaml" "$chart_rules" > /dev/null 2>&1; then
+            echo "RBAC rules are out of sync"
+            echo "Run 'make manifests' and commit the result."
+            diff "$TMPDIR/files/ClusterRole.yaml" "$chart_rules" || true
+            exit 1
+          fi
+
+          echo "RBAC is in sync"
