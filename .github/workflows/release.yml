@@ -176,15 +176,23 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+      - name: Setup Helm
+        uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
         with:
-          go-version-file: 'go.mod'
-          check-latest: true
+          version: v3.20.2
 
       - name: Generate install.yaml
+        env:
+          IMAGE_REPOSITORY: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
+          IMAGE_TAG: ${{ needs.docker-configure.outputs.release }}
         run: |
-          make build-installer IMG="${{ vars.FALCO_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
+          mkdir -p dist
+          helm template falco-operator chart/falco-operator \
+            --namespace falco-operator \
+            --include-crds \
+            --set image.repository="${IMAGE_REPOSITORY}" \
+            --set-string image.tag="${IMAGE_TAG}" \
+            > dist/install.yaml
 
       - name: Upload install.yaml and quickstart.yaml to release
         env:
