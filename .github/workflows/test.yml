@@ -12,14 +12,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
         with:
           go-version-file: go.mod
 
-      - name: Running Tests
+      - name: Setup envtest binaries
         run: |
-          go mod tidy
-          make test
+          ENVTEST_K8S_VERSION=$(go list -m -f '{{ .Version }}' k8s.io/api \
+            | awk -F'[v.]' '{printf "1.%d", $3}')
+          KUBEBUILDER_ASSETS="$(go tool setup-envtest use "${ENVTEST_K8S_VERSION}" -p path)"
+          echo "KUBEBUILDER_ASSETS=${KUBEBUILDER_ASSETS}" >> "$GITHUB_ENV"
+
+      - name: Run tests
+        run: |
+          go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
