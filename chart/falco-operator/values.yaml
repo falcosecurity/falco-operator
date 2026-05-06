@@ -107,3 +107,15 @@ affinity: {}
 
 # -- Priority class name
 priorityClassName: ""
+
+# -- Array of extra Kubernetes manifests to deploy alongside the operator. Each
+# entry is rendered with `tpl`, so Helm templating (e.g. `{{ .Release.Name }}`)
+# is supported within values.
+extraObjects: []
+  # - apiVersion: v1
+  #   kind: ConfigMap
+  #   metadata:
+  #     name: '{{ include "falco-operator.fullname" . }}-extra'
+  #     namespace: '{{ .Release.Namespace }}'
+  #   data:
+  #     example: "value"
