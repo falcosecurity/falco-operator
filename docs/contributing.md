@@ -110,6 +110,22 @@ make build-installer IMG=falcosecurity/falco-operator:dev
 
 This generates `dist/install.yaml` via `helm template`, aggregating CRDs, RBAC, and the operator Deployment.
 
+### Helm chart publishing and versioning
+
+The Helm chart source lives in [`../chart/falco-operator/`](../chart/falco-operator/). This repository is the source of truth for the chart content and release metadata, including [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml), [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md), [`../chart/falco-operator/README.gotmpl`](../chart/falco-operator/README.gotmpl), and the generated [`../chart/falco-operator/README.md`](../chart/falco-operator/README.md).
+
+Published Falco Helm charts live in the [`falcosecurity/charts`](https://github.com/falcosecurity/charts) repository, so the Falco Operator chart is published by syncing this source chart into `falcosecurity/charts/charts/falco-operator` and merging a chart-release PR there.
+
+Until the first Falco Operator chart release is prepared, keep [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml) at its initial chart version. After the first release, PRs that change chart templates, values, CRDs, RBAC, or the operator application version rendered by the chart must update the chart release metadata in this repository before they are synced to `falcosecurity/charts`.
+
+Use SemVer for `Chart.yaml` `version`: major for breaking changes to chart values, rendered resources, or upgrade behavior; minor for backward-compatible chart features; patch for backward-compatible fixes or metadata changes. Set `Chart.yaml` `appVersion` to the Falco Operator application version rendered by the chart.
+
+Run `make chart-docs` after changing chart values or chart documentation, and update [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md) when preparing a chart release.
+
+`falcosecurity/charts` is the release gate. A chart is published only when the corresponding sync PR is merged there. That PR should be labeled with `/kind chart-release` and the Falco Operator chart area label, but it should not be the place where normal chart changes or version bumps are authored.
+
+The cross-repository sync belongs to Falco infrastructure, not to this repository. The intended automation is a Prow job in [`falcosecurity/test-infra`](https://github.com/falcosecurity/test-infra), running as the Falco project automation bot, that opens or updates the sync PR in `falcosecurity/charts` when [`../chart/falco-operator/`](../chart/falco-operator/) changes. Until that job exists, prepare the sync PR manually by copying the chart from this repository.
+
 ## Code Generation
 
 After modifying API types (`api/` directory), regenerate manifests:
@@ -192,7 +208,7 @@ feat(api)!: rename field in Rulesfile spec
 When opening a PR, fill in the template:
 
 1. **Kind label** (required): `/kind feature`, `/kind bug`, `/kind cleanup`, `/kind documentation`, `/kind failing-test`, `/kind design`
-2. **Area label** (required): `/area instance-operator`, `/area artifact-operator`, `/area pkg`, `/area api`, `/area docs`
+2. **Area label** (required): `/area instance-operator`, `/area artifact-operator`, `/area chart`, `/area pkg`, `/area api`, `/area docs`
 3. **Description**: What the PR does and why
 4. **Linked issues**: `Fixes #<number>` or `Relates to #<number>`
 
