@@ -30,6 +30,8 @@
 
 > /area artifact-operator
 
+> /area chart
+
 > /area pkg
 
 > /area api
