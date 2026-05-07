@@ -68,6 +68,7 @@ The following table lists the configurable parameters of the falco-operator char
 | rbac.create | bool | `true` | Specifies whether RBAC resources should be created |
 | readinessProbe | object | `{"httpGet":{"path":"/readyz","port":"health"},"initialDelaySeconds":5,"periodSeconds":10}` | Readiness probe configuration |
 | replicaCount | int | `1` | Number of replicas for the operator |
+| resizePolicy | list | `[]` | In-place pod resize policy for the manager container |
 | resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource limits and requests |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Container security context |
 | serviceAccount | object | `{"annotations":{},"create":true,"name":""}` | Service account configuration |
