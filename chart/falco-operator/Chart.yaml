@@ -15,4 +15,4 @@ maintainers:
     email: cncf-falco-dev@lists.cncf.io
 type: application
 version: 0.1.0
-appVersion: "v0.2.1"
+appVersion: "0.2.1"
