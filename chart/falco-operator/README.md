@@ -76,5 +76,6 @@ The following table lists the configurable parameters of the falco-operator char
 | serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
 | serviceAccount.name | string | `""` | The name of the service account to use |
 | tolerations | list | `[]` | Tolerations |
+| topologySpreadConstraints | list | `[]` | Topology spread constraints |
 | volumeMounts | list | `[]` | Additional volume mounts |
 | volumes | list | `[]` | Additional volumes |
