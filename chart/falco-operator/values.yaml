@@ -5,6 +5,9 @@
 # -- Number of replicas for the operator
 replicaCount: 1
 
+# -- The number of old ReplicaSets to retain to allow rollback
+revisionHistoryLimit: 10
+
 image:
   # -- Repository for the Falco Operator image
   repository: falcosecurity/falco-operator

@@ -9,6 +9,7 @@ metadata:
     control-plane: falco-operator
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   selector:
     matchLabels:
       {{- include "falco-operator.selectorLabels" . | nindent 6 }}

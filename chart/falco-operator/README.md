@@ -70,6 +70,7 @@ The following table lists the configurable parameters of the falco-operator char
 | replicaCount | int | `1` | Number of replicas for the operator |
 | resizePolicy | list | `[]` | In-place pod resize policy for the manager container |
 | resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource limits and requests |
+| revisionHistoryLimit | int | `10` | The number of old ReplicaSets to retain to allow rollback |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Container security context |
 | serviceAccount | object | `{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""}` | Service account configuration |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
