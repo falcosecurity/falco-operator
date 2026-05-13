@@ -36,6 +36,19 @@ For details, see the [Architecture documentation](docs/architecture.md).
 
 ### Install the operator
 
+Install with [Helm](https://helm.sh/) (recommended):
+
+```bash
+helm repo add falcosecurity https://falcosecurity.github.io/charts
+helm repo update
+helm install falco-operator falcosecurity/falco-operator \
+  --namespace falco-operator \
+  --create-namespace
+```
+
+<details>
+<summary>Alternative: install with YAML manifest</summary>
+
 ```bash
 kubectl create namespace falco-operator
 
@@ -46,6 +59,10 @@ else
   kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
 fi
 ```
+
+</details>
+
+For prerequisites, configuration, upgrade, and uninstall instructions for both methods, see the [Installation guide](docs/installation.md).
 
 ### Deploy Falco
 
@@ -106,12 +123,12 @@ For the complete walkthrough, see the [Getting Started guide](docs/getting-start
 
 | Document | Description |
 |----------|-------------|
-| [Installation](docs/installation.md) | Prerequisites, install, upgrade, uninstall |
+| [Installation](docs/installation.md) | Prerequisites, install (Helm or YAML manifest), upgrade, uninstall |
 | [Getting Started](docs/getting-started.md) | Step-by-step deployment guide |
 | [Architecture](docs/architecture.md) | Components, interactions, design |
 | [CRD Reference](docs/crds/) | Full reference for all Custom Resources |
 | [Configuration](docs/configuration.md) | Defaults and customization |
-| [Migration Guide](docs/migration-guide.md) | Upgrade from v0.1.x to v0.2.0 |
+| [Migration Guide](docs/migration-guide.md) | Index of migration chapters |
 | [Contributing](docs/contributing.md) | Development, testing, PR guidelines |
 
 ## Key Features

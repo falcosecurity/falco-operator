@@ -6,11 +6,11 @@ Complete documentation for the [Falco Operator](https://github.com/falcosecurity
 
 | Document | Description |
 |----------|-------------|
-| [Installation](installation.md) | Install the operator and prerequisites |
+| [Installation](installation.md) | Install the operator with Helm (recommended) or the YAML manifest, plus prerequisites, upgrade, and uninstall |
 | [Getting Started](getting-started.md) | Deploy Falco and add rules in minutes |
 | [Architecture](architecture.md) | Components, interactions, and design decisions |
 | [Configuration](configuration.md) | Default settings and customization |
-| [Migration Guide](migration-guide.md) | Upgrade from v0.1.x to v0.2.0 |
+| [Migration Guide](migration-guide.md) | Index of migration chapters |
 | [Contributing](contributing.md) | Development setup, testing, and PR guidelines |
 
 | CRD Reference | Description |

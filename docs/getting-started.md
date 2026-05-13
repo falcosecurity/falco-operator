@@ -4,19 +4,11 @@ This guide walks you through deploying Falco using the operator.
 
 ## 1. Install the Operator
 
-```bash
-kubectl create namespace falco-operator
+Install the operator following the [Installation guide](installation.md) — it covers both the Helm chart (recommended) and the YAML manifest. Once the operator pods are Ready in the `falco-operator` namespace, continue here:
 
-VERSION=latest
-if [ "$VERSION" = "latest" ]; then
-  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
-else
-  kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/download/${VERSION}/install.yaml
-fi
+```bash
 kubectl wait pods --for=condition=Ready --all -n falco-operator
 ```
-
-See [Installation](installation.md) for details.
 
 Then choose how you want to get started:
 
@@ -52,11 +44,11 @@ kubectl delete components,falcos --all -n falco
 # 3. Infrastructure
 kubectl delete statefulset falcosidekick-ui-redis -n falco
 kubectl delete svc falcosidekick-ui-redis -n falco
-# 4. Namespace and operator
+# 4. Namespace
 kubectl delete namespace falco
-kubectl delete -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
-kubectl delete namespace falco-operator
 ```
+
+To uninstall the operator itself, follow the [Installation guide](installation.md) — use the uninstall steps for whichever method (Helm or YAML manifest) you used to install it.
 
 > To configure Falcosidekick outputs (Slack, Elasticsearch, S3, etc.), see the [Falcosidekick documentation](https://github.com/falcosecurity/falcosidekick#outputs).
 

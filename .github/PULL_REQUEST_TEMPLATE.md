@@ -22,6 +22,8 @@
 
 > /kind feature
 
+> /kind chart-release
+
 **Any specific area of the project related to this PR?**
 
 > Uncomment one (or more) `/area <>` lines:
