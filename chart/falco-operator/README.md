@@ -72,10 +72,11 @@ The following table lists the configurable parameters of the falco-operator char
 | resources | object | `{"limits":{"cpu":"500m","memory":"128Mi"},"requests":{"cpu":"10m","memory":"64Mi"}}` | Resource limits and requests |
 | revisionHistoryLimit | int | `10` | The number of old ReplicaSets to retain to allow rollback |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}` | Container security context |
-| serviceAccount | object | `{"annotations":{},"automountServiceAccountToken":true,"create":true,"name":""}` | Service account configuration |
+| serviceAccount | object | `{"annotations":{},"automountServiceAccountToken":true,"create":true,"imagePullSecrets":[],"name":""}` | Service account configuration |
 | serviceAccount.annotations | object | `{}` | Annotations to add to the service account |
 | serviceAccount.automountServiceAccountToken | bool | `true` | Automatically mount the ServiceAccount API token into pods using this ServiceAccount |
 | serviceAccount.create | bool | `true` | Specifies whether a service account should be created |
+| serviceAccount.imagePullSecrets | list | `[]` | Image pull secrets attached to the service account |
 | serviceAccount.name | string | `""` | The name of the service account to use |
 | tolerations | list | `[]` | Tolerations |
 | topologySpreadConstraints | list | `[]` | Topology spread constraints |

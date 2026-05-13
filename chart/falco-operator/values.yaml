@@ -36,6 +36,8 @@ serviceAccount:
   annotations: {}
   # -- The name of the service account to use
   name: ""
+  # -- Image pull secrets attached to the service account
+  imagePullSecrets: []
 
 # -- RBAC configuration
 rbac:
