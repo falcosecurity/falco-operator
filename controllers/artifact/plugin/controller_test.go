@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
@@ -42,6 +43,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
 
 const testPluginName = "test-plugin"
@@ -82,6 +84,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		Client:          cl,
 		Scheme:          s,
 		recorder:        events.NewFakeRecorder(100),
+		gate:            startupgate.NoopGateRecorder{},
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		PluginsConfig:   &PluginsConfig{},
@@ -93,7 +96,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 func TestNewPluginReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	r := NewPluginReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace")
+	r := NewPluginReconciler(cl, s, events.NewFakeRecorder(10), startupgate.NoopGateRecorder{}, "my-node", "my-namespace")
 
 	require.NotNil(t, r)
 	assert.Equal(t, "my-node", r.nodeName)
@@ -400,6 +403,185 @@ func TestReconcile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcile_GateInteraction(t *testing.T) {
+	const gen int64 = 5
+	workerNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   testutil.TestNodeName,
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+	matching := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testPluginName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+		},
+		Spec: artifactv1alpha1.PluginSpec{},
+	}
+	mismatched := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testPluginName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+		},
+		Spec: artifactv1alpha1.PluginSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "gpu"}},
+		},
+	}
+	// withFinalizer simulates a CR that has already received its finalizer in a
+	// previous reconcile; the next reconcile call gets past ensureFinalizers and
+	// reaches the artifact-writing path.
+	withFinalizer := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testPluginName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+			Finalizers: []string{testFinalizerName()},
+		},
+		Spec: artifactv1alpha1.PluginSpec{},
+	}
+	// withFinalizerAndOCI is used to drive the OCI failure path; the mocked
+	// puller returns an error, ensurePlugin fails, and the gate must stay closed.
+	withFinalizerAndOCI := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testPluginName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+			Finalizers: []string{testFinalizerName()},
+		},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/test", Tag: "latest"},
+			},
+		},
+	}
+
+	tests := []struct {
+		name            string
+		objects         []client.Object
+		triggerDeletion bool
+		pullErr         error
+		req             ctrl.Request
+		wantErr         bool
+		wantReconciled  []startupgate.FakeGateCall
+		wantForgotten   []startupgate.FakeGateCall
+	}{
+		{
+			name:          "NotFound forgets the CR",
+			req:           testutil.Request(testPluginName),
+			wantForgotten: []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName}},
+		},
+		{
+			name:          "selector mismatch forgets the CR",
+			objects:       []client.Object{workerNode, mismatched},
+			req:           testutil.Request(testPluginName),
+			wantForgotten: []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName}},
+		},
+		{
+			name:            "completed deletion forgets the CR",
+			objects:         []client.Object{workerNode, withFinalizer},
+			triggerDeletion: true,
+			req:             testutil.Request(testPluginName),
+			wantForgotten:   []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName}},
+		},
+		{
+			name:    "first reconcile only adds the finalizer and must NOT mark reconciled",
+			objects: []client.Object{workerNode, matching},
+			req:     testutil.Request(testPluginName),
+		},
+		{
+			name:           "successful reconcile marks reconciled with current generation",
+			objects:        []client.Object{workerNode, withFinalizer},
+			req:            testutil.Request(testPluginName),
+			wantReconciled: []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName, Generation: gen}},
+		},
+		{
+			name:           "real reconcile failure still marks reconciled after finalizer",
+			objects:        []client.Object{workerNode, withFinalizerAndOCI},
+			pullErr:        fmt.Errorf("oci pull failed"),
+			req:            testutil.Request(testPluginName),
+			wantErr:        true,
+			wantReconciled: []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName, Generation: gen}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, cl := newTestReconciler(t, tt.objects...)
+			rec := &startupgate.FakeGateRecorder{}
+			r.gate = rec
+			if tt.pullErr != nil {
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+					artifact.WithFS(filesystem.NewMockFileSystem()),
+					artifact.WithOCIPuller(&puller.MockOCIPuller{PullErr: tt.pullErr}),
+				)
+			}
+			if tt.triggerDeletion {
+				obj := &artifactv1alpha1.Plugin{}
+				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
+				require.NoError(t, cl.Delete(context.Background(), obj))
+			}
+
+			_, err := r.Reconcile(context.Background(), tt.req)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.wantReconciled, rec.Reconciled)
+			assert.Equal(t, tt.wantForgotten, rec.Forgotten)
+		})
+	}
+}
+
+func TestReconcile_GateForgetsOnDeletionCleanupFailure(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	finalizer := testFinalizerName()
+	plugin := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testPluginName,
+			Namespace:         testutil.TestNamespace,
+			Generation:        1,
+			Finalizers:        []string{finalizer},
+			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(plugin).
+		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("patch failed: cluster unreachable")
+			},
+		}).
+		Build()
+
+	r := &PluginReconciler{
+		Client:    cl,
+		Scheme:    s,
+		recorder:  events.NewFakeRecorder(100),
+		gate:      &startupgate.FakeGateRecorder{},
+		finalizer: finalizer,
+		artifactManager: artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(filesystem.NewMockFileSystem()),
+			artifact.WithOCIPuller(&puller.MockOCIPuller{}),
+		),
+		PluginsConfig:  &PluginsConfig{},
+		nodeName:       testutil.TestNodeName,
+		crToConfigName: make(map[string]string),
+	}
+
+	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
+	require.Error(t, err)
+
+	rec := r.gate.(*startupgate.FakeGateRecorder)
+	assert.Empty(t, rec.Reconciled)
+	assert.Equal(t, []startupgate.FakeGateCall{{Kind: "Plugin", Namespace: testutil.TestNamespace, Name: testPluginName}}, rec.Forgotten)
 }
 
 func TestHandleDeletion(t *testing.T) {

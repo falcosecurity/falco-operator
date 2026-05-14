@@ -225,6 +225,19 @@ var FalcoDefaults = &InstanceDefaults{
 				{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
 				{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
 			},
+			StartupProbe: &corev1.Probe{
+				InitialDelaySeconds: 3,
+				TimeoutSeconds:      5,
+				PeriodSeconds:       5,
+				FailureThreshold:    20,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/readyz",
+						Port: intstr.FromInt32(8081),
+					},
+				},
+			},
 			ReadinessProbe: &corev1.Probe{
 				InitialDelaySeconds: 5,
 				TimeoutSeconds:      5,
@@ -233,7 +246,7 @@ var FalcoDefaults = &InstanceDefaults{
 				SuccessThreshold:    1,
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/healthz",
+						Path: "/readyz",
 						Port: intstr.FromInt32(8081),
 					},
 				},

@@ -32,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
@@ -42,6 +43,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
 
 const testRulesfileName = "test-rulesfile"
@@ -78,6 +80,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconcile
 		Client:          cl,
 		Scheme:          s,
 		recorder:        events.NewFakeRecorder(100),
+		gate:            startupgate.NoopGateRecorder{},
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		nodeName:        testutil.TestNodeName,
@@ -88,7 +91,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconcile
 func TestNewRulesfileReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	r := NewRulesfileReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace")
+	r := NewRulesfileReconciler(cl, s, events.NewFakeRecorder(10), startupgate.NoopGateRecorder{}, "my-node", "my-namespace")
 
 	require.NotNil(t, r)
 	assert.Equal(t, "my-node", r.nodeName)
@@ -401,6 +404,170 @@ func TestReconcile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcile_GateInteraction(t *testing.T) {
+	const gen int64 = 4
+	workerNode := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   testutil.TestNodeName,
+			Labels: map[string]string{"role": "worker"},
+		},
+	}
+	matching := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testRulesfileName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+		},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
+		},
+	}
+	mismatched := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testRulesfileName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+		},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "gpu"}},
+		},
+	}
+	withFinalizer := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       testRulesfileName,
+			Namespace:  testutil.TestNamespace,
+			Generation: gen,
+			Finalizers: []string{testFinalizerName()},
+		},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
+		},
+	}
+
+	tests := []struct {
+		name            string
+		objects         []client.Object
+		triggerDeletion bool
+		writeErr        error
+		req             ctrl.Request
+		wantErr         bool
+		wantReconciled  []startupgate.FakeGateCall
+		wantForgotten   []startupgate.FakeGateCall
+	}{
+		{
+			name:          "NotFound forgets the CR",
+			req:           testutil.Request(testRulesfileName),
+			wantForgotten: []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName}},
+		},
+		{
+			name:          "selector mismatch forgets the CR",
+			objects:       []client.Object{workerNode, mismatched},
+			req:           testutil.Request(testRulesfileName),
+			wantForgotten: []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName}},
+		},
+		{
+			name:            "completed deletion forgets the CR",
+			objects:         []client.Object{workerNode, withFinalizer},
+			triggerDeletion: true,
+			req:             testutil.Request(testRulesfileName),
+			wantForgotten:   []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName}},
+		},
+		{
+			name:    "first reconcile only adds the finalizer and must NOT mark reconciled",
+			objects: []client.Object{workerNode, matching},
+			req:     testutil.Request(testRulesfileName),
+		},
+		{
+			name:           "successful reconcile marks reconciled with current generation",
+			objects:        []client.Object{workerNode, withFinalizer},
+			req:            testutil.Request(testRulesfileName),
+			wantReconciled: []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName, Generation: gen}},
+		},
+		{
+			name:           "real reconcile failure still marks reconciled after finalizer",
+			objects:        []client.Object{workerNode, withFinalizer},
+			writeErr:       fmt.Errorf("disk full"),
+			req:            testutil.Request(testRulesfileName),
+			wantErr:        true,
+			wantReconciled: []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName, Generation: gen}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, cl := newTestReconciler(t, tt.objects...)
+			rec := &startupgate.FakeGateRecorder{}
+			r.gate = rec
+			if tt.writeErr != nil {
+				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+					artifact.WithFS(&filesystem.MockFileSystem{WriteErr: tt.writeErr}),
+					artifact.WithOCIPuller(&puller.MockOCIPuller{}),
+				)
+			}
+			if tt.triggerDeletion {
+				obj := &artifactv1alpha1.Rulesfile{}
+				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
+				require.NoError(t, cl.Delete(context.Background(), obj))
+			}
+
+			_, err := r.Reconcile(context.Background(), tt.req)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			assert.Equal(t, tt.wantReconciled, rec.Reconciled)
+			assert.Equal(t, tt.wantForgotten, rec.Forgotten)
+		})
+	}
+}
+
+func TestReconcile_GateForgetsOnDeletionCleanupFailure(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	finalizer := testFinalizerName()
+	rulesfile := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              testRulesfileName,
+			Namespace:         testutil.TestNamespace,
+			Generation:        1,
+			Finalizers:        []string{finalizer},
+			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
+		},
+	}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(rulesfile).
+		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("patch failed: cluster unreachable")
+			},
+		}).
+		Build()
+
+	r := &RulesfileReconciler{
+		Client:    cl,
+		Scheme:    s,
+		recorder:  events.NewFakeRecorder(100),
+		gate:      &startupgate.FakeGateRecorder{},
+		finalizer: finalizer,
+		artifactManager: artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+			artifact.WithFS(filesystem.NewMockFileSystem()),
+			artifact.WithOCIPuller(&puller.MockOCIPuller{}),
+		),
+		nodeName:  testutil.TestNodeName,
+		namespace: testutil.TestNamespace,
+	}
+
+	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
+	require.Error(t, err)
+
+	rec := r.gate.(*startupgate.FakeGateRecorder)
+	assert.Empty(t, rec.Reconciled)
+	assert.Equal(t, []startupgate.FakeGateCall{{Kind: "Rulesfile", Namespace: testutil.TestNamespace, Name: testRulesfileName}}, rec.Forgotten)
 }
 
 func TestEnsureFinalizer(t *testing.T) {
@@ -1042,6 +1209,7 @@ func TestFindRulesfilesForConfigMap(t *testing.T) {
 		Client:          cl,
 		Scheme:          s,
 		recorder:        events.NewFakeRecorder(100),
+		gate:            startupgate.NoopGateRecorder{},
 		finalizer:       testFinalizerName(),
 		artifactManager: am,
 		nodeName:        testutil.TestNodeName,

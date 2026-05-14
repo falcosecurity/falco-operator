@@ -40,6 +40,18 @@ func mustGetPodTemplateLabels(t *testing.T, obj *unstructured.Unstructured) map[
 	return labels
 }
 
+func assertArtifactOperatorReadinessProbes(t *testing.T, c *corev1.Container) {
+	t.Helper()
+	require.NotNil(t, c.StartupProbe)
+	require.NotNil(t, c.StartupProbe.HTTPGet)
+	assert.Equal(t, "/readyz", c.StartupProbe.HTTPGet.Path)
+	assert.Equal(t, int32(8081), c.StartupProbe.HTTPGet.Port.IntVal)
+
+	require.NotNil(t, c.ReadinessProbe)
+	require.NotNil(t, c.ReadinessProbe.HTTPGet)
+	assert.Equal(t, "/readyz", c.ReadinessProbe.HTTPGet.Path)
+}
+
 func TestGenerateWorkload(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -207,6 +219,7 @@ func TestGenerateWorkload(t *testing.T) {
 						assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
 						require.NotNil(t, c.RestartPolicy, "native sidecar should have RestartPolicy set")
 						assert.Equal(t, corev1.ContainerRestartPolicyAlways, *c.RestartPolicy, "native sidecar RestartPolicy should be Always")
+						assertArtifactOperatorReadinessProbes(t, &c)
 						break
 					}
 					assert.True(t, foundSidecar, "native sidecar %s not found in initContainers", tt.wantSidecarName)
@@ -222,6 +235,7 @@ func TestGenerateWorkload(t *testing.T) {
 							foundSidecar = true
 							assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
 							assert.Nil(t, c.RestartPolicy, "non-native sidecar should have nil RestartPolicy")
+							assertArtifactOperatorReadinessProbes(t, &c)
 							break
 						}
 					}
