@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,6 +43,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -226,10 +228,13 @@ func main() {
 		}
 	}
 
+	gate := startupgate.NewGate(mgr.GetClient(), nodeName, namespace)
+
 	if err = config.NewConfigReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("config-controller/"+nodeName),
+		gate,
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
@@ -241,6 +246,7 @@ func main() {
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("rulesfile-controller/"+nodeName),
+		gate,
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
@@ -252,6 +258,7 @@ func main() {
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("plugin-controller/"+nodeName),
+		gate,
 		nodeName,
 		namespace,
 	).SetupWithManager(mgr); err != nil {
@@ -279,7 +286,20 @@ func main() {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
+
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		if err := gate.MarkCacheSynced(ctx); err != nil {
+			setupLog.Error(err, "unable to initialize startup gate")
+			return err
+		}
+		setupLog.Info("startup gate initialized")
+		<-ctx.Done()
+		return nil
+	})); err != nil {
+		setupLog.Error(err, "unable to add startup gate runnable")
+		os.Exit(1)
+	}
+	if err := mgr.AddReadyzCheck("readyz", gate.Check); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}

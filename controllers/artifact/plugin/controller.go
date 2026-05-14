@@ -45,6 +45,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
 
 const (
@@ -61,12 +62,14 @@ func NewPluginReconciler(
 	cl client.Client,
 	scheme *runtime.Scheme,
 	recorder events.EventRecorder,
+	gate startupgate.Recorder,
 	nodeName, namespace string,
 ) *PluginReconciler {
 	return &PluginReconciler{
 		Client:          cl,
 		Scheme:          scheme,
 		recorder:        recorder,
+		gate:            gate,
 		finalizer:       common.FormatFinalizerName(pluginFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		PluginsConfig:   &PluginsConfig{},
@@ -80,6 +83,7 @@ type PluginReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	recorder        events.EventRecorder
+	gate            startupgate.Recorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	PluginsConfig   *PluginsConfig
@@ -99,6 +103,7 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		logger.Error(err, "Unable to fetch Plugin")
 		return ctrl.Result{}, err
 	} else if k8serrors.IsNotFound(err) {
+		r.gate.Forget(startupgate.KindPlugin, req.Namespace, req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -107,12 +112,17 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		return ctrl.Result{}, err
 	} else if !ok {
 		logger.Info("Plugin instance does not match node selector, will remove local resources if any")
+		r.gate.Forget(startupgate.KindPlugin, plugin.Namespace, plugin.Name)
 
 		// Here we handle the case where the plugin was created with a selector that matched the node, but now it doesn't.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, plugin); ok || err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if !plugin.DeletionTimestamp.IsZero() {
+		defer r.gate.Forget(startupgate.KindPlugin, plugin.Namespace, plugin.Name)
 	}
 
 	// Handle deletion of the Plugin instance.
@@ -124,6 +134,8 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	if ok, err := r.ensureFinalizers(ctx, plugin); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	defer r.gate.MarkReconciled(startupgate.KindPlugin, plugin.Namespace, plugin.Name, plugin.Generation)
 
 	// Patch status via defer to ensure it's always called.
 	defer func() {

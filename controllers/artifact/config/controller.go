@@ -39,6 +39,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
 
 const (
@@ -51,12 +52,14 @@ func NewConfigReconciler(
 	cl client.Client,
 	scheme *runtime.Scheme,
 	recorder events.EventRecorder,
+	gate startupgate.Recorder,
 	nodeName, namespace string,
 ) *ConfigReconciler {
 	return &ConfigReconciler{
 		Client:          cl,
 		Scheme:          scheme,
 		recorder:        recorder,
+		gate:            gate,
 		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
@@ -69,6 +72,7 @@ type ConfigReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	recorder        events.EventRecorder
+	gate            startupgate.Recorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
@@ -88,6 +92,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		logger.Error(err, "unable to fetch Config instance")
 		return ctrl.Result{}, err
 	} else if k8serrors.IsNotFound(err) {
+		r.gate.Forget(startupgate.KindConfig, req.Namespace, req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -96,12 +101,17 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		return ctrl.Result{}, err
 	} else if !ok {
 		logger.Info("Config instance does not match node selector, will remove local resources if any")
+		r.gate.Forget(startupgate.KindConfig, config.Namespace, config.Name)
 
 		// Handle case where config selector no longer matches the node.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, config); ok || err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if !config.DeletionTimestamp.IsZero() {
+		defer r.gate.Forget(startupgate.KindConfig, config.Namespace, config.Name)
 	}
 
 	// Handle deletion.
@@ -113,6 +123,8 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	if ok, err := r.ensureFinalizer(ctx, config); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	defer r.gate.MarkReconciled(startupgate.KindConfig, config.Namespace, config.Name, config.Generation)
 
 	// Patch status via defer to ensure it's always called.
 	defer func() {

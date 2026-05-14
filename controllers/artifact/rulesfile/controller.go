@@ -39,6 +39,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
 
 const (
@@ -53,12 +54,14 @@ func NewRulesfileReconciler(
 	cl client.Client,
 	scheme *runtime.Scheme,
 	recorder events.EventRecorder,
+	gate startupgate.Recorder,
 	nodeName, namespace string,
 ) *RulesfileReconciler {
 	return &RulesfileReconciler{
 		Client:          cl,
 		Scheme:          scheme,
 		recorder:        recorder,
+		gate:            gate,
 		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, nodeName),
 		artifactManager: artifact.NewManager(cl, namespace),
 		nodeName:        nodeName,
@@ -71,6 +74,7 @@ type RulesfileReconciler struct {
 	client.Client
 	Scheme          *runtime.Scheme
 	recorder        events.EventRecorder
+	gate            startupgate.Recorder
 	finalizer       string
 	artifactManager *artifact.Manager
 	nodeName        string
@@ -90,6 +94,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		logger.Error(err, "unable to fetch Rulesfile")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	} else if k8serrors.IsNotFound(err) {
+		r.gate.Forget(startupgate.KindRulesfile, req.Namespace, req.Name)
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -98,12 +103,17 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, err
 	} else if !ok {
 		logger.Info("Rulesfile instance does not match node selector, will remove local resources if any")
+		r.gate.Forget(startupgate.KindRulesfile, rulesfile.Namespace, rulesfile.Name)
 
 		// Handle case where rulesfile selector no longer matches the node.
 		if ok, err := controllerhelper.RemoveLocalResources(ctx, r.Client, r.artifactManager, r.finalizer, rulesfile); ok || err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
+	}
+
+	if !rulesfile.DeletionTimestamp.IsZero() {
+		defer r.gate.Forget(startupgate.KindRulesfile, rulesfile.Namespace, rulesfile.Name)
 	}
 
 	// Handle deletion.
@@ -115,6 +125,8 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if ok, err := r.ensureFinalizer(ctx, rulesfile); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	defer r.gate.MarkReconciled(startupgate.KindRulesfile, rulesfile.Namespace, rulesfile.Name, rulesfile.Generation)
 
 	// Patch status via defer to ensure it's always called.
 	defer func() {
