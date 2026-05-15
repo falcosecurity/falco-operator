@@ -1,6 +1,6 @@
 # Image URL to use all building/pushing image targets
 IMG ?= falcosecurity/falco-operator:latest
-RELEASE ?= v0.2.1
+RELEASE ?= $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0-dev)
 COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= instance
