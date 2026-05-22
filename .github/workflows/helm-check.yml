@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout the code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Helm
         uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2 # v5.0.0
@@ -25,78 +27,22 @@ jobs:
           go-version-file: 'go.mod'
           check-latest: true
 
-      - name: Verify Helm chart renders
-        run: |
-          helm lint chart/falco-operator
-          helm template falco-operator chart/falco-operator --namespace falco-operator --include-crds > /tmp/falco-operator.yaml
-
       - name: Verify chart README is in sync
-        run: |
-          go tool helm-docs -c ./chart/falco-operator -t ./README.gotmpl -o ./README.md
-          git diff --exit-code -- chart/falco-operator/README.md
+        run: make chart-docs-check
 
-      - name: Regenerate manifests into a temp directory
-        run: |
-          TMPDIR=$(mktemp -d)
-          echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
-          mkdir -p "$TMPDIR/crds" "$TMPDIR/files"
-          go tool controller-gen \
-            rbac:roleName=falco-operator-role \
-            crd:generateEmbeddedObjectMeta=true \
-            paths="./..." \
-            output:crd:artifacts:config="$TMPDIR/crds" \
-            output:rbac:stdout | sed -n '/^rules:/,$p' > "$TMPDIR/files/ClusterRole.yaml"
+      - name: Setup Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.x"
 
-      - name: Verify CRDs are in sync
-        run: |
-          echo "Checking chart/falco-operator/crds/ against freshly-generated CRDs..."
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
 
-          for crd in "$TMPDIR"/crds/*.yaml; do
-            filename=$(basename "$crd")
-            chart_crd="chart/falco-operator/crds/$filename"
+      - name: Run chart-testing lint
+        run: ct lint --config ct.yaml --charts chart/falco-operator
 
-            if [[ ! -f "$chart_crd" ]]; then
-              echo "Missing CRD in chart: $chart_crd"
-              echo "Run 'make manifests' and commit the result."
-              exit 1
-            fi
+      - name: Create KIND Cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
 
-            if ! diff -q "$crd" "$chart_crd" > /dev/null 2>&1; then
-              echo "CRD out of sync: $filename"
-              echo "Run 'make manifests' and commit the result."
-              diff "$crd" "$chart_crd" || true
-              exit 1
-            fi
-          done
-
-          for chart_crd in chart/falco-operator/crds/*.yaml; do
-            filename=$(basename "$chart_crd")
-            if [[ ! -f "$TMPDIR/crds/$filename" ]]; then
-              echo "Stale CRD in chart (no longer produced by controller-gen): $chart_crd"
-              echo "Run 'make manifests' and remove stale files."
-              exit 1
-            fi
-          done
-
-          echo "All CRDs are in sync"
-
-      - name: Verify RBAC is in sync
-        run: |
-          echo "Checking chart/falco-operator/files/ClusterRole.yaml against freshly-generated rules..."
-
-          chart_rules="chart/falco-operator/files/ClusterRole.yaml"
-
-          if [[ ! -f "$chart_rules" ]]; then
-            echo "Missing file: $chart_rules"
-            echo "Run 'make manifests' and commit the result."
-            exit 1
-          fi
-
-          if ! diff -q "$TMPDIR/files/ClusterRole.yaml" "$chart_rules" > /dev/null 2>&1; then
-            echo "RBAC rules are out of sync"
-            echo "Run 'make manifests' and commit the result."
-            diff "$TMPDIR/files/ClusterRole.yaml" "$chart_rules" || true
-            exit 1
-          fi
-
-          echo "RBAC is in sync"
+      - name: Run chart-testing install
+        run: ct install --exclude-deprecated --config ct.yaml --charts chart/falco-operator

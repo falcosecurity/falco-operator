@@ -6,7 +6,9 @@ BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= instance
 PROJECT ?= github.com/falcosecurity/falco-operator
 ARTIFACT_OPERATOR_IMAGE ?= docker.io/falcosecurity/artifact-operator:latest
+HELM ?= helm
 HELM_DOCS ?= go tool helm-docs
+chart ?= chart/falco-operator
 
 # SED_INPLACE defines the sed in-place flag based on the OS.
 # macOS requires an empty string argument after -i, while Linux does not.
@@ -55,11 +57,22 @@ manifests: ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefin
 
 .PHONY: chart-docs
 chart-docs: ## Generate Helm chart README.
-	$(HELM_DOCS) -c ./chart/falco-operator -t ./README.gotmpl -o ./README.md
+	$(HELM_DOCS) -c ./$(chart) -t ./README.gotmpl -o ./README.md
 
 .PHONY: chart-docs-check
 chart-docs-check: chart-docs ## Verify Helm chart README is up to date.
-	git diff --exit-code -- chart/falco-operator/README.md
+	git diff --exit-code -- $(chart)/README.md
+
+.PHONY: chart-lint
+chart-lint: ## Lint the Helm chart.
+	$(HELM) lint $(chart)
+
+.PHONY: chart-template
+chart-template: ## Render the Helm chart.
+	$(HELM) template falco-operator $(chart) --namespace falco-operator --include-crds
+
+.PHONY: chart-check
+chart-check: chart-lint chart-template chart-docs-check ## Verify the Helm chart.
 
 .PHONY: generate
 generate: ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
