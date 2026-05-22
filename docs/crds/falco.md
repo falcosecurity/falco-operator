@@ -15,7 +15,7 @@ The `Falco` Custom Resource defines a Falco instance in the cluster. The operato
 |-------|------|---------|-------------|
 | `type` | `*string` | `DaemonSet` | Deployment mode: `DaemonSet` or `Deployment` |
 | `replicas` | `*int32` | `1` | Number of replicas (Deployment mode only) |
-| `version` | `*string` | *(auto-detected)* | Falco version to deploy |
+| `version` | `*string` | *(built-in default)* | Falco version to deploy. If omitted, the operator resolves it from the Falco container image tag in `podTemplateSpec` when provided, otherwise it uses the built-in default pinned in this operator release. |
 | `podTemplateSpec` | `*corev1.PodTemplateSpec` | *(operator defaults)* | Custom pod template to override defaults |
 | `updateStrategy` | `*appsv1.DaemonSetUpdateStrategy` | — | Update strategy for DaemonSet mode |
 | `strategy` | `*appsv1.DeploymentStrategy` | — | Update strategy for Deployment mode |
@@ -99,7 +99,7 @@ spec:
     spec:
       containers:
         - name: falco
-          image: falcosecurity/falco:0.43.0
+          image: falcosecurity/falco:0.44.0
           resources:
             requests:
               cpu: 200m
@@ -112,6 +112,6 @@ spec:
 ## Notes
 
 - When `type` is omitted, the operator defaults to `DaemonSet` mode.
-- When `version` is omitted, the operator resolves the version from the container image tag or uses a built-in default.
+- When `version` is omitted, the operator resolves the version from the Falco container image tag in `podTemplateSpec` when provided, otherwise it uses the built-in default pinned in this operator release.
 - The `podTemplateSpec` allows full customization of the Falco pod, including the Artifact Operator sidecar (init container named `artifact-operator`) and the Falco container (named `falco`).
 - Only one Falco CR should be created per namespace to avoid conflicts.
