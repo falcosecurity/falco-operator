@@ -112,19 +112,16 @@ This generates `dist/install.yaml` via `helm template`, aggregating CRDs, RBAC, 
 
 ### Helm chart publishing and versioning
 
-The Helm chart source lives in [`../chart/falco-operator/`](../chart/falco-operator/). This repository is the source of truth for the chart content and release metadata, including [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml), [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md), [`../chart/falco-operator/README.gotmpl`](../chart/falco-operator/README.gotmpl), and the generated [`../chart/falco-operator/README.md`](../chart/falco-operator/README.md).
+The Helm chart source lives in [`../chart/falco-operator/`](../chart/falco-operator/). Published Falco Helm charts live in [`falcosecurity/charts`](https://github.com/falcosecurity/charts), and Falco infrastructure syncs this chart there only when the chart version is bumped.
 
-Published Falco Helm charts live in the [`falcosecurity/charts`](https://github.com/falcosecurity/charts) repository, so the Falco Operator chart is published by syncing this source chart into `falcosecurity/charts/charts/falco-operator` and merging a chart-release PR there.
+Open Falco Operator chart issues and PRs in this repository; `falcosecurity/charts` receives the generated sync PR.
 
-PRs that change chart templates, values, CRDs, RBAC, or the operator application version rendered by the chart must update the chart release metadata in this repository before they are synced to `falcosecurity/charts`.
+- Regular chart PRs: do not bump [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml); add the change under `## Unreleased` in [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md).
+- Chart release PRs: use `/kind chart-release`, bump [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml), and move the selected `## Unreleased` entries into the new version section. Entries not included in that release can stay under `## Unreleased`.
 
-Use SemVer for `Chart.yaml` `version`: major for breaking changes to chart values, rendered resources, or upgrade behavior; minor for backward-compatible chart features; patch for backward-compatible fixes or metadata changes. Set `Chart.yaml` `appVersion` to the Falco Operator application version rendered by the chart.
+Use SemVer for `Chart.yaml` `version`: major for breaking changes, minor for backward-compatible chart features, patch for fixes or metadata changes. Set `appVersion` to the Falco Operator version rendered by the chart when preparing a chart release.
 
-Run `make chart-docs` after changing chart values or chart documentation, and update [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md) when preparing a chart release.
-
-Chart releases are authored as **release PRs in this source repository**: a release PR bumps [`../chart/falco-operator/Chart.yaml`](../chart/falco-operator/Chart.yaml), updates [`../chart/falco-operator/CHANGELOG.md`](../chart/falco-operator/CHANGELOG.md), and carries the `/kind chart-release` label. Normal chart changes and version bumps must not be authored directly in `falcosecurity/charts`.
-
-The cross-repository sync to `falcosecurity/charts` belongs to Falco infrastructure, not to this repository. A Prow job in [`falcosecurity/test-infra`](https://github.com/falcosecurity/test-infra), running as the Falco project automation bot, opens or updates the corresponding sync PR (titled `sync(charts/falco-operator): v<version>`) in `falcosecurity/charts` when [`../chart/falco-operator/`](../chart/falco-operator/) changes. That sync PR is the publication gate: merging it on `falcosecurity/charts` publishes the chart.
+Run `make chart-docs` after changing chart values or chart documentation. Normal chart changes and version bumps must not be authored directly in `falcosecurity/charts`.
 
 ## Code Generation
 
