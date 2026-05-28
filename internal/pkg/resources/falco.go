@@ -139,6 +139,11 @@ var FalcoDefaults = &InstanceDefaults{
 			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
+			APIGroups: []string{""},
+			Resources: []string{"secrets"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
+		{
 			APIGroups: []string{"events.k8s.io"},
 			Resources: []string{"events"},
 			Verbs:     []string{"create", "patch"},

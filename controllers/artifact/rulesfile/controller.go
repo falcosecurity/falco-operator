@@ -158,6 +158,10 @@ func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.findRulesfilesForConfigMap),
 		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findRulesfilesForSecret),
+		).
 		Named("artifact-rulesfile").
 		Complete(r)
 }
@@ -170,6 +174,30 @@ func (r *RulesfileReconciler) findRulesfilesForConfigMap(ctx context.Context, co
 	indexKey := configMap.GetNamespace() + "/" + configMap.GetName()
 	if err := r.List(ctx, rulesfileList, client.MatchingFields{index.ConfigMapOnRulesfile: indexKey}); err != nil {
 		logger.Error(err, "unable to list Rulesfiles by ConfigMap index")
+		return []reconcile.Request{}
+	}
+
+	requests := make([]reconcile.Request, len(rulesfileList.Items))
+	for i := range rulesfileList.Items {
+		requests[i] = reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Name:      rulesfileList.Items[i].Name,
+				Namespace: rulesfileList.Items[i].Namespace,
+			},
+		}
+	}
+
+	return requests
+}
+
+// findRulesfilesForSecret finds all Rulesfiles that reference a given Secret using the index.
+func (r *RulesfileReconciler) findRulesfilesForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
+	logger := log.FromContext(ctx)
+	rulesfileList := &artifactv1alpha1.RulesfileList{}
+
+	indexKey := secret.GetNamespace() + "/" + secret.GetName()
+	if err := r.List(ctx, rulesfileList, client.MatchingFields{index.SecretOnRulesfile: indexKey}); err != nil {
+		logger.Error(err, "unable to list Rulesfiles by Secret index")
 		return []reconcile.Request{}
 	}
 
