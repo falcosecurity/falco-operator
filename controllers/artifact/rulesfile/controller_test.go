@@ -1181,6 +1181,83 @@ func TestPatchStatus(t *testing.T) {
 	})
 }
 
+func TestFindRulesfilesForSecret(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	rf := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testRulesfileName,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "ghcr.io/repo", Tag: "latest"},
+				Registry: &commonv1alpha1.RegistryConfig{
+					Auth: &commonv1alpha1.RegistryAuth{
+						SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+					},
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(rf).
+		WithIndex(&artifactv1alpha1.Rulesfile{}, index.SecretOnRulesfile, index.RulesfileBySecretRef).
+		Build()
+
+	mockFS := filesystem.NewMockFileSystem()
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+		artifact.WithFS(mockFS),
+		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
+	)
+
+	r := &RulesfileReconciler{
+		Client:          cl,
+		Scheme:          s,
+		recorder:        events.NewFakeRecorder(100),
+		gate:            startupgate.NoopGateRecorder{},
+		finalizer:       testFinalizerName(),
+		artifactManager: am,
+		nodeName:        testutil.TestNodeName,
+		namespace:       testutil.TestNamespace,
+	}
+
+	tests := []struct {
+		name       string
+		secretName string
+		wantCount  int
+	}{
+		{
+			name:       "matching secret returns rulesfile requests",
+			secretName: "my-pull-secret",
+			wantCount:  1,
+		},
+		{
+			name:       "non-matching secret returns empty",
+			secretName: "other-secret",
+			wantCount:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.secretName,
+					Namespace: testutil.TestNamespace,
+				},
+			}
+			requests := r.findRulesfilesForSecret(context.Background(), secret)
+			require.Len(t, requests, tt.wantCount)
+			if tt.wantCount > 0 {
+				assert.Equal(t, testRulesfileName, requests[0].Name)
+				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+			}
+		})
+	}
+}
+
 func TestFindRulesfilesForConfigMap(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	rf := &artifactv1alpha1.Rulesfile{

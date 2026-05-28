@@ -41,6 +41,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
@@ -1729,4 +1730,82 @@ func TestPatchStatus(t *testing.T) {
 	testutil.RequireConditions(t, obj.Status.Conditions, []testutil.ConditionExpect{
 		{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
 	})
+}
+
+func TestFindPluginsForSecret(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	pl := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testPluginName,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "ghcr.io/repo", Tag: "latest"},
+				Registry: &commonv1alpha1.RegistryConfig{
+					Auth: &commonv1alpha1.RegistryAuth{
+						SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
+					},
+				},
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(pl).
+		WithIndex(&artifactv1alpha1.Plugin{}, index.SecretOnPlugin, index.PluginBySecretRef).
+		Build()
+
+	mockFS := filesystem.NewMockFileSystem()
+	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
+		artifact.WithFS(mockFS),
+		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
+	)
+
+	r := &PluginReconciler{
+		Client:          cl,
+		Scheme:          s,
+		recorder:        events.NewFakeRecorder(100),
+		gate:            startupgate.NoopGateRecorder{},
+		finalizer:       testFinalizerName(),
+		artifactManager: am,
+		PluginsConfig:   &PluginsConfig{},
+		nodeName:        testutil.TestNodeName,
+		crToConfigName:  make(map[string]string),
+	}
+
+	tests := []struct {
+		name       string
+		secretName string
+		wantCount  int
+	}{
+		{
+			name:       "matching secret returns plugin requests",
+			secretName: "my-pull-secret",
+			wantCount:  1,
+		},
+		{
+			name:       "non-matching secret returns empty",
+			secretName: "other-secret",
+			wantCount:  0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			secret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      tt.secretName,
+					Namespace: testutil.TestNamespace,
+				},
+			}
+			requests := r.findPluginsForSecret(context.Background(), secret)
+			require.Len(t, requests, tt.wantCount)
+			if tt.wantCount > 0 {
+				assert.Equal(t, testPluginName, requests[0].Name)
+				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+			}
+		})
+	}
 }

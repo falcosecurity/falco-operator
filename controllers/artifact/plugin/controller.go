@@ -37,13 +37,16 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
 )
@@ -168,8 +171,36 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&artifactv1alpha1.Plugin{}).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(r.findPluginsForSecret),
+		).
 		Named("artifact-plugin").
 		Complete(r)
+}
+
+// findPluginsForSecret finds all Plugins that reference a given Secret using the index.
+func (r *PluginReconciler) findPluginsForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
+	logger := log.FromContext(ctx)
+	pluginList := &artifactv1alpha1.PluginList{}
+
+	indexKey := secret.GetNamespace() + "/" + secret.GetName()
+	if err := r.List(ctx, pluginList, client.MatchingFields{index.SecretOnPlugin: indexKey}); err != nil {
+		logger.Error(err, "unable to list Plugins by Secret index")
+		return []reconcile.Request{}
+	}
+
+	requests := make([]reconcile.Request, len(pluginList.Items))
+	for i := range pluginList.Items {
+		requests[i] = reconcile.Request{
+			NamespacedName: client.ObjectKey{
+				Name:      pluginList.Items[i].Name,
+				Namespace: pluginList.Items[i].Namespace,
+			},
+		}
+	}
+
+	return requests
 }
 
 // ensureFinalizers ensures that the finalizer is set on the Plugin instance.
