@@ -97,3 +97,4 @@ spec:
 - When `config.name` is not specified, the operator derives it from the OCI artifact metadata.
 - The operator manages plugin configuration entries in the shared Falco config automatically.
 - The operator adds a finalizer to referenced Secrets to prevent accidental deletion.
+- OCI artifacts are re-pulled when any of `image.repository`, `image.tag`, `registry.name`, `registry.plainHTTP`, `registry.tls.insecureSkipVerify`, `registry.auth.secretRef.name`, or the referenced auth Secret data changes. Pin `image.tag` to a digest (`sha256:...`) for strict GitOps: a mutable tag whose content moves on the registry is not detected until the spec changes or the pod restarts.

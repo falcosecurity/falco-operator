@@ -624,7 +624,7 @@ func TestEnsureRulesfile(t *testing.T) {
 		writeErr error
 		pullErr  error
 		// useRealFS uses a real OS filesystem backed by a temp dir instead of the mock FS.
-		// Required for test cases that exercise the full OCI pull path (ExtractTarGz uses os.* directly).
+		// Required for test cases that assert the OCI file lifecycle on disk.
 		useRealFS      bool
 		wantErr        bool
 		wantConditions []testutil.ConditionExpect
@@ -865,7 +865,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec:       artifactv1alpha1.RulesfileSpec{},
 			},
-			// ExtractTarGz uses os.* directly, so the full OCI path needs a real FS with an injectable dir.
+			// This case asserts the previous OCI file is removed from disk.
 			useRealFS: true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
@@ -884,16 +884,18 @@ func TestEnsureRulesfile(t *testing.T) {
 			var tmpDir string
 
 			if tt.useRealFS {
-				// ExtractTarGz calls os.* directly, so tests that exercise the full
-				// OCI pull-and-extract path need a real FS backed by a temp directory.
+				// The full OCI pull-and-extract path writes to disk via the manager: use a real
+				// filesystem rooted at a temp directory so each test gets an isolated rules.d.
 				realFS := filesystem.NewOSFileSystem()
 				tmpDir = t.TempDir()
+				layer, layerErr := puller.MakeTarGz("rules.yaml", []byte("fake-rules-content"))
+				require.NoError(t, layerErr)
 				managerOpts = append(managerOpts,
 					artifact.WithFS(realFS),
 					artifact.WithRulesfileDir(tmpDir),
 					artifact.WithOCIPuller(&puller.MockOCIPuller{
-						Result: &puller.RegistryResult{Filename: "falco-rules.tar.gz"},
-						FS:     realFS,
+						Result:       &puller.RegistryResult{Filename: "falco-rules.tar.gz", Type: puller.Rulesfile},
+						LayerContent: layer,
 					}),
 				)
 			} else {

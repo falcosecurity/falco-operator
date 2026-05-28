@@ -19,6 +19,7 @@ package artifact
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -28,7 +29,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/utils/ptr"
-	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -1246,6 +1246,13 @@ func TestStoreFromOCI(t *testing.T) {
 		Tag:        "latest",
 	}
 
+	validLayer := func(t *testing.T) []byte {
+		t.Helper()
+		data, err := puller.MakeTarGz("rules.yaml", []byte("fake-rules-content"))
+		require.NoError(t, err)
+		return data
+	}
+
 	tests := []struct {
 		name            string
 		artifact        *commonv1alpha1.OCIArtifact
@@ -1254,22 +1261,22 @@ func TestStoreFromOCI(t *testing.T) {
 		artifactType    Type
 		existingFile    *File
 		existingData    string
+		layerContent    func(t *testing.T) []byte
 		pullerResult    *puller.RegistryResult
 		pullerErr       error
-		archiveContent  []byte
-		useRealFS       bool
-		customPuller    puller.Puller
+		allowNilResult  bool
 		fsRenameErr     error
 		fsRemoveErr     error
 		fsStatErr       error
-		fsOpenErr       error
+		fsWriteErr      error
 		wantErr         bool
 		wantErrMsg      string
 		wantPullCalls   int
+		wantWriteCalls  int
 		wantRenameCalls int
 		wantRemoveCalls int
-		wantFilesLen    int
 		wantFile        *File
+		wantFileContent string
 		wantOpts        *puller.RegistryOptions
 		wantAction      StoreAction
 	}{
@@ -1281,20 +1288,13 @@ func TestStoreFromOCI(t *testing.T) {
 				Medium:   MediumOCI,
 				Priority: 50,
 			},
-			wantErr:         false,
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
 			wantRemoveCalls: 1,
 			wantAction:      StoreActionRemoved,
 		},
 		{
-			name:            "does nothing when artifact is nil and no existing file",
-			artifact:        nil,
-			wantErr:         false,
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
+			name:       "does nothing when artifact is nil and no existing file",
+			artifact:   nil,
+			wantAction: StoreActionNone,
 		},
 		{
 			name: "returns error when artifact already stored but file not found on filesystem",
@@ -1308,51 +1308,43 @@ func TestStoreFromOCI(t *testing.T) {
 				Medium:   MediumOCI,
 				Priority: 50,
 			},
-			wantErr:         true,
-			wantErrMsg:      "not found on filesystem",
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
+			wantErr:    true,
+			wantErrMsg: "not found on filesystem",
+			wantAction: StoreActionNone,
 		},
 		{
-			name: "renames file when priority changes",
+			name: "renames file when only priority changes",
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: testImage,
 			},
 			priority:     60,
 			artifactType: TypeRulesfile,
 			existingFile: &File{
-				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   MediumOCI,
-				Priority: 50,
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
 			},
 			existingData:    "existing content",
-			wantErr:         false,
-			wantPullCalls:   0,
 			wantRenameCalls: 1,
-			wantRemoveCalls: 0,
 			wantFile:        &File{Path: "/etc/falco/rules.d/60-01-test-artifact-oci.yaml", Medium: MediumOCI, Priority: 60},
 			wantAction:      StoreActionPriorityChanged,
 		},
 		{
-			name: "skips pull when file already exists with same priority",
+			name: "skips pull when file already exists with same signature and priority",
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: testImage,
 			},
 			priority:     50,
 			artifactType: TypeRulesfile,
 			existingFile: &File{
-				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   MediumOCI,
-				Priority: 50,
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
 			},
-			existingData:    "existing content",
-			wantErr:         false,
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionUnchanged,
+			existingData: "existing content",
+			wantAction:   StoreActionUnchanged,
 		},
 		{
 			name: "returns error when credentials getter fails",
@@ -1364,123 +1356,88 @@ func TestStoreFromOCI(t *testing.T) {
 					},
 				},
 			},
-			priority:        50,
-			artifactType:    TypeRulesfile,
-			wantErr:         true,
-			wantErrMsg:      "failed to get pull secret",
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
+			priority:     50,
+			artifactType: TypeRulesfile,
+			wantErr:      true,
+			wantErrMsg:   "failed to get pull secret",
+			wantAction:   StoreActionNone,
 		},
 		{
 			name: "returns error when puller fails",
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: testImage,
 			},
+			priority:      50,
+			artifactType:  TypeRulesfile,
+			pullerErr:     fmt.Errorf("registry unavailable"),
+			wantErr:       true,
+			wantErrMsg:    "registry unavailable",
+			wantPullCalls: 1,
+			wantAction:    StoreActionNone,
+		},
+		{
+			name:           "puller returns nil result",
+			artifact:       &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:       50,
+			artifactType:   TypeRulesfile,
+			allowNilResult: true,
+			wantErr:        true,
+			wantErrMsg:     "nil result",
+			wantPullCalls:  1,
+			wantAction:     StoreActionNone,
+		},
+		{
+			name:          "returns error when layer content is not a valid gzip",
+			artifact:      &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:      50,
+			artifactType:  TypeRulesfile,
+			pullerResult:  &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:  func(t *testing.T) []byte { return []byte("not-a-valid-gzip") },
+			wantErr:       true,
+			wantPullCalls: 1,
+			wantAction:    StoreActionNone,
+		},
+		{
+			name:          "returns error when pulled artifact type does not match resource type",
+			artifact:      &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:      50,
+			artifactType:  TypeRulesfile,
+			pullerResult:  &puller.RegistryResult{Filename: "plugin.tar.gz", Type: puller.Plugin},
+			layerContent:  validLayer,
+			wantErr:       true,
+			wantErrMsg:    "does not match expected type",
+			wantPullCalls: 1,
+			wantAction:    StoreActionNone,
+		},
+		{
+			name:            "returns error when WriteFile fails on tmp",
+			artifact:        &commonv1alpha1.OCIArtifact{Image: testImage},
 			priority:        50,
 			artifactType:    TypeRulesfile,
-			pullerErr:       fmt.Errorf("registry unavailable"),
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			fsWriteErr:      fmt.Errorf("disk full"),
 			wantErr:         true,
-			wantErrMsg:      "registry unavailable",
+			wantErrMsg:      "disk full",
 			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
+			wantWriteCalls:  1,
+			wantRemoveCalls: 1,
 			wantAction:      StoreActionNone,
 		},
 		{
-			name: "returns error when rename fails during priority change",
-			artifact: &commonv1alpha1.OCIArtifact{
-				Image: testImage,
-			},
-			priority:     60,
-			artifactType: TypeRulesfile,
-			existingFile: &File{
-				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   MediumOCI,
-				Priority: 50,
-			},
-			existingData:    "existing content",
-			fsRenameErr:     fmt.Errorf("permission denied"),
+			name:            "returns error when Rename of tmp to final path fails",
+			artifact:        &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:        50,
+			artifactType:    TypeRulesfile,
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			fsRenameErr:     fmt.Errorf("rename failed"),
 			wantErr:         true,
-			wantErrMsg:      "permission denied",
-			wantPullCalls:   0,
+			wantErrMsg:      "rename failed",
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
 			wantRenameCalls: 1,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
-		},
-		{
-			name: "returns error when Exists check fails",
-			artifact: &commonv1alpha1.OCIArtifact{
-				Image: testImage,
-			},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			existingFile: &File{
-				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
-				Medium:   MediumOCI,
-				Priority: 50,
-			},
-			fsStatErr:       fmt.Errorf("permission denied"),
-			wantErr:         true,
-			wantErrMsg:      "permission denied",
-			wantPullCalls:   0,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
-		},
-		{
-			name: "returns error when Open fails after successful pull",
-			artifact: &commonv1alpha1.OCIArtifact{
-				Image: testImage,
-			},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			pullerResult: &puller.RegistryResult{
-				Filename: "rules.tar.gz",
-			},
-			fsOpenErr:       fmt.Errorf("cannot open archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot open archive",
-			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
-		},
-		{
-			name: "uses plugin directory for plugin artifact type",
-			artifact: &commonv1alpha1.OCIArtifact{
-				Image: testImage,
-			},
-			priority:     50,
-			artifactType: TypePlugin,
-			pullerResult: &puller.RegistryResult{
-				Filename: "plugin.tar.gz",
-			},
-			fsOpenErr:       fmt.Errorf("cannot open archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot open archive",
-			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantAction:      StoreActionNone,
-		},
-		{
-			name: "uses empty directory for unknown artifact type",
-			artifact: &commonv1alpha1.OCIArtifact{
-				Image: testImage,
-			},
-			priority:     50,
-			artifactType: Type("unknown"),
-			pullerResult: &puller.RegistryResult{
-				Filename: "artifact.tar.gz",
-			},
-			fsOpenErr:       fmt.Errorf("cannot open archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot open archive",
-			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
+			wantRemoveCalls: 1,
 			wantAction:      StoreActionNone,
 		},
 		{
@@ -1491,105 +1448,46 @@ func TestStoreFromOCI(t *testing.T) {
 					PlainHTTP: new(true),
 				},
 			},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			pullerResult: &puller.RegistryResult{
-				Filename: "rules.tar.gz",
-			},
-			fsOpenErr:       fmt.Errorf("cannot open archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot open archive",
+			priority:        50,
+			artifactType:    TypeRulesfile,
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
 			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
 			wantOpts:        &puller.RegistryOptions{PlainHTTP: true},
-			wantAction:      StoreActionNone,
+			wantAction:      StoreActionAdded,
 		},
 		{
 			name: "passes TLS insecureSkipVerify option to puller",
 			artifact: &commonv1alpha1.OCIArtifact{
 				Image: testImage,
 				Registry: &commonv1alpha1.RegistryConfig{
-					TLS: &commonv1alpha1.TLSConfig{
-						InsecureSkipVerify: true,
-					},
+					TLS: &commonv1alpha1.TLSConfig{InsecureSkipVerify: true},
 				},
 			},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			pullerResult: &puller.RegistryResult{
-				Filename: "rules.tar.gz",
-			},
-			fsOpenErr:       fmt.Errorf("cannot open archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot open archive",
+			priority:        50,
+			artifactType:    TypeRulesfile,
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
 			wantPullCalls:   1,
-			wantRenameCalls: 0,
-			wantRemoveCalls: 0,
-			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
-			wantAction:      StoreActionNone,
-		},
-		{
-			name:         "puller returns nil result",
-			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			customPuller: nilResultPuller{},
-			wantErr:      true,
-			wantErrMsg:   "nil result",
-			wantAction:   StoreActionNone,
-		},
-		{
-			name:         "successfully pulls, extracts and stores artifact",
-			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			useRealFS:    true,
-			wantFilesLen: 1,
-			wantAction:   StoreActionAdded,
-		},
-		{
-			name:           "returns error when ExtractTarGz fails due to invalid archive content",
-			artifact:       &commonv1alpha1.OCIArtifact{Image: testImage},
-			priority:       50,
-			artifactType:   TypeRulesfile,
-			archiveContent: []byte("not-a-valid-gzip"),
-			wantErr:        true,
-			wantPullCalls:  1,
-			wantAction:     StoreActionNone,
-		},
-		{
-			name:         "returns error when Remove of archive fails after successful extraction",
-			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			archiveContent: func() []byte {
-				data, _ := puller.MakeTarGz("rules.yaml", []byte("fake"))
-				return data
-			}(),
-			fsRemoveErr:     fmt.Errorf("cannot remove archive"),
-			wantErr:         true,
-			wantErrMsg:      "cannot remove archive",
-			wantPullCalls:   1,
-			wantRemoveCalls: 1,
-			wantAction:      StoreActionNone,
-		},
-		{
-			name:         "returns error when Rename fails after successful extraction",
-			artifact:     &commonv1alpha1.OCIArtifact{Image: testImage},
-			priority:     50,
-			artifactType: TypeRulesfile,
-			archiveContent: func() []byte {
-				data, _ := puller.MakeTarGz("rules.yaml", []byte("fake"))
-				return data
-			}(),
-			fsRenameErr:     fmt.Errorf("cannot rename file"),
-			wantErr:         true,
-			wantErrMsg:      "cannot rename file",
-			wantPullCalls:   1,
-			wantRemoveCalls: 1,
+			wantWriteCalls:  1,
 			wantRenameCalls: 1,
-			wantAction:      StoreActionNone,
+			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
+			wantAction:      StoreActionAdded,
+		},
+		{
+			name:            "successfully pulls, extracts and stores artifact",
+			artifact:        &commonv1alpha1.OCIArtifact{Image: testImage},
+			priority:        50,
+			artifactType:    TypeRulesfile,
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantFileContent: "fake-rules-content",
+			wantAction:      StoreActionAdded,
 		},
 		{
 			name:     "returns error when removeArtifact fails on nil artifact",
@@ -1604,6 +1502,224 @@ func TestStoreFromOCI(t *testing.T) {
 			wantErrMsg:      "remove failed",
 			wantRemoveCalls: 1,
 			wantAction:      StoreActionNone,
+		},
+		{
+			name: "re-pulls when OCI tag changes (signature drift)",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{
+					Repository: "falcosecurity/rules/falco-rules",
+					Tag:        "v2",
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:   MediumOCI,
+				Priority: 50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{
+					Image: commonv1alpha1.ImageSpec{
+						Repository: "falcosecurity/rules/falco-rules",
+						Tag:        "v1",
+					},
+				}, nil),
+			},
+			existingData:    "v1 rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantFileContent: "fake-rules-content",
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when OCI repository changes",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{
+					Repository: "falcosecurity/rules/falco-rules-extras",
+					Tag:        "latest",
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when OCI registry name changes",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					Name: "quay.io",
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when plainHTTP toggles",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					PlainHTTP: new(true),
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantOpts:        &puller.RegistryOptions{PlainHTTP: true},
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when insecureSkipVerify toggles",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					TLS: &commonv1alpha1.TLSConfig{InsecureSkipVerify: true},
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:            "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:          MediumOCI,
+				Priority:        50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{Image: testImage}, nil),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantOpts:        &puller.RegistryOptions{InsecureSkipVerify: true},
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when auth secret reference name changes",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					Auth: &commonv1alpha1.RegistryAuth{
+						SecretRef: &commonv1alpha1.SecretRef{Name: "new-pull-secret"},
+					},
+				},
+			},
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "new-pull-secret", Namespace: testNamespace},
+					Data: map[string][]byte{
+						commonv1alpha1.SecretUsernameKey: []byte("u"),
+						commonv1alpha1.SecretPasswordKey: []byte("p"),
+					},
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:   MediumOCI,
+				Priority: 50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{
+					Image: testImage,
+					Registry: &commonv1alpha1.RegistryConfig{
+						Auth: &commonv1alpha1.RegistryAuth{
+							SecretRef: &commonv1alpha1.SecretRef{Name: "old-pull-secret"},
+						},
+					},
+				}, nil),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantAction:      StoreActionUpdated,
+		},
+		{
+			name: "re-pulls when auth secret data rotates",
+			artifact: &commonv1alpha1.OCIArtifact{
+				Image: testImage,
+				Registry: &commonv1alpha1.RegistryConfig{
+					Auth: &commonv1alpha1.RegistryAuth{
+						SecretRef: &commonv1alpha1.SecretRef{Name: "rotating-secret"},
+					},
+				},
+			},
+			objects: []client.Object{
+				&corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "rotating-secret", Namespace: testNamespace},
+					Data: map[string][]byte{
+						commonv1alpha1.SecretUsernameKey: []byte("u"),
+						commonv1alpha1.SecretPasswordKey: []byte("rotated-password"),
+					},
+				},
+			},
+			priority:     50,
+			artifactType: TypeRulesfile,
+			existingFile: &File{
+				Path:     "/etc/falco/rules.d/50-01-test-artifact-oci.yaml",
+				Medium:   MediumOCI,
+				Priority: 50,
+				SourceSignature: computeOCISourceSignature(&commonv1alpha1.OCIArtifact{
+					Image: testImage,
+					Registry: &commonv1alpha1.RegistryConfig{
+						Auth: &commonv1alpha1.RegistryAuth{
+							SecretRef: &commonv1alpha1.SecretRef{Name: "rotating-secret"},
+						},
+					},
+				}, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: "rotating-secret", Namespace: testNamespace},
+					Data: map[string][]byte{
+						commonv1alpha1.SecretUsernameKey: []byte("u"),
+						commonv1alpha1.SecretPasswordKey: []byte("pre-rotation-password"),
+					},
+				}),
+			},
+			existingData:    "original rules",
+			pullerResult:    &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+			layerContent:    validLayer,
+			wantPullCalls:   1,
+			wantWriteCalls:  1,
+			wantRenameCalls: 1,
+			wantAction:      StoreActionUpdated,
 		},
 	}
 
@@ -1620,40 +1736,30 @@ func TestStoreFromOCI(t *testing.T) {
 			mockFS := filesystem.NewMockFileSystem()
 			mockFS.RenameErr = tt.fsRenameErr
 			mockFS.StatErr = tt.fsStatErr
-			mockFS.OpenErr = tt.fsOpenErr
 			mockFS.RemoveErr = tt.fsRemoveErr
+			mockFS.WriteErr = tt.fsWriteErr
 
 			mockPuller := &puller.MockOCIPuller{
-				Result:  tt.pullerResult,
-				PullErr: tt.pullerErr,
+				Result:         tt.pullerResult,
+				PullErr:        tt.pullerErr,
+				AllowNilResult: tt.allowNilResult,
 			}
-			if tt.archiveContent != nil {
-				mockPuller.Result = &puller.RegistryResult{Filename: "falco-rules.tar.gz"}
-				mockFS.Files[filepath.Join(tmpDir, "falco-rules.tar.gz")] = tt.archiveContent
-			}
-
-			var thePuller puller.Puller = mockPuller
-			if tt.customPuller != nil {
-				thePuller = tt.customPuller
+			if tt.layerContent != nil {
+				mockPuller.LayerContent = tt.layerContent(t)
 			}
 
-			var managerOpts []ManagerOption
-			if tt.useRealFS {
-				realFS := filesystem.NewOSFileSystem()
-				realPuller := &puller.MockOCIPuller{
-					Result: &puller.RegistryResult{Filename: "falco-rules.tar.gz"},
-					FS:     realFS,
-				}
-				managerOpts = []ManagerOption{WithFS(realFS), WithRulesfileDir(tmpDir), WithOCIPuller(realPuller)}
-			} else {
-				managerOpts = []ManagerOption{WithFS(mockFS), WithRulesfileDir(tmpDir), WithOCIPuller(thePuller)}
-			}
-
-			manager := NewManagerWithOptions(fakeClient, testNamespace, managerOpts...)
+			manager := NewManagerWithOptions(fakeClient, testNamespace,
+				WithFS(mockFS),
+				WithRulesfileDir(tmpDir),
+				WithOCIPuller(mockPuller),
+			)
 
 			if tt.existingFile != nil {
+				if tt.existingFile.Medium == MediumOCI && tt.artifactType != "" {
+					tt.existingFile.Path = manager.Path(testArtifactName, tt.existingFile.Priority, MediumOCI, tt.artifactType)
+				}
 				manager.files[testArtifactName] = []File{*tt.existingFile}
-				if tt.existingData != "" && !tt.useRealFS {
+				if tt.existingData != "" {
 					mockFS.Files[tt.existingFile.Path] = []byte(tt.existingData)
 				}
 			}
@@ -1671,33 +1777,298 @@ func TestStoreFromOCI(t *testing.T) {
 			if tt.wantAction != "" {
 				assert.Equal(t, tt.wantAction, action)
 			}
-			if !tt.useRealFS && tt.customPuller == nil {
-				assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
-				assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
-				assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
-				if tt.wantOpts != nil && len(mockPuller.PullCalls) > 0 {
-					assert.Equal(t, tt.wantOpts, mockPuller.PullCalls[0].Opts)
-				}
+			assert.Len(t, mockPuller.PullCalls, tt.wantPullCalls)
+			if tt.wantOpts != nil && len(mockPuller.PullCalls) > 0 {
+				assert.Equal(t, tt.wantOpts, mockPuller.PullCalls[0].Opts)
 			}
+			assert.Len(t, mockFS.WriteCalls, tt.wantWriteCalls)
+			assert.Len(t, mockFS.RenameCalls, tt.wantRenameCalls)
+			assert.Len(t, mockFS.RemoveCalls, tt.wantRemoveCalls)
 
-			if tt.wantFilesLen > 0 {
-				assert.Len(t, manager.files[testArtifactName], tt.wantFilesLen)
-			}
 			if tt.wantFile != nil {
 				file := manager.getArtifactFile(testArtifactName, tt.wantFile.Medium)
 				require.NotNil(t, file)
 				assert.Equal(t, filepath.Base(tt.wantFile.Path), filepath.Base(file.Path))
 				assert.Equal(t, tt.wantFile.Priority, file.Priority)
 			}
+			if tt.wantFileContent != "" {
+				path := manager.Path(testArtifactName, tt.priority, MediumOCI, tt.artifactType)
+				data, ok := mockFS.Files[path]
+				require.True(t, ok, "expected final file %q to exist", path)
+				assert.Equal(t, tt.wantFileContent, string(data))
+			}
 		})
 	}
 }
 
-// nilResultPuller always returns (nil, nil) to exercise the nil-result guard in StoreFromOCI.
-type nilResultPuller struct{}
+func TestStoreFromOCI_TagChangeTriggersRePull(t *testing.T) {
+	const (
+		testNamespace    = "test-namespace"
+		testArtifactName = "test-rules"
+	)
 
-func (nilResultPuller) Pull(_ context.Context, _, _, _, _ string, _ auth.CredentialFunc, _ *puller.RegistryOptions) (*puller.RegistryResult, error) {
-	return nil, nil
+	scheme := createTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tmpDir := t.TempDir()
+
+	realFS := filesystem.NewOSFileSystem()
+	layerV1, err := puller.MakeTarGz("rules.yaml", []byte("v1-rules-content"))
+	require.NoError(t, err)
+	layerV2, err := puller.MakeTarGz("rules.yaml", []byte("v2-rules-content"))
+	require.NoError(t, err)
+
+	mockPuller := &puller.MockOCIPuller{
+		Result:       &puller.RegistryResult{Filename: "falco-rules.tar.gz", Type: puller.Rulesfile},
+		LayerContent: layerV1,
+	}
+
+	manager := NewManagerWithOptions(fakeClient, testNamespace,
+		WithFS(realFS),
+		WithRulesfileDir(tmpDir),
+		WithOCIPuller(mockPuller),
+	)
+
+	ctx := context.Background()
+
+	artifactV1 := &commonv1alpha1.OCIArtifact{
+		Image: commonv1alpha1.ImageSpec{
+			Repository: "falcosecurity/rules/falco-rules",
+			Tag:        "v1",
+		},
+	}
+
+	action, err := manager.StoreFromOCI(ctx, testArtifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionAdded, action)
+	require.Len(t, mockPuller.PullCalls, 1)
+	assert.Contains(t, mockPuller.PullCalls[0].Ref, ":v1")
+
+	action, err = manager.StoreFromOCI(ctx, testArtifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionUnchanged, action)
+	assert.Len(t, mockPuller.PullCalls, 1, "spec unchanged: must not pull again")
+
+	artifactV2 := &commonv1alpha1.OCIArtifact{
+		Image: commonv1alpha1.ImageSpec{
+			Repository: "falcosecurity/rules/falco-rules",
+			Tag:        "v2",
+		},
+	}
+	mockPuller.LayerContent = layerV2
+	action, err = manager.StoreFromOCI(ctx, testArtifactName, 50, TypeRulesfile, artifactV2)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionUpdated, action)
+	require.Len(t, mockPuller.PullCalls, 2, "tag changed: must re-pull")
+	assert.Contains(t, mockPuller.PullCalls[1].Ref, ":v2")
+
+	stored := manager.getArtifactFile(testArtifactName, MediumOCI)
+	require.NotNil(t, stored)
+	expectedSig := computeOCISourceSignature(artifactV2, nil)
+	assert.Equal(t, expectedSig, stored.SourceSignature, "cache entry must carry the new source signature")
+
+	action, err = manager.StoreFromOCI(ctx, testArtifactName, 50, TypeRulesfile, artifactV2)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionUnchanged, action)
+	assert.Len(t, mockPuller.PullCalls, 2, "spec stable on v2: must not pull again")
+}
+
+func TestStoreFromOCI_TagAndPriorityChange_RemovesOldPath(t *testing.T) {
+	const (
+		testNamespace = "test-namespace"
+		artifactName  = "test-rules"
+	)
+
+	scheme := createTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tmpDir := t.TempDir()
+	realFS := filesystem.NewOSFileSystem()
+
+	layerV1, err := puller.MakeTarGz("rules.yaml", []byte("v1-content"))
+	require.NoError(t, err)
+	layerV2, err := puller.MakeTarGz("rules.yaml", []byte("v2-content"))
+	require.NoError(t, err)
+
+	mockPuller := &puller.MockOCIPuller{
+		Result:       &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+		LayerContent: layerV1,
+	}
+	manager := NewManagerWithOptions(fakeClient, testNamespace,
+		WithFS(realFS),
+		WithRulesfileDir(tmpDir),
+		WithOCIPuller(mockPuller),
+	)
+	ctx := context.Background()
+
+	artifactV1 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v1"}}
+	_, err = manager.StoreFromOCI(ctx, artifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	oldPath := manager.Path(artifactName, 50, MediumOCI, TypeRulesfile)
+	require.FileExists(t, oldPath)
+
+	mockPuller.LayerContent = layerV2
+	artifactV2 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v2"}}
+	action, err := manager.StoreFromOCI(ctx, artifactName, 60, TypeRulesfile, artifactV2)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionUpdated, action)
+
+	newPath := manager.Path(artifactName, 60, MediumOCI, TypeRulesfile)
+	require.FileExists(t, newPath)
+	require.NoFileExists(t, oldPath, "old artifact path must be removed when priority changes alongside the signature")
+
+	stored := manager.getArtifactFile(artifactName, MediumOCI)
+	require.NotNil(t, stored)
+	assert.Equal(t, newPath, stored.Path)
+	assert.Equal(t, int32(60), stored.Priority)
+}
+
+func TestStoreFromOCI_PullFailureAfterDrift_PreservesOldFileAndCache(t *testing.T) {
+	const (
+		testNamespace = "test-namespace"
+		artifactName  = "test-rules"
+	)
+
+	scheme := createTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tmpDir := t.TempDir()
+	realFS := filesystem.NewOSFileSystem()
+
+	layerV1, err := puller.MakeTarGz("rules.yaml", []byte("v1-content"))
+	require.NoError(t, err)
+	mockPuller := &puller.MockOCIPuller{
+		Result:       &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+		LayerContent: layerV1,
+	}
+	manager := NewManagerWithOptions(fakeClient, testNamespace,
+		WithFS(realFS),
+		WithRulesfileDir(tmpDir),
+		WithOCIPuller(mockPuller),
+	)
+	ctx := context.Background()
+
+	artifactV1 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v1"}}
+	_, err = manager.StoreFromOCI(ctx, artifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	path := manager.Path(artifactName, 50, MediumOCI, TypeRulesfile)
+	require.FileExists(t, path)
+
+	sigBefore := manager.getArtifactFile(artifactName, MediumOCI).SourceSignature
+
+	mockPuller.PullErr = fmt.Errorf("registry unavailable")
+	artifactV2 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v2"}}
+	action, err := manager.StoreFromOCI(ctx, artifactName, 50, TypeRulesfile, artifactV2)
+	require.Error(t, err)
+	assert.Equal(t, StoreActionNone, action)
+
+	require.FileExists(t, path, "previous artifact must remain on disk on pull failure")
+	contents, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "v1-content", string(contents))
+
+	stored := manager.getArtifactFile(artifactName, MediumOCI)
+	require.NotNil(t, stored, "cache entry for previous artifact must remain after pull failure")
+	assert.Equal(t, sigBefore, stored.SourceSignature)
+}
+
+func TestStoreFromOCI_RetryAfterPullFailure_Converges(t *testing.T) {
+	const (
+		testNamespace = "test-namespace"
+		artifactName  = "test-rules"
+	)
+
+	scheme := createTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tmpDir := t.TempDir()
+	realFS := filesystem.NewOSFileSystem()
+
+	layerV1, err := puller.MakeTarGz("rules.yaml", []byte("v1-content"))
+	require.NoError(t, err)
+	layerV2, err := puller.MakeTarGz("rules.yaml", []byte("v2-content"))
+	require.NoError(t, err)
+
+	mockPuller := &puller.MockOCIPuller{
+		Result:       &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+		LayerContent: layerV1,
+	}
+	manager := NewManagerWithOptions(fakeClient, testNamespace,
+		WithFS(realFS),
+		WithRulesfileDir(tmpDir),
+		WithOCIPuller(mockPuller),
+	)
+	ctx := context.Background()
+
+	artifactV1 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v1"}}
+	_, err = manager.StoreFromOCI(ctx, artifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	oldPath := manager.Path(artifactName, 50, MediumOCI, TypeRulesfile)
+
+	artifactV2 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v2"}}
+
+	mockPuller.PullErr = fmt.Errorf("transient registry error")
+	_, err = manager.StoreFromOCI(ctx, artifactName, 60, TypeRulesfile, artifactV2)
+	require.Error(t, err)
+	require.FileExists(t, oldPath)
+
+	mockPuller.PullErr = nil
+	mockPuller.LayerContent = layerV2
+	action, err := manager.StoreFromOCI(ctx, artifactName, 60, TypeRulesfile, artifactV2)
+	require.NoError(t, err)
+	assert.Equal(t, StoreActionUpdated, action)
+
+	newPath := manager.Path(artifactName, 60, MediumOCI, TypeRulesfile)
+	require.FileExists(t, newPath)
+	require.NoFileExists(t, oldPath, "old path must be removed after the successful retry")
+}
+
+func TestStoreFromOCI_OldPathRemoveFailure_RollsBackNewPathAndLeavesCacheUnchanged(t *testing.T) {
+	const (
+		testNamespace = "test-namespace"
+		artifactName  = "test-rules"
+	)
+
+	scheme := createTestScheme(t)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	tmpDir := t.TempDir()
+	mockFS := filesystem.NewMockFileSystem()
+
+	layerV1, err := puller.MakeTarGz("rules.yaml", []byte("v1-content"))
+	require.NoError(t, err)
+	layerV2, err := puller.MakeTarGz("rules.yaml", []byte("v2-content"))
+	require.NoError(t, err)
+
+	mockPuller := &puller.MockOCIPuller{
+		Result:       &puller.RegistryResult{Filename: "rules.tar.gz", Type: puller.Rulesfile},
+		LayerContent: layerV1,
+	}
+	manager := NewManagerWithOptions(fakeClient, testNamespace,
+		WithFS(mockFS),
+		WithRulesfileDir(tmpDir),
+		WithOCIPuller(mockPuller),
+	)
+	ctx := context.Background()
+
+	artifactV1 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v1"}}
+	_, err = manager.StoreFromOCI(ctx, artifactName, 50, TypeRulesfile, artifactV1)
+	require.NoError(t, err)
+	oldPath := manager.Path(artifactName, 50, MediumOCI, TypeRulesfile)
+	sigBefore := manager.getArtifactFile(artifactName, MediumOCI).SourceSignature
+
+	mockPuller.LayerContent = layerV2
+	mockFS.RemoveErrFor = map[string]error{oldPath: fmt.Errorf("device busy")}
+
+	artifactV2 := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "v2"}}
+	action, err := manager.StoreFromOCI(ctx, artifactName, 60, TypeRulesfile, artifactV2)
+	require.Error(t, err)
+	assert.Equal(t, StoreActionNone, action)
+	assert.Contains(t, err.Error(), "device busy")
+
+	stored := manager.getArtifactFile(artifactName, MediumOCI)
+	require.NotNil(t, stored, "cache entry must be preserved when old path removal fails")
+	assert.Equal(t, sigBefore, stored.SourceSignature, "cache must still point to the previous artifact")
+	assert.Equal(t, oldPath, stored.Path)
+
+	assert.Contains(t, mockFS.Files, oldPath, "old artifact must still be on disk after a failed Remove")
+	newPath := manager.Path(artifactName, 60, MediumOCI, TypeRulesfile)
+	assert.NotContains(t, mockFS.Files, newPath, "new artifact must be rolled back when the old path cannot be removed")
 }
 
 func TestCheckReferenceResolution(t *testing.T) {

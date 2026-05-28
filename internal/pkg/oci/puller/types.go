@@ -16,9 +16,7 @@
 
 package puller
 
-import (
-	"errors"
-)
+import "errors"
 
 // ArtifactType represents a rules file or a plugin. Used to select the right mediaType when interacting with the registry.
 type ArtifactType string

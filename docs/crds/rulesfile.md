@@ -154,3 +154,4 @@ spec:
 - When combining multiple sources (OCI + inline + ConfigMap), each source gets a sub-priority within the main priority.
 - The ConfigMap must contain a key named `rules.yaml` with the rules content.
 - The operator adds a finalizer to referenced ConfigMaps to prevent accidental deletion.
+- OCI artifacts are re-pulled when any of `image.repository`, `image.tag`, `registry.name`, `registry.plainHTTP`, `registry.tls.insecureSkipVerify`, `registry.auth.secretRef.name`, or the referenced auth Secret data changes. Pin `image.tag` to a digest (`sha256:...`) for strict GitOps: a mutable tag whose content moves on the registry is not detected until the spec changes or the pod restarts.

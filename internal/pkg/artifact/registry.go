@@ -31,12 +31,7 @@ const (
 // ResolveReference builds the full OCI reference string from an OCIArtifact.
 // Defaults to "ghcr.io" when no registry name is specified and "latest" when no tag is set.
 func ResolveReference(artifact *commonv1alpha1.OCIArtifact) string {
-	registry := DefaultRegistry
-	if artifact.Registry != nil && artifact.Registry.Name != "" {
-		registry = artifact.Registry.Name
-	}
-
-	ref := registry + "/" + artifact.Image.Repository
+	ref := ResolveRegistryHost(artifact) + "/" + artifact.Image.Repository
 
 	tag := artifact.Image.Tag
 	if tag == "" {
@@ -50,6 +45,29 @@ func ResolveReference(artifact *commonv1alpha1.OCIArtifact) string {
 	}
 
 	return ref
+}
+
+// ResolveRegistryHost returns the registry hostname used for an OCIArtifact.
+func ResolveRegistryHost(artifact *commonv1alpha1.OCIArtifact) string {
+	if artifact != nil && artifact.Registry != nil && artifact.Registry.Name != "" {
+		return artifact.Registry.Name
+	}
+	return DefaultRegistry
+}
+
+func authSecretRefName(artifact *commonv1alpha1.OCIArtifact) string {
+	ref := authSecretRef(artifact)
+	if ref == nil {
+		return ""
+	}
+	return ref.Name
+}
+
+func authSecretRef(artifact *commonv1alpha1.OCIArtifact) *commonv1alpha1.SecretRef {
+	if artifact == nil || artifact.Registry == nil || artifact.Registry.Auth == nil {
+		return nil
+	}
+	return artifact.Registry.Auth.SecretRef
 }
 
 // ResolveRegistryOptions builds a RegistryOptions from the registry configuration of an OCIArtifact.
