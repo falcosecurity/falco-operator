@@ -22,11 +22,9 @@ import (
 	"compress/gzip"
 	"context"
 	"fmt"
-	"path/filepath"
+	"io"
 
 	"oras.land/oras-go/v2/registry/remote/auth"
-
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 )
 
 // MockOCIPuller implements Puller for testing.
@@ -35,51 +33,42 @@ type MockOCIPuller struct {
 	Result *RegistryResult
 	// PullErr is returned instead of pulling when set.
 	PullErr error
-	// FS is the filesystem used to write the archive on a successful pull.
-	// When set, Pull writes a minimal valid tar.gz archive to destDir/Result.Filename
-	// so that the caller (e.g. Manager.StoreFromOCI) can open and extract it.
-	FS        filesystem.FileSystem
-	PullCalls []PullCall
+	// AllowNilResult makes Pull return (nil, nil) when Result is nil.
+	AllowNilResult bool
+	// LayerContent is the raw layer payload (typically a tar.gz archive) copied to the
+	// destination writer when PullErr is nil. If nil, the payload is empty.
+	LayerContent []byte
+	PullCalls    []PullCall
 }
 
 // PullCall records the arguments of a Pull invocation.
 type PullCall struct {
-	Ref     string
-	DestDir string
-	OS      string
-	Arch    string
-	Opts    *RegistryOptions
+	Ref  string
+	OS   string
+	Arch string
+	Opts *RegistryOptions
 }
 
-// Pull records the call and returns the preset result or error.
-// When FS is set and Result is non-nil, it writes a minimal tar.gz archive to
-// destDir/Result.Filename before returning so the full StoreFromOCI path can proceed.
-func (m *MockOCIPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error) {
-	m.PullCalls = append(m.PullCalls, PullCall{Ref: ref, DestDir: destDir, OS: os, Arch: arch, Opts: opts})
+// Pull records the call, writes LayerContent to dst, and returns the preset result.
+func (m *MockOCIPuller) Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions, dst io.Writer) (*RegistryResult, error) {
+	m.PullCalls = append(m.PullCalls, PullCall{Ref: ref, OS: os, Arch: arch, Opts: opts})
 	if m.PullErr != nil {
 		return nil, m.PullErr
 	}
 	if m.Result == nil {
+		if m.AllowNilResult {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("MockOCIPuller: Result is not set for ref %q", ref)
 	}
-	if m.FS != nil {
-		archivePath := filepath.Join(destDir, m.Result.Filename)
-		// Use "rules.yaml" as the inner file name so it differs from the archive
-		// file name; the manager removes the archive after extraction, and having
-		// the same name for both would cause the extracted file to be deleted too.
-		data, err := MakeTarGz("rules.yaml", []byte("fake-rules-content"))
-		if err != nil {
-			return nil, fmt.Errorf("MockOCIPuller: failed to create fake archive: %w", err)
-		}
-		if err := m.FS.WriteFile(archivePath, data, 0o644); err != nil {
-			return nil, fmt.Errorf("MockOCIPuller: failed to write archive to FS: %w", err)
-		}
+	if _, err := dst.Write(m.LayerContent); err != nil {
+		return nil, err
 	}
 	return m.Result, nil
 }
 
 // MakeTarGz creates a minimal valid tar.gz archive containing a single file
-// with the given name and content. Useful for seeding mock filesystems in tests.
+// with the given name and content. Useful for seeding mock pullers in tests.
 func MakeTarGz(filename string, content []byte) ([]byte, error) {
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)

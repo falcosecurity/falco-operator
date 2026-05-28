@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"runtime"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -30,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/credentials"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
@@ -284,117 +282,80 @@ func (am *Manager) StoreFromOCI(ctx context.Context, name string, artifactPriori
 		}
 		return StoreActionNone, nil
 	}
-	newFile := File{
-		Path:     am.Path(name, artifactPriority, MediumOCI, artifactType),
-		Medium:   MediumOCI,
-		Priority: artifactPriority,
+
+	secretRef := authSecretRef(artifact)
+
+	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
+	if err != nil {
+		logger.Error(err, "unable to fetch auth secret for the OCI artifact", "authSecretRef", secretRef)
+		return StoreActionNone, err
+	}
+	creds, err := credentials.FromSecret(ResolveRegistryHost(artifact), authSecret)
+	if err != nil {
+		logger.Error(err, "unable to derive credentials for the OCI artifact", "authSecretRef", secretRef)
+		return StoreActionNone, err
 	}
 
-	// Check if the artifact is already stored.
-	if file := am.getArtifactFile(name, MediumOCI); file != nil {
-		logger.V(4).Info("Artifact already stored", "artifact", file)
-		// Check if the file already exists on the filesystem.
-		ok, err := am.fs.Exists(file.Path)
-		if err != nil {
-			logger.Error(err, "Failed to check if file exists", "file", file.Path)
-			return StoreActionNone, err
-		}
-		// If the file exists and the priority has changed, we rename the file reflecting the new priority.
-		if ok && file.Priority != artifactPriority {
+	newFile := File{
+		Path:            am.Path(name, artifactPriority, MediumOCI, artifactType),
+		Medium:          MediumOCI,
+		Priority:        artifactPriority,
+		SourceSignature: computeOCISourceSignature(artifact, authSecret),
+	}
+
+	oldFile, err := am.getCurrentOCIFile(ctx, name)
+	if err != nil {
+		logger.Error(err, "Failed to get current OCI file", "name", name)
+		return StoreActionNone, err
+	}
+
+	if oldFile != nil {
+		if oldFile.SourceSignature == newFile.SourceSignature {
+			if oldFile.Priority == artifactPriority {
+				return StoreActionUnchanged, nil
+			}
 			logger.Info("Renaming artifact file due to priority change",
-				"oldPriority", file.Priority, "newPriority", artifactPriority, "oldFile", file.Path, "newFile", newFile.Path)
-			if err := am.fs.Rename(file.Path, newFile.Path); err != nil {
-				logger.Error(err, "Failed to rename file", "oldFile", file.Path, "newFile", newFile.Path)
+				"oldPriority", oldFile.Priority, "newPriority", artifactPriority,
+				"oldFile", oldFile.Path, "newFile", newFile.Path)
+			if err := am.fs.Rename(oldFile.Path, newFile.Path); err != nil {
+				logger.Error(err, "Failed to rename file", "oldFile", oldFile.Path, "newFile", newFile.Path)
 				return StoreActionNone, err
 			}
 			am.removeArtifactFile(name, MediumOCI)
 			am.addArtifactFile(name, newFile)
 			return StoreActionPriorityChanged, nil
 		}
-		// If the file does not exist on the filesystem, we remove it from the manager and return an error.
-		// Next time the artifact is requested, it will be fetched from the OCI registry.
-		if !ok {
-			am.removeArtifactFile(name, MediumOCI)
-			err := fmt.Errorf("artifact %q not found on filesystem", file.Path)
-			logger.Error(err, "Failed to find file on filesystem", "file", newFile.Path)
-			return StoreActionNone, err
-		}
-
-		return StoreActionUnchanged, nil
+		logger.Info("OCI source signature changed, re-pulling artifact",
+			"name", name, "oldFile", oldFile.Path, "newFile", newFile.Path)
 	}
-
-	var dstDir string
-	switch artifactType {
-	case TypeRulesfile:
-		dstDir = am.rulesfileDir
-	case TypePlugin:
-		dstDir = mounts.PluginDirPath
-	default:
-		dstDir = ""
-	}
-
-	// Resolve auth credentials.
-	var authSecretRef *commonv1alpha1.SecretRef
-	if artifact.Registry != nil && artifact.Registry.Auth != nil {
-		authSecretRef = artifact.Registry.Auth.SecretRef
-	}
-
-	logger.V(4).Info("Getting credentials from auth secret ref", "authSecretRef", authSecretRef)
-	creds, err := credentials.GetCredentialsFromSecret(ctx, am.client, am.namespace, authSecretRef)
-	if err != nil {
-		logger.Error(err, "unable to get credentials for the OCI artifact", "authSecretRef", authSecretRef)
-		return StoreActionNone, err
-	}
-
-	// Resolve registry TLS options.
-	registryOpts := ResolveRegistryOptions(artifact)
 
 	ref := ResolveReference(artifact)
 	logger.Info("Pulling OCI artifact", "reference", ref)
-	res, err := am.ociPuller.Pull(ctx, ref, dstDir, runtime.GOOS, runtime.GOARCH, creds, registryOpts)
+
+	payload, err := am.pullOCIFile(ctx, ref, artifactType, artifact, creds)
 	if err != nil {
 		logger.Error(err, "unable to pull artifact", "reference", ref)
 		return StoreActionNone, err
 	}
-	if res == nil {
-		return StoreActionNone, fmt.Errorf("puller returned nil result for reference %q", ref)
-	}
 
-	archiveFile := filepath.Clean(filepath.Join(dstDir, res.Filename))
-
-	// Extract the rulesfile from the archive.
-	f, err := am.fs.Open(archiveFile)
-	if err != nil {
+	if err := am.installOCIFile(ctx, newFile.Path, payload); err != nil {
+		logger.Error(err, "unable to install OCI artifact file", "file", newFile.Path)
 		return StoreActionNone, err
 	}
+	logger.Info("OCI artifact saved", "artifact", newFile.Path, "reference", ref)
 
-	logger.V(4).Info("Extracting OCI artifact", "archive", archiveFile)
-
-	// Extract artifact and move it to its destination directory
-	files, err := common.ExtractTarGz(ctx, f, dstDir, 0)
-	if err != nil {
-		logger.Error(err, "unable to extract OCI artifact", "filename", archiveFile)
-		return StoreActionNone, err
+	if oldFile == nil {
+		am.addArtifactFile(name, newFile)
+		return StoreActionAdded, nil
 	}
 
-	// Clean up the archive.
-	if err = am.fs.Remove(archiveFile); err != nil {
-		logger.Error(err, "unable to remove OCI artifact", "filename", archiveFile)
+	if err := am.removeReplacedOCIFile(ctx, oldFile, newFile.Path); err != nil {
+		logger.Error(err, "unable to remove replaced OCI file", "file", oldFile.Path)
 		return StoreActionNone, err
 	}
-
-	logger.V(4).Info("Writing OCI artifact", "filename", newFile.Path)
-	// Rename the artifact to the generated name.
-	if err = am.fs.Rename(files[0], newFile.Path); err != nil {
-		logger.Error(err, "unable to rename artifact", "source", files[0], "destination", newFile.Path)
-		return StoreActionNone, err
-	}
-	logger.Info("OCI artifact downloaded and saved", "artifact", newFile.Path)
-
-	// Add the artifact to the manager.
-	am.files[name] = append(am.files[name], newFile)
-
-	return StoreActionAdded, nil
+	am.removeArtifactFile(name, MediumOCI)
+	am.addArtifactFile(name, newFile)
+	return StoreActionUpdated, nil
 }
 
 // StoreFromConfigMap stores an artifact from a ConfigMap to the local filesystem.

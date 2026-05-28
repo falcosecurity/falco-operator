@@ -26,7 +26,7 @@ import (
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
-	"oras.land/oras-go/v2/content/file"
+	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
@@ -36,7 +36,7 @@ import (
 
 // Puller defines the interface for pulling OCI artifacts.
 type Puller interface {
-	Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error)
+	Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions, dst io.Writer) (*RegistryResult, error)
 }
 
 // OciPuller implements the Puller interface for OCI artifacts.
@@ -52,18 +52,18 @@ func NewOciPuller(defaults *RegistryOptions) *OciPuller {
 	return &OciPuller{defaults: defaults}
 }
 
-// Pull an artifact from a remote registry.
+// Pull resolves ref to its artifact layer and copies the compressed layer payload into dst.
+//
 // Ref format follows: REGISTRY/REPO[:TAG|@DIGEST]. Ex. localhost:5000/hello:latest.
 // When opts is non-nil it overrides the puller defaults entirely.
-func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions) (*RegistryResult, error) {
+func (p *OciPuller) Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions, dst io.Writer) (*RegistryResult, error) {
+	if dst == nil {
+		return nil, fmt.Errorf("nil destination writer")
+	}
+
 	options := p.defaults
 	if opts != nil {
 		options = opts
-	}
-
-	fileStore, err := file.New(destDir)
-	if err != nil {
-		return nil, err
 	}
 
 	repo, err := remote.NewRepository(ref)
@@ -85,31 +85,25 @@ func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, cre
 
 	repo.Client = client.NewClient(clientOpts...)
 
-	// if no tag was specified, "latest" is used
 	if repo.Reference.Reference == "" {
-		ref += ":" + DefaultTag
 		repo.Reference.Reference = DefaultTag
 	}
+	copyRef := repo.Reference.String()
 
-	refDesc, _, err := repo.FetchReference(ctx, ref)
+	refDesc, err := repo.Resolve(ctx, repo.Reference.Reference)
 	if err != nil {
 		return nil, err
 	}
 
-	copyOpts := oras.CopyOptions{}
-	copyOpts.Concurrency = 1
+	copyOpts := oras.CopyOptions{
+		CopyGraphOptions: oras.CopyGraphOptions{Concurrency: 1},
+	}
 	if refDesc.MediaType == v1.MediaTypeImageIndex {
-		plt := &v1.Platform{
-			OS:           os,
-			Architecture: arch,
-		}
-		copyOpts.WithTargetPlatform(plt)
+		copyOpts.WithTargetPlatform(&v1.Platform{OS: os, Architecture: arch})
 	}
 
-	localTarget := oras.Target(fileStore)
-
-	desc, err := oras.Copy(ctx, repo, ref, localTarget, ref, copyOpts)
-
+	localTarget := oras.Target(memory.New())
+	desc, err := oras.Copy(ctx, repo, copyRef, localTarget, copyRef, copyOpts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to pull artifact %s with tag %s from repo %s: %w",
 			repo.Reference.Repository, repo.Reference.Reference, repo.Reference.Repository, err)
@@ -120,8 +114,9 @@ func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, cre
 		return nil, err
 	}
 
+	layerDesc := manifest.Layers[0]
 	var artifactType ArtifactType
-	switch manifest.Layers[0].MediaType {
+	switch layerDesc.MediaType {
 	case FalcoPluginLayerMediaType:
 		artifactType = Plugin
 	case FalcoRulesfileLayerMediaType:
@@ -129,39 +124,64 @@ func (p *OciPuller) Pull(ctx context.Context, ref, destDir, os, arch string, cre
 	case FalcoAssetLayerMediaType:
 		artifactType = Asset
 	default:
-		return nil, fmt.Errorf("unknown media type: %q", manifest.Layers[0].MediaType)
+		return nil, fmt.Errorf("unknown media type: %q", layerDesc.MediaType)
 	}
 
-	filename := manifest.Layers[0].Annotations[v1.AnnotationTitle]
+	layerReader, err := localTarget.Fetch(ctx, layerDesc)
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch layer for %s: %w", ref, err)
+	}
+	if err := copyAndClose(dst, layerReader); err != nil {
+		return nil, fmt.Errorf("unable to read layer for %s: %w", ref, err)
+	}
 
 	return &RegistryResult{
 		RootDigest: string(refDesc.Digest),
 		Digest:     string(desc.Digest),
 		Type:       artifactType,
-		Filename:   filename,
+		Filename:   layerDesc.Annotations[v1.AnnotationTitle],
 	}, nil
 }
 
 func manifestFromDesc(ctx context.Context, target oras.Target, desc *v1.Descriptor) (*v1.Manifest, error) {
-	var manifest v1.Manifest
-
 	descReader, err := target.Fetch(ctx, *desc)
 	if err != nil {
 		return nil, fmt.Errorf("unable to fetch descriptor with digest %q: %w", desc.Digest, err)
 	}
 
-	descBytes, err := io.ReadAll(descReader)
+	descBytes, err := readAndClose(descReader)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read bytes from descriptor: %w", err)
 	}
 
-	if err = json.Unmarshal(descBytes, &manifest); err != nil {
+	var manifest v1.Manifest
+	if err := json.Unmarshal(descBytes, &manifest); err != nil {
 		return nil, fmt.Errorf("unable to unmarshal manifest: %w", err)
 	}
-
 	if len(manifest.Layers) < 1 {
 		return nil, fmt.Errorf("no layers in manifest")
 	}
 
 	return &manifest, nil
+}
+
+func readAndClose(reader io.ReadCloser) ([]byte, error) {
+	data, readErr := io.ReadAll(reader)
+	closeErr := reader.Close()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return data, nil
+}
+
+func copyAndClose(dst io.Writer, reader io.ReadCloser) error {
+	_, copyErr := io.Copy(dst, reader)
+	closeErr := reader.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }

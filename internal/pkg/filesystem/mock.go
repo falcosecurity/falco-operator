@@ -24,19 +24,20 @@ import (
 
 // MockFileSystem implements FileSystem for testing.
 type MockFileSystem struct {
-	Files       map[string][]byte
-	StatErr     error
-	ReadErr     error
-	WriteErr    error
-	RemoveErr   error
-	RenameErr   error
-	OpenErr     error
-	statCalls   []string
-	readCalls   []string
-	WriteCalls  []writeCall
-	RemoveCalls []string
-	RenameCalls []renameCall
-	openCalls   []string
+	Files        map[string][]byte
+	StatErr      error
+	ReadErr      error
+	WriteErr     error
+	RemoveErr    error
+	RemoveErrFor map[string]error
+	RenameErr    error
+	OpenErr      error
+	statCalls    []string
+	readCalls    []string
+	WriteCalls   []writeCall
+	RemoveCalls  []string
+	RenameCalls  []renameCall
+	openCalls    []string
 }
 
 type renameCall struct {
@@ -95,6 +96,9 @@ func (m *MockFileSystem) WriteFile(name string, data []byte, perm fs.FileMode) e
 // Remove deletes the named file from the mock filesystem.
 func (m *MockFileSystem) Remove(name string) error {
 	m.RemoveCalls = append(m.RemoveCalls, name)
+	if err, ok := m.RemoveErrFor[name]; ok {
+		return err
+	}
 	if m.RemoveErr != nil {
 		return m.RemoveErr
 	}

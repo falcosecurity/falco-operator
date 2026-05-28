@@ -49,7 +49,8 @@ const (
 
 // File represents a tracked file for any artifact type.
 type File struct {
-	Path     string // Full Path on filesystem
-	Medium   Medium // How the artifact is stored/distributed
-	Priority int32  // Priority when created
+	Path            string // Full Path on filesystem
+	Medium          Medium // How the artifact is stored/distributed
+	Priority        int32  // Priority when created
+	SourceSignature string // Resolved source identity (set for MediumOCI)
 }

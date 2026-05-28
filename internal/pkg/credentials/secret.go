@@ -21,52 +21,46 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"oras.land/oras-go/v2/registry/remote/auth"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
-func credentialFuncFromCredentials(creds auth.Credential) auth.CredentialFunc {
-	return func(ctx context.Context, hostport string) (auth.Credential, error) {
-		return creds, nil
-	}
+func anonymousCredential(_ context.Context, _ string) (auth.Credential, error) {
+	return auth.EmptyCredential, nil
 }
 
-// GetCredentialsFromSecret retrieves credentials from the Kubernetes secret
-// referenced by the AuthSecretRef and returns an ORAS credential.
-func GetCredentialsFromSecret(ctx context.Context, k8sClient client.Client, namespace string, authSecretRef *commonv1alpha1.SecretRef) (auth.CredentialFunc, error) {
-	var creds = auth.EmptyCredential
-
-	if authSecretRef == nil {
-		return credentialFuncFromCredentials(creds), nil
+// FromSecret derives an ORAS credential function from a Secret.
+// A nil secret yields anonymous credentials.
+func FromSecret(registry string, secret *corev1.Secret) (auth.CredentialFunc, error) {
+	if secret == nil {
+		return anonymousCredential, nil
+	}
+	if registry == "" {
+		return nil, fmt.Errorf("registry host is required when using pull credentials")
 	}
 
-	// Fetch the secret
-	secret := &corev1.Secret{}
-	secretNamespacedName := types.NamespacedName{
-		Name:      authSecretRef.Name,
-		Namespace: namespace,
+	creds, err := CredentialsFromSecret(secret)
+	if err != nil {
+		return nil, err
 	}
+	return auth.StaticCredential(registry, creds), nil
+}
 
-	if err := k8sClient.Get(ctx, secretNamespacedName, secret); err != nil {
-		return nil, fmt.Errorf("failed to get pull secret %s: %w", authSecretRef.Name, err)
-	}
-
-	// Extract username and password using standard kubernetes.io/basic-auth keys.
+// CredentialsFromSecret extracts registry credentials from a Kubernetes Secret.
+func CredentialsFromSecret(secret *corev1.Secret) (auth.Credential, error) {
 	username, ok := secret.Data[commonv1alpha1.SecretUsernameKey]
 	if !ok {
-		return nil, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretUsernameKey, authSecretRef.Name)
+		return auth.Credential{}, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretUsernameKey, secret.Name)
 	}
 
 	password, ok := secret.Data[commonv1alpha1.SecretPasswordKey]
 	if !ok {
-		return nil, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretPasswordKey, authSecretRef.Name)
+		return auth.Credential{}, fmt.Errorf("key %q not found in secret %s", commonv1alpha1.SecretPasswordKey, secret.Name)
 	}
 
-	return credentialFuncFromCredentials(auth.Credential{
+	return auth.Credential{
 		Username: string(username),
 		Password: string(password),
-	}), nil
+	}, nil
 }
