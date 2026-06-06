@@ -48,6 +48,8 @@ The following table lists the configurable parameters of the falco-operator char
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity rules |
+| dnsConfig | object | `{}` | Pod DNS config. Requires dnsPolicy to be set to None to take full effect. |
+| dnsPolicy | string | `""` | Pod DNS policy. One of ClusterFirst, ClusterFirstWithHostNet, Default or None. |
 | extraArgs | list | `[]` | Additional CLI arguments passed to the operator binary |
 | extraEnv | list | `[]` | Extra environment variables |
 | extraObjects | list | `[]` | Array of extra Kubernetes manifests to deploy alongside the operator. Each entry is rendered with `tpl`, so Helm templating (e.g. `{{ .Release.Name }}`) is supported within values. |
