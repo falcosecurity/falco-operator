@@ -132,6 +132,19 @@ topologySpreadConstraints: []
 # -- Priority class name
 priorityClassName: ""
 
+# -- Pod DNS policy. One of ClusterFirst, ClusterFirstWithHostNet, Default or None.
+dnsPolicy: ""
+
+# -- Pod DNS config. Requires dnsPolicy to be set to None to take full effect.
+dnsConfig: {}
+  # nameservers:
+  #   - 1.1.1.1
+  # searches:
+  #   - ns.svc.cluster.local
+  # options:
+  #   - name: ndots
+  #     value: "2"
+
 # -- Array of extra Kubernetes manifests to deploy alongside the operator. Each
 # entry is rendered with `tpl`, so Helm templating (e.g. `{{ .Release.Name }}`)
 # is supported within values.
