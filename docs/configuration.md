@@ -12,6 +12,8 @@ This means you do not need to provide a complete Falco configuration. Only speci
 
 ## Default Settings
 
+> These are the defaults of the operator-generated base `falco.yaml`. Optional functionality such as container metadata enrichment (`container.*`, `k8s.*` fields) is **not** part of the base config — load the [container plugin](getting-started.md) via a `Plugin` CR to enable it.
+
 ### DaemonSet Mode
 
 When a Falco CR uses `type: DaemonSet` (or omits `type`), the operator applies these defaults:
@@ -19,7 +21,6 @@ When a Falco CR uses `type: DaemonSet` (or omits `type`), the operator applies t
 | Category | Setting | Default Value |
 |----------|---------|---------------|
 | **Engine** | `engine.kind` | `modern_ebpf` |
-| **Container engines** | CRI, Docker | Both enabled |
 | **Outputs** | `stdout_output.enabled` | `true` |
 | | `syslog_output.enabled` | `true` |
 | **Webserver** | `webserver.enabled` | `true` |
@@ -35,7 +36,7 @@ When a Falco CR uses `type: DaemonSet` (or omits `type`), the operator applies t
 | | Liveness | HTTP `/healthz`, delay 0s (startup probe handles the wait) |
 | | Readiness | HTTP `/healthz`, delay 0s (startup probe handles the wait) |
 
-The full default `falco.yaml` configuration (engine, CRI sockets, outputs, metrics, etc.) is defined in [`internal/pkg/resources/falco.go`](../internal/pkg/resources/falco.go).
+The full default `falco.yaml` configuration (engine, outputs, metrics, etc.) is defined in [`internal/pkg/resources/falco.go`](../internal/pkg/resources/falco.go).
 
 ### Deployment Mode
 
@@ -44,7 +45,6 @@ When a Falco CR uses `type: Deployment`, the operator applies these defaults:
 | Category | Setting | Default Value |
 |----------|---------|---------------|
 | **Engine** | `engine.kind` | `nodriver` |
-| **Container engines** | All | Disabled |
 | **Designed for** | | Plugin-only workloads |
 
 All other settings (outputs, webserver, resources) follow the same defaults as DaemonSet mode.

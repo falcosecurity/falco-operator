@@ -79,7 +79,7 @@ kubectl get falco
 kubectl get pods -l app.kubernetes.io/name=falco
 ```
 
-> **Note**: Falco starts in idle mode — it will not actively monitor until you provide detection rules.
+> **Note**: Falco starts in idle mode — it will not actively monitor until you provide detection rules. Container metadata fields (`container.*`, `k8s.*`) are also unavailable until you load the container plugin (next step).
 
 ## 3. Add the Container Plugin
 
@@ -100,6 +100,8 @@ spec:
       name: ghcr.io
 EOF
 ```
+
+> **Note**: The default runtime sockets work out of the box — the operator mounts them and the plugin resolves paths via `HOST_ROOT`. If you set custom sockets under `spec.config.initConfig.engines`, use plain node paths (e.g. `/run/containerd/containerd.sock`) — do **not** prepend `/host`; the plugin adds it automatically.
 
 ## 4. Add Detection Rules
 

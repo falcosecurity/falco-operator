@@ -8,7 +8,7 @@ The Falco Operator manages Falco deployments, companion components, and runtime 
 
 ### Falco Operator (Instance Controller)
 
-The Falco Operator is the primary component that users install and interact with. It runs as a DaemonSet (by default) in the `falco-operator` namespace and watches for Custom Resources in the `instance.falcosecurity.dev` and `artifact.falcosecurity.dev` API groups.
+The Falco Operator is the primary component that users install and interact with. It runs as a Deployment in the `falco-operator` namespace and watches for Custom Resources in the `instance.falcosecurity.dev` and `artifact.falcosecurity.dev` API groups.
 
 The instance operator binary registers four controllers:
 1. **Falco controller** — Reconciles `Falco` CRs
@@ -142,21 +142,19 @@ All controllers use **Server-Side Apply (SSA)** for resource management:
 | Setting | Value |
 |---------|-------|
 | Engine | `modern_ebpf` |
-| Container engines | CRI + Docker enabled |
 | Outputs | stdout + syslog |
 | Webserver | Enabled (port 8765, Prometheus metrics) |
 | Security context | Privileged |
 | Host mounts | `/proc`, `/sys`, `/dev`, `/etc`, container runtimes |
 | Resource requests | 100m CPU, 512Mi memory |
 | Resource limits | 1000m CPU, 1024Mi memory |
-| Probes | Liveness (60s delay), Readiness (30s delay) |
+| Probes | Startup (HTTP `/healthz`, 3s delay, 5s period, 20 failures), Liveness & Readiness (0s delay — the startup probe handles the wait) |
 
 ### Deployment Mode
 
 | Setting | Value |
 |---------|-------|
 | Engine | `nodriver` (plugin-only) |
-| Container engines | All disabled |
 | Designed for | Plugin-based event sources |
 
 ### Artifact Operator Sidecar
@@ -165,5 +163,5 @@ All controllers use **Server-Side Apply (SSA)** for resource management:
 |---------|-------|
 | Image | Configurable via `ARTIFACT_OPERATOR_IMAGE` env var |
 | Default image | `docker.io/falcosecurity/artifact-operator:latest` |
-| Probes | Readiness (5s delay), Liveness (15s delay) on port 8081 |
+| Probes | Startup (`/readyz`, 3s delay), Readiness (`/readyz`, 5s delay), Liveness (`/healthz`, 15s delay) — all on port 8081 |
 | Volumes | 3 shared `emptyDir` volumes (config, rulesfiles, plugins) |

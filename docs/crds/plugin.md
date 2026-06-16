@@ -73,6 +73,8 @@ spec:
       with_size: false
 ```
 
+> Socket paths under `initConfig.engines.<engine>.sockets` are node paths (e.g. `/run/containerd/containerd.sock`) — do not prepend `/host`; the container plugin adds `HOST_ROOT` automatically.
+
 ### K8s audit plugin
 
 ```yaml
