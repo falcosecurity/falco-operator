@@ -289,29 +289,7 @@ base_syscalls:
 buffered_outputs: false
 config_files:
 - /etc/falco/config.d
-container_engines:
-  bpm:
-    enabled: false
-  cri:
-    enabled: true
-    sockets:
-    - /run/containerd/containerd.sock
-    - /run/crio/crio.sock
-    - /run/k3s/containerd/containerd.sock
-    - /run/host-containerd/containerd.sock
-  docker:
-    enabled: true
-  libvirt_lxc:
-    enabled: false
-  lxc:
-    enabled: false
-  podman:
-    enabled: false
 engine:
-  ebpf:
-    buf_size_preset: 4
-    drop_failed_exit: false
-    probe: ${HOME}/.falco/falco-bpf.o
   kind: modern_ebpf
   kmod:
     buf_size_preset: 4
@@ -329,12 +307,6 @@ file_output:
   enabled: false
   filename: ./events.txt
   keep_alive: false
-grpc:
-  bind_address: unix:///run/falco/falco.sock
-  enabled: false
-  threadiness: 0
-grpc_output:
-  enabled: false
 http_output:
   ca_bundle: ""
   ca_cert: ""
@@ -420,29 +392,7 @@ base_syscalls:
 buffered_outputs: false
 config_files:
 - /etc/falco/config.d
-container_engines:
-  bpm:
-    enabled: false
-  cri:
-    enabled: false
-    sockets:
-    - /run/containerd/containerd.sock
-    - /run/crio/crio.sock
-    - /run/k3s/containerd/containerd.sock
-    - /run/host-containerd/containerd.sock
-  docker:
-    enabled: false
-  libvirt_lxc:
-    enabled: false
-  lxc:
-    enabled: false
-  podman:
-    enabled: false
 engine:
-  ebpf:
-    buf_size_preset: 4
-    drop_failed_exit: false
-    probe: ${HOME}/.falco/falco-bpf.o
   kind: nodriver
   kmod:
     buf_size_preset: 4
@@ -460,12 +410,6 @@ file_output:
   enabled: false
   filename: ./events.txt
   keep_alive: false
-grpc:
-  bind_address: unix:///run/falco/falco.sock
-  enabled: false
-  threadiness: 0
-grpc_output:
-  enabled: false
 http_output:
   ca_bundle: ""
   ca_cert: ""
