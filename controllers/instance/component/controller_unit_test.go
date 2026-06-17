@@ -720,3 +720,89 @@ func TestPatchStatus(t *testing.T) {
 	assert.Equal(t, int32(1), obj.Status.DesiredReplicas)
 	assert.Equal(t, int32(1), obj.Status.AvailableReplicas)
 }
+
+// TestReconcileLabelExclusion verifies the contract of the label filter: keys
+// propagated from the Component resource's metadata are dropped from generated
+// resources (cluster-scoped, workload metadata and pod template), pod selector
+// labels are always preserved, and the Component resource itself is never mutated.
+func TestReconcileLabelExclusion(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+
+	tests := []struct {
+		name        string
+		crLabels    map[string]string
+		excluded    []string
+		wantAbsent  []string
+		wantPodTmpl map[string]string
+		wantCRKeeps []string
+	}{
+		{
+			name:        "tracking label is not propagated, benign label is",
+			crLabels:    map[string]string{"argocd.argoproj.io/instance": "tracked", "team": "secops"},
+			excluded:    []string{"argocd.argoproj.io/instance"},
+			wantAbsent:  []string{"argocd.argoproj.io/instance"},
+			wantPodTmpl: map[string]string{"team": "secops", "app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
+			wantCRKeeps: []string{"argocd.argoproj.io/instance"},
+		},
+		{
+			name:        "excluding a selector key still preserves it in the pod template",
+			crLabels:    map[string]string{"app.kubernetes.io/instance": "custom", "app.kubernetes.io/version": "1.0", "team": "secops"},
+			excluded:    []string{"app.kubernetes.io/*"},
+			wantAbsent:  []string{"app.kubernetes.io/version"},
+			wantPodTmpl: map[string]string{"team": "secops", "app.kubernetes.io/name": "test-mc", "app.kubernetes.io/instance": "test-mc"},
+		},
+		{
+			name:     "disabled filter propagates labels unchanged",
+			crLabels: map[string]string{"argocd.argoproj.io/instance": "tracked"},
+			excluded: nil,
+			wantPodTmpl: map[string]string{
+				"argocd.argoproj.io/instance": "tracked",
+				"app.kubernetes.io/name":      "test-mc",
+				"app.kubernetes.io/instance":  "test-mc",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comp := newMetacollectorComponent("test-mc").WithLabels(tt.crLabels).Build()
+			// Pre-set the finalizer so Reconcile proceeds past ensureFinalizer in one pass.
+			comp.Finalizers = []string{finalizer}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).
+				WithStatusSubresource(comp).Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10),
+				WithLabelFilter(instance.NewLabelFilter(tt.excluded)))
+
+			_, err := r.Reconcile(context.Background(), reconcile.Request{NamespacedName: client.ObjectKeyFromObject(comp)})
+			require.NoError(t, err)
+
+			dep := &appsv1.Deployment{}
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(comp), dep))
+			cr := &rbacv1.ClusterRole{}
+			require.NoError(t, cl.Get(context.Background(),
+				client.ObjectKey{Name: resources.GenerateUniqueName(comp.Name, comp.Namespace)}, cr))
+
+			for _, k := range tt.wantAbsent {
+				assert.NotContains(t, cr.Labels, k, "ClusterRole must not carry %s", k)
+				assert.NotContains(t, dep.Labels, k, "Deployment metadata must not carry %s", k)
+				assert.NotContains(t, dep.Spec.Template.Labels, k, "pod template must not carry %s", k)
+			}
+			for k, v := range tt.wantPodTmpl {
+				assert.Equal(t, v, dep.Spec.Template.Labels[k], "pod template label %s", k)
+			}
+
+			// The pod template must always remain a superset of the immutable selector.
+			require.NotEmpty(t, dep.Spec.Selector.MatchLabels)
+			for k, v := range dep.Spec.Selector.MatchLabels {
+				assert.Equal(t, v, dep.Spec.Template.Labels[k], "pod template must satisfy selector key %s", k)
+			}
+
+			// The Component resource itself must keep its labels (filter is in-memory only).
+			srv := &instancev1alpha1.Component{}
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(comp), srv))
+			for _, k := range tt.wantCRKeeps {
+				assert.Contains(t, srv.Labels, k, "Component resource must retain %s", k)
+			}
+		})
+	}
+}

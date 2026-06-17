@@ -161,3 +161,24 @@ env:
 ```
 
 Default: `docker.io/falcosecurity/artifact-operator:latest`
+
+## Excluding labels from propagation
+
+The operator copies the labels of a `Falco` (or `Component`) resource onto the resources it generates.
+Some external tools add their own labels to the resources they manage and rely on them to decide which objects they own.
+When such a label is copied onto a generated resource, the tool may treat that resource as one of its own and remove it when it is not part of its desired state.
+Namespaced resources are protected by their `OwnerReference`, but cluster-scoped resources (`ClusterRole`, `ClusterRoleBinding`) cannot carry one, so they may be removed and recreated repeatedly.
+
+The `--excluded-labels` flag lists label keys the operator must not copy from the resource's `metadata.labels` onto the resources it generates.
+Matching keys are dropped wherever the operator would propagate them — including the workload metadata and its pod template — while pod selector labels are always preserved.
+Labels you set explicitly (for example in `spec.podTemplateSpec.metadata.labels`) are left untouched.
+The `*` wildcard is supported and the flag may be repeated.
+
+The Helm chart exposes this as the `excludedLabels` array. It is empty by default — add the label keys your environment requires:
+
+```yaml
+excludedLabels:
+  - argocd.argoproj.io/instance
+  - kustomize.toolkit.fluxcd.io/name
+  - kustomize.toolkit.fluxcd.io/namespace
+```

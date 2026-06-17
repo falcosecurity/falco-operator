@@ -5,6 +5,7 @@ release numbering uses [semantic versioning](http://semver.org).
 
 ## Unreleased
 
+* Add `excludedLabels` to stop propagating tracking labels used by external tools onto operator-generated resources, preventing repeated removal/recreation of cluster-scoped resources.
 * Add `dnsPolicy` and `dnsConfig` support for the operator pod.
 
 ## v0.2.0

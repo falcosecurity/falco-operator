@@ -59,17 +59,32 @@ var clusterScopedGVKs = []schema.GroupVersionKind{
 // Reconciler reconciles a Component object.
 type Reconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	recorder events.EventRecorder
+	Scheme      *runtime.Scheme
+	recorder    events.EventRecorder
+	labelFilter instance.LabelFilter
+}
+
+// Option configures a Reconciler.
+type Option func(*Reconciler)
+
+// WithLabelFilter sets the label filter applied to generated resources.
+func WithLabelFilter(f instance.LabelFilter) Option {
+	return func(r *Reconciler) {
+		r.labelFilter = f
+	}
 }
 
 // NewReconciler creates a new Reconciler.
-func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder) *Reconciler {
-	return &Reconciler{
+func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder, opts ...Option) *Reconciler {
+	r := &Reconciler{
 		Client:   cl,
 		Scheme:   scheme,
 		recorder: recorder,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=components;components/status,verbs=create;delete;get;list;patch;update;watch
@@ -102,6 +117,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if ok, err := r.handleDeletion(ctx, comp); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Drop excluded label keys up front so they are not propagated onto any
+	// generated resource. This mutates the in-memory copy only; the Component
+	// resource on the API server keeps its labels.
+	comp.SetLabels(r.labelFilter.Apply(comp.GetLabels()))
 
 	// Patch status via defer to ensure it's always called.
 	defer func() {

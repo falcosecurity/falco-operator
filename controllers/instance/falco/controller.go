@@ -64,16 +64,33 @@ type Reconciler struct {
 	recorder events.EventRecorder
 	// NativeSidecar is a flag to enable the native sidecar.
 	NativeSidecar bool
+	// labelFilter excludes label keys from propagation onto generated resources.
+	labelFilter instance.LabelFilter
+}
+
+// Option configures a Reconciler.
+type Option func(*Reconciler)
+
+// WithLabelFilter sets the label filter applied to generated resources.
+func WithLabelFilter(f instance.LabelFilter) Option {
+	return func(r *Reconciler) {
+		r.labelFilter = f
+	}
 }
 
 // NewReconciler creates a new Reconciler.
-func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder, nativeSidecar bool) *Reconciler {
-	return &Reconciler{
+func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder,
+	nativeSidecar bool, opts ...Option) *Reconciler {
+	r := &Reconciler{
 		Client:        cl,
 		Scheme:        scheme,
 		recorder:      recorder,
 		NativeSidecar: nativeSidecar,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos;falcos/status,verbs=create;delete;get;list;patch;update;watch
@@ -110,6 +127,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	if ok, err := r.handleDeletion(ctx, falco); ok || err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Drop excluded label keys up front so they are not propagated onto any
+	// generated resource. This mutates the in-memory copy only; the Falco
+	// resource on the API server keeps its labels.
+	falco.SetLabels(r.labelFilter.Apply(falco.GetLabels()))
 
 	// Patch status via defer to ensure it's always called.
 	defer func() {
