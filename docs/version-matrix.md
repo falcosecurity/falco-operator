@@ -11,7 +11,7 @@ Each row marks the operator version that introduced a given default; `+` means t
 | v0.0.1+        | 0.41.0        |
 | v0.2.0+        | 0.43.0        |
 | v0.3.0+        | 0.44.0        |
-| v0.3.1+        | 0.44.1        |
+| v0.4.0+        | 0.44.1        |
 
 > The operator version is the released operator image tag (which matches the Helm chart `appVersion`). You can always override the Falco version per instance — see [Configuration](configuration.md) and the [Falco CRD reference](crds/falco.md).
 
