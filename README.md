@@ -128,6 +128,7 @@ For the complete walkthrough, see the [Getting Started guide](docs/getting-start
 | [Architecture](docs/architecture.md) | Components, interactions, design |
 | [CRD Reference](docs/crds/) | Full reference for all Custom Resources |
 | [Configuration](docs/configuration.md) | Defaults and customization |
+| [Version Matrix](docs/version-matrix.md) | Default Falco version per operator release |
 | [Migration Guide](docs/migration-guide.md) | Index of migration chapters |
 | [Contributing](docs/contributing.md) | Development, testing, PR guidelines |
 

@@ -10,6 +10,7 @@ Complete documentation for the [Falco Operator](https://github.com/falcosecurity
 | [Getting Started](getting-started.md) | Deploy Falco and add rules in minutes |
 | [Architecture](architecture.md) | Components, interactions, and design decisions |
 | [Configuration](configuration.md) | Default settings and customization |
+| [Version Matrix](version-matrix.md) | Default Falco version installed by each operator release |
 | [Migration Guide](migration-guide.md) | Index of migration chapters |
 | [Contributing](contributing.md) | Development setup, testing, and PR guidelines |
 
