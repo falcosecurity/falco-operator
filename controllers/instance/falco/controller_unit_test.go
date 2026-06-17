@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -614,6 +615,89 @@ func TestEnsureDeployment(t *testing.T) {
 				assert.Equal(t, tt.falco.Name, dep.GetOwnerReferences()[0].Name)
 			default:
 				assert.Fail(t, "unknown resource type")
+			}
+		})
+	}
+}
+
+// TestReconcileLabelExclusion verifies the contract of the label filter: keys
+// propagated from the Falco resource's metadata are dropped from generated
+// resources (cluster-scoped, workload metadata and pod template), pod selector
+// labels are always preserved, and the Falco resource itself is never mutated.
+func TestReconcileLabelExclusion(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+
+	tests := []struct {
+		name        string
+		crLabels    map[string]string
+		excluded    []string
+		wantAbsent  []string          // keys that must NOT appear on generated resources
+		wantPodTmpl map[string]string // keys+values that must appear in the pod template
+		wantCRKeeps []string          // keys the Falco resource must retain
+	}{
+		{
+			name:        "tracking label is not propagated, benign label is",
+			crLabels:    map[string]string{"argocd.argoproj.io/instance": "tracked", "team": "secops"},
+			excluded:    []string{"argocd.argoproj.io/instance"},
+			wantAbsent:  []string{"argocd.argoproj.io/instance"},
+			wantPodTmpl: map[string]string{"team": "secops", "app.kubernetes.io/name": "test", "app.kubernetes.io/instance": "test"},
+			wantCRKeeps: []string{"argocd.argoproj.io/instance"},
+		},
+		{
+			name:        "excluding a selector key still preserves it in the pod template",
+			crLabels:    map[string]string{"app.kubernetes.io/instance": "custom", "app.kubernetes.io/version": "1.0", "team": "secops"},
+			excluded:    []string{"app.kubernetes.io/*"},
+			wantAbsent:  []string{"app.kubernetes.io/version"},
+			wantPodTmpl: map[string]string{"team": "secops", "app.kubernetes.io/name": "test", "app.kubernetes.io/instance": "test"},
+		},
+		{
+			name:        "disabled filter propagates labels unchanged",
+			crLabels:    map[string]string{"argocd.argoproj.io/instance": "tracked"},
+			excluded:    nil,
+			wantPodTmpl: map[string]string{"argocd.argoproj.io/instance": "tracked", "app.kubernetes.io/name": "test", "app.kubernetes.io/instance": "test"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
+				WithType(resources.ResourceTypeDaemonSet).WithLabels(tt.crLabels).Build()
+			// Pre-set the finalizer so Reconcile proceeds past ensureFinalizer in one pass.
+			falco.Finalizers = []string{finalizer}
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).
+				WithStatusSubresource(falco).Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false,
+				WithLabelFilter(instance.NewLabelFilter(tt.excluded)))
+
+			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(falco)})
+			require.NoError(t, err)
+
+			ds := &appsv1.DaemonSet{}
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), ds))
+			cr := &rbacv1.ClusterRole{}
+			require.NoError(t, cl.Get(context.Background(),
+				client.ObjectKey{Name: resources.GenerateUniqueName(falco.Name, falco.Namespace)}, cr))
+
+			for _, k := range tt.wantAbsent {
+				assert.NotContains(t, cr.Labels, k, "ClusterRole must not carry %s", k)
+				assert.NotContains(t, ds.Labels, k, "DaemonSet metadata must not carry %s", k)
+				assert.NotContains(t, ds.Spec.Template.Labels, k, "pod template must not carry %s", k)
+			}
+			for k, v := range tt.wantPodTmpl {
+				assert.Equal(t, v, ds.Spec.Template.Labels[k], "pod template label %s", k)
+			}
+
+			// The pod template must always remain a superset of the immutable selector.
+			require.NotEmpty(t, ds.Spec.Selector.MatchLabels)
+			for k, v := range ds.Spec.Selector.MatchLabels {
+				assert.Equal(t, v, ds.Spec.Template.Labels[k], "pod template must satisfy selector key %s", k)
+			}
+
+			// The Falco resource itself must keep its labels (filter is in-memory only).
+			srv := &instancev1alpha1.Falco{}
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), srv))
+			for _, k := range tt.wantCRKeeps {
+				assert.Contains(t, srv.Labels, k, "Falco resource must retain %s", k)
 			}
 		})
 	}

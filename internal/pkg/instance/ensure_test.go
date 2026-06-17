@@ -291,71 +291,80 @@ func TestPrepareResource_InputValidation(t *testing.T) {
 	}
 }
 
-func TestPrepareResource_NamespacedResource(t *testing.T) {
+func TestPrepareResource(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	ownerCM := builders.NewConfigMap().WithName("test-owner").
-		WithNamespace("default").
-		WithLabels(map[string]string{"app": "test"}).Build()
-	ownerCM.UID = "test-uid"
+	// newOwner builds a ConfigMap owner with the given labels, optionally with a
+	// UID so that SetControllerReference succeeds.
+	newOwner := func(labels map[string]string, withUID bool) *corev1.ConfigMap {
+		cm := builders.NewConfigMap().WithName("test-owner").WithNamespace("default").
+			WithLabels(labels).Build()
+		if withUID {
+			cm.UID = "test-uid"
+		}
+		return cm
+	}
 
-	resource := builders.NewService().
-		WithNamespace(ownerCM.Namespace).
-		WithLabels(ownerCM.Labels).Build()
+	clusterRoleName := resources.GenerateUniqueName("test-owner", "default")
 
-	result, err := PrepareResource(cl, ownerCM, resource, GenerateOptions{
-		SetControllerRef: true,
-		IsClusterScoped:  false,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
+	tests := []struct {
+		name           string
+		owner          client.Object
+		resource       runtime.Object
+		options        GenerateOptions
+		wantErr        string
+		wantKind       string
+		wantAPIVersion string
+		wantName       string
+		wantLabels     map[string]string
+	}{
+		{
+			name:           "namespaced resource keeps its name and labels",
+			owner:          newOwner(map[string]string{"app": "test"}, true),
+			resource:       builders.NewService().WithNamespace("default").WithLabels(map[string]string{"app": "test"}).Build(),
+			options:        GenerateOptions{SetControllerRef: true},
+			wantKind:       "Service",
+			wantAPIVersion: "v1",
+			wantName:       "test-owner",
+			wantLabels:     map[string]string{"app": "test"},
+		},
+		{
+			name:           "cluster-scoped resource gets a unique name",
+			owner:          newOwner(map[string]string{"app": "test"}, false),
+			resource:       builders.NewClusterRole().WithName(clusterRoleName).WithLabels(map[string]string{"app": "test"}).Build(),
+			options:        GenerateOptions{IsClusterScoped: true},
+			wantKind:       "ClusterRole",
+			wantAPIVersion: "rbac.authorization.k8s.io/v1",
+			wantName:       "test-owner--default",
+			wantLabels:     map[string]string{"app": "test"},
+		},
+		{
+			name:     "controller reference failure on owner without UID",
+			owner:    newOwner(nil, false),
+			resource: builders.NewService().Build(),
+			options:  GenerateOptions{SetControllerRef: true},
+			wantErr:  "failed to set controller reference",
+		},
+	}
 
-	assert.Equal(t, "Service", result.GetKind())
-	assert.Equal(t, "v1", result.GetAPIVersion())
-	assert.Equal(t, "test-owner", result.GetName())
-	assert.Equal(t, map[string]string{"app": "test"}, result.GetLabels())
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := PrepareResource(cl, tt.owner, tt.resource, tt.options)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, result)
 
-func TestPrepareResource_ClusterScopedResource(t *testing.T) {
-	scheme := testScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	ownerCM := builders.NewConfigMap().WithName("test-owner").WithNamespace("default").
-		WithLabels(map[string]string{"app": "test"}).Build()
-
-	resource := builders.NewClusterRole().
-		WithName(resources.GenerateUniqueName(ownerCM.Name, ownerCM.Namespace)).
-		WithLabels(ownerCM.Labels).Build()
-
-	result, err := PrepareResource(cl, ownerCM, resource, GenerateOptions{
-		SetControllerRef: false,
-		IsClusterScoped:  true,
-	})
-	require.NoError(t, err)
-	require.NotNil(t, result)
-
-	assert.Equal(t, "ClusterRole", result.GetKind())
-	assert.Equal(t, "rbac.authorization.k8s.io/v1", result.GetAPIVersion())
-	assert.Equal(t, "test-owner--default", result.GetName())
-	assert.Equal(t, map[string]string{"app": "test"}, result.GetLabels())
-}
-
-func TestPrepareResource_ControllerRefFailure(t *testing.T) {
-	scheme := testScheme(t)
-	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
-
-	// Owner without UID causes SetControllerReference to fail.
-	ownerCM := builders.NewConfigMap().WithName("test-owner").WithNamespace("default").Build()
-
-	resource := builders.NewService().Build()
-
-	_, err := PrepareResource(cl, ownerCM, resource, GenerateOptions{
-		SetControllerRef: true,
-		IsClusterScoped:  false,
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to set controller reference")
+			assert.Equal(t, tt.wantKind, result.GetKind())
+			assert.Equal(t, tt.wantAPIVersion, result.GetAPIVersion())
+			assert.Equal(t, tt.wantName, result.GetName())
+			assert.Equal(t, tt.wantLabels, result.GetLabels())
+		})
+	}
 }
 
 func TestEnsureResource(t *testing.T) {

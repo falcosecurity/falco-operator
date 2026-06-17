@@ -21,6 +21,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -42,6 +43,7 @@ import (
 	secretctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/secret"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -49,6 +51,18 @@ var (
 	scheme   = runtime.NewScheme()
 	setupLog = ctrl.Log.WithName("setup")
 )
+
+// stringSliceFlag accumulates repeated string flag values into a slice.
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string {
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceFlag) Set(value string) error {
+	*s = append(*s, value)
+	return nil
+}
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -66,6 +80,7 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var excludedLabels stringSliceFlag
 	var tlsOpts []func(*tls.Config)
 	var opts zap.Options
 
@@ -86,6 +101,9 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.Var(&excludedLabels, "excluded-labels",
+		"A label key to exclude from propagation onto operator-generated resources. "+
+			"The '*' wildcard is supported (e.g. kustomize.toolkit.fluxcd.io/*). May be repeated.")
 
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
@@ -183,6 +201,10 @@ func main() {
 
 	setupLog.Info("SidecarContainers feature", "enabled", sidecarEnabled)
 
+	// Build the label filter applied to generated resources.
+	labelFilter := instance.NewLabelFilter(excludedLabels)
+	setupLog.V(4).Info("Label propagation filter", "excludedLabels", []string(excludedLabels))
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
@@ -218,6 +240,7 @@ func main() {
 
 	if err = falco.NewReconciler(
 		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"), sidecarEnabled,
+		falco.WithLabelFilter(labelFilter),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)
@@ -225,6 +248,7 @@ func main() {
 
 	if err = component.NewReconciler(
 		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("component-controller"),
+		component.WithLabelFilter(labelFilter),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Component")
 		os.Exit(1)
