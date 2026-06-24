@@ -231,13 +231,14 @@ func TestGenerateWorkload(t *testing.T) {
 					// Non-native sidecar: should be in containers with nil RestartPolicy.
 					var foundSidecar bool
 					for _, c := range podSpec.Containers {
-						if c.Name == tt.wantSidecarName {
-							foundSidecar = true
-							assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
-							assert.Nil(t, c.RestartPolicy, "non-native sidecar should have nil RestartPolicy")
-							assertArtifactOperatorReadinessProbes(t, &c)
-							break
+						if c.Name != tt.wantSidecarName {
+							continue
 						}
+						foundSidecar = true
+						assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
+						assert.Nil(t, c.RestartPolicy, "non-native sidecar should have nil RestartPolicy")
+						assertArtifactOperatorReadinessProbes(t, &c)
+						break
 					}
 					assert.True(t, foundSidecar, "non-native sidecar %s not found in containers", tt.wantSidecarName)
 					// Should NOT be in initContainers.
