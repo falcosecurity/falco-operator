@@ -225,14 +225,17 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	logger := log.FromContext(ctx)
 	p := config.Spec.Priority
 
-	// Clean up conditions before ensuring the config.
-	apimeta.RemoveStatusCondition(&config.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-
 	// Store inline config if specified.
 	// spec.config is stored as JSON by the API server; convert to YAML before writing to disk.
 	configData, err := common.JSONRawToYAML(config.Spec.Config)
 	if err != nil {
-		return fmt.Errorf("converting inline config to YAML: %w", err)
+		logger.Error(err, "unable to convert inline config to YAML")
+		artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&config.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineConfigStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
+		))
+		return err
 	}
 
 	inlineAction, err := r.artifactManager.StoreFromInLineYaml(ctx, config.Name, p, configData, artifact.TypeConfig)

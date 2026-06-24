@@ -214,8 +214,6 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	logger := log.FromContext(ctx)
 	var err error
 
-	apimeta.RemoveStatusCondition(&plugin.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-
 	ociAction, err := r.artifactManager.StoreFromOCI(ctx, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, plugin.Spec.OCIArtifact)
 	if err != nil {
 		logger.Error(err, "unable to store plugin artifact")
@@ -325,9 +323,6 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	r.crToConfigName[plugin.Name] = configName
 
 	r.PluginsConfig.addConfig(r.artifactManager, plugin)
-
-	// Clean up conditions before ensuring the plugin config.
-	apimeta.RemoveStatusCondition(&plugin.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 
 	pluginConfigString, err := r.PluginsConfig.toString()
 	if err != nil {

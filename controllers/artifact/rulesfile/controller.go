@@ -226,9 +226,6 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	logger := log.FromContext(ctx)
 	p := rulesfile.Spec.Priority
 
-	// Clean up conditions before ensuring the rulesfile.
-	apimeta.RemoveStatusCondition(&rulesfile.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-
 	// Store OCI artifact if specified; passing nil removes any previously stored OCI artifact.
 	ociAction, err := r.artifactManager.StoreFromOCI(ctx, rulesfile.Name, p, artifact.TypeRulesfile, rulesfile.Spec.OCIArtifact)
 	if err != nil {
@@ -247,7 +244,13 @@ func (r *RulesfileReconciler) ensureRulesfile(ctx context.Context, rulesfile *ar
 	var inlineRulesData *string
 	inlineRulesData, err = common.JSONRawToYAML(rulesfile.Spec.InlineRules)
 	if err != nil {
-		return fmt.Errorf("converting inline rules to YAML: %w", err)
+		logger.Error(err, "unable to convert inline rules to YAML")
+		artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, common.NewProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonInlineRulesStoreFailed,
+			fmt.Sprintf(artifact.MessageFormatInlineRulesStoreFailed, err.Error()), gen,
+		))
+		return err
 	}
 
 	inlineAction, err := r.artifactManager.StoreFromInLineYaml(ctx, rulesfile.Name, p, inlineRulesData, artifact.TypeRulesfile)
