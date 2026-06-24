@@ -53,7 +53,7 @@ func ExtractAsUnstructured(obj runtime.Object, fieldManager string) (*unstructur
 	}
 
 	fieldset := &fieldpath.Set{}
-	if err := fieldset.FromJSON(bytes.NewReader(fieldsEntry.FieldsV1.Raw)); err != nil {
+	if err := fieldset.FromJSON(bytes.NewReader(fieldsEntry.FieldsV1.GetRawBytes())); err != nil {
 		return nil, fmt.Errorf("error parsing FieldsV1 JSON: %w", err)
 	}
 

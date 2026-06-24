@@ -18,6 +18,7 @@ package managedfields
 
 import (
 	"reflect"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
@@ -59,8 +60,8 @@ func pruneEmptyFields(m map[string]any) {
 			}
 
 			// Remove empty maps from slice (in reverse order to maintain correct indices)
-			for i := len(emptyIndices) - 1; i >= 0; i-- {
-				idx := emptyIndices[i]
+			for _, v := range slices.Backward(emptyIndices) {
+				idx := v
 				val = append(val[:idx], val[idx+1:]...)
 			}
 
