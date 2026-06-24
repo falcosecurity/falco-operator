@@ -128,7 +128,3 @@ type FalcoList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Falco `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&Falco{}, &FalcoList{})
-}

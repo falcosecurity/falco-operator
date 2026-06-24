@@ -14,14 +14,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package v1alpha1 contains API Schema definitions for the artifact v1alpha1 API group.
-// +kubebuilder:object:generate=true
-// +groupName=artifact.falcosecurity.dev
 package v1alpha1
 
 import (
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
 var (
@@ -29,8 +27,19 @@ var (
 	GroupVersion = schema.GroupVersion{Group: "artifact.falcosecurity.dev", Version: "v1alpha1"}
 
 	// SchemeBuilder is used to add go types to the GroupVersionKind scheme.
-	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+	SchemeBuilder = runtime.NewSchemeBuilder(addKnownTypes)
 
 	// AddToScheme adds the types in this group-version to the given scheme.
 	AddToScheme = SchemeBuilder.AddToScheme
 )
+
+// addKnownTypes registers the artifact v1alpha1 types with the given scheme.
+func addKnownTypes(s *runtime.Scheme) error {
+	s.AddKnownTypes(GroupVersion,
+		&Config{}, &ConfigList{},
+		&Plugin{}, &PluginList{},
+		&Rulesfile{}, &RulesfileList{},
+	)
+	metav1.AddToGroupVersion(s, GroupVersion)
+	return nil
+}
