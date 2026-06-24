@@ -21,11 +21,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
@@ -757,6 +759,45 @@ func TestEnsurePlugin(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
+		})
+	}
+}
+
+// TestEnsurePlugin_ProgrammedLastTransitionTime verifies LastTransitionTime stays put on a
+// steady-state reconcile and only moves on a real status transition.
+func TestEnsurePlugin_ProgrammedLastTransitionTime(t *testing.T) {
+	pinned := metav1.NewTime(time.Now().Add(-time.Hour))
+	tests := []struct {
+		name          string
+		initialStatus metav1.ConditionStatus
+		wantPreserved bool
+	}{
+		{name: "steady state preserves timestamp", initialStatus: metav1.ConditionTrue, wantPreserved: true},
+		{name: "real transition restamps timestamp", initialStatus: metav1.ConditionFalse, wantPreserved: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := newTestReconciler(t)
+			plugin := &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Status: artifactv1alpha1.PluginStatus{
+					Conditions: []metav1.Condition{{
+						Type:               commonv1alpha1.ConditionProgrammed.String(),
+						Status:             tt.initialStatus,
+						Reason:             artifact.ReasonProgrammed,
+						Message:            artifact.MessageProgrammed,
+						LastTransitionTime: pinned,
+					}},
+				},
+			}
+
+			require.NoError(t, r.ensurePlugin(context.Background(), plugin))
+
+			cond := apimeta.FindStatusCondition(plugin.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+			require.NotNil(t, cond)
+			require.Equal(t, metav1.ConditionTrue, cond.Status)
+			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
 		})
 	}
 }
