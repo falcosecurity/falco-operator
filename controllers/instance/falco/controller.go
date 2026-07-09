@@ -105,6 +105,7 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=coordination.k8s.io,resources=leases,verbs=create;get;update
 // +kubebuilder:rbac:urls=/metrics,verbs=get
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
