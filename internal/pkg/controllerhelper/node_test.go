@@ -18,17 +18,117 @@ package controllerhelper_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
+
+// newNodeScheme returns a scheme with only corev1 registered, for node-only tests.
+func newNodeScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(s))
+	return s
+}
+
+func newConfigMapWithFinalizer() *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "obj",
+			Namespace:  "default",
+			Finalizers: []string{"test.example.com/my-finalizer"},
+		},
+	}
+}
+
+func TestClearFinalizersIfNodeGone_NoFinalizers(t *testing.T) {
+	s := newNodeScheme(t)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
+
+	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	require.NoError(t, err)
+	// Object had no finalizers, so Patch was never called.
+	got := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
+	assert.Empty(t, got.Finalizers)
+}
+
+func TestClearFinalizersIfNodeGone_NodeExists(t *testing.T) {
+	s := newNodeScheme(t)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
+	cm := newConfigMapWithFinalizer()
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
+
+	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	require.NoError(t, err)
+	// Node still exists, so finalizers must be preserved.
+	got := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
+	assert.NotEmpty(t, got.Finalizers)
+}
+
+func TestClearFinalizersIfNodeGone_NodeGone(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := newConfigMapWithFinalizer()
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build() // node NOT created
+
+	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	require.NoError(t, err)
+	// Finalizers are cleared once the node is gone.
+	got := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
+	assert.Empty(t, got.Finalizers)
+}
+
+func TestClearFinalizersIfNodeGone_GetNodeError(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := newConfigMapWithFinalizer()
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Node); ok {
+					return fmt.Errorf("api server error")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	require.Error(t, err)
+}
+
+func TestClearFinalizersIfNodeGone_PatchError(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := newConfigMapWithFinalizer()
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("patch error")
+			},
+		}).
+		Build()
+
+	// Patch is attempted when the node is gone, and its error is returned.
+	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	require.Error(t, err)
+}
 
 func TestNodeMatchesSelector(t *testing.T) {
 	scheme := runtime.NewScheme()

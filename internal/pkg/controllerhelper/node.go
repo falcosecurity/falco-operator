@@ -19,11 +19,44 @@ package controllerhelper
 import (
 	"context"
 
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
+
+// ClearFinalizersIfNodeGone checks whether nodeName still exists in the cluster.
+// If the node is gone and obj still has finalizers, it removes all finalizers via
+// a Patch so the API server can complete the pending deletion.
+//
+// This is needed when a Kubernetes node is deleted: the per-node artifact operator
+// (running as a DaemonSet pod on that node) is evicted along with it and can no
+// longer remove its own finalizer from the per-node object (ArtifactNode). Without
+// this call the node objects would remain stuck in Terminating indefinitely,
+// blocking parent artifact cleanup.
+func ClearFinalizersIfNodeGone(ctx context.Context, cl client.Client, nodeName string, obj client.Object) error {
+	if len(obj.GetFinalizers()) == 0 {
+		return nil
+	}
+	node := &corev1.Node{}
+	err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node)
+	if err == nil {
+		return nil // node still exists, let the per-node operator clean up normally.
+	}
+	if !k8serrors.IsNotFound(err) {
+		return err
+	}
+	log.FromContext(ctx).Info("Node gone, force-clearing finalizers on orphaned node object",
+		"node", nodeName, "object", obj.GetName())
+	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object)) //nolint:forcetypeassert // client.Object always satisfies this
+	obj.SetFinalizers(nil)
+	if pErr := cl.Patch(ctx, obj, patch); pErr != nil && !k8serrors.IsNotFound(pErr) {
+		return pErr
+	}
+	return nil
+}
 
 // NodeMatchesSelector checks if a selector matches the node labels.
 func NodeMatchesSelector(ctx context.Context, cl client.Client, nodeName string, labelSelector *metav1.LabelSelector) (bool, error) {
