@@ -36,6 +36,7 @@ var (
 // addKnownTypes registers the artifact v1alpha1 types with the given scheme.
 func addKnownTypes(s *runtime.Scheme) error {
 	s.AddKnownTypes(GroupVersion,
+		&ArtifactNode{}, &ArtifactNodeList{},
 		&Config{}, &ConfigList{},
 		&Plugin{}, &PluginList{},
 		&Rulesfile{}, &RulesfileList{},
