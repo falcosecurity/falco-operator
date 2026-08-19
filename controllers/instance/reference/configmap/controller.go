@@ -82,7 +82,7 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	if err := controllerhelper.EnsureInUseFinalizer(
-		ctx, r.Client, r.Scheme, common.ConfigmapInUseFinalizer, ControllerName, cm, referenced); err != nil {
+		ctx, r.Client, common.ConfigmapInUseFinalizer, cm, referenced); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -102,6 +102,7 @@ func (r *ConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findConfigMapsForConfig),
 		).
 		Named(ControllerName).
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &corev1.ConfigMap{})).
 		Complete(r)
 }
 

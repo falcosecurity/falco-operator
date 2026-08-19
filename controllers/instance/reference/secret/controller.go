@@ -78,7 +78,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	}
 
 	if err := controllerhelper.EnsureInUseFinalizer(
-		ctx, r.Client, r.Scheme, common.SecretInUseFinalizer, ControllerName, secret, referenced); err != nil {
+		ctx, r.Client, common.SecretInUseFinalizer, secret, referenced); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -98,6 +98,7 @@ func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(r.findSecretsForPlugin),
 		).
 		Named(ControllerName).
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &corev1.Secret{})).
 		Complete(r)
 }
 

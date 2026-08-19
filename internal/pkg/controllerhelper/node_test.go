@@ -130,6 +130,59 @@ func TestClearFinalizersIfNodeGone_PatchError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestListMatchingNodes_NilSelectorMatchesAll(t *testing.T) {
+	s := newNodeScheme(t)
+	n1 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}}
+	n2 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2", Labels: map[string]string{"pool": "gpu"}}}
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(n1, n2).Build()
+
+	nodes, err := controllerhelper.ListMatchingNodes(context.Background(), cl, nil)
+	require.NoError(t, err)
+	assert.Len(t, nodes, 2)
+}
+
+func TestListMatchingNodes_SelectorMatchesSubset(t *testing.T) {
+	s := newNodeScheme(t)
+	n1 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1", Labels: map[string]string{"pool": "gpu"}}}
+	n2 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2", Labels: map[string]string{"pool": "cpu"}}}
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(n1, n2).Build()
+
+	nodes, err := controllerhelper.ListMatchingNodes(context.Background(), cl,
+		&metav1.LabelSelector{MatchLabels: map[string]string{"pool": "gpu"}})
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	assert.Equal(t, "node1", nodes[0].Name)
+}
+
+func TestListMatchingNodes_InvalidSelector(t *testing.T) {
+	s := newNodeScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(s).Build()
+
+	_, err := controllerhelper.ListMatchingNodes(context.Background(), cl, &metav1.LabelSelector{
+		MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: "key1", Operator: "NotAnOperator"},
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid node selector")
+}
+
+func TestListMatchingNodes_ListError(t *testing.T) {
+	s := newNodeScheme(t)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return fmt.Errorf("api server unavailable")
+			},
+		}).
+		Build()
+
+	_, err := controllerhelper.ListMatchingNodes(context.Background(), cl, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api server unavailable")
+}
+
 func TestNodeMatchesSelector(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)

@@ -196,18 +196,18 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 			request: ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "sec7"}},
 		},
 		{
-			name: "Apply error propagates",
+			name: "Patch error propagates",
 			objects: []client.Object{newSecret("sec7"), &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rf3"},
 				Spec:       artifactv1alpha1.RulesfileSpec{OCIArtifact: ociWithSecret("sec7")},
 			}},
 			intercept: interceptor.Funcs{
-				Apply: func(_ context.Context, _ client.WithWatch, _ runtime.ApplyConfiguration, _ ...client.ApplyOption) error {
-					return errors.New("apply failed")
+				Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+					return errors.New("patch failed")
 				},
 			},
 			request: ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "sec7"}},
-			wantErr: "apply failed",
+			wantErr: "patch failed",
 		},
 		{
 			name:    "Get error (not NotFound)",
@@ -231,7 +231,8 @@ func TestSecretReconciler_Reconcile(t *testing.T) {
 			for _, e := range index.All {
 				builder = builder.WithIndex(e.Object, e.Field, e.ExtractValueFn)
 			}
-			if tt.intercept.Get != nil || tt.intercept.List != nil || tt.intercept.Apply != nil || tt.intercept.Delete != nil {
+			if tt.intercept.Get != nil || tt.intercept.List != nil || tt.intercept.Apply != nil ||
+				tt.intercept.Delete != nil || tt.intercept.Update != nil || tt.intercept.Patch != nil {
 				builder = builder.WithInterceptorFuncs(tt.intercept)
 			}
 			cl := builder.Build()

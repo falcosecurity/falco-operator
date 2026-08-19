@@ -18,6 +18,7 @@ package controllerhelper
 
 import (
 	"context"
+	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -25,6 +26,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
 // ClearFinalizersIfNodeGone checks whether nodeName still exists in the cluster.
@@ -56,6 +59,77 @@ func ClearFinalizersIfNodeGone(ctx context.Context, cl client.Client, nodeName s
 		return pErr
 	}
 	return nil
+}
+
+// ListMatchingNodes returns all nodes matching the given label selector.
+// A nil selector matches all nodes.
+func ListMatchingNodes(ctx context.Context, cl client.Client, sel *metav1.LabelSelector) ([]corev1.Node, error) {
+	nodeList := &corev1.NodeList{}
+	var listOpts []client.ListOption
+	if sel != nil {
+		selector, err := metav1.LabelSelectorAsSelector(sel)
+		if err != nil {
+			return nil, fmt.Errorf("invalid node selector: %w", err)
+		}
+		listOpts = append(listOpts, client.MatchingLabelsSelector{Selector: selector})
+	}
+	if err := cl.List(ctx, nodeList, listOpts...); err != nil {
+		return nil, err
+	}
+	return nodeList.Items, nil
+}
+
+// ListMatchingFalcoNodes returns the subset of nodes that (a) match sel and (b) have at least
+// one Running Falco pod scheduled on them across all Falco CRs in namespace. In DaemonSet mode
+// every matching node has a Falco pod, so the result equals ListMatchingNodes. In Deployment mode
+// only the node(s) hosting a scheduled Falco pod are returned. Nodes excluded by taints or
+// tolerations that prevent Falco from running there are correctly omitted in both modes.
+func ListMatchingFalcoNodes(ctx context.Context, cl client.Client, sel *metav1.LabelSelector, namespace string) ([]corev1.Node, error) {
+	nodes, err := ListMatchingNodes(ctx, cl, sel)
+	if err != nil {
+		return nil, err
+	}
+
+	falcoNodes, err := listFalcoRunningNodeNames(ctx, cl, namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := nodes[:0]
+	for i := range nodes {
+		if _, ok := falcoNodes[nodes[i].Name]; ok {
+			filtered = append(filtered, nodes[i])
+		}
+	}
+	return filtered, nil
+}
+
+// listFalcoRunningNodeNames lists all Falco CRs in namespace and returns the set of node names
+// that currently have a Running pod for any of them.
+func listFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace string) (map[string]struct{}, error) {
+	falcoList := &instancev1alpha1.FalcoList{}
+	if err := cl.List(ctx, falcoList, client.InNamespace(namespace)); err != nil {
+		return nil, fmt.Errorf("list Falco CRs for node filtering: %w", err)
+	}
+
+	running := make(map[string]struct{})
+	for i := range falcoList.Items {
+		name := falcoList.Items[i].Name
+		podList := &corev1.PodList{}
+		if err := cl.List(ctx, podList,
+			client.InNamespace(namespace),
+			client.MatchingLabels{"app.kubernetes.io/instance": name},
+		); err != nil {
+			return nil, fmt.Errorf("list pods for Falco %q: %w", name, err)
+		}
+		for j := range podList.Items {
+			pod := &podList.Items[j]
+			if pod.Status.Phase == corev1.PodRunning && pod.Spec.NodeName != "" {
+				running[pod.Spec.NodeName] = struct{}{}
+			}
+		}
+	}
+	return running, nil
 }
 
 // NodeMatchesSelector checks if a selector matches the node labels.
