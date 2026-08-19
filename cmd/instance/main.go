@@ -37,6 +37,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	artifactconfigctr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/config"
 	"github.com/falcosecurity/falco-operator/controllers/instance/component"
 	"github.com/falcosecurity/falco-operator/controllers/instance/falco"
 	configmapctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/configmap"
@@ -265,6 +266,13 @@ func main() {
 		mgr.GetClient(), mgr.GetScheme(),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", secretctr.ControllerName)
+		os.Exit(1)
+	}
+
+	if err := artifactconfigctr.NewConfigAggregatorReconciler(
+		mgr.GetClient(), mgr.GetScheme(),
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", artifactconfigctr.ControllerName)
 		os.Exit(1)
 	}
 

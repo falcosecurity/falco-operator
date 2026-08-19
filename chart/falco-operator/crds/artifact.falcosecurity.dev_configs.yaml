@@ -194,6 +194,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the .metadata.generation that the instance operator has fully
+                  processed (node objects synced, status patched). Per-node artifact operators defer
+                  reconciliation until this equals metadata.generation.
+                format: int64
+                type: integer
             type: object
         type: object
     served: true

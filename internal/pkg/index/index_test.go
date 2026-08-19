@@ -67,10 +67,11 @@ func TestIndexByConfigMapRef(t *testing.T) {
 }
 
 func TestAll(t *testing.T) {
-	expected := make([]index.Entry, 0, len(index.ConfigIndexes)+len(index.RulesfileIndexes)+len(index.PluginIndexes))
+	expected := make([]index.Entry, 0, len(index.ConfigIndexes)+len(index.RulesfileIndexes)+len(index.PluginIndexes)+len(index.ArtifactNodeIndexes))
 	expected = append(expected, index.ConfigIndexes...)
 	expected = append(expected, index.RulesfileIndexes...)
 	expected = append(expected, index.PluginIndexes...)
+	expected = append(expected, index.ArtifactNodeIndexes...)
 	require.Len(t, index.All, len(expected), "All must contain exactly one entry per resource index")
 
 	for i, entry := range index.All {

@@ -69,6 +69,26 @@ rules:
 - apiGroups:
   - artifact.falcosecurity.dev
   resources:
+  - artifactnodes
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - artifact.falcosecurity.dev
+  resources:
+  - artifactnodes/status
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - artifact.falcosecurity.dev
+  resources:
   - configs
   - configs/status
   - plugins
@@ -81,6 +101,13 @@ rules:
   - patch
   - update
   - watch
+- apiGroups:
+  - artifact.falcosecurity.dev
+  resources:
+  - configs/finalizers
+  verbs:
+  - patch
+  - update
 - apiGroups:
   - coordination.k8s.io
   resources:
