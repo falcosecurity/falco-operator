@@ -41,8 +41,6 @@ import (
 const (
 	testFinalizerInUse = "test.example.com/in-use"
 	testFinalizer      = "test.example.com/finalizer"
-
-	testFieldManager = "test-field-manager"
 )
 
 func newFinalizerScheme(t *testing.T) *runtime.Scheme {
@@ -150,7 +148,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 		initialCM      *corev1.ConfigMap
 		isReferenced   bool
 		setupFn        func(t *testing.T, cl client.Client, s *runtime.Scheme)
-		interceptApply func(ctx context.Context, c client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error
+		interceptPatch func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error
 		wantErr        bool
 		wantFinalizer  bool
 	}{
@@ -167,8 +165,6 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 			wantFinalizer: true,
 		},
 		{
-			// The finalizer must have been added via SSA (by the same field manager)
-			// for SSA to be able to remove it. setupFn establishes that ownership first.
 			name:      "isReferenced=false, finalizer present -> removes finalizer",
 			initialCM: newFinalizerCM(),
 			setupFn: func(t *testing.T, cl client.Client, s *runtime.Scheme) {
@@ -177,7 +173,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 				require.NoError(t, cl.Get(context.Background(),
 					types.NamespacedName{Name: "my-cm", Namespace: "default"}, cm))
 				require.NoError(t, controllerhelper.EnsureInUseFinalizer(
-					context.Background(), cl, s, testFinalizer, testFieldManager, cm, true))
+					context.Background(), cl, testFinalizer, cm, true))
 			},
 			isReferenced:  false,
 			wantFinalizer: false,
@@ -189,9 +185,9 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 			wantFinalizer: false,
 		},
 		{
-			name:      "apply error propagates",
+			name:      "patch error propagates",
 			initialCM: newFinalizerCM(),
-			interceptApply: func(_ context.Context, _ client.WithWatch, _ runtime.ApplyConfiguration, _ ...client.ApplyOption) error {
+			interceptPatch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return fmt.Errorf("server unavailable")
 			},
 			isReferenced: true,
@@ -203,9 +199,9 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newFinalizerScheme(t)
 			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.initialCM)
-			if tt.interceptApply != nil {
+			if tt.interceptPatch != nil {
 				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
-					Apply: tt.interceptApply,
+					Patch: tt.interceptPatch,
 				})
 			}
 			cl := builder.Build()
@@ -220,7 +216,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 				types.NamespacedName{Name: tt.initialCM.Name, Namespace: tt.initialCM.Namespace}, fetched))
 
 			err := controllerhelper.EnsureInUseFinalizer(
-				context.Background(), cl, s, testFinalizer, testFieldManager, fetched, tt.isReferenced)
+				context.Background(), cl, testFinalizer, fetched, tt.isReferenced)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -235,6 +231,240 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 
 			hasFinalizer := slices.Contains(result.Finalizers, testFinalizer)
 			assert.Equal(t, tt.wantFinalizer, hasFinalizer)
+		})
+	}
+}
+
+func TestEnsureInUseFinalizer_GetNotFound(t *testing.T) {
+	s := newFinalizerScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(s).Build() // object never created
+
+	err := controllerhelper.EnsureInUseFinalizer(
+		context.Background(), cl, testFinalizer, newFinalizerCM(), true)
+	require.NoError(t, err, "object already gone is treated as nothing to do, not an error")
+}
+
+func TestEnsureInUseFinalizer_GetOtherError(t *testing.T) {
+	s := newFinalizerScheme(t)
+	cm := newFinalizerCM()
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return fmt.Errorf("api server unavailable")
+			},
+		}).
+		Build()
+
+	err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api server unavailable")
+}
+
+func TestEnsureInUseFinalizer_PatchNotFoundOrConflictSwallowed(t *testing.T) {
+	for _, mkErr := range []struct {
+		name string
+		err  error
+	}{
+		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm")},
+		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict"))},
+	} {
+		t.Run(mkErr.name, func(t *testing.T) {
+			s := newFinalizerScheme(t)
+			cm := newFinalizerCM()
+			cl := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(cm).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+						return mkErr.err
+					},
+				}).
+				Build()
+
+			err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+			require.NoError(t, err, "%s on Patch must be swallowed, not propagated", mkErr.name)
+		})
+	}
+}
+
+const (
+	testLegacyRulesfileFinalizer = "rulesfile.artifact.falcosecurity.dev/finalizer-node-1"
+	testLegacyPluginFinalizer    = "plugin.artifact.falcosecurity.dev/finalizer-node-2"
+	testLegacyConfigFinalizer    = "config.artifact.falcosecurity.dev/finalizer-node-3"
+	testForeignFinalizer         = "other.example.com/keep-me"
+)
+
+func TestReconcileInUseFinalizer(t *testing.T) {
+	// NOTE: the SSA path (pure additions) and the no-op guard are also verified against a
+	// real API server in finalizer_envtest_test.go, since the fake client does not fully
+	// implement SSA ownership semantics for metadata.finalizers.
+	tests := []struct {
+		name           string
+		initialCM      *corev1.ConfigMap
+		isReferenced   bool
+		interceptPatch func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error
+		wantErr        bool
+		wantFinalizers []string
+	}{
+		{
+			name:           "isReferenced=true, no finalizer -> adds finalizer",
+			initialCM:      newFinalizerCM(),
+			isReferenced:   true,
+			wantFinalizers: []string{testFinalizer},
+		},
+		{
+			name:           "isReferenced=true, finalizer already present -> no-op, returns nil",
+			initialCM:      newFinalizerCM(testFinalizer),
+			isReferenced:   true,
+			wantFinalizers: []string{testFinalizer},
+		},
+		{
+			name:           "isReferenced=false, finalizer present -> removes finalizer, list left empty",
+			initialCM:      newFinalizerCM(testFinalizer),
+			isReferenced:   false,
+			wantFinalizers: nil,
+		},
+		{
+			name:           "isReferenced=false, no finalizer -> no-op, returns nil",
+			initialCM:      newFinalizerCM(),
+			isReferenced:   false,
+			wantFinalizers: nil,
+		},
+		{
+			name: "strips all legacy per-node finalizers, keeps foreign and in-use",
+			initialCM: newFinalizerCM(
+				testLegacyRulesfileFinalizer, testFinalizer,
+				testLegacyPluginFinalizer, testForeignFinalizer, testLegacyConfigFinalizer),
+			isReferenced:   true,
+			wantFinalizers: []string{testForeignFinalizer, testFinalizer},
+		},
+		{
+			name:           "strips legacy finalizer and adds in-use in one reconcile",
+			initialCM:      newFinalizerCM(testLegacyPluginFinalizer),
+			isReferenced:   true,
+			wantFinalizers: []string{testFinalizer},
+		},
+		{
+			name:           "strips the last (legacy) finalizer, list left empty",
+			initialCM:      newFinalizerCM(testLegacyConfigFinalizer),
+			isReferenced:   false,
+			wantFinalizers: nil,
+		},
+		{
+			// Removal takes the MergeFrom path (c.Patch), so the Patch interceptor fires.
+			name:      "patch error propagates on removal",
+			initialCM: newFinalizerCM(testFinalizer),
+			interceptPatch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+				return fmt.Errorf("server unavailable")
+			},
+			isReferenced: false,
+			wantErr:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newFinalizerScheme(t)
+			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.initialCM)
+			if tt.interceptPatch != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: tt.interceptPatch,
+				})
+			}
+			cl := builder.Build()
+
+			err := controllerhelper.ReconcileInUseFinalizer(
+				context.Background(), cl, tt.initialCM, testFinalizer, tt.isReferenced)
+
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			result := &corev1.ConfigMap{}
+			require.NoError(t, cl.Get(context.Background(),
+				types.NamespacedName{Name: tt.initialCM.Name, Namespace: tt.initialCM.Namespace}, result))
+			assert.Equal(t, tt.wantFinalizers, result.Finalizers)
+		})
+	}
+}
+
+func TestReconcileInUseFinalizer_NoOpGuardSkipsApply(t *testing.T) {
+	s := newFinalizerScheme(t)
+	cm := newFinalizerCM(testFinalizer, testForeignFinalizer)
+	patchCalls := 0
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patchCalls++
+				return c.Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	err := controllerhelper.ReconcileInUseFinalizer(
+		context.Background(), cl, cm, testFinalizer, true)
+	require.NoError(t, err)
+	assert.Equal(t, 0, patchCalls, "no API call expected when finalizer state already matches")
+}
+
+func TestReconcileInUseFinalizer_GetNotFound(t *testing.T) {
+	s := newFinalizerScheme(t)
+	cl := fake.NewClientBuilder().WithScheme(s).Build() // object never created
+
+	err := controllerhelper.ReconcileInUseFinalizer(
+		context.Background(), cl, newFinalizerCM(), testFinalizer, true)
+	require.NoError(t, err, "object already gone is treated as nothing to do, not an error")
+}
+
+func TestReconcileInUseFinalizer_GetOtherError(t *testing.T) {
+	s := newFinalizerScheme(t)
+	cm := newFinalizerCM()
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return fmt.Errorf("api server unavailable")
+			},
+		}).
+		Build()
+
+	err := controllerhelper.ReconcileInUseFinalizer(
+		context.Background(), cl, cm, testFinalizer, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api server unavailable")
+}
+
+func TestReconcileInUseFinalizer_ApplyNotFoundOrConflictSwallowed(t *testing.T) {
+	for _, mkErr := range []struct {
+		name string
+		err  error
+	}{
+		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm")},
+		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict"))},
+	} {
+		t.Run(mkErr.name, func(t *testing.T) {
+			s := newFinalizerScheme(t)
+			cm := newFinalizerCM()
+			cl := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(cm).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+						return mkErr.err
+					},
+				}).
+				Build()
+
+			err := controllerhelper.ReconcileInUseFinalizer(
+				context.Background(), cl, cm, testFinalizer, true)
+			require.NoError(t, err, "%s on patch must be swallowed, not propagated", mkErr.name)
 		})
 	}
 }
