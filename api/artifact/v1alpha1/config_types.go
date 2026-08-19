@@ -48,6 +48,11 @@ type ConfigStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// ObservedGeneration is the .metadata.generation that the instance operator has fully
+	// processed (node objects synced, status patched). Per-node artifact operators defer
+	// reconciliation until this equals metadata.generation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true
