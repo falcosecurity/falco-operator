@@ -48,6 +48,12 @@ type MockOCIPuller struct {
 	FetchConfigErr   error
 	FetchConfigCalls []string
 
+	// ResolveDigestResult is the digest string returned by ResolveDigest.
+	ResolveDigestResult string
+	// ResolveDigestErr is returned by ResolveDigest when set.
+	ResolveDigestErr   error
+	ResolveDigestCalls []string
+
 	// ContentResult is returned by FetchContent when FetchContentErr is nil.
 	ContentResult []byte
 	// FetchContentErr is returned by FetchContent when set.
@@ -70,6 +76,15 @@ func (m *MockOCIPuller) FetchConfig(_ context.Context, ref string, _ auth.Creden
 		return nil, "", m.FetchConfigErr
 	}
 	return m.ConfigResult, m.ConfigDigest, nil
+}
+
+// ResolveDigest records the call and returns the preset digest result.
+func (m *MockOCIPuller) ResolveDigest(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) (string, error) {
+	m.ResolveDigestCalls = append(m.ResolveDigestCalls, ref)
+	if m.ResolveDigestErr != nil {
+		return "", m.ResolveDigestErr
+	}
+	return m.ResolveDigestResult, nil
 }
 
 // FetchContent records the call and returns the preset content bytes.
