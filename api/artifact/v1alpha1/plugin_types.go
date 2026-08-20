@@ -56,12 +56,24 @@ type PluginStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
+	// ArtifactMeta holds the parsed metadata (requirements, dependencies, digest) collected by
+	// the instance operator. Per-node artifact operators read this field instead of hitting the
+	// registry themselves.
+	// +optional
+	// +nullable
+	ArtifactMeta *commonv1alpha1.ArtifactMeta `json:"artifactMeta,omitempty"`
+	// ObservedGeneration is the .metadata.generation that the instance operator has fully
+	// processed (ArtifactMeta computed, status patched). Per-node artifact operators defer
+	// reconciliation until this equals metadata.generation.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:path=plugins,categories=artifacts
 // +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=".status.conditions[?(@.type == 'Programmed')].status"
+// +kubebuilder:printcolumn:name="DependenciesSatisfied",type="string",JSONPath=".status.conditions[?(@.type == 'DependenciesSatisfied')].status"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // Plugin is the Schema for the plugin API.
