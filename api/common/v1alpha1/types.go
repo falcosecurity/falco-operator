@@ -47,6 +47,15 @@ const (
 	// - True: the artifact was programmed successfully.
 	// - False: the artifact could not be programmed.
 	ConditionProgrammed ConditionType = "Programmed"
+	// ConditionDeletionBlocked indicates whether removal of this node's artifact is being
+	// withheld because another artifact on the same node (e.g. a Rulesfile) still structurally
+	// depends on it. Set only by per-node artifact operators on the ArtifactNode they own; the
+	// instance-level aggregator surfaces it onto the parent artifact like any other condition.
+	// The possible status values for this condition type are:
+	// - True: removal is blocked; the message names the blocking dependent(s).
+	// - Absent: not blocked. This condition is only ever set while a removal is actually being
+	//   withheld; there is no corresponding False state to clear.
+	ConditionDeletionBlocked ConditionType = "DeletionBlocked"
 )
 
 // String returns the string representation of the condition type.

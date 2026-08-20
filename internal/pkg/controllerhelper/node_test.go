@@ -183,6 +183,61 @@ func TestListMatchingNodes_ListError(t *testing.T) {
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
 
+func TestIsBeingDeleted_NotDeleted(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
+
+	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
+	require.NoError(t, err)
+	assert.False(t, deleting)
+}
+
+func TestIsBeingDeleted_DeletionTimestampSet(t *testing.T) {
+	s := newNodeScheme(t)
+	now := metav1.Now()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "obj", Namespace: "default",
+			Finalizers:        []string{"test.example.com/finalizer"}, // a DeletionTimestamp requires a finalizer to be set
+			DeletionTimestamp: &now,
+		},
+	}
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
+
+	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
+	require.NoError(t, err)
+	assert.True(t, deleting)
+}
+
+func TestIsBeingDeleted_ObjectGone(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
+	cl := fake.NewClientBuilder().WithScheme(s).Build() // never created
+
+	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
+	require.NoError(t, err)
+	assert.True(t, deleting, "a gone object is treated the same as being deleted")
+}
+
+func TestIsBeingDeleted_GetError(t *testing.T) {
+	s := newNodeScheme(t)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(cm).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				return fmt.Errorf("api server unavailable")
+			},
+		}).
+		Build()
+
+	_, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "api server unavailable")
+}
+
 func TestNodeMatchesSelector(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)

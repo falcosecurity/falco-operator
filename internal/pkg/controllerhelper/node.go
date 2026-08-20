@@ -132,6 +132,24 @@ func listFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace 
 	return running, nil
 }
 
+// IsBeingDeleted re-fetches obj and reports whether it now has a DeletionTimestamp set, or is
+// gone entirely, which is treated the same way since there is nothing left to create against.
+//
+// Use this as a final check immediately before creating a child object, after any slow,
+// network-bound work (OCI registry calls, blob pulls) that ran since the initial
+// DeletionTimestamp check at the top of Reconcile (that earlier check can go stale if an
+// external delete lands while the reconcile is busy).
+func IsBeingDeleted(ctx context.Context, cl client.Client, obj client.Object) (bool, error) {
+	fresh := obj.DeepCopyObject().(client.Object) //nolint:forcetypeassert // client.Object always satisfies this
+	if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), fresh); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return true, nil
+		}
+		return false, err
+	}
+	return !fresh.GetDeletionTimestamp().IsZero(), nil
+}
+
 // NodeMatchesSelector checks if a selector matches the node labels.
 func NodeMatchesSelector(ctx context.Context, cl client.Client, nodeName string, labelSelector *metav1.LabelSelector) (bool, error) {
 	logger := log.FromContext(ctx)

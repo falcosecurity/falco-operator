@@ -105,6 +105,7 @@ rules:
   - artifact.falcosecurity.dev
   resources:
   - configs/finalizers
+  - plugins/finalizers
   verbs:
   - patch
   - update
