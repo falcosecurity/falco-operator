@@ -43,6 +43,9 @@ type Puller interface {
 	// FetchConfig retrieves only the OCI config layer for the given reference without downloading the artifact
 	// binary. It returns the parsed ArtifactConfig and the resolved root digest (suitable as a cache key).
 	FetchConfig(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (*ArtifactConfig, string, error)
+	// ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
+	// It is a cheap HEAD-equivalent call suitable for cache validation.
+	ResolveDigest(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (string, error)
 	// FetchContent downloads the content layer for ref and returns the extracted file bytes without writing to disk.
 	// For rulesfile artifacts this is the raw YAML.
 	FetchContent(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) ([]byte, error)
@@ -265,6 +268,42 @@ func (p *OciPuller) FetchConfig(ctx context.Context, ref string, creds auth.Cred
 	}
 
 	return &config, string(rootDesc.Digest), nil
+}
+
+// ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
+func (p *OciPuller) ResolveDigest(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (string, error) {
+	options := p.defaults
+	if opts != nil {
+		options = opts
+	}
+
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return "", fmt.Errorf("unable to create repository for %q: %w", ref, err)
+	}
+
+	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
+	if options != nil {
+		if options.InsecureSkipVerify {
+			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
+			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
+			retryTransport := retry.NewTransport(httpTransport)
+			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
+		}
+		repo.PlainHTTP = options.PlainHTTP
+	}
+	repo.Client = client.NewClient(clientOpts...)
+
+	if repo.Reference.Reference == "" {
+		repo.Reference.Reference = DefaultTag
+	}
+
+	desc, err := repo.Resolve(ctx, repo.Reference.Reference)
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve %q: %w", ref, err)
+	}
+
+	return string(desc.Digest), nil
 }
 
 // FetchContent downloads the artifact content layer for ref and returns the extracted file bytes.
