@@ -28,10 +28,11 @@ import (
 )
 
 // patchFinalizer adds (add=true) or removes (add=false) finalizer on obj, then applies the
-// change via a MergeFrom patch. obj is mutated in place. Callers classify/handle the returned
-// error themselves.
+// change via an optimistic-lock MergeFrom patch. obj is mutated in place. Callers
+// classify/handle the returned error themselves.
 func patchFinalizer(ctx context.Context, cl client.Client, obj client.Object, finalizer string, add bool) error {
-	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object)) //nolint:forcetypeassert // client.Object always satisfies this
+	base := obj.DeepCopyObject().(client.Object) //nolint:forcetypeassert // client.Object always satisfies this
+	patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
 
 	if add {
 		controllerutil.AddFinalizer(obj, finalizer)
@@ -72,9 +73,8 @@ func EnsureFinalizer(ctx context.Context, cl client.Client, finalizer string, ob
 // the object's current server state, not whatever the caller happened to be holding.
 //
 // A no-op guard avoids any API call when the current state already matches the desired state.
-// A NotFound from the initial Get, and a NotFound or Conflict from the patch, are treated as
-// nothing left to do rather than errors, since another actor already removed or changed the
-// object.
+// A NotFound from the initial Get or patch is treated as nothing left to do. A Conflict is
+// returned so controller-runtime retries from the latest finalizer set.
 func EnsureInUseFinalizer(ctx context.Context, c client.Client, finalizer string, obj client.Object, isReferenced bool) error {
 	logger := log.FromContext(ctx)
 
@@ -98,8 +98,8 @@ func EnsureInUseFinalizer(ctx context.Context, c client.Client, finalizer string
 	}
 
 	if err := patchFinalizer(ctx, c, current, finalizer, isReferenced); err != nil {
-		if k8serrors.IsNotFound(err) || k8serrors.IsConflict(err) {
-			logger.V(3).Info("Object gone or changed before finalizer update landed, skipping", "err", err)
+		if k8serrors.IsNotFound(err) {
+			logger.V(3).Info("Object gone before finalizer update landed, skipping", "err", err)
 			return nil
 		}
 		return fmt.Errorf("updating finalizer on %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
@@ -137,8 +137,8 @@ var legacyParentFinalizerPrefixes = []string{
 // EnsureInUseFinalizer instead, which only touches its own finalizer.
 //
 // A no-op guard avoids any API call when the current state already matches the desired
-// state. A NotFound from the initial Get, and a NotFound or Conflict from the patch, are
-// treated as nothing left to do rather than errors, mirroring EnsureInUseFinalizer.
+// state. A NotFound from the initial Get or patch is treated as nothing left to do. A
+// Conflict is returned so controller-runtime retries without losing a concurrent finalizer.
 func ReconcileInUseFinalizer(ctx context.Context, c client.Client,
 	obj client.Object, finalizer string, isReferenced bool,
 ) error {
@@ -173,20 +173,15 @@ func ReconcileInUseFinalizer(ctx context.Context, c client.Client,
 
 	base := current.DeepCopyObject().(client.Object) //nolint:forcetypeassert // client.Object always satisfies this
 	current.SetFinalizers(desired)
-	if err := c.Patch(ctx, current, client.MergeFrom(base)); err != nil {
-		return swallowGoneOrConflict(ctx, err, obj)
+	patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+	if err := c.Patch(ctx, current, patch); err != nil {
+		if k8serrors.IsNotFound(err) {
+			logger.V(3).Info("Object gone before finalizer update landed, skipping", "err", err)
+			return nil
+		}
+		return fmt.Errorf("updating finalizers on %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
 	}
 	return nil
-}
-
-// swallowGoneOrConflict returns nil when err is NotFound or Conflict (the object is gone
-// or changed underneath us; a later reconcile settles it), and a wrapped error otherwise.
-func swallowGoneOrConflict(ctx context.Context, err error, obj client.Object) error {
-	if k8serrors.IsNotFound(err) || k8serrors.IsConflict(err) {
-		log.FromContext(ctx).V(3).Info("Object gone or changed before finalizer update landed, skipping", "err", err)
-		return nil
-	}
-	return fmt.Errorf("updating finalizers on %s/%s: %w", obj.GetNamespace(), obj.GetName(), err)
 }
 
 // finalizerSetsEqual reports whether a and b contain the same finalizers, ignoring order.

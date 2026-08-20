@@ -302,6 +302,43 @@ func TestReconcile_DeletesStaleNodeObject(t *testing.T) {
 	assert.Empty(t, nodeList.Items)
 }
 
+func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) {
+	config := newTestConfig(
+		withConfigSelector("env", "prod"),
+		func(c *artifactv1alpha1.Config) {
+			c.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+		},
+	)
+	staleNode := newTestConfigNode(func(n *artifactv1alpha1.ArtifactNode) {
+		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
+		n.Status.Conditions = []metav1.Condition{{
+			Type:    commonv1alpha1.ConditionProgrammed.String(),
+			Status:  metav1.ConditionTrue,
+			Reason:  "Programmed",
+			Message: "old result",
+		}}
+	})
+	r, cl := newTestReconciler(t, config, staleNode, newTestNode())
+
+	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	terminating := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), terminating))
+	assert.False(t, terminating.DeletionTimestamp.IsZero(), "the node-side finalizer keeps the stale child terminating")
+
+	got := &artifactv1alpha1.Config{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
+	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
+		"the parent must stay alive until the terminating child is physically gone")
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
+	assert.Equal(t, "NoNodesAssigned", condition.Reason,
+		"the stale child's last successful result must not remain in the aggregate")
+}
+
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	config := newTestConfig()

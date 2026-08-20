@@ -50,7 +50,11 @@ func NewConfigAggregatorReconciler(cl client.Client, scheme *runtime.Scheme) *Co
 
 // ConfigAggregatorReconciler manages ArtifactNode objects and aggregates their
 // conditions into the parent Config status.
-//
+type ConfigAggregatorReconciler struct {
+	client.Client
+	Scheme *runtime.Scheme
+}
+
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/status,verbs=patch;update
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/finalizers,verbs=patch;update
@@ -59,10 +63,6 @@ func NewConfigAggregatorReconciler(cl client.Client, scheme *runtime.Scheme) *Co
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
-type ConfigAggregatorReconciler struct {
-	client.Client
-	Scheme *runtime.Scheme
-}
 
 // Reconcile reconciles a Config: ensures ArtifactNode objects exist for matching nodes,
 // removes stale ones, and writes the aggregate conditions back to the Config.
@@ -114,17 +114,6 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Ensure the in-use finalizer is present when node objects exist.
-	// The SSA variant also strips any legacy per-node finalizers left by old operators.
-	hasNodes := len(matchingNodes) > 0
-	if err := controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, config,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		hasNodes,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Re-fetch node objects (some may have just been created) to compute the aggregate.
 	existingNodes, err = controllerhelper.ListOwnedNodes(ctx, r.Client, config.Namespace, config.Name, controllerhelper.KindConfig)
 	if err != nil {
@@ -132,9 +121,34 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	logger.V(1).Info("Re-listed ArtifactNode objects after sync", "count", len(existingNodes.Items))
 
+	// Keep the parent alive when children are desired or until every existing child is
+	// physically gone. The desired-node check also covers a just-created child that the
+	// informer cache may not expose in the immediate re-list yet.
+	if err := controllerhelper.ReconcileInUseFinalizer(
+		ctx, r.Client, config,
+		controllerhelper.NodeObjectsInUseFinalizer,
+		len(matchingNodes) > 0 || len(existingNodes.Items) > 0,
+	); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// A stale or terminating child no longer represents the desired assignment and must not
+	// keep its last condition in the aggregate while deletion is pending.
+	activeNodes := &artifactv1alpha1.ArtifactNodeList{}
+	for i := range existingNodes.Items {
+		nodeObject := &existingNodes.Items[i]
+		if !nodeObject.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if _, ok := desired[nodeObject.Spec.NodeName]; !ok {
+			continue
+		}
+		activeNodes.Items = append(activeNodes.Items, *nodeObject)
+	}
+
 	oldStatus := config.Status.DeepCopy()
 	config.Status.ObservedGeneration = config.Generation
-	controllerhelper.ComputeAggregateConditions(ctx, config, &config.Status.Conditions, existingNodes)
+	controllerhelper.ComputeAggregateConditions(ctx, config, &config.Status.Conditions, activeNodes)
 	if !apiequality.Semantic.DeepEqual(*oldStatus, config.Status) {
 		return ctrl.Result{}, controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, config, ControllerName)
 	}
