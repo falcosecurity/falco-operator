@@ -28,6 +28,9 @@ const (
 	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
 	// ReasonOCIArtifactProgramFailed indicates the OCI-sourced artifact failed to store.
 	ReasonOCIArtifactProgramFailed = "OCIArtifactProgramFailed"
+	// ReasonPluginConfigStillRequired indicates a plugin's on-disk config/binary removal is
+	// being withheld because a Rulesfile on this node still structurally depends on it.
+	ReasonPluginConfigStillRequired = "PluginConfigStillRequired"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
 	ReasonOCIArtifactStored = "OCIArtifactStored"
 	// ReasonOCIArtifactUpdated indicates the OCI artifact was updated successfully.
