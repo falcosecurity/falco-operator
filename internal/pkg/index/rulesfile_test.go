@@ -146,3 +146,90 @@ func TestRulesfileBySecretRef_WrongType(t *testing.T) {
 	}
 	assert.Nil(t, index.RulesfileBySecretRef(plugin))
 }
+
+func TestRulesfileByPluginDependency(t *testing.T) {
+	tests := []struct {
+		name      string
+		rulesfile *artifactv1alpha1.Rulesfile
+		want      []string
+	}{
+		{
+			name: "nil ArtifactMeta returns nil",
+			rulesfile: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rf", Namespace: testNamespace},
+			},
+			want: nil,
+		},
+		{
+			name: "empty dependencies returns nil",
+			rulesfile: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rf", Namespace: testNamespace},
+				Status: artifactv1alpha1.RulesfileStatus{
+					ArtifactMeta: &commonv1alpha1.ArtifactMeta{},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "single dependency no alternatives",
+			rulesfile: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rf", Namespace: testNamespace},
+				Status: artifactv1alpha1.RulesfileStatus{
+					ArtifactMeta: &commonv1alpha1.ArtifactMeta{
+						Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+							{Name: "k8saudit", Version: "0.7.0"},
+						},
+					},
+				},
+			},
+			want: []string{"k8saudit"},
+		},
+		{
+			name: "dependency with alternatives",
+			rulesfile: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rf", Namespace: testNamespace},
+				Status: artifactv1alpha1.RulesfileStatus{
+					ArtifactMeta: &commonv1alpha1.ArtifactMeta{
+						Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+							{
+								Name:    "k8saudit",
+								Version: "0.7.0",
+								Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
+									{Name: "k8saudit-eks", Version: "0.5.0"},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: []string{"k8saudit", "k8saudit-eks"},
+		},
+		{
+			name: "duplicate names across dependencies are deduplicated",
+			rulesfile: &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "rf", Namespace: testNamespace},
+				Status: artifactv1alpha1.RulesfileStatus{
+					ArtifactMeta: &commonv1alpha1.ArtifactMeta{
+						Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+							{Name: "k8saudit", Version: "0.7.0"},
+							{Name: "k8saudit", Version: "0.8.0"},
+						},
+					},
+				},
+			},
+			want: []string{"k8saudit"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, index.RulesfileByPluginDependency(tt.rulesfile))
+		})
+	}
+}
+
+func TestRulesfileByPluginDependency_WrongType(t *testing.T) {
+	assert.Nil(t, index.RulesfileByPluginDependency(&artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+	}))
+}

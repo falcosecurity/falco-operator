@@ -106,6 +106,7 @@ rules:
   resources:
   - configs/finalizers
   - plugins/finalizers
+  - rulesfiles/finalizers
   verbs:
   - patch
   - update

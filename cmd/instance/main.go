@@ -39,6 +39,7 @@ import (
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	artifactconfigctr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/config"
 	artifactpluginctr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/plugin"
+	artifactrulesfilectr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/controllers/instance/component"
 	"github.com/falcosecurity/falco-operator/controllers/instance/falco"
 	configmapctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/configmap"
@@ -278,11 +279,18 @@ func main() {
 	}
 
 	// cache is nil until the centralized artifact blob cache is wired up (a later PR); Plugin
-	// pre-fetches are then skipped and per-node artifact operators pull directly.
+	// and Rulesfile pre-fetches are then skipped and per-node artifact operators pull directly.
 	if err := artifactpluginctr.NewPluginAggregatorReconciler(
 		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-plugin"), nil,
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", artifactpluginctr.ControllerName)
+		os.Exit(1)
+	}
+
+	if err := artifactrulesfilectr.NewRulesfileAggregatorReconciler(
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-rulesfile"), nil,
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", artifactrulesfilectr.ControllerName)
 		os.Exit(1)
 	}
 
