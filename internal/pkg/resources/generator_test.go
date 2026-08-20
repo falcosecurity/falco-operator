@@ -17,6 +17,7 @@
 package resources
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -179,9 +180,9 @@ func TestGenerateRole(t *testing.T) {
 		wantRuleCount int
 	}{
 		{
-			name:          "falco role has 5 rules",
+			name:          "falco role has 6 rules",
 			defs:          FalcoDefaults,
-			wantRuleCount: 5,
+			wantRuleCount: 6,
 		},
 		{
 			name:          "metacollector role has no rules",
@@ -217,6 +218,21 @@ func TestGenerateRole(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestFalcoRoleAllowsArtifactNodeCache(t *testing.T) {
+	role := GenerateRole(testObject(), FalcoDefaults).(*rbacv1.Role) //nolint:forcetypeassert // generator contract
+
+	var resourceRule *rbacv1.PolicyRule
+	for i := range role.Rules {
+		rule := &role.Rules[i]
+		if slices.Contains(rule.Resources, "artifactnodes") {
+			resourceRule = rule
+		}
+	}
+
+	require.NotNil(t, resourceRule, "the artifact-operator cache needs list/watch access to ArtifactNodes")
+	assert.ElementsMatch(t, []string{"get", "list", "watch"}, resourceRule.Verbs)
 }
 
 func TestGenerateRoleBinding(t *testing.T) {

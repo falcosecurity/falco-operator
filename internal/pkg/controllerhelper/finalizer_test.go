@@ -122,7 +122,9 @@ func TestEnsureFinalizer(t *testing.T) {
 			}
 			cl := builder.Build()
 
-			added, err := controllerhelper.EnsureFinalizer(context.Background(), cl, testFinalizer, tt.obj)
+			live := &corev1.ConfigMap{}
+			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.obj), live))
+			added, err := controllerhelper.EnsureFinalizer(context.Background(), cl, testFinalizer, live)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -262,13 +264,14 @@ func TestEnsureInUseFinalizer_GetOtherError(t *testing.T) {
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
 
-func TestEnsureInUseFinalizer_PatchNotFoundOrConflictSwallowed(t *testing.T) {
+func TestEnsureInUseFinalizer_PatchErrors(t *testing.T) {
 	for _, mkErr := range []struct {
-		name string
-		err  error
+		name    string
+		err     error
+		wantErr bool
 	}{
-		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm")},
-		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict"))},
+		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm"), false},
+		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict")), true},
 	} {
 		t.Run(mkErr.name, func(t *testing.T) {
 			s := newFinalizerScheme(t)
@@ -284,7 +287,56 @@ func TestEnsureInUseFinalizer_PatchNotFoundOrConflictSwallowed(t *testing.T) {
 				Build()
 
 			err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
-			require.NoError(t, err, "%s on Patch must be swallowed, not propagated", mkErr.name)
+			if mkErr.wantErr {
+				require.Error(t, err)
+				assert.True(t, k8serrors.IsConflict(err), "Conflict must be returned so the reconcile is retried")
+				return
+			}
+			require.NoError(t, err, "NotFound on Patch is benign because the object is already gone")
+		})
+	}
+}
+
+func TestInUseFinalizerPatchesUseOptimisticLock(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(client.Client, *corev1.ConfigMap) error
+	}{
+		{
+			name: "EnsureInUseFinalizer",
+			run: func(cl client.Client, cm *corev1.ConfigMap) error {
+				return controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+			},
+		},
+		{
+			name: "ReconcileInUseFinalizer",
+			run: func(cl client.Client, cm *corev1.ConfigMap) error {
+				return controllerhelper.ReconcileInUseFinalizer(context.Background(), cl, cm, testFinalizer, true)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newFinalizerScheme(t)
+			cm := newFinalizerCM()
+			sawResourceVersion := false
+			cl := fake.NewClientBuilder().
+				WithScheme(s).
+				WithObjects(cm).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						data, err := patch.Data(obj)
+						require.NoError(t, err)
+						sawResourceVersion = assert.Contains(t, string(data), `"resourceVersion":`,
+							"optimistic-lock patch must carry the version read before changing finalizers")
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+
+			require.NoError(t, tt.run(cl, cm))
+			assert.True(t, sawResourceVersion)
 		})
 	}
 }
@@ -297,9 +349,9 @@ const (
 )
 
 func TestReconcileInUseFinalizer(t *testing.T) {
-	// NOTE: the SSA path (pure additions) and the no-op guard are also verified against a
-	// real API server in finalizer_envtest_test.go, since the fake client does not fully
-	// implement SSA ownership semantics for metadata.finalizers.
+	// NOTE: finalizer removal and the no-op guard are also verified against a real API
+	// server in finalizer_envtest_test.go, since fake-client patch behavior is not a
+	// complete substitute for apiserver semantics.
 	tests := []struct {
 		name           string
 		initialCM      *corev1.ConfigMap
@@ -392,7 +444,7 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 	}
 }
 
-func TestReconcileInUseFinalizer_NoOpGuardSkipsApply(t *testing.T) {
+func TestReconcileInUseFinalizer_NoOpGuardSkipsPatch(t *testing.T) {
 	s := newFinalizerScheme(t)
 	cm := newFinalizerCM(testFinalizer, testForeignFinalizer)
 	patchCalls := 0
@@ -441,13 +493,14 @@ func TestReconcileInUseFinalizer_GetOtherError(t *testing.T) {
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
 
-func TestReconcileInUseFinalizer_ApplyNotFoundOrConflictSwallowed(t *testing.T) {
+func TestReconcileInUseFinalizer_PatchErrors(t *testing.T) {
 	for _, mkErr := range []struct {
-		name string
-		err  error
+		name    string
+		err     error
+		wantErr bool
 	}{
-		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm")},
-		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict"))},
+		{"NotFound", k8serrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, "my-cm"), false},
+		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict")), true},
 	} {
 		t.Run(mkErr.name, func(t *testing.T) {
 			s := newFinalizerScheme(t)
@@ -464,7 +517,12 @@ func TestReconcileInUseFinalizer_ApplyNotFoundOrConflictSwallowed(t *testing.T) 
 
 			err := controllerhelper.ReconcileInUseFinalizer(
 				context.Background(), cl, cm, testFinalizer, true)
-			require.NoError(t, err, "%s on patch must be swallowed, not propagated", mkErr.name)
+			if mkErr.wantErr {
+				require.Error(t, err)
+				assert.True(t, k8serrors.IsConflict(err), "Conflict must be returned so the reconcile is retried")
+				return
+			}
+			require.NoError(t, err, "NotFound on Patch is benign because the object is already gone")
 		})
 	}
 }

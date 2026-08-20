@@ -158,6 +158,11 @@ var FalcoDefaults = &InstanceDefaults{
 			Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
 			Verbs:     []string{"get", "update", "patch"},
 		},
+		{
+			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+			Resources: []string{"artifactnodes"},
+			Verbs:     []string{"get", "list", "watch"},
+		},
 	},
 	VolumeMounts: []corev1.VolumeMount{
 		{Name: "root-falco-fs", MountPath: "/root/.falco"},
