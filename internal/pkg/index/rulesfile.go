@@ -17,6 +17,8 @@
 package index
 
 import (
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
@@ -26,6 +28,9 @@ const (
 	ConfigMapOnRulesfile = "ConfigMapOnRulesfile"
 	// SecretOnRulesfile is the index field name for Rulesfile resources indexed by their SecretRef.
 	SecretOnRulesfile = "SecretOnRulesfile"
+	// PluginOnRulesfile is the index field name for Rulesfile resources indexed by the plugin names
+	// declared in Status.ArtifactMeta.Dependencies (primary and alternatives).
+	PluginOnRulesfile = "PluginOnRulesfile"
 )
 
 // RulesfileByConfigMapRef indexes Rulesfile resources by their .spec.configMapRef.name.
@@ -46,6 +51,31 @@ var RulesfileBySecretRef = IndexBySecretRef(
 	},
 )
 
+// RulesfileByPluginDependency indexes Rulesfile resources by the plugin names declared in
+// Status.ArtifactMeta.Dependencies, including all alternatives. Returns nil when ArtifactMeta
+// is not yet populated (status not written by the instance operator).
+var RulesfileByPluginDependency client.IndexerFunc = func(obj client.Object) []string {
+	rf, ok := obj.(*artifactv1alpha1.Rulesfile)
+	if !ok || rf.Status.ArtifactMeta == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var names []string
+	addName := func(name string) {
+		if _, exists := seen[name]; !exists {
+			seen[name] = struct{}{}
+			names = append(names, name)
+		}
+	}
+	for _, dep := range rf.Status.ArtifactMeta.Dependencies {
+		addName(dep.Name)
+		for _, alt := range dep.Alternatives {
+			addName(alt.Name)
+		}
+	}
+	return names
+}
+
 // RulesfileIndexes holds all field indexes for Rulesfile resources.
 var RulesfileIndexes = []Entry{
 	{
@@ -57,5 +87,10 @@ var RulesfileIndexes = []Entry{
 		Object:         &artifactv1alpha1.Rulesfile{},
 		Field:          SecretOnRulesfile,
 		ExtractValueFn: RulesfileBySecretRef,
+	},
+	{
+		Object:         &artifactv1alpha1.Rulesfile{},
+		Field:          PluginOnRulesfile,
+		ExtractValueFn: RulesfileByPluginDependency,
 	},
 }
