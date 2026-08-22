@@ -146,3 +146,55 @@ type ConfigMapRef struct {
 	// +kubebuilder:validation:Required
 	Name string `json:"name"`
 }
+
+// ArtifactMeta holds the parsed metadata for an artifact (requirements and dependencies
+// extracted from all sources). Written by the instance operator; read by per-node artifact
+// operators to check requirements without hitting the registry or re-parsing content.
+// +kubebuilder:object:generate=true
+type ArtifactMeta struct {
+	// Digest is the resolved OCI manifest digest of the currently observed artifact.
+	// +optional
+	Digest string `json:"digest,omitempty"`
+	// SpecHash is a SHA-256 hash of the OCIArtifact spec. When it changes the cached
+	// Digest, Requirements, and Dependencies are invalidated and re-fetched.
+	// +optional
+	SpecHash string `json:"specHash,omitempty"`
+	// Requirements lists the engine/capability requirements declared by the artifact.
+	// +optional
+	Requirements []ArtifactMetaRequirement `json:"requirements,omitempty"`
+	// Dependencies lists the plugin dependencies declared by the artifact.
+	// +optional
+	Dependencies []ArtifactMetaDependency `json:"dependencies,omitempty"`
+}
+
+// ArtifactMetaRequirement is a single engine or capability requirement declared by an artifact.
+// +kubebuilder:object:generate=true
+type ArtifactMetaRequirement struct {
+	// Name is the capability name (e.g. "engine_version_semver", "falco").
+	Name string `json:"name"`
+	// Version is the minimum required version string.
+	Version string `json:"version"`
+}
+
+// ArtifactMetaDependency is a plugin dependency declared by an artifact.
+// +kubebuilder:object:generate=true
+type ArtifactMetaDependency struct {
+	// Name is the plugin name.
+	Name string `json:"name"`
+	// Version is the minimum required plugin version.
+	Version string `json:"version"`
+	// Alternatives lists optional substitute plugins that can satisfy this dependency.
+	// +optional
+	Alternatives []ArtifactMetaDependencyVariant `json:"alternatives,omitempty"`
+}
+
+// ArtifactMetaDependencyVariant is an alternative plugin that can satisfy a dependency.
+// It is a flat (non-recursive) form of ArtifactMetaDependency so that CRD schemas
+// can express a concrete array-item type.
+// +kubebuilder:object:generate=true
+type ArtifactMetaDependencyVariant struct {
+	// Name is the plugin name.
+	Name string `json:"name"`
+	// Version is the minimum required plugin version.
+	Version string `json:"version"`
+}
