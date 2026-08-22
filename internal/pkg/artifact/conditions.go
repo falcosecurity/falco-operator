@@ -26,6 +26,8 @@ const (
 	ReasonReferenceResolved = "ReferenceResolved"
 	// ReasonReferenceResolutionFailed indicates the reference failed to resolve.
 	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
+	// ReasonOCIArtifactProgramFailed indicates the OCI-sourced artifact failed to store.
+	ReasonOCIArtifactProgramFailed = "OCIArtifactProgramFailed"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
 	ReasonOCIArtifactStored = "OCIArtifactStored"
 	// ReasonOCIArtifactUpdated indicates the OCI artifact was updated successfully.

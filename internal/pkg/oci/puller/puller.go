@@ -17,12 +17,14 @@
 package puller
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
@@ -31,12 +33,22 @@ import (
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/client"
 )
 
 // Puller defines the interface for pulling OCI artifacts.
 type Puller interface {
 	Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions, dst io.Writer) (*RegistryResult, error)
+	// FetchConfig retrieves only the OCI config layer for the given reference without downloading the artifact
+	// binary. It returns the parsed ArtifactConfig and the resolved root digest (suitable as a cache key).
+	FetchConfig(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (*ArtifactConfig, string, error)
+	// ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
+	// It is a cheap HEAD-equivalent call suitable for cache validation.
+	ResolveDigest(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (string, error)
+	// FetchContent downloads the content layer for ref and returns the extracted file bytes without writing to disk.
+	// For rulesfile artifacts this is the raw YAML.
+	FetchContent(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) ([]byte, error)
 }
 
 // OciPuller implements the Puller interface for OCI artifacts.
@@ -184,4 +196,137 @@ func copyAndClose(dst io.Writer, reader io.ReadCloser) error {
 		return copyErr
 	}
 	return closeErr
+}
+
+// FetchConfig retrieves only the OCI config layer (manifest.Config) for ref without
+// downloading the artifact binary layers. It returns the parsed ArtifactConfig and
+// the root manifest digest, which callers may use as a stable cache key.
+func (p *OciPuller) FetchConfig(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (*ArtifactConfig, string, error) {
+	options := p.defaults
+	if opts != nil {
+		options = opts
+	}
+
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to create repository for %q: %w", ref, err)
+	}
+
+	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
+	if options != nil {
+		if options.InsecureSkipVerify {
+			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
+			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
+			retryTransport := retry.NewTransport(httpTransport)
+			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
+		}
+		repo.PlainHTTP = options.PlainHTTP
+	}
+	repo.Client = client.NewClient(clientOpts...)
+
+	if repo.Reference.Reference == "" {
+		repo.Reference.Reference = DefaultTag
+	}
+
+	rootDesc, err := repo.Resolve(ctx, repo.Reference.Reference)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to resolve %q: %w", ref, err)
+	}
+
+	manifestDesc := rootDesc
+	if rootDesc.MediaType == v1.MediaTypeImageIndex {
+		indexBytes, err := fetchBytes(ctx, repo, &rootDesc)
+		if err != nil {
+			return nil, "", fmt.Errorf("unable to fetch image index for %q: %w", ref, err)
+		}
+		var index v1.Index
+		if err := json.Unmarshal(indexBytes, &index); err != nil {
+			return nil, "", fmt.Errorf("unable to parse image index for %q: %w", ref, err)
+		}
+		if len(index.Manifests) == 0 {
+			return nil, "", fmt.Errorf("image index for %q has no manifests", ref)
+		}
+		manifestDesc = index.Manifests[0]
+	}
+
+	manifestBytes, err := fetchBytes(ctx, repo, &manifestDesc)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to fetch manifest for %q: %w", ref, err)
+	}
+	var manifest v1.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil, "", fmt.Errorf("unable to parse manifest for %q: %w", ref, err)
+	}
+
+	configBytes, err := fetchBytes(ctx, repo, &manifest.Config)
+	if err != nil {
+		return nil, "", fmt.Errorf("unable to fetch config for %q: %w", ref, err)
+	}
+	var config ArtifactConfig
+	if err := json.Unmarshal(configBytes, &config); err != nil {
+		return nil, "", fmt.Errorf("unable to parse config for %q: %w", ref, err)
+	}
+
+	return &config, string(rootDesc.Digest), nil
+}
+
+// ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
+func (p *OciPuller) ResolveDigest(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (string, error) {
+	options := p.defaults
+	if opts != nil {
+		options = opts
+	}
+
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return "", fmt.Errorf("unable to create repository for %q: %w", ref, err)
+	}
+
+	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
+	if options != nil {
+		if options.InsecureSkipVerify {
+			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
+			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
+			retryTransport := retry.NewTransport(httpTransport)
+			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
+		}
+		repo.PlainHTTP = options.PlainHTTP
+	}
+	repo.Client = client.NewClient(clientOpts...)
+
+	if repo.Reference.Reference == "" {
+		repo.Reference.Reference = DefaultTag
+	}
+
+	desc, err := repo.Resolve(ctx, repo.Reference.Reference)
+	if err != nil {
+		return "", fmt.Errorf("unable to resolve %q: %w", ref, err)
+	}
+
+	return string(desc.Digest), nil
+}
+
+// FetchContent downloads the artifact content layer for ref and returns the extracted file bytes.
+// For rulesfile artifacts the layer is a tar.gz archive containing a single YAML file.
+func (p *OciPuller) FetchContent(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) ([]byte, error) {
+	var compressed bytes.Buffer
+	if _, err := p.Pull(ctx, ref, runtime.GOOS, runtime.GOARCH, creds, opts, &compressed); err != nil {
+		return nil, fmt.Errorf("pull content for %q: %w", ref, err)
+	}
+	file, err := common.ExtractSingleFileFromTarGz(ctx, &compressed, 0)
+	if err != nil {
+		return nil, fmt.Errorf("extract content for %q: %w", ref, err)
+	}
+	return file.Content, nil
+}
+
+// fetchBytes fetches the content of desc from target and returns it as a byte slice.
+func fetchBytes(ctx context.Context, target interface {
+	Fetch(context.Context, v1.Descriptor) (io.ReadCloser, error)
+}, desc *v1.Descriptor) ([]byte, error) {
+	r, err := target.Fetch(ctx, *desc)
+	if err != nil {
+		return nil, err
+	}
+	return readAndClose(r)
 }

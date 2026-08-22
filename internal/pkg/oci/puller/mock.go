@@ -39,6 +39,26 @@ type MockOCIPuller struct {
 	// destination writer when PullErr is nil. If nil, the payload is empty.
 	LayerContent []byte
 	PullCalls    []PullCall
+
+	// ConfigResult is returned by FetchConfig when FetchConfigErr is nil.
+	ConfigResult *ArtifactConfig
+	// ConfigDigest is the digest string returned by FetchConfig.
+	ConfigDigest string
+	// FetchConfigErr is returned by FetchConfig when set.
+	FetchConfigErr   error
+	FetchConfigCalls []string
+
+	// ResolveDigestResult is the digest string returned by ResolveDigest.
+	ResolveDigestResult string
+	// ResolveDigestErr is returned by ResolveDigest when set.
+	ResolveDigestErr   error
+	ResolveDigestCalls []string
+
+	// ContentResult is returned by FetchContent when FetchContentErr is nil.
+	ContentResult []byte
+	// FetchContentErr is returned by FetchContent when set.
+	FetchContentErr   error
+	FetchContentCalls []string
 }
 
 // PullCall records the arguments of a Pull invocation.
@@ -47,6 +67,33 @@ type PullCall struct {
 	OS   string
 	Arch string
 	Opts *RegistryOptions
+}
+
+// FetchConfig records the call and returns the preset config result.
+func (m *MockOCIPuller) FetchConfig(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) (*ArtifactConfig, string, error) {
+	m.FetchConfigCalls = append(m.FetchConfigCalls, ref)
+	if m.FetchConfigErr != nil {
+		return nil, "", m.FetchConfigErr
+	}
+	return m.ConfigResult, m.ConfigDigest, nil
+}
+
+// ResolveDigest records the call and returns the preset digest result.
+func (m *MockOCIPuller) ResolveDigest(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) (string, error) {
+	m.ResolveDigestCalls = append(m.ResolveDigestCalls, ref)
+	if m.ResolveDigestErr != nil {
+		return "", m.ResolveDigestErr
+	}
+	return m.ResolveDigestResult, nil
+}
+
+// FetchContent records the call and returns the preset content bytes.
+func (m *MockOCIPuller) FetchContent(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) ([]byte, error) {
+	m.FetchContentCalls = append(m.FetchContentCalls, ref)
+	if m.FetchContentErr != nil {
+		return nil, m.FetchContentErr
+	}
+	return m.ContentResult, nil
 }
 
 // Pull records the call, writes LayerContent to dst, and returns the preset result.
