@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"runtime"
 
+	"oras.land/oras-go/v2/registry"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -37,6 +38,8 @@ import (
 // Pass knownDigest when the caller already resolved the digest (e.g. from
 // Status.ArtifactMeta.Digest set by fetchAndCacheArtifactMeta) to skip the
 // redundant ResolveDigest registry call. Pass an empty string to resolve it here.
+// The actual pull is always pinned to that digest so a mutable tag cannot change
+// between resolution and download.
 //
 // For platform-specific artifacts (plugins) supply goos and goarch; for platform-agnostic
 // artifacts (rulesfiles) pass empty strings. The pull still uses the server's own platform
@@ -44,6 +47,10 @@ import (
 func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArtifact, artifactType Type,
 	goos, goarch string, cache *artifactcache.Cache, knownDigest string,
 ) (string, error) {
+	if artifactType == TypePlugin && (goos == "" || goarch == "") {
+		return "", fmt.Errorf("plugin artifact requires both OS and architecture")
+	}
+
 	logger := log.FromContext(ctx)
 
 	secretRef := authSecretRef(ociArt)
@@ -66,6 +73,10 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 			return "", fmt.Errorf("resolve digest for %q: %w", ref, err)
 		}
 	}
+	pullRef, err := pinReferenceToDigest(ref, digest)
+	if err != nil {
+		return "", fmt.Errorf("pin reference %q to digest %q: %w", ref, digest, err)
+	}
 
 	blobPath := artifactcache.BlobPath(cache.Dir(), string(artifactType), ref, digest, goos, goarch)
 
@@ -82,12 +93,15 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 	logger.Info("Pulling OCI blob", "ref", ref, "os", pullGOOS, "arch", pullGOARCH)
 
 	var buf bytes.Buffer
-	res, err := am.ociPuller.Pull(ctx, ref, pullGOOS, pullGOARCH, creds, opts, &buf)
+	res, err := am.ociPuller.Pull(ctx, pullRef, pullGOOS, pullGOARCH, creds, opts, &buf)
 	if err != nil {
 		return "", fmt.Errorf("pull %q (%s/%s): %w", ref, pullGOOS, pullGOARCH, err)
 	}
 	if res == nil {
 		return "", fmt.Errorf("puller returned nil result for %q", ref)
+	}
+	if res.RootDigest != digest {
+		return "", fmt.Errorf("pulled OCI artifact digest %q does not match expected digest %q for %q", res.RootDigest, digest, ref)
 	}
 	if !isExpectedOCIArtifactType(artifactType, res.Type) {
 		return "", fmt.Errorf("pulled OCI artifact type %q does not match expected %q", res.Type, artifactType)
@@ -98,10 +112,22 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 		return "", fmt.Errorf("extract from OCI layer %q: %w", ref, err)
 	}
 
-	if err := artifactcache.Store(blobPath, file.Content, file.Perm); err != nil {
+	if err := cache.Store(blobPath, file.Content, file.Perm); err != nil {
 		return "", err
 	}
 
 	logger.Info("OCI blob cached", "ref", ref, "digest", digest, "blob", blobPath)
 	return blobPath, nil
+}
+
+func pinReferenceToDigest(ref, digest string) (string, error) {
+	pinned, err := registry.ParseReference(ref)
+	if err != nil {
+		return "", err
+	}
+	pinned.Reference = digest
+	if err := pinned.ValidateReferenceAsDigest(); err != nil {
+		return "", err
+	}
+	return pinned.String(), nil
 }

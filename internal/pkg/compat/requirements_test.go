@@ -43,6 +43,10 @@ func TestSemverAtLeast(t *testing.T) {
 		{name: "short available padded with zeros", available: "62", required: "15", want: true},
 		{name: "short required padded with zeros", available: "0.62.0", required: "0", want: true},
 		{name: "short versions equal", available: "62", required: "62", want: true},
+		{name: "leading v accepted", available: "v0.62.1", required: "0.62.0", want: true},
+		{name: "prerelease is lower than release", available: "1.0.0-rc.1", required: "1.0.0", want: false},
+		{name: "release is higher than prerelease", available: "1.0.0", required: "1.0.0-rc.1", want: true},
+		{name: "build metadata does not affect precedence", available: "1.0.0+build.2", required: "1.0.0+build.1", want: true},
 		{name: "invalid available part returns error", available: "x.62.0", required: "0.62.0", wantErr: true},
 		{name: "invalid required part returns error", available: "0.62.0", required: "0.x.0", wantErr: true},
 	}
@@ -77,6 +81,8 @@ func TestSemverMajorCompatible(t *testing.T) {
 		{name: "zero major same", available: "0.5.0", required: "0.5.0", want: true},
 		{name: "zero major available higher patch", available: "0.5.1", required: "0.5.0", want: true},
 		{name: "zero major available lower", available: "0.4.9", required: "0.5.0", want: false},
+		{name: "leading v accepted", available: "v2.1.0", required: "2.0.0", want: true},
+		{name: "same major prerelease is lower", available: "2.0.0-rc.1", required: "2.0.0", want: false},
 		{name: "invalid available returns error", available: "x.0.0", required: "2.0.0", wantErr: true},
 		{name: "invalid required returns error", available: "2.0.0", required: "x.0.0", wantErr: true},
 	}

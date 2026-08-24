@@ -19,8 +19,8 @@ package compat
 import (
 	"fmt"
 	"strconv"
-	"strings"
 
+	semver "github.com/blang/semver/v4"
 	"gopkg.in/yaml.v3"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
@@ -30,51 +30,42 @@ import (
 // It uses major-compatibility semantics: the major version must match exactly.
 const CapabilityPluginAPIVersion = "plugin_api_version"
 
-// SemverAtLeast reports whether available >= required, comparing X.Y.Z version tuples
-// part by part. Shorter versions are padded with zeros (e.g. "19" → "19.0.0").
+// SemverAtLeast reports whether available >= required according to semantic-version
+// precedence. Tolerant parsing accepts common forms such as "v1.2.3" and shortened
+// versions such as "19" (interpreted as "19.0.0").
 func SemverAtLeast(available, required string) (bool, error) {
-	ap := strings.SplitN(available, ".", 3)
-	rp := strings.SplitN(required, ".", 3)
-	for len(ap) < 3 {
-		ap = append(ap, "0")
+	availableVersion, err := parseSemver(available, "available")
+	if err != nil {
+		return false, err
 	}
-	for len(rp) < 3 {
-		rp = append(rp, "0")
+	requiredVersion, err := parseSemver(required, "required")
+	if err != nil {
+		return false, err
 	}
-	for i := range 3 {
-		a, err := strconv.Atoi(ap[i])
-		if err != nil {
-			return false, fmt.Errorf("parse available version part %q of %q: %w", ap[i], available, err)
-		}
-		r, err := strconv.Atoi(rp[i])
-		if err != nil {
-			return false, fmt.Errorf("parse required version part %q of %q: %w", rp[i], required, err)
-		}
-		if a != r {
-			return a > r, nil
-		}
-	}
-	return true, nil
+	return availableVersion.GTE(requiredVersion), nil
 }
 
 // SemverMajorCompatible reports whether available and required share the same major version
 // AND available >= required. Used for plugin_api_version, where a higher major version
 // (e.g. framework 3.x) is not compatible with a plugin requiring 2.x.
 func SemverMajorCompatible(available, required string) (bool, error) {
-	aMajor, _, _ := strings.Cut(available, ".")
-	rMajor, _, _ := strings.Cut(required, ".")
-	a, err := strconv.Atoi(aMajor)
+	availableVersion, err := parseSemver(available, "available")
 	if err != nil {
-		return false, fmt.Errorf("parse available major version %q of %q: %w", aMajor, available, err)
+		return false, err
 	}
-	r, err := strconv.Atoi(rMajor)
+	requiredVersion, err := parseSemver(required, "required")
 	if err != nil {
-		return false, fmt.Errorf("parse required major version %q of %q: %w", rMajor, required, err)
+		return false, err
 	}
-	if a != r {
-		return false, nil
+	return availableVersion.Major == requiredVersion.Major && availableVersion.GTE(requiredVersion), nil
+}
+
+func parseSemver(value, role string) (semver.Version, error) {
+	version, err := semver.ParseTolerant(value)
+	if err != nil {
+		return semver.Version{}, fmt.Errorf("parse %s version %q: %w", role, value, err)
 	}
-	return SemverAtLeast(available, required)
+	return version, nil
 }
 
 // RulesRequirements holds requirements extracted from a Falco rules YAML document.

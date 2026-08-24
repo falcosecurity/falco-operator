@@ -80,13 +80,43 @@ func TestDeduplicateArtifactMeta(t *testing.T) {
 			wantDeps: nil,
 		},
 		{
+			name: "incompatible plugin API majors are preserved",
+			input: commonv1alpha1.ArtifactMeta{
+				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
+					req("plugin_api_version", "3.0.0"),
+					req("plugin_api_version", "2.0.0"),
+					req("plugin_api_version", "2.1.0"),
+				},
+			},
+			wantReqs: []commonv1alpha1.ArtifactMetaRequirement{
+				req("plugin_api_version", "2.1.0"),
+				req("plugin_api_version", "3.0.0"),
+			},
+			wantDeps: nil,
+		},
+		{
+			name: "invalid requirement is preserved while valid versions are collapsed",
+			input: commonv1alpha1.ArtifactMeta{
+				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
+					req("engine_version_semver", "invalid"),
+					req("engine_version_semver", "0.62.0"),
+					req("engine_version_semver", "0.57.0"),
+				},
+			},
+			wantReqs: []commonv1alpha1.ArtifactMetaRequirement{
+				req("engine_version_semver", "0.62.0"),
+				req("engine_version_semver", "invalid"),
+			},
+			wantDeps: nil,
+		},
+		{
 			name:     "single dependency unchanged",
 			input:    commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{dep("json", "0.7.0")}},
 			wantReqs: nil,
 			wantDeps: []commonv1alpha1.ArtifactMetaDependency{dep("json", "0.7.0")},
 		},
 		{
-			name: "duplicate dependency keeps strictest (higher) version with its alternatives",
+			name: "same primary dependency in distinct groups is preserved",
 			input: commonv1alpha1.ArtifactMeta{
 				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
 					dep("json", "0.7.0"),
@@ -95,7 +125,44 @@ func TestDeduplicateArtifactMeta(t *testing.T) {
 				},
 			},
 			wantDeps: []commonv1alpha1.ArtifactMetaDependency{
+				dep("json", "0.7.0"),
+				dep("json", "0.8.0"),
 				dep("json", "0.9.0", commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alt", Version: "1.0.0"}),
+			},
+		},
+		{
+			name: "identical dependency groups and alternatives are deduplicated",
+			input: commonv1alpha1.ArtifactMeta{
+				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+					dep("json", "0.7.0",
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+					),
+					dep("json", "0.7.0",
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+					),
+				},
+			},
+			wantDeps: []commonv1alpha1.ArtifactMetaDependency{
+				dep("json", "0.7.0",
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+				),
+			},
+		},
+		{
+			name: "same primary and version with different alternatives is preserved",
+			input: commonv1alpha1.ArtifactMeta{
+				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+					dep("json", "0.7.0", commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"}),
+					dep("json", "0.7.0", commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"}),
+				},
+			},
+			wantDeps: []commonv1alpha1.ArtifactMetaDependency{
+				dep("json", "0.7.0", commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"}),
+				dep("json", "0.7.0", commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"}),
 			},
 		},
 		{
@@ -124,7 +191,10 @@ func TestDeduplicateArtifactMeta(t *testing.T) {
 				},
 			},
 			wantReqs: []commonv1alpha1.ArtifactMetaRequirement{req("engine_version_semver", "0.62.0")},
-			wantDeps: []commonv1alpha1.ArtifactMetaDependency{dep("json", "0.9.0")},
+			wantDeps: []commonv1alpha1.ArtifactMetaDependency{
+				dep("json", "0.7.0"),
+				dep("json", "0.9.0"),
+			},
 		},
 	}
 

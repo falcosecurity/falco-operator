@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -178,11 +179,11 @@ func TestStore(t *testing.T) {
 			if tt.wantErrContains != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErrContains)
-				// No case leaves a usable temp file behind: either it was never created (the
-				// blob dir itself couldn't be made, so stat fails with "not a directory"), or it
-				// was created and then removed on failure (stat fails with "not exist").
-				_, statErr := os.Stat(blobPath + ".tmp")
-				assert.Error(t, statErr, "temp file must be cleaned up on failure")
+				// No case leaves a temporary writer file behind.
+				tempFiles, globErr := filepath.Glob(filepath.Join(
+					filepath.Dir(blobPath), "."+filepath.Base(blobPath)+".tmp-*"))
+				require.NoError(t, globErr)
+				assert.Empty(t, tempFiles, "temp files must be cleaned up on failure")
 				return
 			}
 			require.NoError(t, err)
@@ -196,6 +197,34 @@ func TestStore(t *testing.T) {
 			assert.Equal(t, tt.wantPermDecimal, string(perm))
 		})
 	}
+}
+
+func TestStore_ConcurrentSamePath(t *testing.T) {
+	dir := t.TempDir()
+	blobPath := filepath.Join(dir, "blobs", "shared")
+	start := make(chan struct{})
+	errs := make(chan error, 32)
+
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Go(func() {
+			<-start
+			errs <- artifactcache.Store(blobPath, []byte("shared content"), 0o750)
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	content, err := os.ReadFile(blobPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("shared content"), content)
+	tempFiles, err := filepath.Glob(filepath.Join(filepath.Dir(blobPath), ".shared.tmp-*"))
+	require.NoError(t, err)
+	assert.Empty(t, tempFiles)
 }
 
 func TestReadPerm(t *testing.T) {

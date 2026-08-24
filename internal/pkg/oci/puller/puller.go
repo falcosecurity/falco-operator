@@ -233,32 +233,12 @@ func (p *OciPuller) FetchConfig(ctx context.Context, ref string, creds auth.Cred
 		return nil, "", fmt.Errorf("unable to resolve %q: %w", ref, err)
 	}
 
-	manifestDesc := rootDesc
-	if rootDesc.MediaType == v1.MediaTypeImageIndex {
-		indexBytes, err := fetchBytes(ctx, repo, &rootDesc)
-		if err != nil {
-			return nil, "", fmt.Errorf("unable to fetch image index for %q: %w", ref, err)
-		}
-		var index v1.Index
-		if err := json.Unmarshal(indexBytes, &index); err != nil {
-			return nil, "", fmt.Errorf("unable to parse image index for %q: %w", ref, err)
-		}
-		if len(index.Manifests) == 0 {
-			return nil, "", fmt.Errorf("image index for %q has no manifests", ref)
-		}
-		manifestDesc = index.Manifests[0]
-	}
-
-	manifestBytes, err := fetchBytes(ctx, repo, &manifestDesc)
+	configDesc, err := resolveConfigDescriptor(ctx, repo, ref, &rootDesc)
 	if err != nil {
-		return nil, "", fmt.Errorf("unable to fetch manifest for %q: %w", ref, err)
-	}
-	var manifest v1.Manifest
-	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return nil, "", fmt.Errorf("unable to parse manifest for %q: %w", ref, err)
+		return nil, "", err
 	}
 
-	configBytes, err := fetchBytes(ctx, repo, &manifest.Config)
+	configBytes, err := fetchBytes(ctx, repo, configDesc)
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to fetch config for %q: %w", ref, err)
 	}
@@ -268,6 +248,60 @@ func (p *OciPuller) FetchConfig(ctx context.Context, ref string, creds auth.Cred
 	}
 
 	return &config, string(rootDesc.Digest), nil
+}
+
+// resolveConfigDescriptor returns the config descriptor of a direct manifest. Falco plugin
+// indexes produced by falcoctl use one shared ArtifactConfig for every platform, so for an
+// index the first concrete platform manifest is sufficient. Descriptors without a platform or
+// with an unknown platform are ignored because OCI indexes may also contain auxiliary entries
+// such as attestations.
+func resolveConfigDescriptor(ctx context.Context, target descriptorFetcher, ref string, rootDesc *v1.Descriptor) (*v1.Descriptor, error) {
+	manifestDesc := rootDesc
+	if rootDesc.MediaType == v1.MediaTypeImageIndex {
+		indexBytes, err := fetchBytes(ctx, target, rootDesc)
+		if err != nil {
+			return nil, fmt.Errorf("unable to fetch image index for %q: %w", ref, err)
+		}
+		var index v1.Index
+		if err := json.Unmarshal(indexBytes, &index); err != nil {
+			return nil, fmt.Errorf("unable to parse image index for %q: %w", ref, err)
+		}
+		manifestDesc = nil
+		for i := range index.Manifests {
+			if hasConcretePlatform(index.Manifests[i].Platform) {
+				manifestDesc = &index.Manifests[i]
+				break
+			}
+		}
+		if manifestDesc == nil {
+			return nil, fmt.Errorf("image index for %q has no platform manifests", ref)
+		}
+	}
+
+	return fetchManifestConfigDescriptor(ctx, target, ref, manifestDesc)
+}
+
+func hasConcretePlatform(platform *v1.Platform) bool {
+	const unknown = "unknown"
+
+	return platform != nil &&
+		platform.OS != "" && platform.OS != unknown &&
+		platform.Architecture != "" && platform.Architecture != unknown
+}
+
+func fetchManifestConfigDescriptor(ctx context.Context, target descriptorFetcher, ref string, manifestDesc *v1.Descriptor) (*v1.Descriptor, error) {
+	manifestBytes, err := fetchBytes(ctx, target, manifestDesc)
+	if err != nil {
+		return nil, fmt.Errorf("unable to fetch manifest %q for %q: %w", manifestDesc.Digest, ref, err)
+	}
+	var manifest v1.Manifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil, fmt.Errorf("unable to parse manifest %q for %q: %w", manifestDesc.Digest, ref, err)
+	}
+	if manifest.Config.Digest == "" {
+		return nil, fmt.Errorf("manifest %q for %q has no config descriptor", manifestDesc.Digest, ref)
+	}
+	return &manifest.Config, nil
 }
 
 // ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
@@ -320,10 +354,12 @@ func (p *OciPuller) FetchContent(ctx context.Context, ref string, creds auth.Cre
 	return file.Content, nil
 }
 
-// fetchBytes fetches the content of desc from target and returns it as a byte slice.
-func fetchBytes(ctx context.Context, target interface {
+type descriptorFetcher interface {
 	Fetch(context.Context, v1.Descriptor) (io.ReadCloser, error)
-}, desc *v1.Descriptor) ([]byte, error) {
+}
+
+// fetchBytes fetches the content of desc from target and returns it as a byte slice.
+func fetchBytes(ctx context.Context, target descriptorFetcher, desc *v1.Descriptor) ([]byte, error) {
 	r, err := target.Fetch(ctx, *desc)
 	if err != nil {
 		return nil, err

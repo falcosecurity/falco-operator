@@ -177,6 +177,22 @@ func TestCache_Set(t *testing.T) {
 		assert.True(t, c.BlobExists(blobPath))
 	})
 
+	t.Run("setting the same entry twice does not leak a reference", func(t *testing.T) {
+		dir := t.TempDir()
+		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
+		require.NoError(t, c.Load())
+
+		blobPath := filepath.Join(dir, "blobs", "v1")
+		require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
+		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
+		require.NoError(t, c.RemoveAll("rulesfile", "ns", "rules"))
+
+		_, err := os.Stat(blobPath)
+		assert.True(t, os.IsNotExist(err), "the blob must be removed with its only logical reference")
+		assert.False(t, c.BlobExists(blobPath))
+	})
+
 	t.Run("overwrite evicts the old blob once nothing else references it (immediate eviction mode)", func(t *testing.T) {
 		dir := t.TempDir()
 		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
@@ -336,7 +352,7 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		// A relative blobPath can't be expressed relative to the (absolute) cacheDir via
-		// filepath.Rel, exercising persistLocked's raw-fallback branch.
+		// filepath.Rel, exercising persistIndexLocked's raw-fallback branch.
 		require.NoError(t, c.Set("plugin", "ns", "json", "", "relative/blob"))
 
 		got, ok := c.Lookup("plugin", "ns", "json", "")
@@ -358,6 +374,9 @@ func TestCache_Set(t *testing.T) {
 		err := c.Set("plugin", "ns", "json", "", "/some/blob")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "write snapshot")
+		_, ok := c.Lookup("plugin", "ns", "json", "")
+		assert.False(t, ok, "a failed snapshot write must not change the live index")
+		assert.False(t, c.BlobExists("/some/blob"))
 	})
 
 	t.Run("snapshot rename failure propagates", func(t *testing.T) {
@@ -371,6 +390,43 @@ func TestCache_Set(t *testing.T) {
 		err := c.Set("plugin", "ns", "json", "", "/some/blob")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rename snapshot")
+		_, ok := c.Lookup("plugin", "ns", "json", "")
+		assert.False(t, ok, "a failed snapshot rename must not change the live index")
+		assert.False(t, c.BlobExists("/some/blob"))
+	})
+
+	t.Run("failed overwrite preserves the previous entry and blob", func(t *testing.T) {
+		dir := t.TempDir()
+		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
+		require.NoError(t, c.Load())
+
+		oldBlob := filepath.Join(dir, "blobs", "old")
+		newBlob := filepath.Join(dir, "blobs", "new")
+		require.NoError(t, artifactcache.Store(oldBlob, []byte("old"), 0o755))
+		require.NoError(t, artifactcache.Store(newBlob, []byte("new"), 0o755))
+		require.NoError(t, c.Set("plugin", "ns", "json", "", oldBlob))
+
+		snapshotPath := filepath.Join(dir, "index.json")
+		backupPath := snapshotPath + ".backup"
+		require.NoError(t, os.Rename(snapshotPath, backupPath))
+		require.NoError(t, os.Mkdir(snapshotPath, 0o755))
+
+		err := c.Set("plugin", "ns", "json", "", newBlob)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rename snapshot")
+
+		got, ok := c.Lookup("plugin", "ns", "json", "")
+		require.True(t, ok)
+		assert.Equal(t, oldBlob, got)
+		assert.FileExists(t, oldBlob, "the old blob must not be evicted before the snapshot commits")
+		assert.True(t, c.BlobExists(oldBlob))
+		assert.False(t, c.BlobExists(newBlob))
+
+		require.NoError(t, os.Remove(snapshotPath))
+		require.NoError(t, os.Rename(backupPath, snapshotPath))
+		require.NoError(t, c.Set("plugin", "ns", "json", "", newBlob))
+		_, err = os.Stat(oldBlob)
+		assert.True(t, os.IsNotExist(err), "a successful retry must evict the old blob")
 	})
 
 	t.Run("-race: concurrent Lookup and Set", func(t *testing.T) {
@@ -436,5 +492,39 @@ func TestCache_RemoveAll(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		require.NoError(t, c.RemoveAll("plugin", "ns", "missing"))
+	})
+
+	t.Run("failed removal changes neither the live index nor the persisted snapshot", func(t *testing.T) {
+		dir := t.TempDir()
+		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
+		require.NoError(t, c.Load())
+
+		blobPath := filepath.Join(dir, "blobs", "json")
+		require.NoError(t, artifactcache.Store(blobPath, []byte("plugin"), 0o755))
+		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobPath))
+
+		snapshotPath := filepath.Join(dir, "index.json")
+		backupPath := snapshotPath + ".backup"
+		require.NoError(t, os.Rename(snapshotPath, backupPath))
+		require.NoError(t, os.Mkdir(snapshotPath, 0o755))
+
+		err := c.RemoveAll("plugin", "ns", "json")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "rename snapshot")
+		got, ok := c.Lookup("plugin", "ns", "json", "linux-amd64")
+		require.True(t, ok)
+		assert.Equal(t, blobPath, got)
+		assert.FileExists(t, blobPath, "the blob must not be evicted before the snapshot commits")
+
+		require.NoError(t, os.Remove(snapshotPath))
+		require.NoError(t, os.Rename(backupPath, snapshotPath))
+		require.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+
+		restarted := artifactcache.NewCache(dir)
+		require.NoError(t, restarted.Load())
+		_, ok = restarted.Lookup("plugin", "ns", "json", "linux-amd64")
+		assert.False(t, ok, "a successful retry must remain removed after restart")
+		_, err = os.Stat(blobPath)
+		assert.True(t, os.IsNotExist(err))
 	})
 }
