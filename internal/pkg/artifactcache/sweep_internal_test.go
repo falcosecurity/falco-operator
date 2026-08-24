@@ -51,6 +51,33 @@ func TestRemoveOrphansLocked_SkipsReReferenced(t *testing.T) {
 	assert.NoError(t, err, "re-referenced blob must survive")
 }
 
+// TestRemoveOrphansLocked_SkipsFreshlyRewrittenCandidate covers the Store-to-Set window when
+// Sweep discovered an old orphan immediately before a reconciler rewrote the same digest path.
+func TestRemoveOrphansLocked_SkipsFreshlyRewrittenCandidate(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "rewritten")
+	require.NoError(t, Store(blobPath, []byte("old orphan"), 0o755))
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(blobPath, old, old))
+
+	candidates, err := c.findOrphanCandidates(map[string]int{}, map[string]time.Time{})
+	require.NoError(t, err)
+	require.Contains(t, candidates, blobPath)
+
+	require.NoError(t, c.Store(blobPath, []byte("fresh content"), 0o755))
+	c.mu.Lock()
+	removed := c.removeOrphansLocked(logr.Discard(), candidates)
+	c.mu.Unlock()
+
+	assert.Equal(t, 0, removed)
+	content, err := os.ReadFile(blobPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("fresh content"), content)
+}
+
 // TestRemoveOrphansLocked_RemovalFailureIsLoggedAndSkipped exercises the best-effort
 // os.Remove-failure branch: a candidate that can't actually be unlinked (here, a
 // non-empty directory masquerading as a blob path) is logged and left in place rather

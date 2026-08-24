@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"sort"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -38,9 +39,11 @@ func ComputeOCIArtifactSpecHash(ociArtifact *commonv1alpha1.OCIArtifact) (string
 	return hex.EncodeToString(h[:]), nil
 }
 
-// DeduplicateArtifactMeta removes duplicate requirements and dependencies by name,
-// keeping the most restrictive (highest) version when the same name appears more than once.
-// Results are sorted by name.
+// DeduplicateArtifactMeta removes semantically redundant requirements and dependency groups.
+// Monotonic requirements with the same name are collapsed to the strictest version, while
+// incompatible plugin API majors and unparsable versions are preserved for the compatibility
+// checker to reject. Dependency alternatives are OR-ed within a group, while distinct groups
+// are AND-ed by Falco, so only identical dependency groups can be safely removed.
 func DeduplicateArtifactMeta(meta *commonv1alpha1.ArtifactMeta) {
 	meta.Requirements = deduplicateRequirements(meta.Requirements)
 	meta.Dependencies = deduplicateDependencies(meta.Dependencies)
@@ -50,23 +53,59 @@ func deduplicateRequirements(reqs []commonv1alpha1.ArtifactMetaRequirement) []co
 	if len(reqs) <= 1 {
 		return reqs
 	}
-	byName := make(map[string]string, len(reqs)) // name -> strictest version seen
+	result := make([]commonv1alpha1.ArtifactMetaRequirement, 0, len(reqs))
 	for _, req := range reqs {
-		current, exists := byName[req.Name]
-		if !exists {
-			byName[req.Name] = req.Version
-			continue
+		merged := false
+		for i := range result {
+			current := result[i]
+			if current.Name != req.Name {
+				continue
+			}
+			if current.Version == req.Version {
+				merged = true
+				break
+			}
+
+			if req.Name == compat.CapabilityPluginAPIVersion {
+				newAtLeast, newErr := compat.SemverMajorCompatible(req.Version, current.Version)
+				currentAtLeast, currentErr := compat.SemverMajorCompatible(current.Version, req.Version)
+				switch {
+				case newErr != nil || currentErr != nil:
+					// Preserve invalid versions so the compatibility checker can report them.
+					continue
+				case newAtLeast:
+					result[i] = req
+					merged = true
+				case currentAtLeast:
+					merged = true
+				default:
+					// Different plugin API majors are incompatible, not ordered.
+					continue
+				}
+				if merged {
+					break
+				}
+				continue
+			}
+
+			if atLeast, err := compat.SemverAtLeast(req.Version, current.Version); err == nil {
+				if atLeast {
+					result[i] = req
+				}
+				merged = true
+				break
+			}
 		}
-		// Replace if the new version is strictly higher; on parse error keep existing.
-		if atLeast, err := compat.SemverAtLeast(req.Version, current); err == nil && atLeast {
-			byName[req.Name] = req.Version
+		if !merged {
+			result = append(result, req)
 		}
 	}
-	result := make([]commonv1alpha1.ArtifactMetaRequirement, 0, len(byName))
-	for name, version := range byName {
-		result = append(result, commonv1alpha1.ArtifactMetaRequirement{Name: name, Version: version})
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].Version < result[j].Version
+	})
 	return result
 }
 
@@ -103,25 +142,64 @@ func AppendConfigLayerRequirements(meta *commonv1alpha1.ArtifactMeta, fetched *p
 }
 
 func deduplicateDependencies(deps []commonv1alpha1.ArtifactMetaDependency) []commonv1alpha1.ArtifactMetaDependency {
-	if len(deps) <= 1 {
+	if len(deps) == 0 {
 		return deps
 	}
-	byName := make(map[string]commonv1alpha1.ArtifactMetaDependency, len(deps))
+	result := make([]commonv1alpha1.ArtifactMetaDependency, 0, len(deps))
 	for _, dep := range deps {
-		current, exists := byName[dep.Name]
-		if !exists {
-			byName[dep.Name] = dep
-			continue
+		dep = canonicalizeDependency(dep)
+		duplicate := false
+		for _, current := range result {
+			if dep.Name == current.Name && dep.Version == current.Version &&
+				slices.Equal(dep.Alternatives, current.Alternatives) {
+				duplicate = true
+				break
+			}
 		}
-		// Replace if the new primary version is strictly higher; alternatives travel with it.
-		if atLeast, err := compat.SemverAtLeast(dep.Version, current.Version); err == nil && atLeast {
-			byName[dep.Name] = dep
+		if !duplicate {
+			result = append(result, dep)
 		}
 	}
-	result := make([]commonv1alpha1.ArtifactMetaDependency, 0, len(byName))
-	for _, dep := range byName {
-		result = append(result, dep)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	sort.Slice(result, func(i, j int) bool { return dependencyLess(result[i], result[j]) })
 	return result
+}
+
+func canonicalizeDependency(dep commonv1alpha1.ArtifactMetaDependency) commonv1alpha1.ArtifactMetaDependency {
+	if len(dep.Alternatives) == 0 {
+		dep.Alternatives = nil
+		return dep
+	}
+
+	alternatives := append([]commonv1alpha1.ArtifactMetaDependencyVariant(nil), dep.Alternatives...)
+	sort.Slice(alternatives, func(i, j int) bool {
+		if alternatives[i].Name != alternatives[j].Name {
+			return alternatives[i].Name < alternatives[j].Name
+		}
+		return alternatives[i].Version < alternatives[j].Version
+	})
+	dep.Alternatives = alternatives[:0]
+	for _, alternative := range alternatives {
+		if len(dep.Alternatives) == 0 || dep.Alternatives[len(dep.Alternatives)-1] != alternative {
+			dep.Alternatives = append(dep.Alternatives, alternative)
+		}
+	}
+	return dep
+}
+
+func dependencyLess(a, b commonv1alpha1.ArtifactMetaDependency) bool {
+	if a.Name != b.Name {
+		return a.Name < b.Name
+	}
+	if a.Version != b.Version {
+		return a.Version < b.Version
+	}
+	for i := range min(len(a.Alternatives), len(b.Alternatives)) {
+		if a.Alternatives[i].Name != b.Alternatives[i].Name {
+			return a.Alternatives[i].Name < b.Alternatives[i].Name
+		}
+		if a.Alternatives[i].Version != b.Alternatives[i].Version {
+			return a.Alternatives[i].Version < b.Alternatives[i].Version
+		}
+	}
+	return len(a.Alternatives) < len(b.Alternatives)
 }

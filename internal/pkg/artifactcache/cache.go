@@ -56,24 +56,44 @@ func BlobPath(cacheDir, artifactType, ref, digest, goos, goarch string) string {
 }
 
 // Store atomically writes content to blobPath and records perm in the companion .perm file.
-// The write is atomic: content goes to a .tmp file first, then renamed into place.
+// Each writer uses a unique temporary file, then renames it into place.
+// Call Cache.Store when the write belongs to a live Cache that may be swept concurrently.
 func Store(blobPath string, content []byte, perm fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0o750); err != nil {
 		return fmt.Errorf("create blob dir: %w", err)
 	}
-	tmp := blobPath + ".tmp"
-	if err := os.WriteFile(tmp, content, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	tmp, err := os.CreateTemp(filepath.Dir(blobPath), "."+filepath.Base(blobPath)+".tmp-*")
+	if err != nil {
 		return fmt.Errorf("write blob: %w", err)
 	}
-	if err := os.Rename(tmp, blobPath); err != nil {
-		_ = os.Remove(tmp)
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
+
+	if _, err := tmp.Write(content); err != nil {
+		return fmt.Errorf("write blob: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close blob: %w", err)
+	}
+	if err := os.Rename(tmpPath, blobPath); err != nil {
 		return fmt.Errorf("rename blob: %w", err)
 	}
 	// Best-effort: clients fall back to 0o755 if the .perm file is missing.
 	_ = os.WriteFile(blobPath+PermSuffix,
 		[]byte(strconv.FormatUint(uint64(perm), 10)), 0o600)
 	return nil
+}
+
+// Store writes a blob while holding the cache mutex so the sweeper cannot delete the same
+// path between the write and its final freshness check. Index registration remains the caller's
+// responsibility through Set.
+func (c *Cache) Store(blobPath string, content []byte, perm fs.FileMode) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return Store(blobPath, content, perm)
 }
 
 // ReadPerm reads the file mode from the companion .perm file.

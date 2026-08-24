@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -185,14 +186,24 @@ func (c *Cache) Set(artifactType, namespace, name, platformKey, blobPath string)
 	defer c.mu.Unlock()
 
 	key := indexKey{artifactType, namespace, name, platformKey}
-	if old, ok := c.index[key]; ok && old != blobPath {
+	old, exists := c.index[key]
+	if exists && old == blobPath {
+		return nil
+	}
+
+	nextIndex := maps.Clone(c.index)
+	nextIndex[key] = blobPath
+	if err := c.persistIndexLocked(nextIndex); err != nil {
+		return err
+	}
+
+	c.index = nextIndex
+	if exists {
 		c.derefLocked(old)
 	}
-	c.index[key] = blobPath
 	c.refs[blobPath]++
 	delete(c.derefTimes, blobPath) // referenced again; cancel any pending eviction
-
-	return c.persistLocked()
+	return nil
 }
 
 // RemoveAll removes every index entry for (artifactType, namespace, name), across all
@@ -203,19 +214,27 @@ func (c *Cache) RemoveAll(artifactType, namespace, name string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var removedAny bool
+	nextIndex := maps.Clone(c.index)
+	var removedBlobs []string
 	for key, blobPath := range c.index {
 		if key.ArtifactType != artifactType || key.Namespace != namespace || key.Name != name {
 			continue
 		}
-		delete(c.index, key)
-		c.derefLocked(blobPath)
-		removedAny = true
+		delete(nextIndex, key)
+		removedBlobs = append(removedBlobs, blobPath)
 	}
-	if !removedAny {
+	if len(removedBlobs) == 0 {
 		return nil
 	}
-	return c.persistLocked()
+	if err := c.persistIndexLocked(nextIndex); err != nil {
+		return err
+	}
+
+	c.index = nextIndex
+	for _, blobPath := range removedBlobs {
+		c.derefLocked(blobPath)
+	}
+	return nil
 }
 
 // derefLocked decrements blobPath's reference count and, if it reaches zero, either defers its
@@ -246,11 +265,11 @@ func (c *Cache) derefLocked(blobPath string) {
 	_ = os.Remove(filepath.Dir(blobPath))
 }
 
-// persistLocked writes the current index to the snapshot file atomically (tmp file, then
-// rename), same pattern as Store's blob writes. Caller must hold c.mu.
-func (c *Cache) persistLocked() error {
-	entries := make([]snapshotEntry, 0, len(c.index))
-	for key, blobPath := range c.index {
+// persistIndexLocked writes index to the snapshot file atomically (tmp file, then rename),
+// same pattern as Store's blob writes. Caller must hold c.mu.
+func (c *Cache) persistIndexLocked(index map[indexKey]string) error {
+	entries := make([]snapshotEntry, 0, len(index))
+	for key, blobPath := range index {
 		rel, err := filepath.Rel(c.cacheDir, blobPath)
 		if err != nil {
 			rel = blobPath

@@ -112,10 +112,9 @@ func (c *Cache) findOrphanCandidates(refs map[string]int, derefTimes map[string]
 // removeOrphansLocked re-checks each candidate against the live refs map, closing the gap
 // against a Set that started referencing it since findOrphanCandidates took its snapshot,
 // and removes it, its .perm companion, and its now-empty ref directory, if still
-// unreferenced. Also skips anything currently in c.derefTimes as a final safety net against a
-// stale pre-walk snapshot (findOrphanCandidates already excludes these, but that's only an
-// optimization; this check is the actual correctness guarantee against double-handling a
-// blob removeExpiredDerefsLocked owns). Caller must hold c.mu.
+// unreferenced. It also skips anything currently in c.derefTimes and any candidate rewritten
+// within sweepGraceWindow after discovery. Cache.Store shares this mutex, making that final
+// freshness check atomic with production blob replacement. Caller must hold c.mu.
 func (c *Cache) removeOrphansLocked(logger logr.Logger, candidates []string) int {
 	removed := 0
 	for _, path := range candidates {
@@ -124,6 +123,16 @@ func (c *Cache) removeOrphansLocked(logger logr.Logger, candidates []string) int
 		}
 		if _, pending := c.derefTimes[path]; pending {
 			continue // now within its own eviction grace period; removeExpiredDerefsLocked owns it
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil {
+			if !os.IsNotExist(statErr) {
+				logger.V(1).Info("sweep: failed to stat orphaned blob", "path", path, "err", statErr)
+			}
+			continue
+		}
+		if time.Since(info.ModTime()) < sweepGraceWindow {
+			continue // rewritten after candidate discovery; protect the new Store-to-Set window
 		}
 		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
 			logger.V(1).Info("sweep: failed to remove orphaned blob", "path", path, "err", removeErr)
