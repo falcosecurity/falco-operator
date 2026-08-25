@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
@@ -51,13 +52,13 @@ func newConfigMapWithFinalizer() *corev1.ConfigMap {
 	}
 }
 
-func TestClearFinalizersIfNodeGone_NoFinalizers(t *testing.T) {
+func TestClearFinalizersIfNodeOrPodGone_NoFinalizers(t *testing.T) {
 	s := newNodeScheme(t)
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
 
-	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
 	require.NoError(t, err)
 	// Object had no finalizers, so Patch was never called.
 	got := &corev1.ConfigMap{}
@@ -65,26 +66,44 @@ func TestClearFinalizersIfNodeGone_NoFinalizers(t *testing.T) {
 	assert.Empty(t, got.Finalizers)
 }
 
-func TestClearFinalizersIfNodeGone_NodeExists(t *testing.T) {
+func TestClearFinalizersIfNodeOrPodGone_NodeAndPodExist(t *testing.T) {
 	s := newNodeScheme(t)
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
 	cm := newConfigMapWithFinalizer()
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
 
-	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
+		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
+	)
 	require.NoError(t, err)
-	// Node still exists, so finalizers must be preserved.
+	// Both the node and its artifact operator still exist, so finalizers must be preserved.
 	got := &corev1.ConfigMap{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
 	assert.NotEmpty(t, got.Finalizers)
 }
 
-func TestClearFinalizersIfNodeGone_NodeGone(t *testing.T) {
+func TestClearFinalizersIfNodeOrPodGone_PodGone(t *testing.T) {
+	s := newNodeScheme(t)
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
+	cm := newConfigMapWithFinalizer()
+	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
+
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
+	require.NoError(t, err)
+	// The node still exists, but no artifact operator can release its finalizer.
+	got := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
+	assert.Empty(t, got.Finalizers)
+}
+
+func TestClearFinalizersIfNodeOrPodGone_NodeGone(t *testing.T) {
 	s := newNodeScheme(t)
 	cm := newConfigMapWithFinalizer()
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build() // node NOT created
 
-	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
+		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
+	)
 	require.NoError(t, err)
 	// Finalizers are cleared once the node is gone.
 	got := &corev1.ConfigMap{}
@@ -92,7 +111,7 @@ func TestClearFinalizersIfNodeGone_NodeGone(t *testing.T) {
 	assert.Empty(t, got.Finalizers)
 }
 
-func TestClearFinalizersIfNodeGone_GetNodeError(t *testing.T) {
+func TestClearFinalizersIfNodeOrPodGone_GetNodeError(t *testing.T) {
 	s := newNodeScheme(t)
 	cm := newConfigMapWithFinalizer()
 	cl := fake.NewClientBuilder().
@@ -108,11 +127,13 @@ func TestClearFinalizersIfNodeGone_GetNodeError(t *testing.T) {
 		}).
 		Build()
 
-	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
+		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
+	)
 	require.Error(t, err)
 }
 
-func TestClearFinalizersIfNodeGone_PatchError(t *testing.T) {
+func TestClearFinalizersIfNodeOrPodGone_PatchError(t *testing.T) {
 	s := newNodeScheme(t)
 	cm := newConfigMapWithFinalizer()
 	cl := fake.NewClientBuilder().
@@ -125,8 +146,8 @@ func TestClearFinalizersIfNodeGone_PatchError(t *testing.T) {
 		}).
 		Build()
 
-	// Patch is attempted when the node is gone, and its error is returned.
-	err := controllerhelper.ClearFinalizersIfNodeGone(context.Background(), cl, "worker-1", cm)
+	// Patch is attempted when the Falco pod is gone, and its error is returned.
+	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
 	require.Error(t, err)
 }
 
@@ -181,6 +202,63 @@ func TestListMatchingNodes_ListError(t *testing.T) {
 	_, err := controllerhelper.ListMatchingNodes(context.Background(), cl, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api server unavailable")
+}
+
+func TestFalcoPodChangePredicate(t *testing.T) {
+	pred := controllerhelper.FalcoPodChangePredicate()
+	makePod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/instance": "falco"}},
+			Spec:       corev1.PodSpec{NodeName: "node-1"},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	assert.True(t, pred.Create(event.CreateEvent{Object: makePod()}))
+	assert.True(t, pred.Delete(event.DeleteEvent{Object: makePod()}))
+	assert.False(t, pred.Create(event.CreateEvent{Object: &corev1.Pod{}}))
+	assert.False(t, pred.Delete(event.DeleteEvent{Object: &corev1.Pod{}}))
+
+	t.Run("instance label added", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		oldPod.Labels = nil
+		assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("instance label removed", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		newPod.Labels = nil
+		assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("instance label changed", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		newPod.Labels["app.kubernetes.io/instance"] = "other-falco"
+		assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("node assignment changed", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		oldPod.Spec.NodeName = ""
+		assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("phase changed", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		oldPod.Status.Phase = corev1.PodPending
+		assert.True(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("irrelevant status changed", func(t *testing.T) {
+		oldPod, newPod := makePod(), makePod()
+		newPod.Status.PodIP = "10.0.0.1"
+		assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
+
+	t.Run("unrelated pod changed", func(t *testing.T) {
+		oldPod, newPod := &corev1.Pod{}, &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+		assert.False(t, pred.Update(event.UpdateEvent{ObjectOld: oldPod, ObjectNew: newPod}))
+	})
 }
 
 func TestIsBeingDeleted_NotDeleted(t *testing.T) {

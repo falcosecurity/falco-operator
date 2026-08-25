@@ -64,15 +64,6 @@ func NewPluginAggregatorReconciler(
 
 // PluginAggregatorReconciler manages ArtifactNode objects and aggregates their
 // conditions into the parent Plugin status.
-//
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins,verbs=get;list;watch
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/status,verbs=patch;update
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/finalizers,verbs=patch;update
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
 type PluginAggregatorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -84,6 +75,15 @@ type PluginAggregatorReconciler struct {
 	// ociPuller overrides the OCI puller used in fetchAndCacheArtifactMeta; nil uses the default.
 	ociPuller puller.Puller
 }
+
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins,verbs=get;list;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/status,verbs=patch;update
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/finalizers,verbs=patch;update
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
 
 // Reconcile reconciles a Plugin: ensures ArtifactNode objects exist for matching nodes,
 // removes stale ones, and writes the aggregate conditions back to the Plugin.
@@ -111,13 +111,13 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	// matchingNodes: subset of allMatchingNodes where a Running Falco pod exists; only these
-	// nodes get ArtifactNode objects (Deployment mode or tainted DaemonSet nodes have no sidecar
-	// on every cluster node, so creating ArtifactNodes there produces stale Pending objects).
-	matchingNodes, err := controllerhelper.ListMatchingFalcoNodes(ctx, r.Client, plugin.Spec.Selector, plugin.Namespace)
+	// matchingNodes: subset of allMatchingNodes where a Running Falco pod exists; these are
+	// the nodes that currently have an artifact operator able to reconcile an ArtifactNode.
+	runningFalcoNodes, err := controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, plugin.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	matchingNodes := controllerhelper.FilterNodesByName(allMatchingNodes, runningFalcoNodes)
 	logger.V(1).Info("Listed matching nodes", "total", len(allMatchingNodes), "withFalco", len(matchingNodes))
 
 	existingNodes, err := controllerhelper.ListOwnedNodes(ctx, r.Client, plugin.Namespace, plugin.Name, controllerhelper.KindPlugin)
@@ -137,16 +137,17 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// Use allMatchingNodes (not matchingNodes) so that a pod restart, which briefly leaves
-	// matchingNodes empty, does not cause existing ArtifactNodes to be deleted and re-created.
-	// A temporarily absent Running pod does not mean the node has stopped hosting Falco.
-	// ArtifactNodes are only deleted when the node no longer matches the selector at all.
-	desiredForDeletion := make(map[string]struct{}, len(allMatchingNodes))
-	for i := range allMatchingNodes {
-		desiredForDeletion[allMatchingNodes[i].Name] = struct{}{}
+	// ArtifactNode existence is the desired per-node assignment. Use the same set for
+	// creation, stale deletion, and status aggregation. If a Falco pod moves away, its old
+	// ArtifactNode is removed; a later pod on that node causes it to be created again.
+	desired := make(map[string]struct{}, len(matchingNodes))
+	for i := range matchingNodes {
+		desired[matchingNodes[i].Name] = struct{}{}
 	}
 
-	if err := controllerhelper.DeleteStaleNodeObjects(ctx, r.Client, existingNodes.Items, desiredForDeletion); err != nil {
+	if err := controllerhelper.DeleteStaleNodeObjects(
+		ctx, r.Client, existingNodes.Items, desired, runningFalcoNodes,
+	); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -181,8 +182,8 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		}
 	}
 
-	// Pulls the OCI binary for every platform present in matching nodes before creating ArtifactNode
-	// objects, so the blob cache is warm when the per-node operator requests it over HTTP.
+	// Pulls the OCI binary for every platform present in selector-matching nodes before creating
+	// ArtifactNode objects, so the blob cache is warm when the per-node operator requests it over HTTP.
 	// If the pre-fetch fails, node creation still proceeds: the per-node operator fetches
 	// independently and surfaces any failure in its own conditions.
 	fetchBinErr := r.fetchAndCacheBlobs(ctx, plugin, allMatchingNodes)
@@ -215,10 +216,6 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// A stale or terminating child no longer represents the desired assignment and must not
 	// keep its last condition in the aggregate while deletion is pending.
-	desired := make(map[string]struct{}, len(matchingNodes))
-	for i := range matchingNodes {
-		desired[matchingNodes[i].Name] = struct{}{}
-	}
 	activeNodes := &artifactv1alpha1.ArtifactNodeList{}
 	for i := range existingNodes.Items {
 		nodeObject := &existingNodes.Items[i]
@@ -314,7 +311,17 @@ func (r *PluginAggregatorReconciler) handleDeletion(ctx context.Context, plugin 
 		return err
 	}
 
-	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(ctx, r.Client, existing.Items)
+	runningFalcoNodes := map[string]struct{}{}
+	if len(existing.Items) > 0 {
+		runningFalcoNodes, err = controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, plugin.Namespace)
+		if err != nil {
+			return err
+		}
+	}
+
+	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(
+		ctx, r.Client, existing.Items, runningFalcoNodes,
+	)
 	if err != nil {
 		return err
 	}
@@ -347,15 +354,16 @@ func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.PluginList{})
 			}),
+			builder.WithPredicates(predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.LabelChangedPredicate{},
+			)),
 		).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, pod client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.PluginList{}, client.InNamespace(pod.GetNamespace()))
 			}),
-			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				_, ok := obj.GetLabels()["app.kubernetes.io/instance"]
-				return ok
-			})),
+			builder.WithPredicates(controllerhelper.FalcoPodChangePredicate()),
 		).
 		Watches(&artifactv1alpha1.ArtifactNode{},
 			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &artifactv1alpha1.Plugin{}),

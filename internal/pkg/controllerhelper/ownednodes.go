@@ -100,16 +100,21 @@ func deleteNodeObject(ctx context.Context, cl client.Client, node *artifactv1alp
 }
 
 // DeleteStaleNodeObjects deletes every node in existing whose Spec.NodeName is not present in
-// desired (the node no longer matches the parent's selector). ClearFinalizersIfNodeGone runs
-// first for each so a node object orphaned by its underlying Kubernetes Node being removed
-// doesn't block forever waiting for an evicted per-node operator to release its finalizer.
-func DeleteStaleNodeObjects(ctx context.Context, cl client.Client, existing []artifactv1alpha1.ArtifactNode, desired map[string]struct{}) error {
+// desired. Before each deletion, ClearFinalizersIfNodeOrPodGone releases finalizers that cannot
+// be handled because either the Kubernetes Node or its Falco pod is gone.
+func DeleteStaleNodeObjects(
+	ctx context.Context,
+	cl client.Client,
+	existing []artifactv1alpha1.ArtifactNode,
+	desired map[string]struct{},
+	runningFalcoNodes map[string]struct{},
+) error {
 	for i := range existing {
 		node := &existing[i]
 		if _, ok := desired[node.Spec.NodeName]; ok {
 			continue
 		}
-		if err := ClearFinalizersIfNodeGone(ctx, cl, node.Spec.NodeName, node); err != nil {
+		if err := ClearFinalizersIfNodeOrPodGone(ctx, cl, node.Spec.NodeName, runningFalcoNodes, node); err != nil {
 			return err
 		}
 		if err := deleteNodeObject(ctx, cl, node); err != nil {
@@ -125,12 +130,17 @@ func DeleteStaleNodeObjects(ctx context.Context, cl client.Client, existing []ar
 // already taken effect server-side. The caller uses this to decide whether the in-use
 // finalizer can be released yet. A subsequent reconcile (triggered by the ArtifactNode watch
 // once each one is actually removed) re-lists and eventually observes zero remaining.
-func DeleteNodeObjectsForParentDeletion(ctx context.Context, cl client.Client, existing []artifactv1alpha1.ArtifactNode) (nodesRemaining bool, err error) {
+func DeleteNodeObjectsForParentDeletion(
+	ctx context.Context,
+	cl client.Client,
+	existing []artifactv1alpha1.ArtifactNode,
+	runningFalcoNodes map[string]struct{},
+) (nodesRemaining bool, err error) {
 	logger := log.FromContext(ctx)
 
 	for i := range existing {
 		node := &existing[i]
-		if err := ClearFinalizersIfNodeGone(ctx, cl, node.Spec.NodeName, node); err != nil {
+		if err := ClearFinalizersIfNodeOrPodGone(ctx, cl, node.Spec.NodeName, runningFalcoNodes, node); err != nil {
 			return false, err
 		}
 		if node.DeletionTimestamp.IsZero() {
