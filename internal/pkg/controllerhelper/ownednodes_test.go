@@ -215,7 +215,7 @@ func TestDeleteStaleNodeObjects_NodeInDesiredIsKept(t *testing.T) {
 	cl := newArtifactNodeClient(t, node)
 
 	err := controllerhelper.DeleteStaleNodeObjects(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"n1": {}})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"n1": {}}, nil)
 	require.NoError(t, err)
 
 	got := &artifactv1alpha1.ArtifactNode{}
@@ -223,12 +223,12 @@ func TestDeleteStaleNodeObjects_NodeInDesiredIsKept(t *testing.T) {
 }
 
 func TestDeleteStaleNodeObjects_NodeNotInDesiredIsDeleted(t *testing.T) {
-	k8sNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}} // node still exists; ClearFinalizersIfNodeGone is a no-op
+	k8sNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}
 	node := newArtifactNode("plugin--container--n1", "container")
 	cl := newArtifactNodeClient(t, node, k8sNode)
 
 	err := controllerhelper.DeleteStaleNodeObjects(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"other-node": {}})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"other-node": {}}, nil)
 	require.NoError(t, err)
 
 	got := &artifactv1alpha1.ArtifactNode{}
@@ -251,7 +251,7 @@ func TestDeleteStaleNodeObjects_DeleteAlreadyNotFoundIsNotAnError(t *testing.T) 
 		Build()
 
 	err := controllerhelper.DeleteStaleNodeObjects(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{}, nil)
 	require.NoError(t, err)
 }
 
@@ -261,7 +261,7 @@ func TestDeleteStaleNodeObjects_ClearFinalizersError(t *testing.T) {
 	cl := fake.NewClientBuilder().
 		WithScheme(newArtifactScheme(t)).
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		WithObjects(node). // no corev1.Node "n1" exists; ClearFinalizersIfNodeGone treats the ArtifactNode as gone and patches it
+		WithObjects(node). // no corev1.Node "n1" exists; orphan cleanup checks it before patching the ArtifactNode
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, ok := obj.(*corev1.Node); ok {
@@ -273,7 +273,7 @@ func TestDeleteStaleNodeObjects_ClearFinalizersError(t *testing.T) {
 		Build()
 
 	err := controllerhelper.DeleteStaleNodeObjects(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{}, map[string]struct{}{"n1": {}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
@@ -293,7 +293,7 @@ func TestDeleteStaleNodeObjects_DeleteOtherErrorPropagates(t *testing.T) {
 		Build()
 
 	err := controllerhelper.DeleteStaleNodeObjects(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server unavailable")
 }
@@ -303,7 +303,7 @@ func TestDeleteStaleNodeObjects_DeleteOtherErrorPropagates(t *testing.T) {
 func TestDeleteNodeObjectsForParentDeletion_EmptyExisting(t *testing.T) {
 	cl := newArtifactNodeClient(t)
 
-	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl, nil)
+	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl, nil, nil)
 	require.NoError(t, err)
 	assert.False(t, remaining)
 }
@@ -314,7 +314,7 @@ func TestDeleteNodeObjectsForParentDeletion_NodesPresentAreDeletedAndReportedRem
 	cl := newArtifactNodeClient(t, node, k8sNode)
 
 	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node})
+		[]artifactv1alpha1.ArtifactNode{*node}, nil)
 	require.NoError(t, err)
 	// nodesRemaining reflects presence at the start of the call, not whether the Delete
 	// this call issued has already taken effect server-side.
@@ -344,7 +344,7 @@ func TestDeleteNodeObjectsForParentDeletion_AlreadyDeletingNodeIsNotDeletedAgain
 		Build()
 
 	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"n1": {}})
 	require.NoError(t, err)
 	assert.True(t, remaining)
 }
@@ -367,7 +367,7 @@ func TestDeleteNodeObjectsForParentDeletion_ClearFinalizersError(t *testing.T) {
 		Build()
 
 	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node})
+		[]artifactv1alpha1.ArtifactNode{*node}, map[string]struct{}{"n1": {}})
 	require.Error(t, err)
 	assert.False(t, remaining)
 	assert.Contains(t, err.Error(), "api server unavailable")
@@ -388,7 +388,7 @@ func TestDeleteNodeObjectsForParentDeletion_DeleteError(t *testing.T) {
 		Build()
 
 	remaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(context.Background(), cl,
-		[]artifactv1alpha1.ArtifactNode{*node})
+		[]artifactv1alpha1.ArtifactNode{*node}, nil)
 	require.Error(t, err)
 	assert.False(t, remaining)
 	assert.Contains(t, err.Error(), "server unavailable")

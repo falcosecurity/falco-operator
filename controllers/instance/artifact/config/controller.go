@@ -80,11 +80,16 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, r.handleDeletion(ctx, config)
 	}
 
-	matchingNodes, err := controllerhelper.ListMatchingFalcoNodes(ctx, r.Client, config.Spec.Selector, config.Namespace)
+	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, config.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	logger.V(1).Info("Listed matching nodes", "count", len(matchingNodes))
+	runningFalcoNodes, err := controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, config.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	matchingNodes := controllerhelper.FilterNodesByName(allMatchingNodes, runningFalcoNodes)
+	logger.V(1).Info("Listed matching nodes", "total", len(allMatchingNodes), "withFalco", len(matchingNodes))
 
 	existingNodes, err := controllerhelper.ListOwnedNodes(ctx, r.Client, config.Namespace, config.Name, controllerhelper.KindConfig)
 	if err != nil {
@@ -97,7 +102,9 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		desired[matchingNodes[i].Name] = struct{}{}
 	}
 
-	if err := controllerhelper.DeleteStaleNodeObjects(ctx, r.Client, existingNodes.Items, desired); err != nil {
+	if err := controllerhelper.DeleteStaleNodeObjects(
+		ctx, r.Client, existingNodes.Items, desired, runningFalcoNodes,
+	); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -164,7 +171,17 @@ func (r *ConfigAggregatorReconciler) handleDeletion(ctx context.Context, config 
 		return err
 	}
 
-	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(ctx, r.Client, existing.Items)
+	runningFalcoNodes := map[string]struct{}{}
+	if len(existing.Items) > 0 {
+		runningFalcoNodes, err = controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, config.Namespace)
+		if err != nil {
+			return err
+		}
+	}
+
+	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(
+		ctx, r.Client, existing.Items, runningFalcoNodes,
+	)
 	if err != nil {
 		return err
 	}
@@ -192,15 +209,16 @@ func (r *ConfigAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.ConfigList{})
 			}),
+			builder.WithPredicates(predicate.Or(
+				predicate.GenerationChangedPredicate{},
+				predicate.LabelChangedPredicate{},
+			)),
 		).
 		Watches(&corev1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, pod client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.ConfigList{}, client.InNamespace(pod.GetNamespace()))
 			}),
-			builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				_, ok := obj.GetLabels()["app.kubernetes.io/instance"]
-				return ok
-			})),
+			builder.WithPredicates(controllerhelper.FalcoPodChangePredicate()),
 		).
 		Watches(&artifactv1alpha1.ArtifactNode{},
 			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &artifactv1alpha1.Config{}),

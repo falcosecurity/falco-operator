@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -46,7 +47,10 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
-const testPluginName = "test-plugin"
+const (
+	testPluginName   = "test-plugin"
+	testPluginDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
 
 func testPluginNodeName() string {
 	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, testPluginName, testutil.TestNodeName)
@@ -256,6 +260,47 @@ func TestReconcile_CreatesNodeObject(t *testing.T) {
 	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
 }
 
+func TestReconcile_CreatesIndependentNodeObjectsForNamespaces(t *testing.T) {
+	const (
+		deploymentNamespace = "falco-deployment"
+		daemonSetNamespace  = "falco-daemonset"
+	)
+
+	node := newTestNode(testutil.TestNodeName, nil)
+	objects := make([]client.Object, 0, 7)
+	objects = append(objects, node)
+	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
+		plugin := newTestPlugin()
+		plugin.Namespace = namespace
+		falco := newTestFalco()
+		falco.Namespace = namespace
+		pod := newRunningFalcoPod()
+		pod.Namespace = namespace
+		objects = append(objects, plugin, falco, pod)
+	}
+	r, cl := newTestReconciler(t, objects...)
+
+	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+			Name:      testPluginName,
+			Namespace: namespace,
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		pluginNode := &artifactv1alpha1.ArtifactNode{}
+		require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
+			Name:      testPluginNodeName(),
+			Namespace: namespace,
+		}, pluginNode))
+		assert.Equal(t, testutil.TestNodeName, pluginNode.Spec.NodeName)
+	}
+
+	nodeList := &artifactv1alpha1.ArtifactNodeList{}
+	require.NoError(t, cl.List(context.Background(), nodeList))
+	assert.Len(t, nodeList.Items, 2)
+}
+
 func TestReconcile_NodeObjectAlreadyExists(t *testing.T) {
 	plugin := newTestPlugin()
 	node := newTestNode(testutil.TestNodeName, nil)
@@ -317,7 +362,9 @@ func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) 
 			Message: "old result",
 		}}
 	})
-	r, cl := newTestReconciler(t, plugin, staleNode, newTestNode(testutil.TestNodeName, nil))
+	r, cl := newTestReconciler(
+		t, plugin, staleNode, newTestNode(testutil.TestNodeName, nil), newTestFalco(), newRunningFalcoPod(),
+	)
 
 	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
 	require.NoError(t, err)
@@ -336,6 +383,26 @@ func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) 
 	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
 	assert.Equal(t, "NoNodesAssigned", condition.Reason,
 		"the stale child's last successful result must not remain in the aggregate")
+}
+
+func TestReconcile_RemovesNodeObjectWhenFalcoPodGone(t *testing.T) {
+	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
+		p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	staleNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
+		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
+	})
+	// The Kubernetes Node still matches the Plugin selector, but no Falco pod remains there.
+	r, cl := newTestReconciler(t, plugin, staleNode, newTestNode(testutil.TestNodeName, nil))
+
+	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	got := &artifactv1alpha1.ArtifactNode{}
+	err = cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), got)
+	assert.True(t, k8serrors.IsNotFound(err),
+		"the instance operator must garbage-collect the ArtifactNode when its artifact operator is gone")
 }
 
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
@@ -389,6 +456,14 @@ func TestHandleDeletion_NoNodeObjects(t *testing.T) {
 		WithScheme(s).
 		WithObjects(plugin).
 		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
+					return fmt.Errorf("Falco list should not be called without node objects")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	addInUseFinalizer(t, cl, plugin)
@@ -963,7 +1038,7 @@ func TestFetchAndCacheBinaries_FastPath(t *testing.T) {
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
 
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
-	const digest = "sha256:cached"
+	const digest = testPluginDigest
 	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypePlugin), ref, digest, "linux", "amd64")
 	require.NoError(t, artifactcache.Store(blobPath, []byte("fake-plugin"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
@@ -990,8 +1065,8 @@ func TestFetchAndCacheBinaries_SlowPath(t *testing.T) {
 	require.NoError(t, err)
 
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:pulled",
-		Result:              &puller.RegistryResult{Type: puller.Plugin},
+		ResolveDigestResult: testPluginDigest,
+		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
@@ -1011,7 +1086,7 @@ func TestFetchAndCacheBinaries_PullError(t *testing.T) {
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:xyz",
+		ResolveDigestResult: testPluginDigest,
 		PullErr:             fmt.Errorf("registry unreachable"),
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
@@ -1031,8 +1106,8 @@ func TestFetchAndCacheBinaries_DeduplicatesPlatforms(t *testing.T) {
 	require.NoError(t, err)
 
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:dup",
-		Result:              &puller.RegistryResult{Type: puller.Plugin},
+		ResolveDigestResult: testPluginDigest,
+		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
@@ -1054,8 +1129,8 @@ func TestFetchAndCacheBinaries_MultiplePlatforms(t *testing.T) {
 	require.NoError(t, err)
 
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:multi",
-		Result:              &puller.RegistryResult{Type: puller.Plugin},
+		ResolveDigestResult: testPluginDigest,
+		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
@@ -1069,7 +1144,8 @@ func TestFetchAndCacheBinaries_MultiplePlatforms(t *testing.T) {
 
 func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 	// staleNode is stale: the plugin's env=prod selector excludes plainNode. staleNode carries a
-	// finalizer, so ClearFinalizersIfNodeGone calls Node.Get, which the interceptor fails with a
+	// finalizer and a Falco pod still runs there, so orphan detection calls Node.Get; the
+	// interceptor fails that lookup with a
 	// non-404 error that propagates back to Reconcile.
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	plugin := newTestPlugin(withPluginSelector())
@@ -1079,7 +1155,7 @@ func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 	plainNode := newTestNode(testutil.TestNodeName, nil)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(plugin, staleNode, plainNode).
+		WithObjects(plugin, staleNode, plainNode, newTestFalco(), newRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -1098,8 +1174,8 @@ func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 }
 
 func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
-	// pluginNode carries a finalizer, so ClearFinalizersIfNodeGone checks the node via Node.Get,
-	// which the interceptor fails with a non-404 error.
+	// pluginNode carries a finalizer and a Falco pod still runs on its node, so orphan detection
+	// checks the Kubernetes Node via Get, which the interceptor fails with a non-404 error.
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	plugin := newTestPlugin()
 	pluginNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
@@ -1107,7 +1183,7 @@ func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
 	})
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(plugin, pluginNode).
+		WithObjects(plugin, pluginNode, newTestFalco(), newRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -1135,7 +1211,7 @@ func TestReconcile_FetchAndCacheBinariesError(t *testing.T) {
 
 	mockPuller := &puller.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
-		ConfigDigest: "sha256:meta",
+		ConfigDigest: testPluginDigest,
 		PullErr:      fmt.Errorf("registry down"),
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin, node, newTestFalco(), newRunningFalcoPod())

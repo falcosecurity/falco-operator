@@ -26,7 +26,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -96,17 +95,6 @@ func newTestConfigNode(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1
 func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigAggregatorReconciler, client.Client) {
 	t.Helper()
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(objs...).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	return NewConfigAggregatorReconciler(cl, s), cl
-}
-
-func newTestReconcilerWithScheme(t *testing.T, s *runtime.Scheme, objs ...client.Object) (*ConfigAggregatorReconciler, client.Client) {
-	t.Helper()
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
@@ -318,7 +306,7 @@ func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) 
 			Message: "old result",
 		}}
 	})
-	r, cl := newTestReconciler(t, config, staleNode, newTestNode())
+	r, cl := newTestReconciler(t, config, staleNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
 
 	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
 	require.NoError(t, err)
@@ -437,7 +425,20 @@ func TestReconcile_EnsureInUseFinalizerError(t *testing.T) {
 func TestHandleDeletion_NoNodeObjects(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	config := newTestConfig()
-	_, cl := newTestReconcilerWithScheme(t, s, config)
+	cl := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(config).
+		WithStatusSubresource(&artifactv1alpha1.Config{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
+					return fmt.Errorf("Falco list should not be called without node objects")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
+		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+		Build()
 	addInUseFinalizer(t, cl, config)
 
 	r := NewConfigAggregatorReconciler(cl, s)
@@ -472,7 +473,7 @@ func TestHandleDeletion_NodeObjectsBeingDeleted(t *testing.T) {
 		n.DeletionTimestamp = &now
 		n.Finalizers = []string{"some-finalizer"} // keeps the object in the fake client after deletion
 	})
-	r, _ := newTestReconciler(t, config, configNode)
+	r, _ := newTestReconciler(t, config, configNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
 
 	// Should return nil and wait (not remove finalizer).
 	err := r.handleDeletion(context.Background(), config)

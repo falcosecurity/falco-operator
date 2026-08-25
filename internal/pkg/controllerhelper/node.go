@@ -25,34 +25,51 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
 
-// ClearFinalizersIfNodeGone checks whether nodeName still exists in the cluster.
-// If the node is gone and obj still has finalizers, it removes all finalizers via
-// a Patch so the API server can complete the pending deletion.
+const falcoInstanceLabel = "app.kubernetes.io/instance"
+
+// ClearFinalizersIfNodeOrPodGone checks whether the per-node artifact operator that
+// owns obj's finalizers can still perform cleanup. When either the Kubernetes Node no
+// longer exists or no Running Falco pod is present on it, all finalizers are removed
+// via a Patch so the API server can complete the pending deletion.
 //
-// This is needed when a Kubernetes node is deleted: the per-node artifact operator
-// (running as a DaemonSet pod on that node) is evicted along with it and can no
-// longer remove its own finalizer from the per-node object (ArtifactNode). Without
-// this call the node objects would remain stuck in Terminating indefinitely,
-// blocking parent artifact cleanup.
-func ClearFinalizersIfNodeGone(ctx context.Context, cl client.Client, nodeName string, obj client.Object) error {
+// This covers both a deleted Kubernetes Node and a Falco pod disappearing from a
+// still-existing node. In either case no per-node artifact operator remains to remove
+// its finalizer, and there is no remaining node-side cleanup to perform. Without this
+// call the ArtifactNode would remain stuck in Terminating indefinitely, blocking its
+// parent artifact cleanup.
+func ClearFinalizersIfNodeOrPodGone(
+	ctx context.Context,
+	cl client.Client,
+	nodeName string,
+	runningFalcoNodes map[string]struct{},
+	obj client.Object,
+) error {
 	if len(obj.GetFinalizers()) == 0 {
 		return nil
 	}
-	node := &corev1.Node{}
-	err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node)
-	if err == nil {
-		return nil // node still exists, let the per-node operator clean up normally.
+
+	reason := "Falco pod gone"
+	if _, podRunning := runningFalcoNodes[nodeName]; podRunning {
+		node := &corev1.Node{}
+		err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node)
+		if err == nil {
+			return nil // Node and per-node artifact operator still exist; let it clean up normally.
+		}
+		if !k8serrors.IsNotFound(err) {
+			return err
+		}
+		reason = "Node gone"
 	}
-	if !k8serrors.IsNotFound(err) {
-		return err
-	}
-	log.FromContext(ctx).Info("Node gone, force-clearing finalizers on orphaned node object",
-		"node", nodeName, "object", obj.GetName())
+
+	log.FromContext(ctx).Info("Force-clearing finalizers on orphaned node object",
+		"node", nodeName, "object", obj.GetName(), "reason", reason)
 	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object)) //nolint:forcetypeassert // client.Object always satisfies this
 	obj.SetFinalizers(nil)
 	if pErr := cl.Patch(ctx, obj, patch); pErr != nil && !k8serrors.IsNotFound(pErr) {
@@ -90,23 +107,29 @@ func ListMatchingFalcoNodes(ctx context.Context, cl client.Client, sel *metav1.L
 		return nil, err
 	}
 
-	falcoNodes, err := listFalcoRunningNodeNames(ctx, cl, namespace)
+	falcoNodes, err := ListFalcoRunningNodeNames(ctx, cl, namespace)
 	if err != nil {
 		return nil, err
 	}
+	return FilterNodesByName(nodes, falcoNodes), nil
+}
 
-	filtered := nodes[:0]
+// FilterNodesByName returns the nodes whose names are present in desired. The returned
+// slice does not alias nodes, so callers can safely retain the original list for other
+// purposes such as multi-platform cache pre-fetching.
+func FilterNodesByName(nodes []corev1.Node, desired map[string]struct{}) []corev1.Node {
+	filtered := make([]corev1.Node, 0, len(nodes))
 	for i := range nodes {
-		if _, ok := falcoNodes[nodes[i].Name]; ok {
+		if _, ok := desired[nodes[i].Name]; ok {
 			filtered = append(filtered, nodes[i])
 		}
 	}
-	return filtered, nil
+	return filtered
 }
 
-// listFalcoRunningNodeNames lists all Falco CRs in namespace and returns the set of node names
+// ListFalcoRunningNodeNames lists all Falco CRs in namespace and returns the set of node names
 // that currently have a Running pod for any of them.
-func listFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace string) (map[string]struct{}, error) {
+func ListFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace string) (map[string]struct{}, error) {
 	falcoList := &instancev1alpha1.FalcoList{}
 	if err := cl.List(ctx, falcoList, client.InNamespace(namespace)); err != nil {
 		return nil, fmt.Errorf("list Falco CRs for node filtering: %w", err)
@@ -118,7 +141,7 @@ func listFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace 
 		podList := &corev1.PodList{}
 		if err := cl.List(ctx, podList,
 			client.InNamespace(namespace),
-			client.MatchingLabels{"app.kubernetes.io/instance": name},
+			client.MatchingLabels{falcoInstanceLabel: name},
 		); err != nil {
 			return nil, fmt.Errorf("list pods for Falco %q: %w", name, err)
 		}
@@ -130,6 +153,47 @@ func listFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace 
 		}
 	}
 	return running, nil
+}
+
+// FalcoPodChangePredicate accepts exactly the Pod events that can change the result of
+// ListFalcoRunningNodeNames: a labeled Pod appearing or disappearing, or an update to its
+// Falco instance label, node assignment, or phase. In particular, checking both sides of an
+// update ensures that removing the instance label still triggers stale ArtifactNode cleanup.
+func FalcoPodChangePredicate() predicate.Predicate {
+	hasFalcoInstance := func(obj client.Object) bool {
+		_, ok := obj.GetLabels()[falcoInstanceLabel]
+		return ok
+	}
+
+	return predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			return hasFalcoInstance(e.Object)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			return hasFalcoInstance(e.Object)
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldInstance, oldTracked := e.ObjectOld.GetLabels()[falcoInstanceLabel]
+			newInstance, newTracked := e.ObjectNew.GetLabels()[falcoInstanceLabel]
+			if !oldTracked && !newTracked {
+				return false
+			}
+			if oldTracked != newTracked || oldInstance != newInstance {
+				return true
+			}
+
+			oldPod, oldOK := e.ObjectOld.(*corev1.Pod)
+			newPod, newOK := e.ObjectNew.(*corev1.Pod)
+			if !oldOK || !newOK {
+				return true
+			}
+			return oldPod.Spec.NodeName != newPod.Spec.NodeName ||
+				oldPod.Status.Phase != newPod.Status.Phase
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return hasFalcoInstance(e.Object)
+		},
+	}
 }
 
 // IsBeingDeleted re-fetches obj and reports whether it now has a DeletionTimestamp set, or is
