@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -47,7 +48,10 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
-const testRulesfileName = "test-rulesfile"
+const (
+	testRulesfileName   = "test-rulesfile"
+	testRulesfileDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+)
 
 func testRulesfileNodeName() string {
 	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, testRulesfileName, testutil.TestNodeName)
@@ -295,6 +299,46 @@ func TestReconcile_CreatesNodeObject(t *testing.T) {
 	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
 }
 
+func TestReconcile_CreatesIndependentNodeObjectsForNamespaces(t *testing.T) {
+	const (
+		deploymentNamespace = "falco-deployment"
+		daemonSetNamespace  = "falco-daemonset"
+	)
+
+	objects := make([]client.Object, 0, 7)
+	objects = append(objects, newTestNode())
+	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
+		rf := newTestRulesfile()
+		rf.Namespace = namespace
+		falco := newTestFalco()
+		falco.Namespace = namespace
+		pod := newRunningFalcoPod()
+		pod.Namespace = namespace
+		objects = append(objects, rf, falco, pod)
+	}
+	r, cl := newTestReconciler(t, objects...)
+
+	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
+		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
+			Name:      testRulesfileName,
+			Namespace: namespace,
+		}})
+		require.NoError(t, err)
+		assert.Equal(t, ctrl.Result{}, result)
+
+		rfNode := &artifactv1alpha1.ArtifactNode{}
+		require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
+			Name:      testRulesfileNodeName(),
+			Namespace: namespace,
+		}, rfNode))
+		assert.Equal(t, testutil.TestNodeName, rfNode.Spec.NodeName)
+	}
+
+	nodeList := &artifactv1alpha1.ArtifactNodeList{}
+	require.NoError(t, cl.List(context.Background(), nodeList))
+	assert.Len(t, nodeList.Items, 2)
+}
+
 func TestReconcile_NodeObjectAlreadyExists(t *testing.T) {
 	rf := newTestRulesfile()
 	node := newTestNode()
@@ -356,7 +400,7 @@ func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) 
 			Message: "old result",
 		}}
 	})
-	r, cl := newTestReconciler(t, rf, staleNode, newTestNode())
+	r, cl := newTestReconciler(t, rf, staleNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
 
 	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.NoError(t, err)
@@ -375,6 +419,26 @@ func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) 
 	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
 	assert.Equal(t, "NoNodesAssigned", condition.Reason,
 		"the stale child's last successful result must not remain in the aggregate")
+}
+
+func TestReconcile_RemovesNodeObjectWhenFalcoPodGone(t *testing.T) {
+	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) {
+		r.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	staleNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
+		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
+	})
+	// The Kubernetes Node still matches the Rulesfile selector, but no Falco pod remains there.
+	r, cl := newTestReconciler(t, rf, staleNode, newTestNode())
+
+	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	got := &artifactv1alpha1.ArtifactNode{}
+	err = cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), got)
+	assert.True(t, k8serrors.IsNotFound(err),
+		"the instance operator must garbage-collect the ArtifactNode when its artifact operator is gone")
 }
 
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
@@ -428,6 +492,14 @@ func TestHandleDeletion_NoNodeObjects(t *testing.T) {
 		WithScheme(s).
 		WithObjects(rf).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
+					return fmt.Errorf("Falco list should not be called without node objects")
+				}
+				return c.List(ctx, list, opts...)
+			},
+		}).
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	addInUseFinalizer(t, cl, rf)
@@ -524,10 +596,14 @@ func TestHandleDeletion_NodeObjectsBeingDeleted(t *testing.T) {
 		n.DeletionTimestamp = &now
 		n.Finalizers = []string{"some-finalizer"}
 	})
-	r, _ := newTestReconciler(t, rf, rfNode)
+	r, cl := newTestReconciler(t, rf, rfNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
 
 	err := r.handleDeletion(context.Background(), rf)
 	require.NoError(t, err)
+
+	got := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rfNode), got))
+	assert.NotEmpty(t, got.Finalizers, "the running node-side operator must retain responsibility for cleanup")
 }
 
 func TestHandleDeletion_ListError(t *testing.T) {
@@ -1203,7 +1279,7 @@ func TestFetchAndCacheBinary_FastPath(t *testing.T) {
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, rf)
 
 	ref := artifact.ResolveReference(rf.Spec.OCIArtifact)
-	const digest = "sha256:cached-rules"
+	const digest = testRulesfileDigest
 	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypeRulesfile), ref, digest, "", "")
 	require.NoError(t, artifactcache.Store(blobPath, []byte("rule content"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
@@ -1229,8 +1305,8 @@ func TestFetchAndCacheBinary_SlowPath(t *testing.T) {
 	require.NoError(t, err)
 
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:pulled-rules",
-		Result:              &puller.RegistryResult{Type: puller.Rulesfile},
+		ResolveDigestResult: testRulesfileDigest,
+		Result:              &puller.RegistryResult{RootDigest: testRulesfileDigest, Type: puller.Rulesfile},
 		LayerContent:        tarGz,
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, rf)
@@ -1247,7 +1323,7 @@ func TestFetchAndCacheBinary_PullError(t *testing.T) {
 	cacheDir := t.TempDir()
 	rf := newTestRulesfile(withRulesfileOCI())
 	mockPuller := &puller.MockOCIPuller{
-		ResolveDigestResult: "sha256:xyz",
+		ResolveDigestResult: testRulesfileDigest,
 		PullErr:             fmt.Errorf("registry down"),
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, rf)
@@ -1259,8 +1335,8 @@ func TestFetchAndCacheBinary_PullError(t *testing.T) {
 
 func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 	// Selector requires env=prod; plain node doesn't have that label → staleNode is stale.
-	// staleNode has a finalizer so ClearFinalizersIfNodeGone doesn't short-circuit.
-	// The interceptor makes Node.Get return a non-404 error propagated to Reconcile.
+	// staleNode has a finalizer and a Falco pod still runs there, so orphan detection calls
+	// Node.Get. The interceptor returns a non-404 error that propagates to Reconcile.
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	rf := newTestRulesfile(withRulesfileSelector())
 	staleNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
@@ -1269,7 +1345,7 @@ func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 	plainNode := newTestNode()
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(rf, staleNode, plainNode).
+		WithObjects(rf, staleNode, plainNode, newTestFalco(), newRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
@@ -1288,8 +1364,8 @@ func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 }
 
 func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
-	// RulesfileNode has a finalizer so ClearFinalizersIfNodeGone proceeds to check the node.
-	// The Node.Get interceptor returns a non-404 error that is propagated to the caller.
+	// RulesfileNode has a finalizer and a Falco pod still runs on its node, so orphan detection
+	// checks the Kubernetes Node via Get. The interceptor fails it with a non-404 error.
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	rf := newTestRulesfile()
 	rfNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
@@ -1297,7 +1373,7 @@ func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
 	})
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(rf, rfNode).
+		WithObjects(rf, rfNode, newTestFalco(), newRunningFalcoPod()).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, ok := obj.(*corev1.Node); ok {
@@ -1324,7 +1400,7 @@ func TestReconcile_FetchAndCacheBinaryError(t *testing.T) {
 
 	mockPuller := &puller.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
-		ConfigDigest: "sha256:meta",
+		ConfigDigest: testRulesfileDigest,
 		PullErr:      fmt.Errorf("registry down"),
 	}
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, rf, node)
