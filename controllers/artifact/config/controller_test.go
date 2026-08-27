@@ -18,6 +18,8 @@ package config
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"testing"
 	"time"
@@ -41,10 +43,51 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
+	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
+
+// testFetcher implements artifact.ArtifactFetcher for controller unit tests.
+// ConfigMap and Inline use the real artifact.Fetcher backed by the fake k8s client.
+// FetchOCI returns in-memory bytes to avoid HTTP calls to a real artifact server.
+type testFetcher struct {
+	delegate *artifact.Fetcher
+	ociErr   error
+	ociBytes []byte
+}
+
+func newTestFetcher(cl client.Client) *testFetcher {
+	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
+}
+
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type) (artifact.FetchResult, error) {
+	if f.ociErr != nil {
+		return artifact.FetchResult{}, f.ociErr
+	}
+	content := f.ociBytes
+	if content == nil {
+		content = []byte("mock-oci-content")
+	}
+	h := sha256.Sum256(content)
+	return artifact.FetchResult{
+		Content:     content,
+		ContentHash: hex.EncodeToString(h[:]),
+		Perm:        0o755,
+	}, nil
+}
+
+func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact.FetchResult, error) {
+	return f.delegate.FetchInline(ctx, content)
+}
+
+func (f *testFetcher) FetchConfigMap(
+	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Type,
+) (artifact.FetchResult, error) {
+	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
+}
 
 const testConfigName = "test-config"
 
@@ -61,8 +104,39 @@ falco_libs:
   thread_table_size: 262144
 `
 
-func testFinalizerName() string {
-	return common.FormatFinalizerName(configFinalizerPrefix, testutil.TestNodeName)
+func testConfigNodeName() string {
+	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName)
+}
+
+func newTestConfigNodeObj(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
+	n := &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      testConfigNodeName(),
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName),
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	}
+	for _, o := range opts {
+		o(n)
+	}
+	return n
+}
+
+func withConfigOwnerRef() func(*artifactv1alpha1.ArtifactNode) {
+	return func(n *artifactv1alpha1.ArtifactNode) {
+		n.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: artifactv1alpha1.GroupVersion.String(),
+			Kind:       "Config",
+			Name:       testConfigName,
+		}}
+	}
+}
+
+func withConfigFinalizer() func(*artifactv1alpha1.ArtifactNode) {
+	return func(n *artifactv1alpha1.ArtifactNode) {
+		n.Finalizers = []string{configNodeFinalizer}
+	}
 }
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, client.Client) {
@@ -71,36 +145,34 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
 
 	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
-		artifact.WithFS(mockFS),
-	)
 
 	return &ConfigReconciler{
-		Client:          cl,
-		Scheme:          s,
-		recorder:        events.NewFakeRecorder(100),
-		gate:            startupgate.NoopGateRecorder{},
-		finalizer:       testFinalizerName(),
-		artifactManager: am,
-		nodeName:        testutil.TestNodeName,
-		namespace:       testutil.TestNamespace,
+		Client:    cl,
+		Scheme:    s,
+		recorder:  events.NewFakeRecorder(100),
+		fetcher:   newTestFetcher(cl),
+		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		nodeName:  testutil.TestNodeName,
+		namespace: testutil.TestNamespace,
 	}, cl
 }
 
 func TestNewConfigReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	r := NewConfigReconciler(cl, s, events.NewFakeRecorder(10), startupgate.NoopGateRecorder{}, "my-node", "my-namespace")
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+		compat.NewMockVersionsFetcher(nil))
+	r := NewConfigReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", store)
 
 	require.NotNil(t, r)
 	assert.Equal(t, "my-node", r.nodeName)
 	assert.Equal(t, "my-namespace", r.namespace)
-	assert.Equal(t, common.FormatFinalizerName(configFinalizerPrefix, "my-node"), r.finalizer)
-	assert.NotNil(t, r.artifactManager)
+	assert.NotNil(t, r.fetcher)
+	assert.NotNil(t, r.store)
 	assert.NotNil(t, r.recorder)
 }
 
@@ -120,69 +192,17 @@ func TestReconcile(t *testing.T) {
 			req:  testutil.Request("nonexistent"),
 		},
 		{
-			name: "selector mismatch without finalizer",
-			objects: []client.Object{
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.TestNodeName,
-						Labels: map[string]string{"role": "worker"},
-					},
-				},
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      testConfigName,
-						Namespace: testutil.TestNamespace,
-					},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"role": "gpu"},
-						},
-					},
-				},
-			},
-			req:           testutil.Request(testConfigName),
-			wantFinalizer: new(false),
-		},
-		{
-			name: "selector mismatch with finalizer removes finalizer",
-			objects: []client.Object{
-				&corev1.Node{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:   testutil.TestNodeName,
-						Labels: map[string]string{"role": "worker"},
-					},
-				},
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"role": "gpu"},
-						},
-					},
-				},
-			},
-			req:           testutil.Request(testConfigName),
-			wantFinalizer: new(false),
-		},
-		{
 			name: "deletion with finalizer removes artifacts and finalizer",
 			objects: []client.Object{
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req:             testutil.Request(testConfigName),
+			req:             testutil.Request(testConfigNodeName()),
 			triggerDeletion: true,
 			wantFinalizer:   new(false),
 		},
@@ -190,35 +210,31 @@ func TestReconcile(t *testing.T) {
 			name: "sets finalizer on first reconcile and returns early",
 			objects: []client.Object{
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      testConfigName,
-						Namespace: testutil.TestNamespace,
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 					},
 				},
+				newTestConfigNodeObj(withConfigOwnerRef()),
 			},
-			req:           testutil.Request(testConfigName),
+			req:           testutil.Request(testConfigNodeName()),
 			wantFinalizer: new(true),
 		},
 		{
 			name: "happy path with inline config stores config and sets conditions",
 			objects: []client.Object{
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 						Priority: 50,
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req: testutil.Request(testConfigName),
+			req: testutil.Request(testConfigNodeName()),
 			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
@@ -226,30 +242,26 @@ func TestReconcile(t *testing.T) {
 			name: "happy path with configmap ref stores config and sets conditions",
 			objects: []client.Object{
 				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-config-cm",
-						Namespace: testutil.TestNamespace,
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-config-cm", Namespace: testutil.TestNamespace},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
 					},
 				},
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
-							Name: "my-config-cm",
-						},
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req: testutil.Request(testConfigName),
+			req: testutil.Request(testConfigNodeName()),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
+				},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
@@ -257,110 +269,80 @@ func TestReconcile(t *testing.T) {
 			name: "configmap ref not found fails reference resolution",
 			objects: []client.Object{
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
-							Name: "missing-cm",
-						},
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req:     testutil.Request(testConfigName),
+			req:     testutil.Request(testConfigNodeName()),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonProgramFailed},
 			},
 		},
 		{
 			name: "deletion without our finalizer is no-op",
 			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{"some-other-finalizer"},
-					},
-				},
+				newTestConfigNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
+					n.Finalizers = []string{"some-other-finalizer"}
+				}),
 			},
-			req:             testutil.Request(testConfigName),
+			req:             testutil.Request(testConfigNodeName()),
 			triggerDeletion: true,
-		},
-		{
-			name: "node not found with selector returns error",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      testConfigName,
-						Namespace: testutil.TestNamespace,
-					},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Selector: &metav1.LabelSelector{
-							MatchLabels: map[string]string{"role": "worker"},
-						},
-					},
-				},
-			},
-			req:     testutil.Request(testConfigName),
-			wantErr: true,
 		},
 		{
 			name: "ensureConfig failure sets error conditions on status",
 			objects: []client.Object{
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
 						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
 						Priority: 50,
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req:      testutil.Request(testConfigName),
+			req:      testutil.Request(testConfigNodeName()),
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+				{
+					Type:   commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineArtifactProgramFailed,
+				},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonProgramFailed},
 			},
 		},
 		{
 			name: "references resolved but configmap store fails sets ResolvedRefs true and Programmed false",
 			objects: []client.Object{
 				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:      "my-config-cm",
-						Namespace: testutil.TestNamespace,
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: "my-config-cm", Namespace: testutil.TestNamespace},
 					Data: map[string]string{
 						commonv1alpha1.ConfigMapConfigKey: testConfigData,
 					},
 				},
 				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       testConfigName,
-						Namespace:  testutil.TestNamespace,
-						Finalizers: []string{testFinalizerName()},
-					},
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
 					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{
-							Name: "my-config-cm",
-						},
+						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
 					},
 				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
 			},
-			req:      testutil.Request(testConfigName),
+			req:      testutil.Request(testConfigNodeName()),
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapConfigStoreFailed},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapArtifactProgramFailed,
+				},
+				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonProgramFailed},
 			},
 		},
 	}
@@ -372,15 +354,13 @@ func TestReconcile(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS := filesystem.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
-					artifact.WithFS(mockFS),
-				)
+				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil))
 			}
 
 			if tt.triggerDeletion {
-				obj := &artifactv1alpha1.Config{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
-				require.NoError(t, cl.Delete(context.Background(), obj))
+				nodeObj := &artifactv1alpha1.ArtifactNode{}
+				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
+				require.NoError(t, cl.Delete(context.Background(), nodeObj))
 			}
 
 			result, err := r.Reconcile(context.Background(), tt.req)
@@ -393,16 +373,16 @@ func TestReconcile(t *testing.T) {
 			}
 
 			if tt.wantFinalizer != nil {
-				obj := &artifactv1alpha1.Config{}
-				if err := cl.Get(context.Background(), tt.req.NamespacedName, obj); err == nil {
-					assert.Equal(t, *tt.wantFinalizer, controllerutil.ContainsFinalizer(obj, testFinalizerName()))
+				nodeObj := &artifactv1alpha1.ArtifactNode{}
+				if err := cl.Get(context.Background(), tt.req.NamespacedName, nodeObj); err == nil {
+					assert.Equal(t, *tt.wantFinalizer, controllerutil.ContainsFinalizer(nodeObj, configNodeFinalizer))
 				}
 			}
 
 			if len(tt.wantConditions) > 0 {
-				obj := &artifactv1alpha1.Config{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
-				testutil.RequireConditions(t, obj.Status.Conditions, tt.wantConditions)
+				nodeObj := &artifactv1alpha1.ArtifactNode{}
+				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
+				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
 			}
 		})
 	}
@@ -419,226 +399,19 @@ func TestReconcile_GetErrorPropagates(t *testing.T) {
 		}).
 		Build()
 
-	mockFS := filesystem.NewMockFileSystem()
-	am := artifact.NewManagerWithOptions(cl, testutil.TestNamespace, artifact.WithFS(mockFS))
 	r := &ConfigReconciler{
-		Client:          cl,
-		Scheme:          s,
-		recorder:        events.NewFakeRecorder(100),
-		gate:            startupgate.NoopGateRecorder{},
-		finalizer:       testFinalizerName(),
-		artifactManager: am,
-		nodeName:        testutil.TestNodeName,
-		namespace:       testutil.TestNamespace,
+		Client:   cl,
+		Scheme:   s,
+		recorder: events.NewFakeRecorder(100),
+		fetcher:  newTestFetcher(cl),
+		store: nodeartifacts.NewManager(&artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+			compat.NewMockVersionsFetcher(nil)),
+		nodeName:  testutil.TestNodeName,
+		namespace: testutil.TestNamespace,
 	}
 
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
+	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigNodeName()))
 	require.Error(t, err)
-}
-
-func TestReconcile_GateInteraction(t *testing.T) {
-	const gen int64 = 3
-	workerNode := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:   testutil.TestNodeName,
-			Labels: map[string]string{"role": "worker"},
-		},
-	}
-	matching := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       testConfigName,
-			Namespace:  testutil.TestNamespace,
-			Generation: gen,
-		},
-		Spec: artifactv1alpha1.ConfigSpec{
-			Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-		},
-	}
-	mismatched := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       testConfigName,
-			Namespace:  testutil.TestNamespace,
-			Generation: gen,
-		},
-		Spec: artifactv1alpha1.ConfigSpec{
-			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "gpu"}},
-		},
-	}
-	withFinalizer := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       testConfigName,
-			Namespace:  testutil.TestNamespace,
-			Generation: gen,
-			Finalizers: []string{testFinalizerName()},
-		},
-		Spec: artifactv1alpha1.ConfigSpec{
-			Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-		},
-	}
-
-	tests := []struct {
-		name            string
-		objects         []client.Object
-		triggerDeletion bool
-		writeErr        error
-		req             ctrl.Request
-		wantErr         bool
-		wantReconciled  []startupgate.FakeGateCall
-		wantForgotten   []startupgate.FakeGateCall
-	}{
-		{
-			name:          "NotFound forgets the CR",
-			req:           testutil.Request(testConfigName),
-			wantForgotten: []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName}},
-		},
-		{
-			name:          "selector mismatch forgets the CR",
-			objects:       []client.Object{workerNode, mismatched},
-			req:           testutil.Request(testConfigName),
-			wantForgotten: []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName}},
-		},
-		{
-			name:            "completed deletion forgets the CR",
-			objects:         []client.Object{workerNode, withFinalizer},
-			triggerDeletion: true,
-			req:             testutil.Request(testConfigName),
-			wantForgotten:   []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName}},
-		},
-		{
-			name:    "first reconcile only adds the finalizer and must NOT mark reconciled",
-			objects: []client.Object{workerNode, matching},
-			req:     testutil.Request(testConfigName),
-		},
-		{
-			name:           "successful reconcile marks reconciled with current generation",
-			objects:        []client.Object{workerNode, withFinalizer},
-			req:            testutil.Request(testConfigName),
-			wantReconciled: []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName, Generation: gen}},
-		},
-		{
-			name:           "real reconcile failure still marks reconciled after finalizer",
-			objects:        []client.Object{workerNode, withFinalizer},
-			writeErr:       fmt.Errorf("disk full"),
-			req:            testutil.Request(testConfigName),
-			wantErr:        true,
-			wantReconciled: []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName, Generation: gen}},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t, tt.objects...)
-			rec := &startupgate.FakeGateRecorder{}
-			r.gate = rec
-			if tt.writeErr != nil {
-				r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
-					artifact.WithFS(&filesystem.MockFileSystem{WriteErr: tt.writeErr}),
-				)
-			}
-			if tt.triggerDeletion {
-				obj := &artifactv1alpha1.Config{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
-				require.NoError(t, cl.Delete(context.Background(), obj))
-			}
-
-			_, err := r.Reconcile(context.Background(), tt.req)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-
-			assert.Equal(t, tt.wantReconciled, rec.Reconciled)
-			assert.Equal(t, tt.wantForgotten, rec.Forgotten)
-		})
-	}
-}
-
-func TestReconcile_GateForgetsOnDeletionCleanupFailure(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
-	finalizer := testFinalizerName()
-	config := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              testConfigName,
-			Namespace:         testutil.TestNamespace,
-			Generation:        1,
-			Finalizers:        []string{finalizer},
-			DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
-		},
-	}
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				return fmt.Errorf("patch failed: cluster unreachable")
-			},
-		}).
-		Build()
-
-	r := &ConfigReconciler{
-		Client:          cl,
-		Scheme:          s,
-		recorder:        events.NewFakeRecorder(100),
-		gate:            &startupgate.FakeGateRecorder{},
-		finalizer:       finalizer,
-		artifactManager: artifact.NewManagerWithOptions(cl, testutil.TestNamespace, artifact.WithFS(filesystem.NewMockFileSystem())),
-		nodeName:        testutil.TestNodeName,
-		namespace:       testutil.TestNamespace,
-	}
-
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.Error(t, err)
-
-	rec := r.gate.(*startupgate.FakeGateRecorder)
-	assert.Empty(t, rec.Reconciled)
-	assert.Equal(t, []startupgate.FakeGateCall{{Kind: "Config", Namespace: testutil.TestNamespace, Name: testConfigName}}, rec.Forgotten)
-}
-
-func TestEnsureFinalizer(t *testing.T) {
-	tests := []struct {
-		name       string
-		finalizers []string
-		wantOK     bool
-	}{
-		{
-			name:   "adds finalizer when not present",
-			wantOK: true,
-		},
-		{
-			name:       "no-op when finalizer already present",
-			finalizers: []string{testFinalizerName()},
-			wantOK:     false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			config := &artifactv1alpha1.Config{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:       testConfigName,
-					Namespace:  testutil.TestNamespace,
-					Finalizers: tt.finalizers,
-				},
-			}
-			r, cl := newTestReconciler(t, config)
-
-			fetched := &artifactv1alpha1.Config{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, fetched))
-
-			ok, err := r.ensureFinalizer(context.Background(), fetched)
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantOK, ok)
-
-			if tt.wantOK {
-				updated := &artifactv1alpha1.Config{}
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, updated))
-				assert.True(t, controllerutil.ContainsFinalizer(updated, testFinalizerName()))
-			}
-		})
-	}
 }
 
 func TestEnforceReferenceResolution(t *testing.T) {
@@ -655,11 +428,6 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      testConfigName,
 					Namespace: testutil.TestNamespace,
-				},
-				Status: artifactv1alpha1.ConfigStatus{
-					Conditions: []metav1.Condition{
-						common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, "", 1),
-					},
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{},
@@ -695,7 +463,6 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
 			},
 		},
 	}
@@ -703,8 +470,16 @@ func TestEnforceReferenceResolution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newTestReconciler(t, tt.objects...)
+			nodeObj := newTestConfigNodeObj()
 
-			err := r.enforceReferenceResolution(context.Background(), tt.config)
+			// Pre-seed a stale ResolvedRefs condition to verify it's removed when no refs.
+			if tt.config.Spec.ConfigMapRef == nil {
+				nodeObj.Status.Conditions = []metav1.Condition{
+					common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, "", 1),
+				}
+			}
+
+			err := r.enforceReferenceResolution(context.Background(), tt.config, nodeObj)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -712,7 +487,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testutil.RequireConditions(t, tt.config.Status.Conditions, tt.wantConditions)
+			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
 		})
 	}
 }
@@ -742,7 +517,7 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 			},
 			wantFiles:  []string{testConfigYAML},
 			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
@@ -759,10 +534,8 @@ func TestEnsureConfig(t *testing.T) {
 					Priority: 50,
 				},
 			},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
-			},
-			wantEvents: []string{},
+			wantConditions: nil,
+			wantEvents:     []string{},
 		},
 		{
 			name: "non-nil config with empty Raw is treated as no inline config",
@@ -778,7 +551,7 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 			},
 			wantEvents: []string{},
 		},
@@ -807,7 +580,10 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
+				},
 			},
 			wantFiles:  []string{testConfigData},
 			wantEvents: []string{"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully"},
@@ -838,7 +614,11 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
+				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
+				},
 			},
 			wantFiles: []string{testConfigYAML, testConfigData},
 			wantEvents: []string{
@@ -861,7 +641,10 @@ func TestEnsureConfig(t *testing.T) {
 			},
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+				{
+					Type:   commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineArtifactProgramFailed,
+				},
 			},
 		},
 		{
@@ -880,7 +663,10 @@ func TestEnsureConfig(t *testing.T) {
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineConfigStoreFailed},
+				{
+					Type:   commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonInlineArtifactProgramFailed,
+				},
 			},
 			wantEvents: []string{"Warning InlineConfigStoreFailed Failed to store config: disk full"},
 		},
@@ -911,7 +697,10 @@ func TestEnsureConfig(t *testing.T) {
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapConfigStoreFailed},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapArtifactProgramFailed,
+				},
 			},
 			wantEvents: []string{"Warning ConfigMapConfigStoreFailed Failed to store ConfigMap config: disk full"},
 		},
@@ -919,17 +708,16 @@ func TestEnsureConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t, tt.objects...)
+			r, _ := newTestReconciler(t, tt.objects...)
+			nodeObj := newTestConfigNodeObj()
 
 			mockFS := filesystem.NewMockFileSystem()
 			if tt.writeErr != nil {
 				mockFS.WriteErr = tt.writeErr
 			}
-			r.artifactManager = artifact.NewManagerWithOptions(cl, testutil.TestNamespace,
-				artifact.WithFS(mockFS),
-			)
+			r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil))
 
-			err := r.ensureConfig(context.Background(), tt.config)
+			err := r.ensureConfig(context.Background(), tt.config, nodeObj)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -937,7 +725,7 @@ func TestEnsureConfig(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testutil.RequireConditions(t, tt.config.Status.Conditions, tt.wantConditions)
+			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
 			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 
 			if len(tt.wantFiles) > 0 {
@@ -970,21 +758,23 @@ func TestEnsureConfig_ProgrammedLastTransitionTime(t *testing.T) {
 			r, _ := newTestReconciler(t)
 			config := &artifactv1alpha1.Config{
 				ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace, Generation: 1},
-				Spec:       artifactv1alpha1.ConfigSpec{Priority: 50},
-				Status: artifactv1alpha1.ConfigStatus{
-					Conditions: []metav1.Condition{{
-						Type:               commonv1alpha1.ConditionProgrammed.String(),
-						Status:             tt.initialStatus,
-						Reason:             artifact.ReasonProgrammed,
-						Message:            artifact.MessageProgrammed,
-						LastTransitionTime: pinned,
-					}},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+					Priority: 50,
 				},
 			}
+			nodeObj := newTestConfigNodeObj()
+			nodeObj.Status.Conditions = []metav1.Condition{{
+				Type:               commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
+				Status:             tt.initialStatus,
+				Reason:             artifact.ReasonInlineArtifactProgrammed,
+				Message:            artifact.MessageInlineArtifactProgrammed,
+				LastTransitionTime: pinned,
+			}}
 
-			require.NoError(t, r.ensureConfig(context.Background(), config))
+			require.NoError(t, r.ensureConfig(context.Background(), config, nodeObj))
 
-			cond := apimeta.FindStatusCondition(config.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+			cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 			require.NotNil(t, cond)
 			require.Equal(t, metav1.ConditionTrue, cond.Status)
 			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
@@ -992,7 +782,7 @@ func TestEnsureConfig_ProgrammedLastTransitionTime(t *testing.T) {
 	}
 }
 
-func TestFindConfigsForConfigMap(t *testing.T) {
+func TestFindNodeObjectsForConfigMap(t *testing.T) {
 	configMap := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "my-config-cm",
@@ -1019,35 +809,92 @@ func TestFindConfigsForConfigMap(t *testing.T) {
 	r := &ConfigReconciler{
 		Client:    cl,
 		namespace: testutil.TestNamespace,
+		nodeName:  testutil.TestNodeName,
 	}
 
-	requests := r.findConfigsForConfigMap(context.Background(), configMap)
+	requests := r.findNodeObjectsForConfigMap(context.Background(), configMap)
 	require.Len(t, requests, 1)
-	assert.Equal(t, testConfigName, requests[0].Name)
+	assert.Equal(t, testConfigNodeName(), requests[0].Name)
 	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
 }
 
-func TestPatchStatus(t *testing.T) {
-	config := &artifactv1alpha1.Config{
+func TestFindNodeObjectForConfig(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	cl := fake.NewClientBuilder().WithScheme(s).Build()
+
+	r := &ConfigReconciler{
+		Client:   cl,
+		nodeName: testutil.TestNodeName,
+	}
+
+	cfg := &artifactv1alpha1.Config{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testConfigName,
 			Namespace: testutil.TestNamespace,
 		},
 	}
-	r, cl := newTestReconciler(t, config)
 
-	fetched := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, fetched))
+	requests := r.findNodeObjectForConfig(context.Background(), cfg)
+	require.Len(t, requests, 1)
+	assert.Equal(t, testConfigNodeName(), requests[0].Name)
+	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+}
 
-	fetched.Status.Conditions = []metav1.Condition{
-		common.NewReconciledCondition(metav1.ConditionTrue, artifact.ReasonReconciled, artifact.MessageConfigReconciled, 1),
+func TestHandleDeletion(t *testing.T) {
+	tests := []struct {
+		name    string
+		objects []client.Object
+		trigger bool
+		wantOK  bool
+	}{
+		{
+			name: "not marked for deletion returns false",
+			objects: []client.Object{
+				&artifactv1alpha1.Config{
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
+				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
+			},
+			wantOK: false,
+		},
+		{
+			name: "marked for deletion with finalizer cleans up",
+			objects: []client.Object{
+				&artifactv1alpha1.Config{
+					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
+				},
+				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
+			},
+			trigger: true,
+			wantOK:  true,
+		},
+		{
+			name: "marked for deletion without our finalizer skips cleanup",
+			objects: []client.Object{
+				newTestConfigNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
+					n.Finalizers = []string{"some-other-finalizer"}
+				}),
+			},
+			trigger: true,
+			wantOK:  true,
+		},
 	}
 
-	require.NoError(t, r.patchStatus(context.Background(), fetched))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, cl := newTestReconciler(t, tt.objects...)
 
-	obj := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigName, Namespace: testutil.TestNamespace}, obj))
-	testutil.RequireConditions(t, obj.Status.Conditions, []testutil.ConditionExpect{
-		{Type: commonv1alpha1.ConditionReconciled.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReconciled},
-	})
+			nodeObj := &artifactv1alpha1.ArtifactNode{}
+			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
+
+			if tt.trigger {
+				require.NoError(t, cl.Delete(context.Background(), nodeObj))
+				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
+			}
+
+			ok, err := r.handleDeletion(context.Background(), nodeObj)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantOK, ok)
+		})
+	}
 }

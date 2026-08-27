@@ -35,9 +35,10 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
-	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
+	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 var k8sClient client.Client
@@ -57,18 +58,15 @@ func TestMain(m *testing.M) {
 // newIntegrationReconciler builds a reconciler backed by the real API server but with an
 // in-memory filesystem, so reconciles touch the cluster but not the disk.
 func newIntegrationReconciler() *ConfigReconciler {
-	am := artifact.NewManagerWithOptions(k8sClient, testutil.TestNamespace,
-		artifact.WithFS(filesystem.NewMockFileSystem()),
-	)
+	mockFS := filesystem.NewMockFileSystem()
 	return &ConfigReconciler{
-		Client:          k8sClient,
-		Scheme:          k8sClient.Scheme(),
-		recorder:        events.NewFakeRecorder(100),
-		gate:            startupgate.NoopGateRecorder{},
-		finalizer:       common.FormatFinalizerName(configFinalizerPrefix, testutil.TestNodeName),
-		artifactManager: am,
-		nodeName:        testutil.TestNodeName,
-		namespace:       testutil.TestNamespace,
+		Client:    k8sClient,
+		Scheme:    k8sClient.Scheme(),
+		recorder:  events.NewFakeRecorder(100),
+		fetcher:   &artifact.Fetcher{K8sClient: k8sClient},
+		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		nodeName:  testutil.TestNodeName,
+		namespace: testutil.TestNamespace,
 	}
 }
 
@@ -79,11 +77,20 @@ func createConfig(t *testing.T, ctx context.Context, c *artifactv1alpha1.Config)
 	return c
 }
 
-func configConditions(o client.Object) *[]metav1.Condition {
-	return &o.(*artifactv1alpha1.Config).Status.Conditions
+func createConfigNode(t *testing.T, ctx context.Context, n *artifactv1alpha1.ArtifactNode) *artifactv1alpha1.ArtifactNode {
+	t.Helper()
+	require.NoError(t, k8sClient.Create(ctx, n))
+	t.Cleanup(func() { testutil.CleanupObject(t, ctx, k8sClient, n) })
+	return n
 }
 
-func applyConfigStatus(ctx context.Context, o client.Object) error {
+// nodeObjConditions extracts conditions from a ConfigNode for use with AssertReconcileQuiet.
+func nodeObjConditions(o client.Object) *[]metav1.Condition {
+	return &o.(*artifactv1alpha1.ArtifactNode).Status.Conditions
+}
+
+// applyNodeObjStatus SSA-patches a ConfigNode's status.
+func applyNodeObjStatus(ctx context.Context, o client.Object) error {
 	return controllerhelper.PatchStatusSSA(ctx, k8sClient, k8sClient.Scheme(), o, fieldManager)
 }
 
@@ -96,22 +103,50 @@ func TestIntegration_Config_SteadyStateReconcileIsQuiet(t *testing.T) {
 			Priority: 50,
 		},
 	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, c.Name, testutil.TestNodeName)
+	nodeObj := createConfigNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindConfig, c.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(c, artifactv1alpha1.GroupVersion.WithKind("Config")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+
 	testutil.AssertReconcileQuiet(t, ctx, newIntegrationReconciler(), k8sClient,
-		client.ObjectKeyFromObject(c), &artifactv1alpha1.Config{}, 5, 5,
-		configConditions,
-		func(o client.Object) error { return applyConfigStatus(ctx, o) },
+		client.ObjectKeyFromObject(nodeObj), &artifactv1alpha1.ArtifactNode{}, 5, 5,
+		nodeObjConditions,
+		func(o client.Object) error { return applyNodeObjStatus(ctx, o) },
 	)
 }
 
 func TestIntegration_Config_StatusApplyNoOpThenChange(t *testing.T) {
 	ctx := context.Background()
-	key := types.NamespacedName{Name: "ssa-semantics", Namespace: testutil.TestNamespace}
-	createConfig(t, ctx, &artifactv1alpha1.Config{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}})
 
-	// Apply both conditions so the no-op contract is exercised on a multi-entry conditions list
-	// (listType=map keyed by type), not just a single condition.
+	c := createConfig(t, ctx, &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Name: "ssa-semantics", Namespace: testutil.TestNamespace},
+	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, c.Name, testutil.TestNodeName)
+	nodeObj := createConfigNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindConfig, c.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(c, artifactv1alpha1.GroupVersion.WithKind("Config")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+	key := types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}
+
 	applyConditions := func(programmed metav1.ConditionStatus, reason, msg string) error {
-		cur := &artifactv1alpha1.Config{}
+		cur := &artifactv1alpha1.ArtifactNode{}
 		if err := k8sClient.Get(ctx, key, cur); err != nil {
 			return err
 		}
@@ -119,10 +154,10 @@ func TestIntegration_Config_StatusApplyNoOpThenChange(t *testing.T) {
 			common.NewProgrammedCondition(programmed, reason, msg, cur.GetGeneration()))
 		apimeta.SetStatusCondition(&cur.Status.Conditions,
 			common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, cur.GetGeneration()))
-		return applyConfigStatus(ctx, cur)
+		return applyNodeObjStatus(ctx, cur)
 	}
 
-	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.Config{},
+	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.ArtifactNode{},
 		func() error {
 			return applyConditions(metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed)
 		},
@@ -132,7 +167,7 @@ func TestIntegration_Config_StatusApplyNoOpThenChange(t *testing.T) {
 	)
 
 	// Sanity: both conditions are present and Programmed reflects the final mutation.
-	final := &artifactv1alpha1.Config{}
+	final := &artifactv1alpha1.ArtifactNode{}
 	require.NoError(t, k8sClient.Get(ctx, key, final))
 	require.Equal(t, metav1.ConditionFalse,
 		apimeta.FindStatusCondition(final.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()).Status)
