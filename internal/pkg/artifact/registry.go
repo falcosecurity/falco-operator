@@ -55,14 +55,6 @@ func ResolveRegistryHost(artifact *commonv1alpha1.OCIArtifact) string {
 	return DefaultRegistry
 }
 
-func authSecretRefName(artifact *commonv1alpha1.OCIArtifact) string {
-	ref := authSecretRef(artifact)
-	if ref == nil {
-		return ""
-	}
-	return ref.Name
-}
-
 func authSecretRef(artifact *commonv1alpha1.OCIArtifact) *commonv1alpha1.SecretRef {
 	if artifact == nil || artifact.Registry == nil || artifact.Registry.Auth == nil {
 		return nil
