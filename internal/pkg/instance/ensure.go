@@ -37,23 +37,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
-// EnsureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
-func EnsureFinalizer(ctx context.Context, cl client.Client, obj client.Object, finalizerName string) (bool, error) {
-	if !controllerutil.ContainsFinalizer(obj, finalizerName) {
-		log.FromContext(ctx).V(3).Info("Setting finalizer", "finalizer", finalizerName)
-
-		patch := client.MergeFrom(obj.DeepCopyObject().(client.Object))
-		controllerutil.AddFinalizer(obj, finalizerName)
-		if err := cl.Patch(ctx, obj, patch); err != nil {
-			log.FromContext(ctx).Error(err, "unable to set finalizer", "finalizer", finalizerName)
-			return false, err
-		}
-		log.FromContext(ctx).V(3).Info("Finalizer set", "finalizer", finalizerName)
-		return true, nil
-	}
-	return false, nil
-}
-
 // HandleDeletion handles the deletion of an instance by cleaning up cluster-scoped resources
 // and removing the finalizer.
 func HandleDeletion(ctx context.Context, cl client.Client, recorder events.EventRecorder,
@@ -173,7 +156,7 @@ func EnsureResource(ctx context.Context, cl client.Client, recorder events.Event
 
 	resourceType := desiredResource.GetKind()
 
-	logger.V(3).Info("Ensuring resource", "type", resourceType, "name", desiredResource.GetName())
+	logger.V(3).Info("Ensuring resource", "type", resourceType)
 
 	// Check if the resource already exists.
 	existingResource := &unstructured.Unstructured{}
@@ -187,9 +170,8 @@ func EnsureResource(ctx context.Context, cl client.Client, recorder events.Event
 		}
 	}
 
-	// Check if update is needed to avoid unnecessary API writes.
-	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
-	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	// Diffs existing and desired state to skip applying when nothing changed. On K8s < 1.31, SSA can
+	// bump resourceVersion even without a real change; see https://github.com/kubernetes/kubernetes/issues/124605.
 	var changedFields string
 	if resourceExists {
 		comparison, err := controllerhelper.Diff(existingResource, desiredResource, fieldManager)
@@ -197,10 +179,10 @@ func EnsureResource(ctx context.Context, cl client.Client, recorder events.Event
 			if !errors.Is(err, controllerhelper.ErrNoManagedFields) {
 				return fmt.Errorf("unable to compare existing %s with desired state: %w", resourceType, err)
 			}
-			logger.V(3).Info("No managed fields found, proceeding with apply to take ownership", "type", resourceType, "name", desiredResource.GetName())
+			logger.V(3).Info("No managed fields found, proceeding with apply to take ownership", "type", resourceType)
 		} else {
 			if comparison.IsSame() {
-				logger.V(3).Info(resourceType+" is up to date, skipping apply", "name", desiredResource.GetName())
+				logger.V(3).Info(resourceType + " is up to date, skipping apply")
 				return nil
 			}
 			changedFields = controllerhelper.FormatChangedFields(comparison)
@@ -211,21 +193,21 @@ func EnsureResource(ctx context.Context, cl client.Client, recorder events.Event
 	if err := cl.Apply(ctx, client.ApplyConfigurationFromUnstructured(desiredResource), applyOpts...); err != nil {
 		recorder.Eventf(owner, nil, corev1.EventTypeWarning, ReasonResourceApplyError,
 			ReasonResourceApplyError, MessageFormatResourceApplyError, resourceType, err.Error())
-		// Validation errors are terminal — the user must fix the CR spec.
-		// Return nil so controller-runtime does not requeue with stack trace spam.
+		// Returns nil without requeuing when the API server rejects the resource as invalid;
+		// the CR spec must be corrected before retrying.
 		if k8serrors.IsInvalid(err) {
-			logger.Info("Apply rejected by API server due to invalid input", "type", resourceType, "name", desiredResource.GetName(), "error", err.Error())
+			logger.Info("Apply rejected by API server due to invalid input", "type", resourceType, "error", err.Error())
 			return nil
 		}
 		return fmt.Errorf("unable to apply %s: %w", resourceType, err)
 	}
 
 	if !resourceExists {
-		logger.V(3).Info(resourceType+" created", "name", desiredResource.GetName())
+		logger.V(3).Info(resourceType + " created")
 		recorder.Eventf(owner, nil, corev1.EventTypeNormal, ReasonSubResourceCreated,
 			ReasonSubResourceCreated, MessageFormatSubResourceCreated, resourceType, desiredResource.GetName())
 	} else {
-		logger.V(3).Info(resourceType+" updated", "name", desiredResource.GetName(), "changedFields", changedFields)
+		logger.V(3).Info(resourceType+" updated", "changedFields", changedFields)
 		recorder.Eventf(owner, nil, corev1.EventTypeNormal, ReasonSubResourceUpdated,
 			ReasonSubResourceUpdated, MessageFormatSubResourceUpdated, resourceType, desiredResource.GetName(), changedFields)
 	}

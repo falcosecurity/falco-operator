@@ -231,7 +231,7 @@ func NodeMatchesSelector(ctx context.Context, cl client.Client, nodeName string,
 			APIVersion: "v1",
 		},
 	}
-	logger.V(2).Info("Fetching node", "name", nodeName)
+	logger.V(2).Info("Fetching node", "node", nodeName)
 	if err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
 		logger.Error(err, "unable to fetch node")
 		return false, err
