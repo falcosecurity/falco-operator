@@ -69,6 +69,14 @@ func PatchStatusSSA(ctx context.Context, c client.Client, scheme *runtime.Scheme
 			logger.V(3).Info("Conflict while patching status, will retry")
 			return err
 		}
+		if k8serrors.IsNotFound(err) {
+			// The object was deleted between this reconcile's Get and this patch reaching the
+			// API server (e.g. a prior reconcile already removed the last finalizer, and this
+			// one was triggered off a stale watch event/lagging informer cache). Nothing to
+			// retry: there's no status left to patch.
+			logger.V(3).Info("Object gone before status patch landed, skipping")
+			return nil
+		}
 		logger.Error(err, "unable to patch status")
 		return err
 	}
