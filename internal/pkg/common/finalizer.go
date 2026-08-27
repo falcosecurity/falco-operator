@@ -16,8 +16,6 @@
 
 package common
 
-import "fmt"
-
 const (
 	// ConfigmapInUseFinalizer is the finalizer placed on ConfigMaps that are referenced
 	// by at least one Rulesfile or Config artifact resource.
@@ -29,8 +27,3 @@ const (
 	// Its presence blocks Secret deletion until all references are cleared.
 	SecretInUseFinalizer = "artifact.falcosecurity.dev/secret-in-use"
 )
-
-// FormatFinalizerName creates a finalizer name by combining a prefix and suffix with a hyphen.
-func FormatFinalizerName(prefix, suffix string) string {
-	return fmt.Sprintf("%s-%s", prefix, suffix)
-}
