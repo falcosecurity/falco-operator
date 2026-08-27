@@ -18,7 +18,7 @@
 // falco-operator. It serves pre-extracted OCI artifact binaries that have been pulled
 // and cached by the instance-level aggregator controllers.
 //
-// The server itself never contacts the OCI registry — it only reads from the local
+// The server itself never contacts the OCI registry; it only reads from the local
 // blob cache written by the Plugin and Rulesfile aggregator controllers.
 package artifactserver
 
@@ -39,13 +39,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 )
-
-// NodeNameHeader is the HTTP request header the artifact-operator client sets to its node's
-// name, identifying the caller for logging. Mirrors internal/pkg/artifact.NodeNameHeader.
-const NodeNameHeader = "X-Node-Name"
 
 // Default timeouts and limits applied unconditionally to the underlying http.Server.
 const (
@@ -239,7 +236,7 @@ func (s *Server) servePlugin(w http.ResponseWriter, r *http.Request) {
 		"os", goos,
 		"arch", goarch,
 		"caller", r.RemoteAddr,
-		"node", r.Header.Get(NodeNameHeader),
+		"node", r.Header.Get(artifact.NodeNameHeader),
 	)
 	logger.V(1).Info("Artifact request received")
 
@@ -247,9 +244,9 @@ func (s *Server) servePlugin(w http.ResponseWriter, r *http.Request) {
 	blobPath, ok := s.cache.Lookup("plugin", ns, name, platformKey)
 	if !ok {
 		cacheLookupsTotal.WithLabelValues("plugin", "miss").Inc()
-		logger.Info("Plugin not yet cached — waiting for aggregator reconcile")
+		logger.Info("Plugin not yet cached; waiting for aggregator reconcile")
 		w.Header().Set("Retry-After", "10")
-		http.Error(w, "artifact not yet available — retry shortly", http.StatusServiceUnavailable)
+		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
 		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
 		requestDuration.WithLabelValues("plugin").Observe(time.Since(start).Seconds())
 		return
@@ -285,16 +282,16 @@ func (s *Server) serveRulesfile(w http.ResponseWriter, r *http.Request) {
 		"artifact", ns+"/"+name,
 		"type", "rulesfile",
 		"caller", r.RemoteAddr,
-		"node", r.Header.Get(NodeNameHeader),
+		"node", r.Header.Get(artifact.NodeNameHeader),
 	)
 	logger.V(1).Info("Artifact request received")
 
 	blobPath, ok := s.cache.Lookup("rulesfile", ns, name, "")
 	if !ok {
 		cacheLookupsTotal.WithLabelValues("rulesfile", "miss").Inc()
-		logger.Info("Rulesfile not yet cached — waiting for aggregator reconcile")
+		logger.Info("Rulesfile not yet cached; waiting for aggregator reconcile")
 		w.Header().Set("Retry-After", "10")
-		http.Error(w, "artifact not yet available — retry shortly", http.StatusServiceUnavailable)
+		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
 		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
 		requestDuration.WithLabelValues("rulesfile").Observe(time.Since(start).Seconds())
 		return
@@ -329,14 +326,14 @@ func serveBlob(w http.ResponseWriter, r *http.Request, blobPath string) int {
 
 	f, err := os.Open(blobPath) //nolint:gosec // blobPath is derived from artifactcache.BlobPath(), not raw external input
 	if err != nil {
-		http.Error(w, "cached blob unavailable — retry shortly", http.StatusServiceUnavailable)
+		http.Error(w, "cached blob unavailable; retry shortly", http.StatusServiceUnavailable)
 		return http.StatusServiceUnavailable
 	}
 	defer f.Close()
 
 	stat, err := f.Stat()
 	if err != nil {
-		http.Error(w, "cached blob unavailable — retry shortly", http.StatusServiceUnavailable)
+		http.Error(w, "cached blob unavailable; retry shortly", http.StatusServiceUnavailable)
 		return http.StatusServiceUnavailable
 	}
 

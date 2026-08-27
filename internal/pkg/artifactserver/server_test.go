@@ -45,6 +45,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
@@ -236,7 +237,7 @@ func TestServer_ServeRulesfile(t *testing.T) {
 }
 
 // reserveAddr opens a listener on an ephemeral loopback port, closes it immediately, and
-// returns the address it was bound to — for handing to code that wants to bind it itself.
+// returns the address it was bound to, for handing to code that wants to bind it itself.
 func reserveAddr(t *testing.T) string {
 	t.Helper()
 	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
@@ -368,7 +369,7 @@ func TestServer_Start_RequestLogsAreNamedAndCarryNodeHeader(t *testing.T) {
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
 		fmt.Sprintf("http://%s/v1/artifacts/plugins/default/json?os=linux&arch=amd64", addr), http.NoBody)
 	require.NoError(t, err)
-	req.Header.Set(artifactserver.NodeNameHeader, "worker-7")
+	req.Header.Set(artifact.NodeNameHeader, "worker-7")
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -481,8 +482,8 @@ func certPool(t *testing.T, certPEM []byte) *x509.CertPool {
 }
 
 // TestServer_Start_MTLS covers the full mTLS round trip: a client with no certificate is
-// rejected at the handshake, a client with a CA-signed certificate succeeds, and — the CA
-// hot-reload regression case — rotating the trusted CA on disk (as cert-manager renewing the
+// rejected at the handshake, a client with a CA-signed certificate succeeds, and the CA
+// hot-reload regression case (rotating the trusted CA on disk, as cert-manager renewing the
 // CA Certificate would) is picked up by a *new* connection without restarting the server.
 func TestServer_Start_MTLS(t *testing.T) {
 	dir := t.TempDir()
@@ -561,7 +562,7 @@ func TestServer_Start_MTLS(t *testing.T) {
 		require.NoError(t, os.Rename(tmp, caFile))
 
 		require.Eventually(t, func() bool {
-			// The server's own certificate is unchanged (still signed by the original ca) —
+			// The server's own certificate is unchanged (still signed by the original ca);
 			// only its ClientCAs trust pool is being rotated, so the test client keeps
 			// trusting the server via the original rootCAs and only swaps its own client
 			// certificate to one signed by the new CA.
