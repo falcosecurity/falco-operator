@@ -26,11 +26,6 @@ const (
 	ReasonReferenceResolved = "ReferenceResolved"
 	// ReasonReferenceResolutionFailed indicates the reference failed to resolve.
 	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
-	// ReasonOCIArtifactProgramFailed indicates the OCI-sourced artifact failed to store.
-	ReasonOCIArtifactProgramFailed = "OCIArtifactProgramFailed"
-	// ReasonPluginConfigStillRequired indicates a plugin's on-disk config/binary removal is
-	// being withheld because a Rulesfile on this node still structurally depends on it.
-	ReasonPluginConfigStillRequired = "PluginConfigStillRequired"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
 	ReasonOCIArtifactStored = "OCIArtifactStored"
 	// ReasonOCIArtifactUpdated indicates the OCI artifact was updated successfully.
@@ -75,6 +70,37 @@ const (
 	ReasonProgrammed = "Programmed"
 	// ReasonProgramFailed indicates the artifact failed to program.
 	ReasonProgramFailed = "ProgramFailed"
+	// ReasonOCIArtifactProgrammed indicates the OCI-sourced artifact was stored successfully.
+	ReasonOCIArtifactProgrammed = "OCIArtifactProgrammed"
+	// ReasonOCIArtifactProgramFailed indicates the OCI-sourced artifact failed to store.
+	ReasonOCIArtifactProgramFailed = "OCIArtifactProgramFailed"
+	// ReasonInlineArtifactProgrammed indicates the inline-sourced artifact was stored successfully.
+	ReasonInlineArtifactProgrammed = "InlineArtifactProgrammed"
+	// ReasonInlineArtifactProgramFailed indicates the inline-sourced artifact failed to store.
+	ReasonInlineArtifactProgramFailed = "InlineArtifactProgramFailed"
+	// ReasonConfigMapArtifactProgrammed indicates the ConfigMap-sourced artifact was stored successfully.
+	ReasonConfigMapArtifactProgrammed = "ConfigMapArtifactProgrammed"
+	// ReasonConfigMapArtifactProgramFailed indicates the ConfigMap-sourced artifact failed to store.
+	ReasonConfigMapArtifactProgramFailed = "ConfigMapArtifactProgramFailed"
+	// ReasonConfigProgrammed indicates the plugin config entry was written successfully.
+	ReasonConfigProgrammed = "ConfigProgrammed"
+	// ReasonConfigProgramFailed indicates the plugin config entry failed to write.
+	ReasonConfigProgramFailed = "ConfigProgramFailed"
+	// ReasonDependenciesSatisfied indicates all plugin requirements are met by the running Falco instance.
+	ReasonDependenciesSatisfied = "DependenciesSatisfied"
+	// ReasonDependenciesNotSatisfied indicates one or more plugin requirements are not met.
+	ReasonDependenciesNotSatisfied = "DependenciesNotSatisfied"
+	// ReasonDependenciesUnknown indicates the Falco API was unreachable and requirements could not be checked.
+	ReasonDependenciesUnknown = "DependenciesUnknown"
+	// ReasonDependenciesNotSatisfiedInstalledAnyway indicates one or more requirements are not
+	// met but the artifact was installed anyway because requirement enforcement is disabled.
+	ReasonDependenciesNotSatisfiedInstalledAnyway = "DependenciesNotSatisfiedInstalledAnyway"
+	// ReasonDependenciesNotSatisfiedUpdateRejected indicates an update's requirements are not
+	// met and the update was rejected, while a previously installed artifact remains in place.
+	ReasonDependenciesNotSatisfiedUpdateRejected = "DependenciesNotSatisfiedUpdateRejected"
+	// ReasonPluginConfigStillRequired indicates a plugin's on-disk config/binary removal is
+	// being withheld because a Rulesfile on this node still structurally depends on it.
+	ReasonPluginConfigStillRequired = "PluginConfigStillRequired"
 )
 
 // Condition messages.
@@ -113,8 +139,28 @@ const (
 	MessageConfigMapArtifactRemoved = "ConfigMap artifact removed from filesystem"
 	// MessageProgrammed is the message when the artifact is programmed successfully.
 	MessageProgrammed = "All artifacts sources were programmed successfully"
+	// MessageOCIArtifactProgrammed is the message when the OCI-sourced artifact is stored successfully.
+	MessageOCIArtifactProgrammed = "OCI artifact stored successfully"
+	// MessageInlineArtifactProgrammed is the message when the inline-sourced artifact is stored successfully.
+	MessageInlineArtifactProgrammed = "Inline artifact stored successfully"
+	// MessageConfigMapArtifactProgrammed is the message when the ConfigMap-sourced artifact is stored successfully.
+	MessageConfigMapArtifactProgrammed = "ConfigMap artifact stored successfully"
+	// MessageConfigProgrammed is the message when the plugin config entry is written successfully.
+	MessageConfigProgrammed = "Plugin configuration stored successfully"
+	// MessageProgramFailed is the message when not all conditions are satisfied.
+	MessageProgramFailed = "Not all conditions are satisfied"
 	// MessageReferencesResolved is the message when all references are resolved successfully.
 	MessageReferencesResolved = "All references were resolved successfully"
+	// MessageDependenciesSatisfied is the message when all plugin requirements are met.
+	MessageDependenciesSatisfied = "All plugin requirements are satisfied"
+	// MessageDependenciesUnknown is the message when the Falco API is unreachable.
+	MessageDependenciesUnknown = "Falco API unreachable; plugin requirements could not be verified"
+	// MessageSuffixInstalledAnyway is appended to a not-satisfied message when the artifact is
+	// installed anyway because requirement enforcement is disabled.
+	MessageSuffixInstalledAnyway = "; installed anyway because requirement enforcement is disabled (--enforce-requirements=false)"
+	// MessageSuffixUpdateRejected is appended to a not-satisfied message when an update is
+	// rejected and the previously installed artifact is kept in place.
+	MessageSuffixUpdateRejected = "; rejecting this update and keeping the previously installed version"
 )
 
 // Condition message formats (for use with fmt.Sprintf).
@@ -137,4 +183,25 @@ const (
 	MessageFormatReferenceResolved = "Reference %q resolved successfully"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.
 	MessageFormatInlinePluginConfigStoreFailed = "Failed to store inline plugin config: %v"
+	// MessageFormatDependenciesNotSatisfied is the format for unmet plugin requirement messages.
+	MessageFormatDependenciesNotSatisfied = "Plugin requires %s >= %s but Falco reports %s"
+	// MessageFormatPluginAPIMajorMismatch is the format when plugin_api_version major versions differ.
+	MessageFormatPluginAPIMajorMismatch = "Plugin requires plugin_api_version %s but Falco reports %s: major versions are incompatible"
+	// MessageFormatDependenciesCapabilityMissing is the format when Falco does not advertise a required capability.
+	MessageFormatDependenciesCapabilityMissing = "Plugin requires %s >= %s but Falco does not advertise this capability"
+	// MessageFormatDependenciesMetadataFetchFailed is the format when OCI metadata cannot be fetched.
+	MessageFormatDependenciesMetadataFetchFailed = "Failed to fetch plugin metadata: %s"
+	// MessageFormatFalcoVersionsFetchFailed is the format when the Falco /versions endpoint cannot be reached.
+	MessageFormatFalcoVersionsFetchFailed = "Failed to fetch Falco versions: %s"
+	// MessageFormatRequirementNotSatisfied is the format when a Falco engine requirement version is not met.
+	MessageFormatRequirementNotSatisfied = "requires %s >= %s but Falco reports %s"
+	// MessageFormatRequirementAPIMajorMismatch is the format when a plugin_api_version major version differs.
+	MessageFormatRequirementAPIMajorMismatch = "requires plugin_api_version %s but Falco reports %s: major versions are incompatible"
+	// MessageFormatRequirementMissing is the format when a Falco engine requirement is not in the /versions response.
+	MessageFormatRequirementMissing = "requires %s >= %s but Falco does not report this capability"
+	// MessageFormatDependencyNotSatisfiedWithAlternatives is the format when a plugin dependency and all its
+	// alternatives are not satisfied. The alternatives argument is a comma-separated list of "name >= version".
+	MessageFormatDependencyNotSatisfiedWithAlternatives = "%s >= %s not satisfied (checked alternatives: %s)"
+	// MessageFormatDependencyNotSatisfied is the format when a plugin dependency (no alternatives) is not satisfied.
+	MessageFormatDependencyNotSatisfied = "%s >= %s is not satisfied by Falco"
 )

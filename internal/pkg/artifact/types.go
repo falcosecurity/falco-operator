@@ -47,10 +47,11 @@ const (
 	StoreActionPriorityChanged StoreAction = "PriorityChanged"
 )
 
-// File represents a tracked file for any artifact type.
+// File represents a tracked artifact file for any source medium.
 type File struct {
-	Path            string // Full Path on filesystem
-	Medium          Medium // How the artifact is stored/distributed
-	Priority        int32  // Priority when created
-	SourceSignature string // Resolved source identity (set for MediumOCI)
+	Path        string // Full path on the filesystem
+	Medium      Medium // How the artifact is sourced
+	Priority    int32  // Load-order priority encoded in the filename
+	ContentHash string // SHA-256 hex digest of the bytes written to disk
+	SpecHash    string // SHA-256 of the parent OCI artifact spec; only meaningful for MediumOCI
 }

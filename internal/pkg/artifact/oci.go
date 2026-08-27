@@ -17,20 +17,13 @@
 package artifact
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io/fs"
-	"runtime"
 
 	corev1 "k8s.io/api/core/v1"
-	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -47,49 +40,6 @@ func (am *Manager) fetchOCIAuthSecret(ctx context.Context, ref *commonv1alpha1.S
 	return secret, nil
 }
 
-func (am *Manager) getCurrentOCIFile(ctx context.Context, name string) (*File, error) {
-	logger := log.FromContext(ctx)
-	file := am.getArtifactFile(name, MediumOCI)
-	if file == nil {
-		return nil, nil
-	}
-
-	ok, err := am.fs.Exists(file.Path)
-	if err != nil {
-		logger.Error(err, "Failed to check if file exists", "file", file.Path)
-		return nil, err
-	}
-	if !ok {
-		am.removeArtifactFile(name, MediumOCI)
-		err := fmt.Errorf("artifact %q not found on filesystem", file.Path)
-		logger.Error(err, "Failed to find file on filesystem", "file", file.Path)
-		return nil, err
-	}
-
-	current := *file
-	return &current, nil
-}
-
-func (am *Manager) pullOCIFile(ctx context.Context, ref string, artifactType Type, artifact *commonv1alpha1.OCIArtifact, creds auth.CredentialFunc) (common.ExtractedFile, error) {
-	var compressed bytes.Buffer
-	res, err := am.ociPuller.Pull(ctx, ref, runtime.GOOS, runtime.GOARCH, creds, ResolveRegistryOptions(artifact), &compressed)
-	if err != nil {
-		return common.ExtractedFile{}, err
-	}
-	if res == nil {
-		return common.ExtractedFile{}, fmt.Errorf("puller returned nil result for reference %q", ref)
-	}
-	if !isExpectedOCIArtifactType(artifactType, res.Type) {
-		return common.ExtractedFile{}, fmt.Errorf("pulled OCI artifact type %q does not match expected type %q", res.Type, artifactType)
-	}
-
-	file, err := common.ExtractSingleFileFromTarGz(ctx, &compressed, 0)
-	if err != nil {
-		return common.ExtractedFile{}, err
-	}
-	return file, nil
-}
-
 func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
 	switch expected {
 	case TypeRulesfile:
@@ -99,43 +49,4 @@ func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
 	default:
 		return false
 	}
-}
-
-func (am *Manager) removeReplacedOCIFile(ctx context.Context, oldFile *File, newPath string) error {
-	if oldFile == nil || oldFile.Path == newPath {
-		return nil
-	}
-
-	logger := log.FromContext(ctx)
-	if err := am.fs.Remove(oldFile.Path); err != nil {
-		logger.Error(err, "unable to remove previous artifact at old path", "oldFile", oldFile.Path)
-		if rollbackErr := am.fs.Remove(newPath); rollbackErr != nil && !errors.Is(rollbackErr, fs.ErrNotExist) {
-			logger.Error(rollbackErr, "unable to roll back newly installed artifact", "file", newPath)
-			return fmt.Errorf("remove previous artifact %q: %w; rollback new artifact %q: %w", oldFile.Path, err, newPath, rollbackErr)
-		}
-		return fmt.Errorf("remove previous artifact %q: %w", oldFile.Path, err)
-	}
-	return nil
-}
-
-func (am *Manager) installOCIFile(ctx context.Context, path string, file common.ExtractedFile) error {
-	logger := log.FromContext(ctx)
-	tmpPath := path + ".tmp"
-
-	if err := am.fs.WriteFile(tmpPath, file.Content, file.Perm); err != nil {
-		logger.Error(err, "unable to write artifact temp file", "file", tmpPath)
-		if removeErr := am.fs.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-			logger.Error(removeErr, "unable to remove leftover temp file", "file", tmpPath)
-		}
-		return err
-	}
-
-	if err := am.fs.Rename(tmpPath, path); err != nil {
-		logger.Error(err, "unable to rename temp artifact to final path", "tmp", tmpPath, "final", path)
-		if removeErr := am.fs.Remove(tmpPath); removeErr != nil && !errors.Is(removeErr, fs.ErrNotExist) {
-			logger.Error(removeErr, "unable to remove leftover temp file", "file", tmpPath)
-		}
-		return err
-	}
-	return nil
 }
