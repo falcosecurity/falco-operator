@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
@@ -128,6 +129,53 @@ func TestDiff(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDiff_Success(t *testing.T) {
+	current := builders.NewConfigMap().WithName("test").WithData(map[string]string{"key": "old-value"}).Build()
+	current.ManagedFields = []metav1.ManagedFieldsEntry{
+		{
+			Manager:    "test-controller",
+			Operation:  metav1.ManagedFieldsOperationApply,
+			APIVersion: "v1",
+			FieldsType: "FieldsV1",
+			FieldsV1:   &metav1.FieldsV1{Raw: []byte(`{"f:data":{"f:key":{}}}`)},
+		},
+	}
+
+	t.Run("detects a modified field", func(t *testing.T) {
+		desired := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "test"},
+				"data":       map[string]any{"key": "new-value"},
+			},
+		}
+
+		result, err := Diff(current, desired, "test-controller")
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.False(t, result.Modified.Empty(), "changing the tracked key's value must show up as Modified")
+	})
+
+	t.Run("no diff when desired matches current exactly", func(t *testing.T) {
+		desired := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": "v1",
+				"kind":       "ConfigMap",
+				"metadata":   map[string]any{"name": "test"},
+				"data":       map[string]any{"key": "old-value"},
+			},
+		}
+
+		result, err := Diff(current, desired, "test-controller")
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "no changes", FormatChangedFields(result))
+	})
 }
 
 func TestErrNoManagedFields(t *testing.T) {
