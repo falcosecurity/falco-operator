@@ -47,6 +47,37 @@ const (
 	// - True: the artifact was programmed successfully.
 	// - False: the artifact could not be programmed.
 	ConditionProgrammed ConditionType = "Programmed"
+	// ConditionDependenciesSatisfied indicates whether the plugin's declared requirements are met by the
+	// running Falco instance.
+	// The possible status values for this condition type are:
+	// - True: all plugin requirements are satisfied; the plugin may be installed.
+	// - False: one or more requirements are not satisfied; the plugin will not be installed.
+	// - Unknown: the Falco API was unreachable; the check will be retried on the next reconcile.
+	ConditionDependenciesSatisfied ConditionType = "DependenciesSatisfied"
+	// ConditionOCIArtifactProgrammed indicates whether the OCI-sourced artifact has been successfully
+	// stored on the local filesystem. Used by plugin (binary) and rulesfile (OCI rules).
+	// The possible status values for this condition type are:
+	// - True: the artifact was fetched and stored (or verified unchanged on disk).
+	// - False: fetching or storing the artifact failed.
+	ConditionOCIArtifactProgrammed ConditionType = "OCIArtifactProgrammed"
+	// ConditionInlineArtifactProgrammed indicates whether the inline-sourced artifact has been
+	// successfully stored on the local filesystem. Used by rulesfile and config.
+	// The possible status values for this condition type are:
+	// - True: the artifact was stored (or verified unchanged on disk).
+	// - False: storing the artifact failed.
+	ConditionInlineArtifactProgrammed ConditionType = "InlineArtifactProgrammed"
+	// ConditionConfigMapArtifactProgrammed indicates whether the ConfigMap-sourced artifact has been
+	// successfully stored on the local filesystem. Used by rulesfile and config.
+	// The possible status values for this condition type are:
+	// - True: the artifact was stored (or verified unchanged on disk).
+	// - False: storing the artifact failed.
+	ConditionConfigMapArtifactProgrammed ConditionType = "ConfigMapArtifactProgrammed"
+	// ConditionConfigProgrammed indicates whether the shared plugin configuration file
+	// (plugins-config-inline.yaml) has been written for this plugin. Owned exclusively by ensurePluginConfig.
+	// The possible status values for this condition type are:
+	// - True: the config entry was written (or verified unchanged on disk).
+	// - False: writing the config entry failed.
+	ConditionConfigProgrammed ConditionType = "ConfigProgrammed"
 	// ConditionDeletionBlocked indicates whether removal of this node's artifact is being
 	// withheld because another artifact on the same node (e.g. a Rulesfile) still structurally
 	// depends on it. Set only by per-node artifact operators on the ArtifactNode they own; the
