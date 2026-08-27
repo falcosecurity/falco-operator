@@ -81,14 +81,17 @@ rules:
 - apiGroups:
   - artifact.falcosecurity.dev
   resources:
-  - artifactnodes/status
+  - artifactnodes/finalizers
+  - configs/finalizers
+  - plugins/finalizers
+  - rulesfiles/finalizers
   verbs:
-  - get
-  - list
-  - watch
+  - patch
+  - update
 - apiGroups:
   - artifact.falcosecurity.dev
   resources:
+  - artifactnodes/status
   - configs
   - configs/status
   - plugins
@@ -101,15 +104,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - artifact.falcosecurity.dev
-  resources:
-  - configs/finalizers
-  - plugins/finalizers
-  - rulesfiles/finalizers
-  verbs:
-  - patch
-  - update
 - apiGroups:
   - coordination.k8s.io
   resources:
