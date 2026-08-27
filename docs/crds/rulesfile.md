@@ -39,6 +39,9 @@ The `Rulesfile` Custom Resource manages Falco detection rules. Rules can be sour
 | Field | Type | Description |
 |-------|------|-------------|
 | `conditions` | `[]metav1.Condition` | `Programmed` and `ResolvedRefs` conditions |
+| `artifactMeta` | `ArtifactMeta` | Requirements and dependencies aggregated from every configured source |
+| `artifactMetaSourcesHash` | `string` | Hash of the source snapshot represented by `artifactMeta` |
+| `observedGeneration` | `int64` | Latest resource generation fully processed by the instance operator |
 
 ## Examples
 

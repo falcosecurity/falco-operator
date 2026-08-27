@@ -272,6 +272,12 @@ spec:
                       Digest, Requirements, and Dependencies are invalidated and re-fetched.
                     type: string
                 type: object
+              artifactMetaSourcesHash:
+                description: |-
+                  ArtifactMetaSourcesHash is the SHA-256 hash of every source input used to build
+                  ArtifactMeta: the OCIArtifact spec, referenced ConfigMap rules, and inline rules.
+                  The instance operator reuses ArtifactMeta only while this hash still matches.
+                type: string
               conditions:
                 description: Conditions represent the latest available observations
                   of the Rulesfile's state.

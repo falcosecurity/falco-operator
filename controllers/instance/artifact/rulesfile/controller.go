@@ -24,6 +24,8 @@ package rulesfile
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -155,17 +157,19 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 	// Snapshot before any status mutation so we can skip the first SSA when nothing changed.
 	oldStatus := rulesfile.Status.DeepCopy()
 
-	// Fetch OCI config layer once and cache it in parent.Status.ArtifactMeta so that
-	// per-node artifact operators can read requirements without hitting the registry.
+	// Build and cache the complete metadata aggregate so per-node artifact operators can
+	// evaluate every configured source without hitting the registry or re-parsing content.
 	if err := r.fetchAndCacheArtifactMeta(ctx, rulesfile); err != nil {
-		// Surfaces the failure directly on the parent Rulesfile status. ObservedGeneration is not
-		// advanced, so enforce-mode per-node operators stay deferred, and no ArtifactNodes are
-		// created since they cannot be programmed without metadata.
+		// A referenced ConfigMap can change without changing Rulesfile.Generation, so merely
+		// retaining the previous ObservedGeneration could make stale metadata look current.
+		// Reset it on every source failure; the last complete ArtifactMeta remains available for
+		// diagnosis, but enforce-mode per-node operators stay deferred until a complete rebuild.
+		rulesfile.Status.ObservedGeneration = 0
 		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, metav1.Condition{
 			Type:               commonv1alpha1.ConditionProgrammed.String(),
 			Status:             metav1.ConditionFalse,
-			Reason:             artifact.ReasonOCIArtifactProgramFailed,
-			Message:            fmt.Sprintf("Failed to fetch OCI artifact metadata: %s", err.Error()),
+			Reason:             artifact.ReasonProgramFailed,
+			Message:            fmt.Sprintf("Failed to compute artifact metadata: %s", err.Error()),
 			ObservedGeneration: rulesfile.Generation,
 		})
 		if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
@@ -239,38 +243,101 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 	return ctrl.Result{}, fetchBinErr
 }
 
-// fetchAndCacheArtifactMeta collects all requirements for the Rulesfile from every source
-// (OCI config layer, OCI content YAML, ConfigMap, or inline rules) and stores the merged
-// result in parent.Status.ArtifactMeta. This single status field is then read by every
-// per-node artifact operator, eliminating per-node registry calls.
-//
-// For OCI sources a digest-based cache avoids redundant registry round-trips: if the
-// spec and current digest match what is already stored, the cached value is kept as-is.
-// ConfigMap and inline sources are always re-parsed on each reconcile (cheap k8s API / in-memory).
+type rulesfileArtifactMetaSources struct {
+	OCIArtifactSpecHash string `json:"ociArtifactSpecHash"`
+	ConfigMapName       string `json:"configMapName"`
+	ConfigMapConfigured bool   `json:"configMapConfigured"`
+	ConfigMapRules      []byte `json:"configMapRules"`
+	InlineConfigured    bool   `json:"inlineConfigured"`
+	InlineRules         []byte `json:"inlineRules"`
+}
+
+func (s *rulesfileArtifactMetaSources) hash() (string, error) {
+	data, err := json.Marshal(s)
+	if err != nil {
+		return "", fmt.Errorf("marshal Rulesfile artifact metadata sources: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data)), nil
+}
+
+// collectArtifactMetaSources resolves a stable snapshot of every input from which
+// ArtifactMeta is built. A configured source must be readable and complete: otherwise
+// callers keep the previous status and retry instead of publishing partial metadata.
+func (r *RulesfileAggregatorReconciler) collectArtifactMetaSources(
+	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile,
+) (*rulesfileArtifactMetaSources, error) {
+	sources := &rulesfileArtifactMetaSources{
+		ConfigMapConfigured: rulesfile.Spec.ConfigMapRef != nil,
+		InlineConfigured:    rulesfile.Spec.InlineRules != nil,
+	}
+
+	if rulesfile.Spec.OCIArtifact != nil {
+		specHash, err := artifact.ComputeOCIArtifactSpecHash(rulesfile.Spec.OCIArtifact)
+		if err != nil {
+			return nil, fmt.Errorf("compute OCI spec hash: %w", err)
+		}
+		sources.OCIArtifactSpecHash = specHash
+	}
+
+	if rulesfile.Spec.ConfigMapRef != nil {
+		sources.ConfigMapName = rulesfile.Spec.ConfigMapRef.Name
+		cm := &corev1.ConfigMap{}
+		key := client.ObjectKey{Name: sources.ConfigMapName, Namespace: rulesfile.Namespace}
+		if err := r.Get(ctx, key, cm); err != nil {
+			return nil, fmt.Errorf("fetch ConfigMap %q for artifact metadata: %w", sources.ConfigMapName, err)
+		}
+		content, ok := cm.Data[commonv1alpha1.ConfigMapRulesKey]
+		if !ok {
+			return nil, fmt.Errorf("ConfigMap %q does not contain required key %q",
+				sources.ConfigMapName, commonv1alpha1.ConfigMapRulesKey)
+		}
+		sources.ConfigMapRules = []byte(content)
+	}
+
+	if rulesfile.Spec.InlineRules != nil {
+		sources.InlineRules = rulesfile.Spec.InlineRules.Raw
+	}
+
+	return sources, nil
+}
+
+// fetchAndCacheArtifactMeta collects requirements for the Rulesfile from every configured
+// source and atomically stores the merged result in parent.Status.ArtifactMeta. The cached
+// aggregate is reused only when ArtifactMetaSourcesHash proves that every source input is
+// unchanged; ArtifactMeta.SpecHash retains its narrower OCI-only meaning for blob lifecycle.
 func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
 	logger := log.FromContext(ctx)
 
 	if rulesfile.Spec.OCIArtifact == nil && rulesfile.Spec.ConfigMapRef == nil && rulesfile.Spec.InlineRules == nil {
 		logger.V(4).Info("No artifact source configured, clearing ArtifactMeta")
 		rulesfile.Status.ArtifactMeta = nil
+		rulesfile.Status.ArtifactMetaSourcesHash = ""
 		return nil
 	}
 
-	var opts []artifact.ManagerOption
-	if r.ociPuller != nil {
-		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
+	sources, err := r.collectArtifactMetaSources(ctx, rulesfile)
+	if err != nil {
+		return err
 	}
-	am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
+	sourcesHash, err := sources.hash()
+	if err != nil {
+		return err
+	}
+	if rulesfile.Status.ArtifactMeta != nil && rulesfile.Status.ArtifactMetaSourcesHash == sourcesHash {
+		return nil
+	}
+
+	// Build into a fresh value and publish it only after every configured source succeeds.
+	// This prevents both stale entries after a source is removed and partial entries when a
+	// source cannot be read or parsed.
+	meta := &commonv1alpha1.ArtifactMeta{SpecHash: sources.OCIArtifactSpecHash}
 
 	if rulesfile.Spec.OCIArtifact != nil {
-		specHash, err := artifact.ComputeOCIArtifactSpecHash(rulesfile.Spec.OCIArtifact)
-		if err != nil {
-			return fmt.Errorf("compute OCI spec hash: %w", err)
+		var opts []artifact.ManagerOption
+		if r.ociPuller != nil {
+			opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
 		}
-
-		if artifact.ArtifactMetaCacheHit(rulesfile.Status.ArtifactMeta, specHash) {
-			return nil
-		}
+		am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
 
 		ref := artifact.ResolveReference(rulesfile.Spec.OCIArtifact)
 		logger.Info("Fetching rulesfile ArtifactMeta from OCI config layer", "ref", ref)
@@ -282,10 +349,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 			return fetchErr
 		}
 
-		meta := &commonv1alpha1.ArtifactMeta{
-			Digest:   digest,
-			SpecHash: specHash,
-		}
+		meta.Digest = digest
 		artifact.AppendConfigLayerRequirements(meta, fetched)
 		logger.Info("Rulesfile ArtifactMeta parsed from OCI config layer",
 			"ref", ref,
@@ -310,55 +374,53 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 			return contentErr
 		}
 		beforeReqs, beforeDeps := len(meta.Requirements), len(meta.Dependencies)
-		appendYAMLRequirements(meta, content)
+		if err := appendYAMLRequirements(meta, content); err != nil {
+			parseErr := fmt.Errorf("parse OCI content requirements: %w", err)
+			logger.Error(parseErr, "Unable to parse rulesfile OCI content; ArtifactMeta will remain stale", "ref", ref)
+			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactProgramFailed,
+				"Failed to parse OCI content layer: %s", err.Error())
+			return parseErr
+		}
 		logger.Info("Rulesfile ArtifactMeta parsed from OCI content layer",
 			"ref", ref,
 			"newRequirements", len(meta.Requirements)-beforeReqs,
 			"newDependencies", len(meta.Dependencies)-beforeDeps,
 		)
-
-		artifact.DeduplicateArtifactMeta(meta)
-		logger.Info("Rulesfile ArtifactMeta updated from OCI artifact",
-			"ref", ref,
-			"digest", digest,
-			"requirements", len(meta.Requirements),
-			"dependencies", len(meta.Dependencies),
-		)
-		rulesfile.Status.ArtifactMeta = meta
-		return nil
 	}
 
-	// Non-OCI sources: ConfigMap and/or inline. Always re-parse (cheap).
-	meta := &commonv1alpha1.ArtifactMeta{}
-	if rulesfile.Spec.ConfigMapRef != nil {
-		cm := &corev1.ConfigMap{}
-		key := client.ObjectKey{Name: rulesfile.Spec.ConfigMapRef.Name, Namespace: rulesfile.Namespace}
-		if err := r.Get(ctx, key, cm); err != nil {
-			logger.Error(err, "Unable to fetch ConfigMap for requirements", "configMap", rulesfile.Spec.ConfigMapRef.Name)
-		} else {
-			appendYAMLRequirements(meta, []byte(cm.Data[commonv1alpha1.ConfigMapRulesKey]))
+	if sources.ConfigMapConfigured {
+		logger.Info("Parsing rulesfile ArtifactMeta from ConfigMap", "configMap", sources.ConfigMapName)
+		if err := appendYAMLRequirements(meta, sources.ConfigMapRules); err != nil {
+			return fmt.Errorf("parse requirements from ConfigMap %q: %w", sources.ConfigMapName, err)
 		}
-		logger.Info("Parsing rulesfile ArtifactMeta from ConfigMap", "configMap", rulesfile.Spec.ConfigMapRef.Name)
 	}
-	if rulesfile.Spec.InlineRules != nil {
+	if sources.InlineConfigured {
 		logger.Info("Parsing rulesfile ArtifactMeta from inline rules")
-		appendYAMLRequirements(meta, rulesfile.Spec.InlineRules.Raw)
+		if err := appendYAMLRequirements(meta, sources.InlineRules); err != nil {
+			return fmt.Errorf("parse requirements from inline rules: %w", err)
+		}
 	}
+
 	artifact.DeduplicateArtifactMeta(meta)
-	logger.Info("Rulesfile ArtifactMeta updated from YAML content",
+	logger.Info("Rulesfile ArtifactMeta updated from all configured sources",
+		"sourcesHash", sourcesHash,
 		"requirements", len(meta.Requirements),
 		"dependencies", len(meta.Dependencies),
 	)
 	rulesfile.Status.ArtifactMeta = meta
+	rulesfile.Status.ArtifactMetaSourcesHash = sourcesHash
 	return nil
 }
 
 // appendYAMLRequirements parses required_engine_version and required_plugin_versions from
 // a Falco rules YAML document and appends the results to meta.
-func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) {
+func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) error {
 	rulesReqs, err := compat.ParseRulesRequirements(content)
-	if err != nil || rulesReqs == nil {
-		return
+	if err != nil {
+		return err
+	}
+	if rulesReqs == nil {
+		return nil
 	}
 	if rulesReqs.EngineVersion != "" {
 		capName := "engine_version_semver"
@@ -378,6 +440,7 @@ func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) {
 		}
 		meta.Dependencies = append(meta.Dependencies, d)
 	}
+	return nil
 }
 
 // handleDeletion deletes all ArtifactNode objects so each per-node artifact operator can clean up
