@@ -105,7 +105,7 @@ func ComputeDaemonSetAvailability(ctx context.Context, reader client.Reader,
 	result.AvailableReplicas = daemonset.Status.NumberAvailable
 	result.UnavailableReplicas = daemonset.Status.NumberUnavailable
 
-	if daemonset.Status.DesiredNumberScheduled == daemonset.Status.NumberAvailable {
+	if daemonset.Status.DesiredNumberScheduled > 0 && daemonset.Status.DesiredNumberScheduled == daemonset.Status.NumberAvailable {
 		result.ConditionStatus = metav1.ConditionTrue
 		result.Reason = ReasonDaemonSetAvailable
 		result.Message = MessageDaemonSetAvailable
