@@ -56,6 +56,11 @@ type RulesfileStatus struct {
 	// +optional
 	// +nullable
 	ArtifactMeta *commonv1alpha1.ArtifactMeta `json:"artifactMeta,omitempty"`
+	// ArtifactMetaSourcesHash is the SHA-256 hash of every source input used to build
+	// ArtifactMeta: the OCIArtifact spec, referenced ConfigMap rules, and inline rules.
+	// The instance operator reuses ArtifactMeta only while this hash still matches.
+	// +optional
+	ArtifactMetaSourcesHash string `json:"artifactMetaSourcesHash,omitempty"`
 	// ObservedGeneration is the .metadata.generation that the instance operator has fully
 	// processed (ArtifactMeta computed, status patched). Per-node artifact operators defer
 	// reconciliation until this equals metadata.generation.

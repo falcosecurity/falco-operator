@@ -280,6 +280,32 @@ func TestReconcile_NoMatchingNodes(t *testing.T) {
 	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
 }
 
+func TestReconcile_NoSourcesClearsCachedMetadata(t *testing.T) {
+	rf := newTestRulesfile(withInlineRules(`[{"required_engine_version":15}]`))
+	rf.Generation = 3
+	r, cl := newTestReconciler(t, rf)
+
+	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+
+	withSource := &artifactv1alpha1.Rulesfile{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), withSource))
+	require.NotNil(t, withSource.Status.ArtifactMeta)
+	require.NotEmpty(t, withSource.Status.ArtifactMetaSourcesHash)
+
+	withSource.Spec.InlineRules = nil
+	withSource.Generation++
+	require.NoError(t, cl.Update(context.Background(), withSource))
+	_, err = r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+
+	withoutSources := &artifactv1alpha1.Rulesfile{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), withoutSources))
+	assert.Nil(t, withoutSources.Status.ArtifactMeta)
+	assert.Empty(t, withoutSources.Status.ArtifactMetaSourcesHash)
+	assert.Equal(t, withSource.Generation, withoutSources.Status.ObservedGeneration)
+}
+
 func TestReconcile_CreatesNodeObject(t *testing.T) {
 	rf := newTestRulesfile()
 	node := newTestNode()
@@ -733,9 +759,11 @@ func TestFetchAndCacheArtifactMeta_NoSources(t *testing.T) {
 	r, _ := newTestReconciler(t, rf)
 
 	rf.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: "old"}
+	rf.Status.ArtifactMetaSourcesHash = "old"
 	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
 	require.NoError(t, err)
 	assert.Nil(t, rf.Status.ArtifactMeta)
+	assert.Empty(t, rf.Status.ArtifactMetaSourcesHash)
 }
 
 func TestFetchAndCacheArtifactMeta_OCICacheHit(t *testing.T) {
@@ -749,6 +777,10 @@ func TestFetchAndCacheArtifactMeta_OCICacheHit(t *testing.T) {
 		SpecHash: specHash,
 		Digest:   "sha256:abc",
 	}
+	sources, err := r.collectArtifactMetaSources(context.Background(), rf)
+	require.NoError(t, err)
+	rf.Status.ArtifactMetaSourcesHash, err = sources.hash()
+	require.NoError(t, err)
 
 	err = r.fetchAndCacheArtifactMeta(context.Background(), rf)
 	require.NoError(t, err)
@@ -843,11 +875,51 @@ func TestFetchAndCacheArtifactMeta_ConfigMap(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_ConfigMapMissing(t *testing.T) {
 	rf := newTestRulesfile(withRulesfileConfigMapRef("missing-cm"))
 	r, _ := newTestReconciler(t, rf)
+	previousMeta := &commonv1alpha1.ArtifactMeta{
+		Requirements: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "15"}},
+	}
+	rf.Status.ArtifactMeta = previousMeta.DeepCopy()
+	rf.Status.ArtifactMetaSourcesHash = "previous-sources"
 
-	// ConfigMap not found: error is logged but ArtifactMeta is still set (empty).
 	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
-	require.NoError(t, err)
-	require.NotNil(t, rf.Status.ArtifactMeta)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `fetch ConfigMap "missing-cm"`)
+	assert.Equal(t, previousMeta, rf.Status.ArtifactMeta,
+		"an unreadable configured source must not replace the last complete aggregate")
+	assert.Equal(t, "previous-sources", rf.Status.ArtifactMetaSourcesHash)
+}
+
+func TestFetchAndCacheArtifactMeta_ConfigMapRequiredKeyMissing(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data:       map[string]string{"other.yaml": "- required_engine_version: 22"},
+	}
+	rf := newTestRulesfile(withRulesfileConfigMapRef(cm.Name))
+	r, _ := newTestReconciler(t, rf, cm)
+
+	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `does not contain required key "rules.yaml"`)
+	assert.Nil(t, rf.Status.ArtifactMeta)
+	assert.Empty(t, rf.Status.ArtifactMetaSourcesHash)
+}
+
+func TestFetchAndCacheArtifactMeta_InvalidSourceDoesNotPublishPartialAggregate(t *testing.T) {
+	mockPuller := &puller.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{
+			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
+		},
+		ConfigDigest: testRulesfileDigest,
+	}
+	rf := newTestRulesfile(withRulesfileOCI(), withInlineRules("{invalid"))
+	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
+
+	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse requirements from inline rules")
+	assert.Nil(t, rf.Status.ArtifactMeta,
+		"successful OCI metadata must not be published when another configured source is invalid")
+	assert.Empty(t, rf.Status.ArtifactMetaSourcesHash)
 }
 
 func TestFetchAndCacheArtifactMeta_InlineRules(t *testing.T) {
@@ -880,10 +952,174 @@ func TestFetchAndCacheArtifactMeta_ConfigMapAndInlineRules(t *testing.T) {
 	assert.Equal(t, "0.30.0", rf.Status.ArtifactMeta.Requirements[0].Version)
 }
 
+func TestFetchAndCacheArtifactMeta_AllConfiguredSources(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data: map[string]string{
+			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
+		},
+	}
+	mockPuller := &puller.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{
+			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
+		},
+		ConfigDigest: testRulesfileDigest,
+	}
+	rf := newTestRulesfile(
+		withRulesfileOCI(),
+		withRulesfileConfigMapRef(cm.Name),
+		withInlineRules(`- required_engine_version: "0.30.0"`),
+	)
+	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+
+	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
+	require.NoError(t, err)
+	require.NotNil(t, rf.Status.ArtifactMeta)
+	assert.ElementsMatch(t, []commonv1alpha1.ArtifactMetaRequirement{
+		{Name: "plugin_api_version", Version: "3.0.0"},
+		{Name: "engine_version", Version: "15"},
+		{Name: "engine_version_semver", Version: "0.30.0"},
+	}, rf.Status.ArtifactMeta.Requirements,
+		"requirements from OCI, ConfigMap, and inline rules must all be aggregated")
+}
+
+func TestFetchAndCacheArtifactMeta_ConfigMapChangeRebuildsCompleteAggregate(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data: map[string]string{
+			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
+		},
+	}
+	mockPuller := &puller.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{
+			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
+		},
+		ConfigDigest: testRulesfileDigest,
+	}
+	rf := newTestRulesfile(withRulesfileOCI(), withRulesfileConfigMapRef(cm.Name))
+	r, cl := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+
+	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
+	firstSourcesHash := rf.Status.ArtifactMetaSourcesHash
+	ociSpecHash := rf.Status.ArtifactMeta.SpecHash
+	assert.ElementsMatch(t, []commonv1alpha1.ArtifactMetaRequirement{
+		{Name: "plugin_api_version", Version: "3.0.0"},
+		{Name: "engine_version", Version: "15"},
+	}, rf.Status.ArtifactMeta.Requirements)
+
+	updatedCM := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), updatedCM))
+	updatedCM.Data[commonv1alpha1.ConfigMapRulesKey] = `- required_engine_version: 22`
+	require.NoError(t, cl.Update(context.Background(), updatedCM))
+
+	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
+	assert.NotEqual(t, firstSourcesHash, rf.Status.ArtifactMetaSourcesHash)
+	assert.Equal(t, ociSpecHash, rf.Status.ArtifactMeta.SpecHash,
+		"a local source change must not change the OCI-only SpecHash used by blob lifecycle")
+	assert.Len(t, mockPuller.FetchConfigCalls, 2, "a changed source invalidates the complete aggregate")
+	assert.ElementsMatch(t, []commonv1alpha1.ArtifactMetaRequirement{
+		{Name: "plugin_api_version", Version: "3.0.0"},
+		{Name: "engine_version", Version: "22"},
+	}, rf.Status.ArtifactMeta.Requirements, "requirements removed from a source must not remain stale")
+}
+
+func TestFetchAndCacheArtifactMeta_RemovingSourcesDropsTheirMetadata(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data: map[string]string{
+			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
+		},
+	}
+	mockPuller := &puller.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{
+			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
+		},
+		ConfigDigest: testRulesfileDigest,
+	}
+	rf := newTestRulesfile(
+		withRulesfileOCI(),
+		withRulesfileConfigMapRef(cm.Name),
+		withInlineRules(`- required_engine_version: "0.30.0"`),
+	)
+	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+
+	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
+	rf.Spec.ConfigMapRef = nil
+	rf.Spec.InlineRules = nil
+	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
+
+	assert.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{
+		{Name: "plugin_api_version", Version: "3.0.0"},
+	}, rf.Status.ArtifactMeta.Requirements)
+}
+
+func TestFetchAndCacheArtifactMeta_CombinesConstraintsWithoutMaskingConflicts(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data: map[string]string{commonv1alpha1.ConfigMapRulesKey: `
+- required_engine_version: "0.62.0"
+- required_plugin_versions:
+  - name: container
+    version: "0.5.0"
+    alternatives:
+    - name: cloudtrail
+      version: "0.2.0"
+`},
+	}
+	mockPuller := &puller.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{
+			Requirements: []puller.ArtifactRequirement{
+				{Name: "engine_version_semver", Version: "0.60.0"},
+				{Name: "plugin_api_version", Version: "2.1.0"},
+				{Name: "plugin_api_version", Version: "3.0.0"},
+			},
+			Dependencies: []puller.ArtifactDependency{{
+				Name: "container", Version: "0.4.0",
+				Alternatives: []puller.Dependency{{Name: "k8smeta", Version: "0.1.0"}},
+			}},
+		},
+		ConfigDigest: testRulesfileDigest,
+	}
+	rf := newTestRulesfile(
+		withRulesfileOCI(),
+		withRulesfileConfigMapRef(cm.Name),
+		withInlineRules(`
+- required_engine_version: "0.57.0"
+- required_plugin_versions:
+  - name: container
+    version: "0.4.0"
+    alternatives:
+    - name: k8smeta
+      version: "0.1.0"
+`),
+	)
+	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+
+	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
+	require.NotNil(t, rf.Status.ArtifactMeta)
+	assert.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{
+		{Name: "engine_version_semver", Version: "0.62.0"},
+		{Name: "plugin_api_version", Version: "2.1.0"},
+		{Name: "plugin_api_version", Version: "3.0.0"},
+	}, rf.Status.ArtifactMeta.Requirements,
+		"the strictest ordered requirement wins, while incompatible plugin API majors remain visible")
+	assert.Equal(t, []commonv1alpha1.ArtifactMetaDependency{
+		{
+			Name: "container", Version: "0.4.0",
+			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}},
+		},
+		{
+			Name: "container", Version: "0.5.0",
+			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "cloudtrail", Version: "0.2.0"}},
+		},
+	}, rf.Status.ArtifactMeta.Dependencies,
+		"identical dependency groups are deduplicated, but distinct AND constraints remain visible")
+}
+
 func TestAppendYAMLRequirements_EngineVersionInt(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
 	content := []byte(`- required_engine_version: 22`)
-	appendYAMLRequirements(meta, content)
+	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Requirements, 1)
 	assert.Equal(t, "engine_version", meta.Requirements[0].Name)
 	assert.Equal(t, "22", meta.Requirements[0].Version)
@@ -892,22 +1128,22 @@ func TestAppendYAMLRequirements_EngineVersionInt(t *testing.T) {
 func TestAppendYAMLRequirements_EngineVersionSemver(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
 	content := []byte(`- required_engine_version: "0.36.0"`)
-	appendYAMLRequirements(meta, content)
+	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Requirements, 1)
 	assert.Equal(t, "engine_version_semver", meta.Requirements[0].Name)
 }
 
 func TestAppendYAMLRequirements_Empty(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
-	appendYAMLRequirements(meta, nil)
+	require.NoError(t, appendYAMLRequirements(meta, nil))
 	assert.Empty(t, meta.Requirements)
 	assert.Empty(t, meta.Dependencies)
 }
 
 func TestAppendYAMLRequirements_InvalidYAML(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
-	appendYAMLRequirements(meta, []byte("{invalid"))
-	// Should not panic and should produce no requirements.
+	err := appendYAMLRequirements(meta, []byte("{invalid"))
+	require.Error(t, err)
 	assert.Empty(t, meta.Requirements)
 }
 
@@ -1120,16 +1356,46 @@ func TestReconcile_SecondListNodeObjectsError(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestReconcile_FetchAndCacheError(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
-		FetchConfigErr: fmt.Errorf("registry down"),
+func TestReconcile_SourceErrorInvalidatesObservedGeneration(t *testing.T) {
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+		Data: map[string]string{
+			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
+		},
 	}
-	rf := newTestRulesfile(withRulesfileOCI())
-	node := newTestNode()
-	rfNode := newTestRulesfileNode() // pre-existing
-	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf, node, rfNode)
+	rf := newTestRulesfile(withRulesfileConfigMapRef(cm.Name))
+	rf.Generation = 7
+	r, cl := newTestReconciler(t, rf, cm)
+
 	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+	ready := &artifactv1alpha1.Rulesfile{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), ready))
+	require.Equal(t, rf.Generation, ready.Status.ObservedGeneration)
+	require.NotNil(t, ready.Status.ArtifactMeta)
+	previousMeta := ready.Status.ArtifactMeta.DeepCopy()
+	previousSourcesHash := ready.Status.ArtifactMetaSourcesHash
+
+	updatedCM := &corev1.ConfigMap{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), updatedCM))
+	updatedCM.Data[commonv1alpha1.ConfigMapRulesKey] = "{invalid"
+	require.NoError(t, cl.Update(context.Background(), updatedCM))
+
+	_, err = r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.Error(t, err)
+
+	got := &artifactv1alpha1.Rulesfile{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
+	assert.Equal(t, previousMeta, got.Status.ArtifactMeta,
+		"a failed rebuild must retain the last complete aggregate for diagnosis")
+	assert.Equal(t, previousSourcesHash, got.Status.ArtifactMetaSourcesHash)
+	assert.Zero(t, got.Status.ObservedGeneration,
+		"a source failure must invalidate readiness even when the Rulesfile generation did not change")
+	condition := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	require.NotNil(t, condition)
+	assert.Equal(t, metav1.ConditionFalse, condition.Status)
+	assert.Equal(t, artifact.ReasonProgramFailed, condition.Reason)
+	assert.Contains(t, condition.Message, "Failed to compute artifact metadata")
 }
 
 // ── fetchAndCacheArtifactMeta additional paths ───────────────────────────────
@@ -1175,10 +1441,14 @@ func TestFetchAndCacheArtifactMeta_OCICacheHitIgnoresDigest(t *testing.T) {
 		SpecHash: specHash,
 		Digest:   "sha256:old",
 	}
+	sources, err := r.collectArtifactMetaSources(context.Background(), rf)
+	require.NoError(t, err)
+	rf.Status.ArtifactMetaSourcesHash, err = sources.hash()
+	require.NoError(t, err)
 
 	err = r.fetchAndCacheArtifactMeta(context.Background(), rf)
 	require.NoError(t, err)
-	assert.Empty(t, mockPuller.FetchConfigCalls, "spec hash match must skip FetchConfig regardless of digest")
+	assert.Empty(t, mockPuller.FetchConfigCalls, "unchanged complete source snapshot must skip FetchConfig regardless of digest")
 	assert.Equal(t, "sha256:old", rf.Status.ArtifactMeta.Digest, "stale digest must not be updated on cache hit")
 }
 
@@ -1187,7 +1457,7 @@ func TestFetchAndCacheArtifactMeta_OCICacheHitIgnoresDigest(t *testing.T) {
 func TestAppendYAMLRequirements_PluginVersions(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
 	content := []byte("- required_plugin_versions:\n  - name: cloudtrail\n    version: \"0.9.0\"")
-	appendYAMLRequirements(meta, content)
+	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Dependencies, 1)
 	assert.Equal(t, "cloudtrail", meta.Dependencies[0].Name)
 	assert.Equal(t, "0.9.0", meta.Dependencies[0].Version)
@@ -1198,7 +1468,7 @@ func TestAppendYAMLRequirements_PluginVersionsWithAlternatives(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
 	content := []byte("- required_plugin_versions:\n  - name: cloudtrail\n    version: \"0.9.0\"\n" +
 		"    alternatives:\n      - name: k8saudit\n        version: \"0.7.0\"")
-	appendYAMLRequirements(meta, content)
+	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Dependencies, 1)
 	assert.Equal(t, "cloudtrail", meta.Dependencies[0].Name)
 	require.Len(t, meta.Dependencies[0].Alternatives, 1)
