@@ -38,69 +38,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
-func TestEnsureFinalizer(t *testing.T) {
-	scheme := testScheme(t)
-
-	tests := []struct {
-		name         string
-		obj          *corev1.ConfigMap
-		hasFinalizer bool
-		patchErr     error
-		wantUpdated  bool
-		wantErr      string
-	}{
-		{
-			name:        "adds finalizer when not present",
-			obj:         newConfigMap(),
-			wantUpdated: true,
-		},
-		{
-			name:         "no-op when finalizer already present",
-			obj:          builders.NewConfigMap().WithName("test").WithNamespace("default").WithFinalizers([]string{"test-finalizer"}).Build(),
-			hasFinalizer: true,
-			wantUpdated:  false,
-		},
-		{
-			name:     "returns error when patch fails",
-			obj:      newConfigMap(),
-			patchErr: fmt.Errorf("injected patch error"),
-			wantErr:  "injected patch error",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.obj)
-			if tt.patchErr != nil {
-				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
-					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-						return tt.patchErr
-					},
-				})
-			}
-			cl := builder.Build()
-
-			updated, err := EnsureFinalizer(context.Background(), cl, tt.obj, "test-finalizer")
-
-			if tt.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.wantErr)
-				assert.False(t, updated)
-				return
-			}
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantUpdated, updated)
-
-			if tt.wantUpdated || tt.hasFinalizer {
-				fetched := &corev1.ConfigMap{}
-				require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.obj), fetched))
-				assert.Contains(t, fetched.Finalizers, "test-finalizer")
-			}
-		})
-	}
-}
-
 func TestHandleDeletion(t *testing.T) {
 	scheme := testScheme(t)
 	finalizerName := "test-finalizer"
@@ -295,8 +232,7 @@ func TestPrepareResource(t *testing.T) {
 	scheme := testScheme(t)
 	cl := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-	// newOwner builds a ConfigMap owner with the given labels, optionally with a
-	// UID so that SetControllerReference succeeds.
+	// newOwner builds a ConfigMap owner with the given labels and, when withUID is true, a UID.
 	newOwner := func(labels map[string]string, withUID bool) *corev1.ConfigMap {
 		cm := builders.NewConfigMap().WithName("test-owner").WithNamespace("default").
 			WithLabels(labels).Build()
@@ -432,7 +368,7 @@ func TestEnsureResource(t *testing.T) {
 			}
 			require.NoError(t, err)
 
-			// Verify the resource was actually applied/persisted by the fake client.
+			// Confirms the resource was applied and persisted by the fake client.
 			sa := &unstructured.Unstructured{}
 			sa.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ServiceAccount"})
 			fetchErr := cl.Get(context.Background(), client.ObjectKey{Name: "test", Namespace: "default"}, sa)

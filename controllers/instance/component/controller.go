@@ -193,6 +193,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Named("component").
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "component", &instancev1alpha1.Component{})).
 		Complete(r)
 }
 
@@ -360,7 +361,7 @@ func (r *Reconciler) patchStatus(ctx context.Context, comp *instancev1alpha1.Com
 
 // ensureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, comp *instancev1alpha1.Component) (bool, error) {
-	return instance.EnsureFinalizer(ctx, r.Client, comp, finalizer)
+	return controllerhelper.EnsureFinalizer(ctx, r.Client, finalizer, comp)
 }
 
 // handleDeletion handles the deletion of the Component instance.

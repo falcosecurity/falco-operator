@@ -445,7 +445,7 @@ func (r *Reconciler) patchStatus(ctx context.Context, falco *instancev1alpha1.Fa
 
 // ensureFinalizer ensures the finalizer is set on the object and returns true if the object was updated.
 func (r *Reconciler) ensureFinalizer(ctx context.Context, falco *instancev1alpha1.Falco) (bool, error) {
-	return instance.EnsureFinalizer(ctx, r.Client, falco, finalizer)
+	return controllerhelper.EnsureFinalizer(ctx, r.Client, finalizer, falco)
 }
 
 // handleDeletion handles the deletion of the Falco instance.

@@ -37,7 +37,7 @@ func ClusterScopedResourceHandler(ctx context.Context, obj client.Object) []reco
 
 	switch obj.(type) {
 	case *rbacv1.ClusterRoleBinding, *rbacv1.ClusterRole:
-		// We extract the instance name and namespace from the resource name.
+		// Extracts the instance name and namespace from the resource name.
 		name, namespace, err := resources.ParseUniqueName(obj.GetName())
 		ns = types.NamespacedName{
 			Name:      name,
@@ -45,7 +45,7 @@ func ClusterScopedResourceHandler(ctx context.Context, obj client.Object) []reco
 		}
 
 		if err != nil {
-			logger.V(5).Info("Failed to parse unique name", "name", obj.GetName(), "error", err)
+			logger.V(5).Info("Failed to parse unique name", "resource", obj.GetName(), "error", err)
 			return nil
 		}
 
