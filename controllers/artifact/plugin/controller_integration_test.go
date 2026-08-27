@@ -34,10 +34,10 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
-	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
+	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 var k8sClient client.Client
@@ -55,22 +55,16 @@ func TestMain(m *testing.M) {
 }
 
 // newIntegrationReconciler builds a reconciler backed by the real API server but with an
-// in-memory filesystem and OCI puller, so reconciles touch the cluster but not the disk/registry.
+// in-memory filesystem, so reconciles touch the cluster but not the disk.
 func newIntegrationReconciler() *PluginReconciler {
-	am := artifact.NewManagerWithOptions(k8sClient, testutil.TestNamespace,
-		artifact.WithFS(filesystem.NewMockFileSystem()),
-		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
-	)
+	mockFS := filesystem.NewMockFileSystem()
 	return &PluginReconciler{
-		Client:          k8sClient,
-		Scheme:          k8sClient.Scheme(),
-		recorder:        events.NewFakeRecorder(100),
-		gate:            startupgate.NoopGateRecorder{},
-		finalizer:       common.FormatFinalizerName(pluginFinalizerPrefix, testutil.TestNodeName),
-		artifactManager: am,
-		PluginsConfig:   &PluginsConfig{},
-		nodeName:        testutil.TestNodeName,
-		crToConfigName:  make(map[string]string),
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		recorder: events.NewFakeRecorder(100),
+		fetcher:  &artifact.Fetcher{K8sClient: k8sClient},
+		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		nodeName: testutil.TestNodeName,
 	}
 }
 
@@ -81,11 +75,20 @@ func createPlugin(t *testing.T, ctx context.Context, p *artifactv1alpha1.Plugin)
 	return p
 }
 
-func pluginConditions(o client.Object) *[]metav1.Condition {
-	return &o.(*artifactv1alpha1.Plugin).Status.Conditions
+func createPluginNode(t *testing.T, ctx context.Context, n *artifactv1alpha1.ArtifactNode) *artifactv1alpha1.ArtifactNode {
+	t.Helper()
+	require.NoError(t, k8sClient.Create(ctx, n))
+	t.Cleanup(func() { testutil.CleanupObject(t, ctx, k8sClient, n) })
+	return n
 }
 
-func applyPluginStatus(ctx context.Context, o client.Object) error {
+// nodeObjConditions extracts conditions from a PluginNode for use with AssertReconcileQuiet.
+func nodeObjConditions(o client.Object) *[]metav1.Condition {
+	return &o.(*artifactv1alpha1.ArtifactNode).Status.Conditions
+}
+
+// applyNodeObjStatus SSA-patches a PluginNode's status.
+func applyNodeObjStatus(ctx context.Context, o client.Object) error {
 	return controllerhelper.PatchStatusSSA(ctx, k8sClient, k8sClient.Scheme(), o, fieldManager)
 }
 
@@ -94,22 +97,50 @@ func TestIntegration_Plugin_SteadyStateReconcileIsQuiet(t *testing.T) {
 	p := createPlugin(t, ctx, &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: "quiet", Namespace: testutil.TestNamespace},
 	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, p.Name, testutil.TestNodeName)
+	nodeObj := createPluginNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindPlugin, p.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(p, artifactv1alpha1.GroupVersion.WithKind("Plugin")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+
 	testutil.AssertReconcileQuiet(t, ctx, newIntegrationReconciler(), k8sClient,
-		client.ObjectKeyFromObject(p), &artifactv1alpha1.Plugin{}, 5, 5,
-		pluginConditions,
-		func(o client.Object) error { return applyPluginStatus(ctx, o) },
+		client.ObjectKeyFromObject(nodeObj), &artifactv1alpha1.ArtifactNode{}, 5, 5,
+		nodeObjConditions,
+		func(o client.Object) error { return applyNodeObjStatus(ctx, o) },
 	)
 }
 
 func TestIntegration_Plugin_StatusApplyNoOpThenChange(t *testing.T) {
 	ctx := context.Background()
-	key := types.NamespacedName{Name: "ssa-semantics", Namespace: testutil.TestNamespace}
-	createPlugin(t, ctx, &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}})
 
-	// Apply both conditions so the no-op contract is exercised on a multi-entry conditions list
-	// (listType=map keyed by type), not just a single condition.
+	p := createPlugin(t, ctx, &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: "ssa-semantics", Namespace: testutil.TestNamespace},
+	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, p.Name, testutil.TestNodeName)
+	nodeObj := createPluginNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindPlugin, p.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(p, artifactv1alpha1.GroupVersion.WithKind("Plugin")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+	key := types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}
+
 	applyConditions := func(programmed metav1.ConditionStatus, reason, msg string) error {
-		cur := &artifactv1alpha1.Plugin{}
+		cur := &artifactv1alpha1.ArtifactNode{}
 		if err := k8sClient.Get(ctx, key, cur); err != nil {
 			return err
 		}
@@ -117,10 +148,10 @@ func TestIntegration_Plugin_StatusApplyNoOpThenChange(t *testing.T) {
 			common.NewProgrammedCondition(programmed, reason, msg, cur.GetGeneration()))
 		apimeta.SetStatusCondition(&cur.Status.Conditions,
 			common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, cur.GetGeneration()))
-		return applyPluginStatus(ctx, cur)
+		return applyNodeObjStatus(ctx, cur)
 	}
 
-	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.Plugin{},
+	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.ArtifactNode{},
 		func() error {
 			return applyConditions(metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed)
 		},
@@ -130,7 +161,7 @@ func TestIntegration_Plugin_StatusApplyNoOpThenChange(t *testing.T) {
 	)
 
 	// Sanity: both conditions are present and Programmed reflects the final mutation.
-	final := &artifactv1alpha1.Plugin{}
+	final := &artifactv1alpha1.ArtifactNode{}
 	require.NoError(t, k8sClient.Get(ctx, key, final))
 	require.Equal(t, metav1.ConditionFalse,
 		apimeta.FindStatusCondition(final.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()).Status)
