@@ -21,6 +21,8 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -33,7 +35,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -42,8 +43,13 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/artifact/config"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
+	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
+	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -67,6 +73,8 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var falcoBaseURL string
+	var enforceRequirements bool
 	var tlsOpts []func(*tls.Config)
 	var opts zap.Options
 
@@ -87,11 +95,49 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.StringVar(&falcoBaseURL, "falco-url", compat.DefaultBaseURL,
+		"Base URL for the Falco REST API used to verify plugin compatibility")
+	flag.BoolVar(&enforceRequirements, "enforce-requirements", true,
+		"Block artifact installation when OCI-declared requirements are not satisfied by the running "+
+			"Falco instance, or when they cannot be verified. When false, the operator installs the "+
+			"artifact anyway and records the unmet requirement in status and logs instead of blocking.")
+
+	// artifactServerURL, artifactClientCertPath and artifactServerCAFile are normally set via the
+	// ARTIFACT_SERVER_URL/ARTIFACT_CLIENT_CERT_PATH/ARTIFACT_SERVER_CA_FILE env vars (see
+	// resources.WithArtifactClientCertOverlay for the Helm chart's cert-manager/trust-manager setup).
+	// envutil.BindFlagEnv, called after flag.Parse below, applies each env var to its flag when the
+	// flag isn't set on the command line.
+	var artifactServerURL string
+	var artifactClientCertPath, artifactClientCertName, artifactClientCertKey string
+	var artifactServerCAFile string
+	flag.StringVar(&artifactServerURL, "artifact-server-url", "",
+		"URL of the central artifact HTTP server to fetch OCI artifacts from, instead of pulling "+
+			"directly from the registry.")
+	flag.StringVar(&artifactClientCertPath, "artifact-client-cert-path", "",
+		"The directory that contains the client certificate used to authenticate to the central "+
+			"artifact server via mTLS. Only meaningful when the artifact server requires client certs.")
+	flag.StringVar(&artifactClientCertName, "artifact-client-cert-name", "tls.crt", "The name of the artifact client certificate file.")
+	flag.StringVar(&artifactClientCertKey, "artifact-client-cert-key", "tls.key", "The name of the artifact client key file.")
+	flag.StringVar(&artifactServerCAFile, "artifact-server-ca-file", "",
+		"Path to a PEM file containing the CA bundle used to verify the artifact server's TLS "+
+			"certificate, for deployments using a private CA. Empty uses the system trust store.")
 
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if err := envutil.BindFlagEnv(flag.CommandLine); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
+
+	if artifactServerURL != "" {
+		setupLog.Info("Artifact server mode enabled; OCI artifacts will be fetched from the central cache",
+			"artifactServer", artifactServerURL)
+	} else {
+		setupLog.Info("Artifact server mode disabled; OCI artifacts will be pulled directly from the registry")
+	}
 
 	setupLog.Info("Starting artifact operator", "version", version.SemVersion, "commit", version.GitCommit,
 		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform)
@@ -109,6 +155,20 @@ func main() {
 		setupLog.Error(nil, "unable to get NODE_NAME environment variable")
 		os.Exit(1)
 	}
+
+	ctx := ctrl.SetupSignalHandler()
+
+	// Waits for Falco to be available before starting the controllers; Falco starts in idle mode
+	// (no plugins, no rules) as a regular container alongside the artifact operator. The fetched
+	// snapshot seeds nodeManager's Falco-capability cache below, which compatibility checks read
+	// instead of querying Falco live on every reconcile.
+	setupLog.Info("Waiting for Falco to be available", "url", falcoBaseURL)
+	initialFalcoVersions, err := compat.WaitAndFetch(ctx, falcoBaseURL)
+	if err != nil {
+		setupLog.Error(err, "failed to fetch Falco versions at startup")
+		os.Exit(1)
+	}
+	setupLog.Info("Falco versions fetched successfully")
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
@@ -228,28 +288,142 @@ func main() {
 		}
 	}
 
-	gate := startupgate.NewGate(mgr.GetClient(), nodeName, namespace)
+	// falcoFetcher is shared by nodeManager (post-install refresh) and versionsWatcher (periodic
+	// refresh); both call the same Falco /versions endpoint on different triggers. See
+	// nodeartifacts.Manager's doc comment.
+	falcoFetcher := compat.NewHTTPVersionsFetcher(falcoBaseURL)
+
+	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
+	// keeping a plugin's config entry until no rules file on this node still requires it. It also
+	// caches Falco's reported capabilities and plugin versions so compatibility checks never
+	// require a live HTTP call. Warm-syncing provides/requires state from durable ArtifactNode
+	// status happens in a WarmSyncRunnable (mgr.Add below), which controller-runtime runs after
+	// the manager's cache syncs and before any reconciler starts; it uses the manager's own
+	// cache-backed client (mgr.GetClient()) to avoid a fleet-wide direct-apiserver request storm
+	// when every node's sidecar restarts at once.
+	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
+	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
+	if err := mgr.Add(nodeartifacts.NewWarmSyncRunnable(mgr.GetClient(), nodeManager, namespace, nodeName)); err != nil {
+		setupLog.Error(err, "unable to add node artifact manager warm sync to manager")
+		os.Exit(1)
+	}
 
 	if err = config.NewConfigReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("config-controller/"+nodeName),
-		gate,
 		nodeName,
 		namespace,
+		nodeManager,
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Config")
 		os.Exit(1)
+	}
+
+	versionsWatcher := compat.NewVersionsWatcher(falcoFetcher, compat.DefaultWatchInterval)
+	versionsWatcher.SetSink(nodeManager.OnFalcoVersionsObserved)
+	if err := mgr.Add(versionsWatcher); err != nil {
+		setupLog.Error(err, "unable to add Falco versions watcher to manager")
+		os.Exit(1)
+	}
+
+	// Backstop for a write to the shared plugins-config file landing during one of Falco's
+	// SIGHUP-triggered restarts and never being picked up; see PluginConfigRetrier's doc comment.
+	// FetchInline, the only ArtifactFetcher method this path uses, needs no server URL, HTTP
+	// client, or K8s client, so a bare &artifact.Fetcher{} suffices.
+	pluginConfigRetrier := nodeartifacts.NewPluginConfigRetrier(
+		nodeManager, &artifact.Fetcher{},
+		nodeartifacts.DefaultPluginConfigRetryInterval, nodeartifacts.DefaultPluginConfigMismatchGracePeriod,
+	)
+	if err := mgr.Add(pluginConfigRetrier); err != nil {
+		setupLog.Error(err, "unable to add plugin config retrier to manager")
+		os.Exit(1)
+	}
+
+	// Builds the shared HTTP client and Fetcher used by both the Rulesfile and Plugin
+	// reconcilers' FetchOCI calls. TLS/mTLS identity and retry policy are configured once here
+	// for both reconcilers.
+	var artifactClientCertWatcher *certwatcher.CertWatcher
+	var artifactCAWatcher *tlsutil.CAWatcher
+
+	if artifactClientCertPath != "" {
+		setupLog.Info("Initializing artifact client certificate watcher using provided certificates",
+			"artifact-client-cert-path", artifactClientCertPath,
+			"artifact-client-cert-name", artifactClientCertName, "artifact-client-cert-key", artifactClientCertKey)
+
+		var certErr error
+		artifactClientCertWatcher, certErr = certwatcher.New(
+			filepath.Join(artifactClientCertPath, artifactClientCertName),
+			filepath.Join(artifactClientCertPath, artifactClientCertKey),
+		)
+		if certErr != nil {
+			setupLog.Error(certErr, "Failed to initialize artifact client certificate watcher")
+			os.Exit(1)
+		}
+	}
+
+	if artifactServerCAFile != "" {
+		setupLog.Info("Initializing artifact server CA watcher", "artifact-server-ca-file", artifactServerCAFile)
+
+		var caErr error
+		artifactCAWatcher, caErr = tlsutil.NewCAWatcher(artifactServerCAFile)
+		if caErr != nil {
+			setupLog.Error(caErr, "Failed to initialize artifact server CA watcher")
+			os.Exit(1)
+		}
+	}
+
+	artifactTransport := http.DefaultTransport.(*http.Transport).Clone()
+	if artifactClientCertWatcher != nil || artifactCAWatcher != nil {
+		// http.Transport.TLSClientConfig is a single static *tls.Config shared across
+		// connections; there is no client-side hook to re-read the trust pool or client cert
+		// per connection. DialTLSContext instead builds a fresh tls.Config from the watchers'
+		// current state on every new TCP connection, so a cert/CA reload takes effect the next
+		// time a keep-alive connection is re-established.
+		artifactTransport.DialTLSContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+			conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, network, addr)
+			if dialErr != nil {
+				return nil, dialErr
+			}
+			host, _, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				host = addr
+			}
+			tlsConfig := &tls.Config{ServerName: host}
+			if artifactCAWatcher != nil {
+				tlsConfig.RootCAs = artifactCAWatcher.CertPool()
+			}
+			if artifactClientCertWatcher != nil {
+				tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+					return artifactClientCertWatcher.GetCertificate(nil)
+				}
+			}
+			tlsConn := tls.Client(conn, tlsConfig)
+			if hsErr := tlsConn.HandshakeContext(dialCtx); hsErr != nil {
+				_ = conn.Close()
+				return nil, hsErr
+			}
+			return tlsConn, nil
+		}
+	}
+
+	artifactFetcher := &artifact.Fetcher{
+		ServerURL:  artifactServerURL,
+		HTTPClient: &http.Client{Transport: artifactTransport},
+		K8sClient:  mgr.GetClient(),
+		NodeName:   nodeName,
 	}
 
 	if err := rulesfile.NewRulesfileReconciler(
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("rulesfile-controller/"+nodeName),
-		gate,
 		nodeName,
 		namespace,
-	).SetupWithManager(mgr); err != nil {
+		enforceRequirements,
+		artifactFetcher,
+		nodeManager,
+	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
 	}
@@ -258,10 +432,12 @@ func main() {
 		mgr.GetClient(),
 		mgr.GetScheme(),
 		mgr.GetEventRecorder("plugin-controller/"+nodeName),
-		gate,
 		nodeName,
 		namespace,
-	).SetupWithManager(mgr); err != nil {
+		enforceRequirements,
+		artifactFetcher,
+		nodeManager,
+	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
 		os.Exit(1)
 	}
@@ -282,30 +458,34 @@ func main() {
 		}
 	}
 
+	if artifactClientCertWatcher != nil {
+		setupLog.Info("Adding artifact client certificate watcher to manager")
+		if err := mgr.Add(artifactClientCertWatcher); err != nil {
+			setupLog.Error(err, "unable to add artifact client certificate watcher to manager")
+			os.Exit(1)
+		}
+	}
+
+	if artifactCAWatcher != nil {
+		setupLog.Info("Adding artifact server CA watcher to manager")
+		if err := mgr.Add(artifactCAWatcher); err != nil {
+			setupLog.Error(err, "unable to add artifact server CA watcher to manager")
+			os.Exit(1)
+		}
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
 	}
 
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		if err := gate.MarkCacheSynced(ctx); err != nil {
-			setupLog.Error(err, "unable to initialize startup gate")
-			return err
-		}
-		setupLog.Info("startup gate initialized")
-		<-ctx.Done()
-		return nil
-	})); err != nil {
-		setupLog.Error(err, "unable to add startup gate runnable")
-		os.Exit(1)
-	}
-	if err := mgr.AddReadyzCheck("readyz", gate.Check); err != nil {
+	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
