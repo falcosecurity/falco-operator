@@ -113,3 +113,134 @@ func TestNewProgrammedCondition(t *testing.T) {
 			condition.Reason, "ProgramFailed")
 	}
 }
+
+func TestNewDependenciesSatisfiedCondition(t *testing.T) {
+	condition := NewDependenciesSatisfiedCondition(metav1.ConditionTrue, "DependenciesSatisfied", "ok", 1)
+	if condition.Type != string(commonv1alpha1.ConditionDependenciesSatisfied) {
+		t.Errorf("NewDependenciesSatisfiedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionDependenciesSatisfied))
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Errorf("NewDependenciesSatisfiedCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
+	}
+}
+
+func TestNewOCIArtifactProgrammedCondition(t *testing.T) {
+	condition := NewOCIArtifactProgrammedCondition(metav1.ConditionTrue, "OCIArtifactProgrammed", "ok", 1)
+	if condition.Type != string(commonv1alpha1.ConditionOCIArtifactProgrammed) {
+		t.Errorf("NewOCIArtifactProgrammedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionOCIArtifactProgrammed))
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Errorf("NewOCIArtifactProgrammedCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
+	}
+}
+
+func TestNewInlineArtifactProgrammedCondition(t *testing.T) {
+	condition := NewInlineArtifactProgrammedCondition(metav1.ConditionFalse, "InlineArtifactProgramFailed", "bad yaml", 1)
+	if condition.Type != string(commonv1alpha1.ConditionInlineArtifactProgrammed) {
+		t.Errorf("NewInlineArtifactProgrammedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionInlineArtifactProgrammed))
+	}
+	if condition.Status != metav1.ConditionFalse {
+		t.Errorf("NewInlineArtifactProgrammedCondition().Status = %v, want %v", condition.Status, metav1.ConditionFalse)
+	}
+}
+
+func TestNewConfigMapArtifactProgrammedCondition(t *testing.T) {
+	condition := NewConfigMapArtifactProgrammedCondition(metav1.ConditionTrue, "ConfigMapArtifactProgrammed", "ok", 1)
+	if condition.Type != string(commonv1alpha1.ConditionConfigMapArtifactProgrammed) {
+		t.Errorf("NewConfigMapArtifactProgrammedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionConfigMapArtifactProgrammed))
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Errorf("NewConfigMapArtifactProgrammedCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
+	}
+}
+
+func TestNewConfigProgrammedCondition(t *testing.T) {
+	condition := NewConfigProgrammedCondition(metav1.ConditionTrue, "ConfigProgrammed", "ok", 1)
+	if condition.Type != string(commonv1alpha1.ConditionConfigProgrammed) {
+		t.Errorf("NewConfigProgrammedCondition().Type = %v, want %v",
+			condition.Type, string(commonv1alpha1.ConditionConfigProgrammed))
+	}
+	if condition.Status != metav1.ConditionTrue {
+		t.Errorf("NewConfigProgrammedCondition().Status = %v, want %v", condition.Status, metav1.ConditionTrue)
+	}
+}
+
+func TestComputeProgrammedCondition(t *testing.T) {
+	gen := int64(7)
+
+	t.Run("all true -> Programmed True", func(t *testing.T) {
+		conditions := []metav1.Condition{
+			{Type: "A", Status: metav1.ConditionTrue},
+			{Type: "B", Status: metav1.ConditionTrue},
+		}
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		if got.Status != metav1.ConditionTrue || got.Reason != "TrueReason" || got.Message != "TrueMsg" {
+			t.Errorf("got %+v, want Status=True Reason=TrueReason Message=TrueMsg", got)
+		}
+		if got.ObservedGeneration != gen {
+			t.Errorf("got ObservedGeneration=%d, want %d", got.ObservedGeneration, gen)
+		}
+	})
+
+	t.Run("one condition false -> Programmed False naming the blocker", func(t *testing.T) {
+		conditions := []metav1.Condition{
+			{Type: "A", Status: metav1.ConditionTrue},
+			{Type: "B", Status: metav1.ConditionFalse, Message: "disk full"},
+		}
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		if got.Status != metav1.ConditionFalse || got.Reason != "FalseReason" {
+			t.Errorf("got %+v, want Status=False Reason=FalseReason", got)
+		}
+		want := "blocked by B (False): disk full"
+		if got.Message != want {
+			t.Errorf("got Message=%q, want %q", got.Message, want)
+		}
+	})
+
+	t.Run("first blocking condition wins when several are not True", func(t *testing.T) {
+		conditions := []metav1.Condition{
+			{Type: "A", Status: metav1.ConditionFalse, Message: "first failure"},
+			{Type: "B", Status: metav1.ConditionUnknown, Message: "second failure"},
+		}
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		want := "blocked by A (False): first failure"
+		if got.Message != want {
+			t.Errorf("got Message=%q, want %q", got.Message, want)
+		}
+	})
+
+	t.Run("skip excludes a condition type from the gate even when False", func(t *testing.T) {
+		conditions := []metav1.Condition{
+			{Type: "A", Status: metav1.ConditionTrue},
+			{Type: "DependenciesSatisfied", Status: metav1.ConditionFalse, Message: "advisory only"},
+		}
+		skip := func(condType string) bool { return condType == "DependenciesSatisfied" }
+		got := ComputeProgrammedCondition(conditions, skip, "TrueReason", "TrueMsg", "FalseReason", gen)
+		if got.Status != metav1.ConditionTrue {
+			t.Errorf("got Status=%v, want True (DependenciesSatisfied should be skipped)", got.Status)
+		}
+	})
+
+	t.Run("existing Programmed condition in the input is always excluded from the gate", func(t *testing.T) {
+		conditions := []metav1.Condition{
+			{Type: string(commonv1alpha1.ConditionProgrammed), Status: metav1.ConditionFalse},
+		}
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		// The only input condition is Programmed and it's excluded, so n stays 0 and the
+		// result is False with the msgNoConditionsToGateOn message.
+		if got.Status != metav1.ConditionFalse || got.Message != msgNoConditionsToGateOn {
+			t.Errorf("got %+v, want Status=False Message=%q", got, msgNoConditionsToGateOn)
+		}
+	})
+
+	t.Run("empty conditions -> False, no conditions to gate on", func(t *testing.T) {
+		got := ComputeProgrammedCondition(nil, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		if got.Status != metav1.ConditionFalse || got.Message != msgNoConditionsToGateOn {
+			t.Errorf("got %+v, want Status=False Message=%q", got, msgNoConditionsToGateOn)
+		}
+	})
+}
