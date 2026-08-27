@@ -25,7 +25,7 @@ import (
 )
 
 func generateApplyConfiguration(comp *instancev1alpha1.Component, defs *resources.InstanceDefaults) (*unstructured.Unstructured, error) {
-	baseResource, err := resources.GenerateWorkload(defs.ResourceType, &comp.ObjectMeta, defs, false)
+	baseResource, err := resources.GenerateWorkload(defs.ResourceType, &comp.ObjectMeta, defs)
 	if err != nil {
 		return nil, err
 	}

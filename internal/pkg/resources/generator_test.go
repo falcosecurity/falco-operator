@@ -232,7 +232,7 @@ func TestFalcoRoleAllowsArtifactNodeCache(t *testing.T) {
 	}
 
 	require.NotNil(t, resourceRule, "the artifact-operator cache needs list/watch access to ArtifactNodes")
-	assert.ElementsMatch(t, []string{"get", "list", "watch"}, resourceRule.Verbs)
+	assert.Subset(t, resourceRule.Verbs, []string{"get", "list", "watch"})
 }
 
 func TestGenerateRoleBinding(t *testing.T) {

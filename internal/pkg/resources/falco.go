@@ -151,17 +151,17 @@ var FalcoDefaults = &InstanceDefaults{
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 			Resources: []string{"configs", "rulesfiles", "plugins"},
-			Verbs:     []string{"get", "list", "watch", "update", "patch"},
-		},
-		{
-			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
-			Resources: []string{"configs/status", "rulesfiles/status", "plugins/status"},
-			Verbs:     []string{"get", "update", "patch"},
+			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 			Resources: []string{"artifactnodes"},
-			Verbs:     []string{"get", "list", "watch"},
+			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+		},
+		{
+			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
+			Resources: []string{"artifactnodes/status"},
+			Verbs:     []string{"get", "update", "patch"},
 		},
 	},
 	VolumeMounts: []corev1.VolumeMount{
@@ -284,6 +284,33 @@ var FalcoDefaults = &InstanceDefaults{
 		Type: appsv1.RollingUpdateDaemonSetStrategyType,
 	},
 }
+
+// SetArtifactServerURL sets the ARTIFACT_SERVER_URL environment variable on the
+// artifact-operator sidecar container. Call this once during falco-operator startup.
+func SetArtifactServerURL(url string) {
+	if url == "" {
+		return
+	}
+	sidecar := &FalcoDefaults.SidecarContainers[0]
+	sidecar.Env = append(sidecar.Env, corev1.EnvVar{
+		Name:  "ARTIFACT_SERVER_URL",
+		Value: url,
+	})
+}
+
+// SetArtifactOperatorImage sets the artifact-operator sidecar image used for every Falco pod.
+// Call this once during falco-operator startup.
+func SetArtifactOperatorImage(img string) {
+	if img == "" {
+		return
+	}
+	FalcoDefaults.SidecarContainers[0].Image = img
+}
+
+// artifactClientCertsMountPath is the mount path for the client cert Secret in the
+// artifact-operator sidecar. cmd/artifact/main.go reads this same path via
+// ARTIFACT_CLIENT_CERT_PATH and ARTIFACT_SERVER_CA_FILE.
+const artifactClientCertsMountPath = "/etc/falco-operator/artifact-client-certs"
 
 // Falco configuration strings, keyed by workload type.
 var daemonsetFalcoConfig = `append_output:

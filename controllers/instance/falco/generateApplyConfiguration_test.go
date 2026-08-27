@@ -59,10 +59,8 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	tests := []struct {
 		name                string
 		falco               *builders.FalcoBuilder
-		nativeSidecar       bool
 		wantKind            string
 		wantContainerCount  int
-		wantInitContainers  int
 		wantMainImage       string
 		wantTolerationCount int
 		wantPodLabels       map[string]string
@@ -75,26 +73,8 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name:                "default DaemonSet produces expected base with sidecar as regular container",
 			falco:               builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace),
-			nativeSidecar:       false,
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
-			wantTolerationCount: len(falcoDefs.Tolerations),
-			wantPodLabels: map[string]string{
-				"app.kubernetes.io/name":     "test-f",
-				"app.kubernetes.io/instance": "test-f",
-			},
-			wantUpdateStrategy: string(appsv1.RollingUpdateDaemonSetStrategyType),
-			wantVolumeMinCount: len(falcoDefs.Volumes),
-		},
-		{
-			name:                "native sidecar moves sidecar to initContainers",
-			falco:               builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace),
-			nativeSidecar:       true,
-			wantKind:            resources.ResourceTypeDaemonSet,
-			wantContainerCount:  1,
-			wantInitContainers:  1,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -108,10 +88,8 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			name: "Deployment type produces Deployment kind",
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment),
-			nativeSidecar:       false,
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -126,10 +104,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			name: "custom version overrides container image",
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).WithVersion("0.38.0"),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -144,10 +121,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			name: "custom replicas are propagated in Deployment",
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).WithReplicas(3),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -163,10 +139,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).
 				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -181,10 +156,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			name: "OnDelete updateStrategy overrides default RollingUpdate for DaemonSet",
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -198,10 +172,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			name: "CR labels propagate to pod template",
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithLabels(map[string]string{"team": "security", "env": "prod"}),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -218,10 +191,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).
 				WithImage(testContainerName, "custom-repo/falco:custom"),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       "custom-repo/falco:custom",
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -238,10 +210,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				WithType(resources.ResourceTypeDeployment).
 				WithVersion("0.38.0").
 				WithImage(testContainerName, "custom-repo/falco:custom"),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       "custom-repo/falco:custom",
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -262,10 +233,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 						NodeSelector: map[string]string{"disktype": "ssd"},
 					},
 				}),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -286,10 +256,9 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 						Containers: []corev1.Container{{Name: "my-sidecar", Image: "sidecar:latest"}},
 					},
 				}),
-			nativeSidecar:       false,
+
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  3,
-			wantInitContainers:  0,
 			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
@@ -311,7 +280,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			falco := tt.falco.Build()
-			result, err := generateApplyConfiguration(falco, tt.wantKind, tt.nativeSidecar)
+			result, err := generateApplyConfiguration(falco, tt.wantKind, "", "")
 
 			if tt.wantErr != "" {
 				require.Error(t, err)
@@ -338,10 +307,6 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			assert.Len(t, containers, tt.wantContainerCount)
 			mainContainer := mustFindContainer(t, containers, falcoDefs.ContainerName)
 			assert.Equal(t, tt.wantMainImage, mainContainer["image"])
-
-			// InitContainers.
-			initContainers, _, _ := unstructured.NestedSlice(result.Object, "spec", "template", "spec", "initContainers")
-			assert.Len(t, initContainers, tt.wantInitContainers)
 
 			// Probes survive merge.
 			assert.NotNil(t, mainContainer["livenessProbe"], "livenessProbe should survive merge")
@@ -409,29 +374,17 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				assert.True(t, sidecarFound, "sidecar container artifact-operator should be present")
 			}
 
-			// Verify sidecar in initContainers when nativeSidecar=true.
-			if tt.wantInitContainers > 0 {
-				initSidecarFound := false
-				for _, c := range initContainers {
-					cm := c.(map[string]any)
-					if cm["name"] == falcoDefs.SidecarContainerName {
-						initSidecarFound = true
-						break
-					}
-				}
-				assert.True(t, initSidecarFound, "sidecar should be in initContainers with nativeSidecar=true")
-			}
 		})
 	}
 }
 
-// TestGenerateApplyConfigurationSidecarProbes verifies that the sidecar container
-// retains its probes after the merge — structurally different from the table-driven test.
+// TestGenerateApplyConfigurationSidecarProbes verifies that the sidecar container retains its
+// liveness/readiness probes, env vars, and volumeMounts after the merge.
 func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
 	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 		WithType(resources.ResourceTypeDeployment).Build()
 
-	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, false)
+	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, "", "")
 	require.NoError(t, err)
 
 	containers := mustGetContainers(t, result)
@@ -444,13 +397,65 @@ func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
 	assert.NotEmpty(t, sidecarVolumeMounts, "sidecar should have volumeMounts")
 }
 
-// TestGenerateApplyConfigurationConfigMapVolume verifies the configmap volume
-// is added to the base — structurally different from the table-driven test.
+// TestGenerateApplyConfigurationMTLSWithUserSidecarOverride verifies that applyArtifactClientCertOverlay
+// merges mTLS volume mounts into an existing, user-customized artifact-operator sidecar container
+// rather than appending a duplicate entry.
+func TestGenerateApplyConfigurationMTLSWithUserSidecarOverride(t *testing.T) {
+	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
+		WithType(resources.ResourceTypeDaemonSet).
+		WithPodTemplateSpec(&corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: "falco", Image: "docker.io/my-registry/falco-supervisor:0.44.1"},
+					{Name: falcoDefs.SidecarContainerName, Image: "docker.io/my-registry/artifact-operator:latest", ImagePullPolicy: corev1.PullNever},
+				},
+				ShareProcessNamespace: new(true),
+			},
+		}).
+		Build()
+
+	result, err := generateApplyConfiguration(
+		falco, resources.ResourceTypeDaemonSet, "test-f-artifact-client-tls", "test-falco-operator-artifact-ca-bundle",
+	)
+	require.NoError(t, err)
+
+	containers := mustGetContainers(t, result)
+	var sidecarCount int
+	for _, c := range containers {
+		cm, ok := c.(map[string]any)
+		require.True(t, ok)
+		if cm["name"] == falcoDefs.SidecarContainerName {
+			sidecarCount++
+		}
+	}
+	require.Equal(t, 1, sidecarCount, "artifact-operator must appear exactly once")
+
+	sidecar := mustFindContainer(t, containers, falcoDefs.SidecarContainerName)
+	assert.Equal(t, "docker.io/my-registry/artifact-operator:latest", sidecar["image"], "user's own image override must survive the merge")
+
+	volumeMounts, _, _ := unstructured.NestedSlice(sidecar, "volumeMounts")
+	var hasClientCertMount, hasTrustBundleMount bool
+	for _, vm := range volumeMounts {
+		vmm, ok := vm.(map[string]any)
+		require.True(t, ok)
+		switch vmm["name"] {
+		case "artifact-client-certs":
+			hasClientCertMount = true
+		case "artifact-server-trust":
+			hasTrustBundleMount = true
+		}
+	}
+	assert.True(t, hasClientCertMount, "mTLS client cert volume mount should still be added")
+	assert.True(t, hasTrustBundleMount, "mTLS CA trust bundle volume mount should still be added")
+}
+
+// TestGenerateApplyConfigurationConfigMapVolume verifies that the configmap volume and its
+// volumeMount are added to the generated pod spec.
 func TestGenerateApplyConfigurationConfigMapVolume(t *testing.T) {
 	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
 		WithType(resources.ResourceTypeDeployment).Build()
 
-	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, false)
+	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, "", "")
 	require.NoError(t, err)
 
 	volumes, _, _ := unstructured.NestedSlice(result.Object, "spec", "template", "spec", "volumes")

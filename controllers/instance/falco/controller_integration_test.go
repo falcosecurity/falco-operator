@@ -56,7 +56,10 @@ func TestMain(m *testing.M) {
 	}
 
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
+		// testdata/crds holds a minimal cert-manager Certificate CRD fixture used by
+		// ensureArtifactClientCertificate's tests to create and read Certificate objects
+		// against envtest's apiserver.
+		CRDDirectoryPaths:     []string{testutil.CRDDirPath(), "testdata/crds"},
 		ErrorIfCRDPathMissing: true,
 	}
 
@@ -87,7 +90,7 @@ func TestMain(m *testing.M) {
 
 // newTestReconciler creates a new reconciler for integration tests.
 func newTestReconciler() *Reconciler {
-	return NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100), false)
+	return NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100))
 }
 
 // createFalco creates a Falco resource and registers cleanup to run after the test.

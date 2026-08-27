@@ -89,7 +89,7 @@ func TestEnsureFinalizer(t *testing.T) {
 				})
 			}
 			cl := builder.Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 			updated, err := r.ensureFinalizer(context.Background(), tt.falco)
 
@@ -223,7 +223,7 @@ func TestHandleDeletion(t *testing.T) {
 				builder = builder.WithInterceptorFuncs(funcs)
 			}
 			cl := builder.Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 			handled, err := r.handleDeletion(context.Background(), tt.falco)
 
@@ -272,7 +272,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		wantEventMessage    string
 	}{
 		{
-			name: "deployment available — applies status and emits event",
+			name: "deployment available: applies status and emits event",
 			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDeployment).WithReplicas(2).Build(),
 			workload: &appsv1.Deployment{
@@ -285,7 +285,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantEventMessage:    instance.MessageDeploymentAvailable,
 		},
 		{
-			name:  "daemonset available — applies status and emits event",
+			name:  "daemonset available: applies status and emits event",
 			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDaemonSet).Build(),
 			workload: &appsv1.DaemonSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
@@ -306,7 +306,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 			}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).WithStatusSubresource(tt.falco).Build()
 			recorder := events.NewFakeRecorder(10)
-			r := NewReconciler(cl, scheme, recorder, false)
+			r := NewReconciler(cl, scheme, recorder)
 
 			err := r.computeAvailableCondition(context.Background(), tt.falco)
 			require.NoError(t, err)
@@ -402,7 +402,7 @@ func TestCleanupDualDeployments(t *testing.T) {
 				builder = builder.WithInterceptorFuncs(funcs)
 			}
 			cl := builder.Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 			err := r.cleanupDualDeployments(context.Background(), tt.falco)
 
@@ -498,7 +498,7 @@ func TestPatchStatus(t *testing.T) {
 		WithObjects(falco).
 		WithStatusSubresource(falco).
 		Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 	fetched := &instancev1alpha1.Falco{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), fetched))
@@ -580,7 +580,7 @@ func TestEnsureDeployment(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			objs := append([]client.Object{tt.falco}, tt.existingObjs...)
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 			err := r.ensureDeployment(context.Background(), tt.falco)
 			require.NoError(t, err)
@@ -662,11 +662,11 @@ func TestReconcileLabelExclusion(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 				WithType(resources.ResourceTypeDaemonSet).WithLabels(tt.crLabels).Build()
-			// Pre-set the finalizer so Reconcile proceeds past ensureFinalizer in one pass.
+			// Sets the finalizer directly before Reconcile runs.
 			falco.Finalizers = []string{finalizer}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).
 				WithStatusSubresource(falco).Build()
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false,
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10),
 				WithLabelFilter(instance.NewLabelFilter(tt.excluded)))
 
 			_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(falco)})
@@ -693,7 +693,7 @@ func TestReconcileLabelExclusion(t *testing.T) {
 				assert.Equal(t, v, ds.Spec.Template.Labels[k], "pod template must satisfy selector key %s", k)
 			}
 
-			// The Falco resource itself must keep its labels (filter is in-memory only).
+			// The Falco resource itself must keep its original labels.
 			srv := &instancev1alpha1.Falco{}
 			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(falco), srv))
 			for _, k := range tt.wantCRKeeps {
@@ -703,15 +703,15 @@ func TestReconcileLabelExclusion(t *testing.T) {
 	}
 }
 
-// TestEnsureDeploymentWithCustomPodTemplateSpec verifies container merge — structurally
-// different assertions (iterating containers) from the table-driven TestEnsureDeployment.
+// TestEnsureDeploymentWithCustomPodTemplateSpec verifies that ensureDeployment includes the
+// user-specified container image from a custom PodTemplateSpec.
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 		WithType(resources.ResourceTypeDeployment).
 		WithImage(testContainerName, "custom-image:latest").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 	require.NoError(t, r.ensureDeployment(context.Background(), falco))
 
@@ -733,7 +733,7 @@ func TestEnsureConfigMapError(t *testing.T) {
 	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 		WithType("InvalidType").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 	err := r.ensureConfigMap(context.Background(), falco)
 	require.Error(t, err)
@@ -745,7 +745,7 @@ func TestEnsureDeploymentApplyConfigError(t *testing.T) {
 	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 		WithType("InvalidType").Build()
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
-	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 	err := r.ensureDeployment(context.Background(), falco)
 	require.Error(t, err)
@@ -761,7 +761,7 @@ func TestEnsureDeploymentOwnerReferenceError(t *testing.T) {
 	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
 		WithType(resources.ResourceTypeDeployment).Build()
 	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, instancev1alpha1.AddToScheme)).WithObjects(falco).Build()
-	r := NewReconciler(cl, emptyScheme, events.NewFakeRecorder(10), false)
+	r := NewReconciler(cl, emptyScheme, events.NewFakeRecorder(10))
 
 	err := r.ensureDeployment(context.Background(), falco)
 	require.Error(t, err)
@@ -844,7 +844,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 			}
 			cl := builder.WithInterceptorFuncs(funcs).Build()
 
-			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10), false)
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
 			err := r.ensureDeployment(context.Background(), tt.falco)
 

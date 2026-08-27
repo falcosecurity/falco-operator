@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
+	"time"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -48,6 +51,15 @@ import (
 const (
 	finalizer    = "falco.instance.falcosecurity.dev/finalizer"
 	fieldManager = "falco-controller"
+
+	// DefaultArtifactClientCertDuration is the default validity period for a per-instance
+	// artifact-client mTLS certificate.
+	DefaultArtifactClientCertDuration = 30 * 24 * time.Hour
+	// DefaultArtifactClientCertRenewBefore is how long before expiry cert-manager renews a
+	// per-instance artifact-client mTLS certificate.
+	DefaultArtifactClientCertRenewBefore = 7 * 24 * time.Hour
+
+	artifactClientCertSecretSuffix = "-artifact-client-tls"
 )
 
 // clusterScopedGVKs are the GVKs of cluster-scoped resources managed by the Falco controller.
@@ -62,10 +74,22 @@ type Reconciler struct {
 	Scheme *runtime.Scheme
 	// recorder is the event recorder for creating Kubernetes events.
 	recorder events.EventRecorder
-	// NativeSidecar is a flag to enable the native sidecar.
-	NativeSidecar bool
 	// labelFilter excludes label keys from propagation onto generated resources.
 	labelFilter instance.LabelFilter
+
+	// artifactMTLSEnabled toggles per-instance artifact-client Certificate creation; false (the
+	// default) creates no Certificate and adds no Secret volume overlay.
+	artifactMTLSEnabled bool
+	// artifactClientCertIssuerName is the cluster-scoped cert-manager ClusterIssuer used to
+	// sign every per-instance artifact-client Certificate.
+	artifactClientCertIssuerName string
+	// artifactClientCertDuration and artifactClientCertRenewBefore configure the issued
+	// certificate's lifetime and renewal window.
+	artifactClientCertDuration, artifactClientCertRenewBefore time.Duration
+	// artifactCABundleConfigMapName is the trust-manager Bundle-synced ConfigMap the sidecar reads to
+	// verify the server's certificate. It is the same CA source the server uses to verify client certs,
+	// avoiding a trust mismatch between the two directions during a CA rotation.
+	artifactCABundleConfigMapName string
 }
 
 // Option configures a Reconciler.
@@ -78,14 +102,39 @@ func WithLabelFilter(f instance.LabelFilter) Option {
 	}
 }
 
+// WithArtifactMTLS enables per-instance artifact-client mTLS certificate provisioning:
+// every Falco instance gets its own cert-manager Certificate (with a unique SPIFFE URI SAN),
+// issued by issuerName, in its own namespace, and its sidecar trusts the server via
+// caBundleConfigMapName (a trust-manager Bundle-synced ConfigMap, expected to be synced into
+// that Falco instance's own namespace; see the mtls.trustLabel chart value). Zero-value
+// duration/renewBefore fall back to
+// DefaultArtifactClientCertDuration/DefaultArtifactClientCertRenewBefore.
+func WithArtifactMTLS(issuerName, caBundleConfigMapName string, duration, renewBefore time.Duration) Option {
+	return func(r *Reconciler) {
+		if issuerName == "" {
+			return
+		}
+		r.artifactMTLSEnabled = true
+		r.artifactClientCertIssuerName = issuerName
+		r.artifactCABundleConfigMapName = caBundleConfigMapName
+		r.artifactClientCertDuration = duration
+		if r.artifactClientCertDuration == 0 {
+			r.artifactClientCertDuration = DefaultArtifactClientCertDuration
+		}
+		r.artifactClientCertRenewBefore = renewBefore
+		if r.artifactClientCertRenewBefore == 0 {
+			r.artifactClientCertRenewBefore = DefaultArtifactClientCertRenewBefore
+		}
+	}
+}
+
 // NewReconciler creates a new Reconciler.
 func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.EventRecorder,
-	nativeSidecar bool, opts ...Option) *Reconciler {
+	opts ...Option) *Reconciler {
 	r := &Reconciler{
-		Client:        cl,
-		Scheme:        scheme,
-		recorder:      recorder,
-		NativeSidecar: nativeSidecar,
+		Client:   cl,
+		Scheme:   scheme,
+		recorder: recorder,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -101,6 +150,9 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=pods;services;configmaps;serviceaccounts,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;patch;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=create;delete;get;list;patch;update;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;patch;update;watch
+// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/finalizers,verbs=patch;update
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch;update
 // +kubebuilder:rbac:groups=apps,resources=deployments;daemonsets,verbs=create;delete;get;list;patch;update;watch
@@ -187,6 +239,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
+	// Ensure the per-instance artifact-client mTLS certificate is created (no-op if disabled).
+	if err := r.ensureArtifactClientCertificate(ctx, falco); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Cleanup dual deployments.
 	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
 		return ctrl.Result{}, err
@@ -219,6 +276,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Named("falco").
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "falco", &instancev1alpha1.Falco{})).
 		Complete(r)
 }
 
@@ -243,8 +301,13 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 
 	resourceType := resolveResourceType(falco.Spec.Type)
 
+	certSecretName := ""
+	if r.artifactMTLSEnabled {
+		certSecretName = artifactClientCertSecretName(falco)
+	}
+
 	logger.V(2).Info("Generating apply configuration from user input")
-	applyConfig, err := generateApplyConfiguration(falco, resourceType, r.NativeSidecar)
+	applyConfig, err := generateApplyConfiguration(falco, resourceType, certSecretName, r.artifactCABundleConfigMapName)
 	if err != nil {
 		logger.Error(err, "unable to generate apply configuration")
 		conditionStatus = metav1.ConditionFalse
@@ -293,9 +356,8 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		}
 	}
 
-	// Check if update is needed to avoid unnecessary API writes.
-	// This is important for K8s < 1.31 where SSA may cause spurious resourceVersion bumps.
-	// See: https://github.com/kubernetes/kubernetes/issues/124605
+	// Compares before applying to avoid unnecessary API writes; on K8s < 1.31, SSA can otherwise
+	// cause a spurious resourceVersion bump (kubernetes/kubernetes#124605).
 	var changedFields string
 	if resourceExists {
 		comparison, err := controllerhelper.Diff(existingResource, applyConfig, fieldManager)
@@ -338,7 +400,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 			r.recorder.Eventf(falco, nil, corev1.EventTypeWarning, instance.ReasonApplyPatchErrorOnUpdate,
 				instance.ReasonApplyPatchErrorOnUpdate, instance.MessageFormatApplyPatchErrorOnUpdate, err.Error())
 		}
-		// Validation errors are terminal — the user must fix the CR spec.
+		// Validation errors are terminal; the user must fix the CR spec.
 		// Don't requeue; the next reconciliation will be triggered by the CR update.
 		if k8serrors.IsInvalid(err) {
 			logger.Info("Apply rejected by API server due to invalid input", "kind", falco.Spec.Type, "error", err.Error())
@@ -505,6 +567,100 @@ func (r *Reconciler) ensureConfigMap(ctx context.Context, falco *instancev1alpha
 	return instance.EnsureResource(ctx, r.Client, r.recorder, falco, fieldManager,
 		configMapResource,
 		instance.GenerateOptions{SetControllerRef: true, IsClusterScoped: false})
+}
+
+// artifactClientCertSecretName returns the name of the per-instance artifact-client mTLS
+// Certificate/Secret for falco. The artifact-operator sidecar's ServiceAccount is named after
+// falco (ensureServiceAccount), so the SPIFFE URI SAN's sa/<name> segment matches falco.Name.
+func artifactClientCertSecretName(falco *instancev1alpha1.Falco) string {
+	return falco.Name + artifactClientCertSecretSuffix
+}
+
+// ensureArtifactClientCertificate ensures a cert-manager Certificate exists for falco's
+// artifact-operator sidecar, issued by the shared ClusterIssuer with a unique SPIFFE URI SAN
+// identifying this instance. No-op when mTLS isn't configured. The Certificate lives in
+// falco.Namespace and is owned via a plain controller reference.
+func (r *Reconciler) ensureArtifactClientCertificate(ctx context.Context, falco *instancev1alpha1.Falco) error {
+	if !r.artifactMTLSEnabled {
+		return nil
+	}
+	logger := log.FromContext(ctx)
+
+	secretName := artifactClientCertSecretName(falco)
+	spiffeURI := fmt.Sprintf("spiffe://cluster.local/ns/%s/sa/%s", falco.Namespace, falco.Name)
+
+	desired := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "cert-manager.io/v1",
+		"kind":       "Certificate",
+		"metadata": map[string]any{
+			"name":      secretName,
+			"namespace": falco.Namespace,
+		},
+		"spec": map[string]any{
+			"secretName":  secretName,
+			"commonName":  "artifact-operator-client",
+			"duration":    r.artifactClientCertDuration.String(),
+			"renewBefore": r.artifactClientCertRenewBefore.String(),
+			"uris":        []any{spiffeURI},
+			"issuerRef": map[string]any{
+				"name": r.artifactClientCertIssuerName,
+				"kind": "ClusterIssuer",
+			},
+		},
+	}}
+
+	if err := controllerutil.SetControllerReference(falco, desired, r.Scheme); err != nil {
+		return fmt.Errorf("setting owner reference on artifact client certificate: %w", err)
+	}
+
+	existing := &unstructured.Unstructured{}
+	existing.SetGroupVersionKind(desired.GroupVersionKind())
+	resourceExists := true
+	if err := r.Get(ctx, client.ObjectKeyFromObject(desired), existing); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("unable to fetch existing artifact client certificate: %w", err)
+		}
+		resourceExists = false
+	}
+
+	// controllerhelper.Diff has no schema for cert-manager's CRD types, so it can't compare this
+	// resource. Compares the spec fields we set directly instead; cert-manager only writes back to status.
+	if resourceExists {
+		unchanged := true
+		for _, field := range []string{"secretName", "commonName", "duration", "renewBefore"} {
+			existingVal, _, _ := unstructured.NestedString(existing.Object, "spec", field)
+			desiredVal, _, _ := unstructured.NestedString(desired.Object, "spec", field)
+			if existingVal != desiredVal {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			existingURIs, _, _ := unstructured.NestedStringSlice(existing.Object, "spec", "uris")
+			desiredURIs, _, _ := unstructured.NestedStringSlice(desired.Object, "spec", "uris")
+			existingIssuer, _, _ := unstructured.NestedStringMap(existing.Object, "spec", "issuerRef")
+			desiredIssuer, _, _ := unstructured.NestedStringMap(desired.Object, "spec", "issuerRef")
+			if reflect.DeepEqual(existingURIs, desiredURIs) && reflect.DeepEqual(existingIssuer, desiredIssuer) {
+				logger.V(3).Info("Artifact client certificate is up to date, skipping apply")
+				return nil
+			}
+		}
+	}
+
+	applyOpts := []client.ApplyOption{client.ForceOwnership, client.FieldOwner(fieldManager)}
+	if err := r.Apply(ctx, client.ApplyConfigurationFromUnstructured(desired), applyOpts...); err != nil {
+		if k8serrors.IsInvalid(err) {
+			logger.Info("Apply of artifact client certificate rejected by API server due to invalid input", "error", err.Error())
+			return nil
+		}
+		return fmt.Errorf("unable to apply artifact client certificate: %w", err)
+	}
+
+	if !resourceExists {
+		logger.V(2).Info("Artifact client certificate created", "secretName", secretName)
+	}
+
+	return nil
 }
 
 // resolveResourceType returns the resource type from the spec, falling back to the default.

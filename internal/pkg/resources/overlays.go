@@ -33,12 +33,14 @@ import (
 type OverlayOption func(*overlayConfig)
 
 type overlayConfig struct {
-	labels          map[string]string
-	replicas        *int32
-	strategy        *appsv1.DeploymentStrategy
-	updateStrategy  *appsv1.DaemonSetUpdateStrategy
-	podTemplateSpec *corev1.PodTemplateSpec
-	version         *string
+	labels                        map[string]string
+	replicas                      *int32
+	strategy                      *appsv1.DeploymentStrategy
+	updateStrategy                *appsv1.DaemonSetUpdateStrategy
+	podTemplateSpec               *corev1.PodTemplateSpec
+	version                       *string
+	artifactClientCertSecretName  string
+	artifactCABundleConfigMapName string
 }
 
 // WithOverlayLabels sets the labels on the overlay resource metadata.
@@ -69,6 +71,16 @@ func WithOverlayPodTemplateSpec(pts *corev1.PodTemplateSpec) OverlayOption {
 // WithOverlayVersion sets the version override on the overlay resource.
 func WithOverlayVersion(version *string) OverlayOption {
 	return func(c *overlayConfig) { c.version = version }
+}
+
+// WithArtifactClientCertOverlay sets the artifact-client mTLS Secret name and CA trust bundle
+// ConfigMap name applied to the artifact-operator sidecar container's overlay. secretName is a
+// cert-manager Certificate's Secret in the same namespace as the resource.
+func WithArtifactClientCertOverlay(secretName, caBundleConfigMapName string) OverlayOption {
+	return func(c *overlayConfig) {
+		c.artifactClientCertSecretName = secretName
+		c.artifactCABundleConfigMapName = caBundleConfigMapName
+	}
 }
 
 func GenerateOverlayOptions(obj client.Object) []OverlayOption {
@@ -147,6 +159,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 			dep.Spec.Strategy = *cfg.strategy
 		}
 		applyVersionOverride(defs, cfg.version, &dep.Spec.Template)
+		applyArtifactClientCertOverlay(defs, cfg.artifactClientCertSecretName, cfg.artifactCABundleConfigMapName, &dep.Spec.Template)
 		userResource = dep
 	case ResourceTypeDaemonSet:
 		ds := &appsv1.DaemonSet{
@@ -169,6 +182,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 			ds.Spec.UpdateStrategy = *cfg.updateStrategy
 		}
 		applyVersionOverride(defs, cfg.version, &ds.Spec.Template)
+		applyArtifactClientCertOverlay(defs, cfg.artifactClientCertSecretName, cfg.artifactCABundleConfigMapName, &ds.Spec.Template)
 		userResource = ds
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
@@ -186,6 +200,105 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 	}
 
 	return resource, nil
+}
+
+// artifactServerTrustMountPath is the mount path for the CA trust bundle ConfigMap in the
+// artifact-operator sidecar. cmd/artifact/main.go reads this same path via
+// ARTIFACT_SERVER_CA_FILE.
+const artifactServerTrustMountPath = "/etc/falco-operator/artifact-server-trust"
+
+// applyArtifactClientCertOverlay adds the artifact-client mTLS Secret and CA trust bundle
+// ConfigMap volumes to template, plus the sidecar's matching volume mounts and env vars. A
+// no-op when secretName is empty. Falls back to the Secret's own ca.crt when
+// caBundleConfigMapName is empty. Merges into an existing "artifact-operator" container entry
+// in template by name instead of appending a duplicate entry, volume, or env var.
+func applyArtifactClientCertOverlay(defs *InstanceDefaults, secretName, caBundleConfigMapName string, template *corev1.PodTemplateSpec) {
+	if secretName == "" {
+		return
+	}
+	const certVolumeName = "artifact-client-certs"
+	const trustVolumeName = "artifact-server-trust"
+
+	addVolumeIfMissing(template, &corev1.Volume{
+		Name: certVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: secretName},
+		},
+	})
+
+	mounts := []corev1.VolumeMount{
+		{Name: certVolumeName, MountPath: artifactClientCertsMountPath, ReadOnly: true},
+	}
+	caFile := artifactClientCertsMountPath + "/ca.crt"
+	if caBundleConfigMapName != "" {
+		addVolumeIfMissing(template, &corev1.Volume{
+			Name: trustVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: caBundleConfigMapName},
+				},
+			},
+		})
+		mounts = append(mounts, corev1.VolumeMount{Name: trustVolumeName, MountPath: artifactServerTrustMountPath, ReadOnly: true})
+		caFile = artifactServerTrustMountPath + "/ca-bundle.crt"
+	}
+
+	env := []corev1.EnvVar{
+		{Name: "ARTIFACT_CLIENT_CERT_PATH", Value: artifactClientCertsMountPath},
+		{Name: "ARTIFACT_SERVER_CA_FILE", Value: caFile},
+	}
+
+	for i := range template.Spec.Containers {
+		if template.Spec.Containers[i].Name != defs.SidecarContainerName {
+			continue
+		}
+		for j := range mounts {
+			template.Spec.Containers[i].VolumeMounts = addVolumeMountIfMissing(template.Spec.Containers[i].VolumeMounts, &mounts[j])
+		}
+		for j := range env {
+			template.Spec.Containers[i].Env = setEnvVar(template.Spec.Containers[i].Env, &env[j])
+		}
+		return
+	}
+
+	template.Spec.Containers = append(template.Spec.Containers, corev1.Container{
+		Name:         defs.SidecarContainerName,
+		VolumeMounts: mounts,
+		Env:          env,
+	})
+}
+
+// addVolumeIfMissing appends v to template's volumes unless one with the same name is already
+// present.
+func addVolumeIfMissing(template *corev1.PodTemplateSpec, v *corev1.Volume) {
+	for i := range template.Spec.Volumes {
+		if template.Spec.Volumes[i].Name == v.Name {
+			return
+		}
+	}
+	template.Spec.Volumes = append(template.Spec.Volumes, *v)
+}
+
+// addVolumeMountIfMissing appends m to mounts unless one with the same name is already present.
+func addVolumeMountIfMissing(mounts []corev1.VolumeMount, m *corev1.VolumeMount) []corev1.VolumeMount {
+	for i := range mounts {
+		if mounts[i].Name == m.Name {
+			return mounts
+		}
+	}
+	return append(mounts, *m)
+}
+
+// setEnvVar sets e in envs, replacing any existing entry with the same name rather than
+// appending a duplicate.
+func setEnvVar(envs []corev1.EnvVar, e *corev1.EnvVar) []corev1.EnvVar {
+	for i := range envs {
+		if envs[i].Name == e.Name {
+			envs[i] = *e
+			return envs
+		}
+	}
+	return append(envs, *e)
 }
 
 func applyVersionOverride(defs *InstanceDefaults, version *string, template *corev1.PodTemplateSpec) {

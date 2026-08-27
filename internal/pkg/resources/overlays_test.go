@@ -373,3 +373,138 @@ func TestApplyVersionOverride(t *testing.T) {
 		})
 	}
 }
+
+const artifactServerCAFileEnvName = "ARTIFACT_SERVER_CA_FILE"
+
+func TestApplyArtifactClientCertOverlay(t *testing.T) {
+	t.Run("empty secret name is a no-op", func(t *testing.T) {
+		template := &corev1.PodTemplateSpec{}
+		applyArtifactClientCertOverlay(FalcoDefaults, "", "my-falco-operator-artifact-ca-bundle", template)
+		assert.Empty(t, template.Spec.Volumes)
+		assert.Empty(t, template.Spec.Containers)
+	})
+
+	t.Run("existing sidecar entry (from a user podTemplateSpec override) gets merged, not duplicated", func(t *testing.T) {
+		template := &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{Name: FalcoDefaults.SidecarContainerName, Image: "docker.io/my-registry/artifact-operator:latest", ImagePullPolicy: corev1.PullNever},
+				},
+			},
+		}
+		applyArtifactClientCertOverlay(FalcoDefaults, "my-falco-artifact-client-tls", "my-falco-operator-artifact-ca-bundle", template)
+
+		require.Len(t, template.Spec.Containers, 1, "must merge into the existing entry, not append a second one")
+		sidecar := template.Spec.Containers[0]
+		assert.Equal(t, "docker.io/my-registry/artifact-operator:latest", sidecar.Image, "user's own override must survive the merge")
+		assert.Equal(t, corev1.PullNever, sidecar.ImagePullPolicy)
+		require.Len(t, sidecar.VolumeMounts, 2)
+		require.Len(t, sidecar.Env, 2)
+	})
+
+	t.Run("existing sidecar env entries with our own names get overwritten, not duplicated", func(t *testing.T) {
+		template := &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name: FalcoDefaults.SidecarContainerName,
+						Env:  []corev1.EnvVar{{Name: artifactServerCAFileEnvName, Value: "/some/stale/path"}},
+					},
+				},
+			},
+		}
+		applyArtifactClientCertOverlay(FalcoDefaults, "my-falco-artifact-client-tls", "my-falco-operator-artifact-ca-bundle", template)
+
+		sidecar := template.Spec.Containers[0]
+		require.Len(t, sidecar.Env, 2, "must overwrite the existing entry, not append a duplicate with the same name")
+		var caFileValue string
+		for _, e := range sidecar.Env {
+			if e.Name == artifactServerCAFileEnvName {
+				caFileValue = e.Value
+			}
+		}
+		assert.Equal(t, artifactServerTrustMountPath+"/ca-bundle.crt", caFileValue)
+	})
+
+	t.Run("non-empty secret name and bundle configmap name adds both volumes and sidecar mounts/env", func(t *testing.T) {
+		template := &corev1.PodTemplateSpec{}
+		applyArtifactClientCertOverlay(FalcoDefaults, "my-falco-artifact-client-tls", "my-falco-operator-artifact-ca-bundle", template)
+
+		require.Len(t, template.Spec.Volumes, 2)
+		volumesByName := map[string]corev1.Volume{}
+		for _, v := range template.Spec.Volumes {
+			volumesByName[v.Name] = v
+		}
+		require.Contains(t, volumesByName, "artifact-client-certs")
+		require.NotNil(t, volumesByName["artifact-client-certs"].Secret)
+		assert.Equal(t, "my-falco-artifact-client-tls", volumesByName["artifact-client-certs"].Secret.SecretName)
+		require.Contains(t, volumesByName, "artifact-server-trust")
+		require.NotNil(t, volumesByName["artifact-server-trust"].ConfigMap)
+		assert.Equal(t, "my-falco-operator-artifact-ca-bundle", volumesByName["artifact-server-trust"].ConfigMap.Name)
+
+		require.Len(t, template.Spec.Containers, 1)
+		sidecar := template.Spec.Containers[0]
+		assert.Equal(t, FalcoDefaults.SidecarContainerName, sidecar.Name)
+
+		require.Len(t, sidecar.VolumeMounts, 2)
+		mountsByName := map[string]corev1.VolumeMount{}
+		for _, m := range sidecar.VolumeMounts {
+			mountsByName[m.Name] = m
+		}
+		assert.Equal(t, artifactClientCertsMountPath, mountsByName["artifact-client-certs"].MountPath)
+		assert.True(t, mountsByName["artifact-client-certs"].ReadOnly)
+		assert.Equal(t, artifactServerTrustMountPath, mountsByName["artifact-server-trust"].MountPath)
+		assert.True(t, mountsByName["artifact-server-trust"].ReadOnly)
+
+		require.Len(t, sidecar.Env, 2)
+		envByName := map[string]string{}
+		for _, e := range sidecar.Env {
+			envByName[e.Name] = e.Value
+		}
+		assert.Equal(t, artifactClientCertsMountPath, envByName["ARTIFACT_CLIENT_CERT_PATH"])
+		assert.Equal(t, artifactServerTrustMountPath+"/ca-bundle.crt", envByName[artifactServerCAFileEnvName],
+			"CA source must be the Bundle ConfigMap, not the Secret's own ca.crt, so rotation trust is bidirectional")
+	})
+
+	t.Run("empty bundle configmap name falls back to the Secret's own ca.crt", func(t *testing.T) {
+		template := &corev1.PodTemplateSpec{}
+		applyArtifactClientCertOverlay(FalcoDefaults, "my-falco-artifact-client-tls", "", template)
+
+		require.Len(t, template.Spec.Volumes, 1, "no trust ConfigMap volume without a bundle name")
+		sidecar := template.Spec.Containers[0]
+		require.Len(t, sidecar.VolumeMounts, 1)
+
+		var caFileValue string
+		for _, e := range sidecar.Env {
+			if e.Name == artifactServerCAFileEnvName {
+				caFileValue = e.Value
+			}
+		}
+		assert.Equal(t, artifactClientCertsMountPath+"/ca.crt", caFileValue)
+	})
+}
+
+// TestWithArtifactClientCertOverlay verifies the artifact-operator sidecar appears exactly once
+// in the overlay's containers after GenerateUserOverlay.
+func TestWithArtifactClientCertOverlay(t *testing.T) {
+	falco := builders.NewFalco().WithName("test-f").WithNamespace(testNamespace).
+		WithType(ResourceTypeDaemonSet).Build()
+
+	opts := append(GenerateOverlayOptions(falco), WithArtifactClientCertOverlay("test-f-artifact-client-tls", "test-falco-operator-artifact-ca-bundle"))
+	overlay, err := GenerateUserOverlay(ResourceTypeDaemonSet, falco.Name, FalcoDefaults, opts...)
+	require.NoError(t, err)
+
+	containers, found, err := unstructured.NestedSlice(overlay.Object, "spec", "template", "spec", "containers")
+	require.NoError(t, err)
+	require.True(t, found)
+
+	var sidecarCount int
+	for _, c := range containers {
+		cm, ok := c.(map[string]any)
+		require.True(t, ok)
+		if cm["name"] == FalcoDefaults.SidecarContainerName {
+			sidecarCount++
+		}
+	}
+	assert.Equal(t, 1, sidecarCount, "artifact-operator should appear exactly once in the overlay's containers")
+}

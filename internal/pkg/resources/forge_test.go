@@ -57,49 +57,26 @@ func TestGenerateWorkload(t *testing.T) {
 		name               string
 		kind               string
 		defs               *InstanceDefaults
-		nativeSidecar      bool
 		wantInitContainers int
 		wantContainers     int
 		wantTolerations    int
 		wantSidecarName    string
 	}{
 		{
-			name:               "Falco Deployment non-native sidecar",
+			name:               "Falco Deployment with sidecar as regular container",
 			kind:               ResourceTypeDeployment,
 			defs:               FalcoDefaults,
-			nativeSidecar:      false,
 			wantInitContainers: 0,
 			wantContainers:     2,
 			wantTolerations:    2,
 			wantSidecarName:    "artifact-operator",
 		},
 		{
-			name:               "Falco Deployment native sidecar",
-			kind:               ResourceTypeDeployment,
-			defs:               FalcoDefaults,
-			nativeSidecar:      true,
-			wantInitContainers: 1,
-			wantContainers:     1,
-			wantTolerations:    2,
-			wantSidecarName:    "artifact-operator",
-		},
-		{
-			name:               "Falco DaemonSet non-native sidecar",
+			name:               "Falco DaemonSet with sidecar as regular container",
 			kind:               ResourceTypeDaemonSet,
 			defs:               FalcoDefaults,
-			nativeSidecar:      false,
 			wantInitContainers: 0,
 			wantContainers:     2,
-			wantTolerations:    2,
-			wantSidecarName:    "artifact-operator",
-		},
-		{
-			name:               "Falco DaemonSet native sidecar",
-			kind:               ResourceTypeDaemonSet,
-			defs:               FalcoDefaults,
-			nativeSidecar:      true,
-			wantInitContainers: 1,
-			wantContainers:     1,
 			wantTolerations:    2,
 			wantSidecarName:    "artifact-operator",
 		},
@@ -107,16 +84,6 @@ func TestGenerateWorkload(t *testing.T) {
 			name:               "Metacollector Deployment without sidecar",
 			kind:               ResourceTypeDeployment,
 			defs:               MetacollectorDefaults,
-			nativeSidecar:      false,
-			wantInitContainers: 0,
-			wantContainers:     1,
-			wantTolerations:    0,
-		},
-		{
-			name:               "Metacollector Deployment native sidecar flag has no effect",
-			kind:               ResourceTypeDeployment,
-			defs:               MetacollectorDefaults,
-			nativeSidecar:      true,
 			wantInitContainers: 0,
 			wantContainers:     1,
 			wantTolerations:    0,
@@ -125,7 +92,6 @@ func TestGenerateWorkload(t *testing.T) {
 			name:               "Falcosidekick Deployment",
 			kind:               ResourceTypeDeployment,
 			defs:               FalcosidekickDefaults,
-			nativeSidecar:      false,
 			wantInitContainers: 0,
 			wantContainers:     1,
 			wantTolerations:    0,
@@ -134,7 +100,6 @@ func TestGenerateWorkload(t *testing.T) {
 			name:               "Falcosidekick UI Deployment has wait-redis init container",
 			kind:               ResourceTypeDeployment,
 			defs:               FalcosidekickUIDefaults,
-			nativeSidecar:      false,
 			wantInitContainers: 1,
 			wantContainers:     1,
 			wantTolerations:    0,
@@ -144,7 +109,7 @@ func TestGenerateWorkload(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			meta := &metav1.ObjectMeta{Name: "test", Namespace: testNamespace}
-			obj, err := GenerateWorkload(tt.kind, meta, tt.defs, tt.nativeSidecar)
+			obj, err := GenerateWorkload(tt.kind, meta, tt.defs)
 			require.NoError(t, err)
 
 			var podSpec corev1.PodSpec
@@ -206,45 +171,22 @@ func TestGenerateWorkload(t *testing.T) {
 			}
 			assert.True(t, foundMain, "main container %s not found in containers", tt.defs.ContainerName)
 
-			// Verify sidecar container properties.
+			// Verify sidecar container properties: always a regular container with nil RestartPolicy.
 			if tt.wantSidecarName != "" {
-				if tt.nativeSidecar {
-					// Native sidecar: should be in initContainers with RestartPolicy Always.
-					var foundSidecar bool
-					for _, c := range podSpec.InitContainers {
-						if c.Name != tt.wantSidecarName {
-							continue
-						}
-						foundSidecar = true
-						assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
-						require.NotNil(t, c.RestartPolicy, "native sidecar should have RestartPolicy set")
-						assert.Equal(t, corev1.ContainerRestartPolicyAlways, *c.RestartPolicy, "native sidecar RestartPolicy should be Always")
-						assertArtifactOperatorReadinessProbes(t, &c)
-						break
+				var foundSidecar bool
+				for _, c := range podSpec.Containers {
+					if c.Name != tt.wantSidecarName {
+						continue
 					}
-					assert.True(t, foundSidecar, "native sidecar %s not found in initContainers", tt.wantSidecarName)
-					// Should NOT be in regular containers.
-					for _, c := range podSpec.Containers {
-						assert.NotEqual(t, tt.wantSidecarName, c.Name, "native sidecar should not be in containers")
-					}
-				} else {
-					// Non-native sidecar: should be in containers with nil RestartPolicy.
-					var foundSidecar bool
-					for _, c := range podSpec.Containers {
-						if c.Name != tt.wantSidecarName {
-							continue
-						}
-						foundSidecar = true
-						assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
-						assert.Nil(t, c.RestartPolicy, "non-native sidecar should have nil RestartPolicy")
-						assertArtifactOperatorReadinessProbes(t, &c)
-						break
-					}
-					assert.True(t, foundSidecar, "non-native sidecar %s not found in containers", tt.wantSidecarName)
-					// Should NOT be in initContainers.
-					for _, c := range podSpec.InitContainers {
-						assert.NotEqual(t, tt.wantSidecarName, c.Name, "non-native sidecar should not be in initContainers")
-					}
+					foundSidecar = true
+					assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
+					assert.Nil(t, c.RestartPolicy, "sidecar should have nil RestartPolicy")
+					assertArtifactOperatorReadinessProbes(t, &c)
+					break
+				}
+				assert.True(t, foundSidecar, "sidecar %s not found in containers", tt.wantSidecarName)
+				for _, c := range podSpec.InitContainers {
+					assert.NotEqual(t, tt.wantSidecarName, c.Name, "sidecar should not be in initContainers")
 				}
 			}
 		})
@@ -287,7 +229,7 @@ func TestGenerateWorkloadErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			meta := &metav1.ObjectMeta{Name: "test", Namespace: testNamespace}
-			_, err := GenerateWorkload(tt.resourceType, meta, tt.defs, false)
+			_, err := GenerateWorkload(tt.resourceType, meta, tt.defs)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErrMsg)
 		})

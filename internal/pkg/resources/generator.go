@@ -30,22 +30,22 @@ import (
 )
 
 // GenerateWorkload builds a base Deployment or DaemonSet from defaults and CR params.
-func GenerateWorkload(resourceType string, meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeSidecar bool) (runtime.Object, error) {
+func GenerateWorkload(resourceType string, meta *metav1.ObjectMeta, defs *InstanceDefaults) (runtime.Object, error) {
 	switch resourceType {
 	case ResourceTypeDeployment:
-		return generateDeployment(meta, defs, nativeSidecar), nil
+		return generateDeployment(meta, defs), nil
 	case ResourceTypeDaemonSet:
 		if !defs.SupportsDaemonSet {
 			return nil, fmt.Errorf("resource type %s is not supported for this instance type", resourceType)
 		}
-		return generateDaemonSet(meta, defs, nativeSidecar), nil
+		return generateDaemonSet(meta, defs), nil
 	default:
 		return nil, fmt.Errorf("unsupported resource type: %s", resourceType)
 	}
 }
 
 // generateDeployment builds a base Deployment from defaults only.
-func generateDeployment(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeSidecar bool) *appsv1.Deployment {
+func generateDeployment(meta *metav1.ObjectMeta, defs *InstanceDefaults) *appsv1.Deployment {
 	b := builders.NewDeployment().
 		WithName(meta.Name).
 		WithNamespace(meta.Namespace).
@@ -60,13 +60,13 @@ func generateDeployment(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeS
 		WithStrategy(forgeDeploymentStrategy(defs.DeploymentStrategy))
 
 	addInitContainers(b, defs)
-	addSidecarContainers(b, nativeSidecar, defs)
+	addSidecarContainers(b, defs)
 
 	return b.Build()
 }
 
 // generateDaemonSet builds a base DaemonSet from defaults only.
-func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeSidecar bool) *appsv1.DaemonSet {
+func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults) *appsv1.DaemonSet {
 	b := builders.NewDaemonSet().
 		WithName(meta.Name).
 		WithNamespace(meta.Namespace).
@@ -80,7 +80,7 @@ func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults, nativeSi
 		WithUpdateStrategy(forgeDaemonSetUpdateStrategy(defs.DaemonSetUpdateStrategy))
 
 	addInitContainers(b, defs)
-	addSidecarContainers(b, nativeSidecar, defs)
+	addSidecarContainers(b, defs)
 
 	return b.Build()
 }
@@ -98,25 +98,16 @@ func addInitContainers(b any, defs *InstanceDefaults) {
 	}
 }
 
-// addSidecarContainers adds the sidecar containers from defaults to the builder.
-func addSidecarContainers(b any, nativeSidecar bool, defs *InstanceDefaults) {
+// addSidecarContainers adds the sidecar containers as regular containers.
+func addSidecarContainers(b any, defs *InstanceDefaults) {
 	for i := range defs.SidecarContainers {
 		sidecar := defs.SidecarContainers[i]
+		sidecar.RestartPolicy = nil
 		switch builder := b.(type) {
 		case *builders.DeploymentBuilder:
-			if nativeSidecar {
-				builder.AddInitContainer(&sidecar)
-			} else {
-				sidecar.RestartPolicy = nil
-				builder.AddContainer(&sidecar)
-			}
+			builder.AddContainer(&sidecar)
 		case *builders.DaemonSetBuilder:
-			if nativeSidecar {
-				builder.AddInitContainer(&sidecar)
-			} else {
-				sidecar.RestartPolicy = nil
-				builder.AddContainer(&sidecar)
-			}
+			builder.AddContainer(&sidecar)
 		}
 	}
 }

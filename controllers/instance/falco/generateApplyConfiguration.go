@@ -24,13 +24,24 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
-func generateApplyConfiguration(falco *instancev1alpha1.Falco, resourceType string, nativeSidecar bool) (*unstructured.Unstructured, error) {
-	baseResource, err := resources.GenerateWorkload(resourceType, &falco.ObjectMeta, resources.FalcoDefaults, nativeSidecar)
+// generateApplyConfiguration builds the desired Deployment/DaemonSet for falco. When
+// artifactClientCertSecretName is non-empty, the artifact-operator sidecar's pod spec gains the
+// matching per-instance mTLS Secret + CA bundle ConfigMap volume mounts + env vars (see
+// resources.WithArtifactClientCertOverlay); empty means mTLS is disabled for this instance.
+func generateApplyConfiguration(
+	falco *instancev1alpha1.Falco, resourceType, artifactClientCertSecretName, artifactCABundleConfigMapName string,
+) (*unstructured.Unstructured, error) {
+	baseResource, err := resources.GenerateWorkload(resourceType, &falco.ObjectMeta, resources.FalcoDefaults)
 	if err != nil {
 		return nil, err
 	}
 
-	userOverlay, err := resources.GenerateUserOverlay(resourceType, falco.Name, resources.FalcoDefaults, resources.GenerateOverlayOptions(falco)...)
+	opts := resources.GenerateOverlayOptions(falco)
+	if artifactClientCertSecretName != "" {
+		opts = append(opts, resources.WithArtifactClientCertOverlay(artifactClientCertSecretName, artifactCABundleConfigMapName))
+	}
+
+	userOverlay, err := resources.GenerateUserOverlay(resourceType, falco.Name, resources.FalcoDefaults, opts...)
 	if err != nil {
 		return nil, err
 	}
