@@ -17,11 +17,14 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -31,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -44,9 +48,14 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/instance/falco"
 	configmapctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/configmap"
 	secretctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/secret"
-	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
+	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
+	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
+	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
+	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -108,13 +117,84 @@ func main() {
 		"A label key to exclude from propagation onto operator-generated resources. "+
 			"The '*' wildcard is supported (e.g. kustomize.toolkit.fluxcd.io/*). May be repeated.")
 
+	var artifactServeAddr string
+	var artifactCacheDir string
+	var artifactCacheEvictionGracePeriod time.Duration
+	var artifactServerURL string
+	var artifactServerCertPath, artifactServerCertName, artifactServerCertKey string
+	var artifactServerClientCAFile string
+	var artifactClientCertIssuerName string
+	var artifactCABundleConfigMapName string
+	var artifactClientCertDuration, artifactClientCertRenewBefore time.Duration
+	var artifactOperatorImage string
+	var artifactServerMaxConcurrentRequests int
+	flag.StringVar(&artifactServeAddr, "artifact-serve-addr", ":8082",
+		"Address the artifact HTTP server binds to. Per-node artifact-operators download OCI artifacts from this server.")
+	flag.StringVar(&artifactCacheDir, "artifact-cache-dir", "/var/cache/falco-operator/artifacts",
+		"Directory used to cache OCI artifact tarballs served by the artifact HTTP server.")
+	flag.DurationVar(&artifactCacheEvictionGracePeriod, "artifact-cache-eviction-grace-period",
+		artifactcache.DefaultEvictionGracePeriod,
+		"How long a dereferenced OCI artifact blob lingers on disk (still servable) before being "+
+			"deleted, absorbing a delete-then-recreate of the same artifact without a registry "+
+			"re-pull. Set to 0 to delete immediately instead (today's original behavior).")
+	flag.StringVar(&artifactServerURL, "artifact-server-url", "",
+		"URL of the artifact HTTP server to advertise to artifact-operator sidecars. "+
+			"Overrides the default in-cluster URL derived from OPERATOR_NAMESPACE. "+
+			"Useful when running the operator outside the cluster (e.g. during local development).")
+	flag.StringVar(&artifactServerCertPath, "artifact-server-cert-path", "",
+		"The directory that contains the artifact server's TLS certificate. When set, the artifact "+
+			"HTTP server serves over HTTPS instead of plain HTTP.")
+	flag.StringVar(&artifactServerCertName, "artifact-server-cert-name", "tls.crt", "The name of the artifact server certificate file.")
+	flag.StringVar(&artifactServerCertKey, "artifact-server-cert-key", "tls.key", "The name of the artifact server key file.")
+	flag.StringVar(&artifactServerClientCAFile, "artifact-server-client-ca-file", "",
+		"Path to a PEM file containing the CA bundle used to verify client certificates presented by "+
+			"artifact-operator sidecars. Requires --artifact-server-cert-path to also be set. When set, "+
+			"the artifact server requires mTLS client certificates from all callers.")
+	flag.StringVar(&artifactClientCertIssuerName, "artifact-client-cert-issuer-name", "",
+		"Name of the cert-manager ClusterIssuer used to sign a unique, per-Falco-instance artifact "+
+			"client mTLS certificate (with a SPIFFE URI SAN identifying the instance) in each instance's "+
+			"own namespace. Empty disables per-instance mTLS certificate provisioning.")
+	flag.StringVar(&artifactCABundleConfigMapName, "artifact-ca-bundle-configmap-name", "",
+		"Name of the trust-manager Bundle-synced ConfigMap every artifact-operator sidecar reads to "+
+			"verify the artifact server's certificate. Sourcing from this (rather than each sidecar's own "+
+			"per-instance Secret) lets the Bundle hold two CA sources at once during a CA rotation, so a "+
+			"sidecar keeps trusting the server (and vice versa) regardless of which side has rotated "+
+			"first. Requires that Falco instance's own namespace be labeled for trust-manager sync; see "+
+			"the chart's mtls.trustLabel value.")
+	flag.DurationVar(&artifactClientCertDuration, "artifact-client-cert-duration", falco.DefaultArtifactClientCertDuration,
+		"Validity period for a per-instance artifact client mTLS certificate.")
+	flag.DurationVar(&artifactClientCertRenewBefore, "artifact-client-cert-renew-before", falco.DefaultArtifactClientCertRenewBefore,
+		"How long before expiry cert-manager renews a per-instance artifact client mTLS certificate.")
+	flag.StringVar(&artifactOperatorImage, "artifact-operator-image", "",
+		"Overrides the artifact-operator sidecar image injected into every Falco pod. Normally this is "+
+			"baked in at build time (version.ArtifactOperatorImage, via -ldflags) to match the release pair; "+
+			"set this (or the ARTIFACT_OPERATOR_IMAGE env var) to repoint an already-built binary at a "+
+			"different image, e.g. a private registry mirror or a local dev build, without rebuilding.")
+	flag.IntVar(&artifactServerMaxConcurrentRequests, "artifact-server-max-concurrent-requests", 0,
+		"Maximum number of concurrent artifact blob transfers the server handles simultaneously. "+
+			"Excess requests receive 503 with a jittered Retry-After so retries spread out. "+
+			"0 disables the limit (unlimited concurrency).")
+
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	if err := envutil.BindFlagEnv(flag.CommandLine); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	if artifactOperatorImage != "" {
+		version.ArtifactOperatorImage = artifactOperatorImage
+	}
+	// Reassigning version.ArtifactOperatorImage above has no effect on FalcoDefaults, which was
+	// already initialized from it at package-init time; this call applies the override directly.
+	resources.SetArtifactOperatorImage(version.ArtifactOperatorImage)
+
+	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 
 	setupLog.Info("Starting instance operator", "version", version.SemVersion, "commit", version.GitCommit,
-		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform)
+		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform,
+		"artifactOperatorImage", version.ArtifactOperatorImage)
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -196,13 +276,42 @@ func main() {
 		})
 	}
 
-	// Get the rest config to check if the SidecarContainers feature is enabled
-	sidecarEnabled, err := common.IsSidecarContainersFeatureEnabled(ctrl.GetConfigOrDie())
-	if err != nil {
-		setupLog.Error(err, "Failed to determine if sidecar containers are enabled. Defaulting to false")
+	// Artifact server TLS/mTLS: opt-in, plain HTTP by default (unchanged from today). Setting
+	// --artifact-server-cert-path switches it to HTTPS; additionally setting
+	// --artifact-server-client-ca-file requires and verifies client certificates (mTLS).
+	var artifactServerCertWatcher *certwatcher.CertWatcher
+	var artifactServerClientCA *tlsutil.CAWatcher
+	var artifactOpts []artifactserver.Option
+
+	if artifactServerCertPath != "" {
+		setupLog.Info("Initializing artifact server certificate watcher using provided certificates",
+			"artifact-server-cert-path", artifactServerCertPath,
+			"artifact-server-cert-name", artifactServerCertName, "artifact-server-cert-key", artifactServerCertKey)
+
+		var err error
+		artifactServerCertWatcher, err = certwatcher.New(
+			filepath.Join(artifactServerCertPath, artifactServerCertName),
+			filepath.Join(artifactServerCertPath, artifactServerCertKey),
+		)
+		if err != nil {
+			setupLog.Error(err, "Failed to initialize artifact server certificate watcher")
+			os.Exit(1)
+		}
+		artifactOpts = append(artifactOpts, artifactserver.WithTLS(artifactServerCertWatcher))
 	}
 
-	setupLog.Info("SidecarContainers feature", "enabled", sidecarEnabled)
+	if artifactServerClientCAFile != "" {
+		setupLog.Info("Initializing artifact server client CA watcher (mTLS enabled)",
+			"artifact-server-client-ca-file", artifactServerClientCAFile)
+
+		var err error
+		artifactServerClientCA, err = tlsutil.NewCAWatcher(artifactServerClientCAFile)
+		if err != nil {
+			setupLog.Error(err, "Failed to initialize artifact server client CA watcher")
+			os.Exit(1)
+		}
+		artifactOpts = append(artifactOpts, artifactserver.WithClientCAs(artifactServerClientCA))
+	}
 
 	// Build the label filter applied to generated resources.
 	labelFilter := instance.NewLabelFilter(excludedLabels)
@@ -242,11 +351,21 @@ func main() {
 	}
 
 	if err = falco.NewReconciler(
-		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"), sidecarEnabled,
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("falco-controller"),
 		falco.WithLabelFilter(labelFilter),
+		falco.WithArtifactMTLS(artifactClientCertIssuerName, artifactCABundleConfigMapName, artifactClientCertDuration, artifactClientCertRenewBefore),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Falco")
 		os.Exit(1)
+	}
+
+	// SPIFFE-based authorization: a client cert signed by our own CA is necessary but not
+	// sufficient (every per-instance cert shares that CA); this additionally checks the SPIFFE
+	// identity against the Falco instances the manager's own cache already knows about. Only
+	// meaningful together with the client-CA verification configured above.
+	if artifactServerClientCA != nil {
+		artifactOpts = append(artifactOpts, artifactserver.WithAuthorizer(
+			artifactserver.NewAuthorizer(mgr.GetClient(), mgr.GetLogger())))
 	}
 
 	if err = component.NewReconciler(
@@ -271,26 +390,31 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := artifactconfigctr.NewConfigAggregatorReconciler(
-		mgr.GetClient(), mgr.GetScheme(),
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", artifactconfigctr.ControllerName)
+	artifactCache := artifactcache.NewCache(artifactCacheDir,
+		artifactcache.WithEvictionGracePeriod(artifactCacheEvictionGracePeriod))
+	if err := artifactCache.Load(); err != nil {
+		setupLog.Error(err, "unable to load artifact cache snapshot")
 		os.Exit(1)
 	}
 
-	// cache is nil until the centralized artifact blob cache is wired up (a later PR); Plugin
-	// and Rulesfile pre-fetches are then skipped and per-node artifact operators pull directly.
+	if err := artifactrulesfilectr.NewRulesfileAggregatorReconciler(
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-rulesfile"), artifactCache,
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", artifactrulesfilectr.ControllerName)
+		os.Exit(1)
+	}
+
 	if err := artifactpluginctr.NewPluginAggregatorReconciler(
-		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-plugin"), nil,
+		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-plugin"), artifactCache,
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", artifactpluginctr.ControllerName)
 		os.Exit(1)
 	}
 
-	if err := artifactrulesfilectr.NewRulesfileAggregatorReconciler(
-		mgr.GetClient(), mgr.GetScheme(), mgr.GetEventRecorder("instance-artifact-rulesfile"), nil,
+	if err := artifactconfigctr.NewConfigAggregatorReconciler(
+		mgr.GetClient(), mgr.GetScheme(),
 	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", artifactrulesfilectr.ControllerName)
+		setupLog.Error(err, "unable to create controller", "controller", artifactconfigctr.ControllerName)
 		os.Exit(1)
 	}
 
@@ -312,6 +436,22 @@ func main() {
 		}
 	}
 
+	if artifactServerCertWatcher != nil {
+		setupLog.Info("Adding artifact server certificate watcher to manager")
+		if err := mgr.Add(artifactServerCertWatcher); err != nil {
+			setupLog.Error(err, "unable to add artifact server certificate watcher to manager")
+			os.Exit(1)
+		}
+	}
+
+	if artifactServerClientCA != nil {
+		setupLog.Info("Adding artifact server client CA watcher to manager")
+		if err := mgr.Add(artifactServerClientCA); err != nil {
+			setupLog.Error(err, "unable to add artifact server client CA watcher to manager")
+			os.Exit(1)
+		}
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up health check")
 		os.Exit(1)
@@ -319,6 +459,49 @@ func main() {
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up ready check")
 		os.Exit(1)
+	}
+
+	// Starts the centralized OCI artifact HTTP server that per-node artifact-operators download
+	// artifacts from. Registered as a manager.Runnable (like the Sweeper below), so it runs on
+	// every replica, not leader-gated.
+	if artifactServerMaxConcurrentRequests > 0 {
+		artifactOpts = append(artifactOpts, artifactserver.WithMaxConcurrentRequests(artifactServerMaxConcurrentRequests))
+	}
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
+	artifactSrv := artifactserver.New(artifactCache, artifactOpts...)
+	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+		return artifactSrv.Start(ctx, artifactServeAddr)
+	})); err != nil {
+		setupLog.Error(err, "unable to add artifact server to manager")
+		os.Exit(1)
+	}
+
+	if err := mgr.Add(artifactcache.NewSweeper(artifactCache, artifactcache.DefaultSweepInterval)); err != nil {
+		setupLog.Error(err, "unable to add artifact cache sweep to manager")
+		os.Exit(1)
+	}
+
+	// Resolve the artifact server URL to advertise to sidecar containers.
+	// Explicit flag takes priority; falls back to the in-cluster Service URL derived
+	// from OPERATOR_NAMESPACE when running inside the cluster.
+	if artifactServerURL == "" && operatorNamespace != "" {
+		scheme := "http"
+		if artifactServerCertPath != "" {
+			scheme = "https"
+		}
+		artifactServerURL = fmt.Sprintf("%s://falco-operator.%s.svc.cluster.local%s", scheme, operatorNamespace, artifactServeAddr)
+	}
+	if artifactServerURL != "" {
+		setupLog.Info("Artifact server URL configured for sidecar injection", "url", artifactServerURL)
+		resources.SetArtifactServerURL(artifactServerURL)
+	} else {
+		setupLog.Info("No artifact server URL available; artifact-operator sidecars will pull OCI artifacts directly from the registry")
+	}
+
+	if artifactClientCertIssuerName != "" {
+		setupLog.Info("Per-instance artifact client mTLS certificate provisioning enabled",
+			"issuerName", artifactClientCertIssuerName, "caBundleConfigMapName", artifactCABundleConfigMapName,
+			"duration", artifactClientCertDuration, "renewBefore", artifactClientCertRenewBefore)
 	}
 
 	setupLog.Info("starting manager")
