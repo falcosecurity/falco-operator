@@ -1,0 +1,33 @@
+# Minimal cert-manager Certificate CRD fixture, for this package's envtest only. Not the real
+# cert-manager CRD (which this repo has no Go dependency on), just enough of a structural
+# schema (permissive via x-kubernetes-preserve-unknown-fields) for ensureArtifactClientCertificate
+# to create/apply/read Certificate objects as unstructured against a real apiserver in tests.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: certificates.cert-manager.io
+spec:
+  group: cert-manager.io
+  names:
+    kind: Certificate
+    listKind: CertificateList
+    plural: certificates
+    singular: certificate
+  scope: Namespaced
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          x-kubernetes-preserve-unknown-fields: true
+          properties:
+            spec:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
