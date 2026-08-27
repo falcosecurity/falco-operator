@@ -160,6 +160,27 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// Surfaces the failure directly on the parent Plugin status. ObservedGeneration is not
 		// advanced, so enforce-mode per-node operators stay deferred, and no ArtifactNodes are
 		// created since they cannot be programmed without metadata.
+
+		// Still aggregate per-node conditions from existing ArtifactNodes: a broken reference
+		// (e.g. a missing auth Secret) fails fetchAndCacheArtifactMeta too, and the usual
+		// aggregation pass below never runs in this branch, since node creation depends on
+		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
+		// would never reach the Plugin's own status.
+		activeNodes := &artifactv1alpha1.ArtifactNodeList{}
+		for i := range existingNodes.Items {
+			nodeObject := &existingNodes.Items[i]
+			if !nodeObject.DeletionTimestamp.IsZero() {
+				continue
+			}
+			if _, ok := desired[nodeObject.Spec.NodeName]; !ok {
+				continue
+			}
+			activeNodes.Items = append(activeNodes.Items, *nodeObject)
+		}
+		controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, activeNodes)
+
+		// The instance-level metadata failure is the more specific, authoritative cause of
+		// Programmed=False; it must win over whatever the per-node aggregate computed above.
 		apimeta.SetStatusCondition(&plugin.Status.Conditions, metav1.Condition{
 			Type:               commonv1alpha1.ConditionProgrammed.String(),
 			Status:             metav1.ConditionFalse,
