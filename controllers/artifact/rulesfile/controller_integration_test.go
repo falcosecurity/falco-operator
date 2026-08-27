@@ -35,10 +35,10 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
-	"github.com/falcosecurity/falco-operator/internal/pkg/startupgate"
+	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 var k8sClient client.Client
@@ -56,21 +56,17 @@ func TestMain(m *testing.M) {
 }
 
 // newIntegrationReconciler builds a reconciler backed by the real API server but with an
-// in-memory filesystem and OCI puller, so reconciles touch the cluster but not the disk/registry.
+// in-memory filesystem, so reconciles touch the cluster but not disk.
 func newIntegrationReconciler() *RulesfileReconciler {
-	am := artifact.NewManagerWithOptions(k8sClient, testutil.TestNamespace,
-		artifact.WithFS(filesystem.NewMockFileSystem()),
-		artifact.WithOCIPuller(&puller.MockOCIPuller{}),
-	)
+	mockFS := filesystem.NewMockFileSystem()
 	return &RulesfileReconciler{
-		Client:          k8sClient,
-		Scheme:          k8sClient.Scheme(),
-		recorder:        events.NewFakeRecorder(100),
-		gate:            startupgate.NoopGateRecorder{},
-		finalizer:       common.FormatFinalizerName(rulesfileFinalizerPrefix, testutil.TestNodeName),
-		artifactManager: am,
-		nodeName:        testutil.TestNodeName,
-		namespace:       testutil.TestNamespace,
+		Client:    k8sClient,
+		Scheme:    k8sClient.Scheme(),
+		recorder:  events.NewFakeRecorder(100),
+		fetcher:   &artifact.Fetcher{K8sClient: k8sClient},
+		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		nodeName:  testutil.TestNodeName,
+		namespace: testutil.TestNamespace,
 	}
 }
 
@@ -81,11 +77,20 @@ func createRulesfile(t *testing.T, ctx context.Context, rf *artifactv1alpha1.Rul
 	return rf
 }
 
-func rulesfileConditions(o client.Object) *[]metav1.Condition {
-	return &o.(*artifactv1alpha1.Rulesfile).Status.Conditions
+func createRulesfileNode(t *testing.T, ctx context.Context, n *artifactv1alpha1.ArtifactNode) *artifactv1alpha1.ArtifactNode {
+	t.Helper()
+	require.NoError(t, k8sClient.Create(ctx, n))
+	t.Cleanup(func() { testutil.CleanupObject(t, ctx, k8sClient, n) })
+	return n
 }
 
-func applyRulesfileStatus(ctx context.Context, o client.Object) error {
+// nodeObjConditions extracts conditions from a RulesfileNode for use with AssertReconcileQuiet.
+func nodeObjConditions(o client.Object) *[]metav1.Condition {
+	return &o.(*artifactv1alpha1.ArtifactNode).Status.Conditions
+}
+
+// applyNodeObjStatus SSA-patches a RulesfileNode's status.
+func applyNodeObjStatus(ctx context.Context, o client.Object) error {
 	return controllerhelper.PatchStatusSSA(ctx, k8sClient, k8sClient.Scheme(), o, fieldManager)
 }
 
@@ -97,22 +102,50 @@ func TestIntegration_Rulesfile_SteadyStateReconcileIsQuiet(t *testing.T) {
 			InlineRules: &apiextensionsv1.JSON{Raw: []byte(`[{"rule":"r","desc":"d","condition":"always_true","output":"o","priority":"WARNING"}]`)},
 		},
 	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, rf.Name, testutil.TestNodeName)
+	nodeObj := createRulesfileNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, rf.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(rf, artifactv1alpha1.GroupVersion.WithKind("Rulesfile")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+
 	testutil.AssertReconcileQuiet(t, ctx, newIntegrationReconciler(), k8sClient,
-		client.ObjectKeyFromObject(rf), &artifactv1alpha1.Rulesfile{}, 5, 5,
-		rulesfileConditions,
-		func(o client.Object) error { return applyRulesfileStatus(ctx, o) },
+		client.ObjectKeyFromObject(nodeObj), &artifactv1alpha1.ArtifactNode{}, 5, 5,
+		nodeObjConditions,
+		func(o client.Object) error { return applyNodeObjStatus(ctx, o) },
 	)
 }
 
 func TestIntegration_Rulesfile_StatusApplyNoOpThenChange(t *testing.T) {
 	ctx := context.Background()
-	key := types.NamespacedName{Name: "ssa-semantics", Namespace: testutil.TestNamespace}
-	createRulesfile(t, ctx, &artifactv1alpha1.Rulesfile{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}})
 
-	// Apply both conditions so the no-op contract is exercised on a multi-entry conditions list
-	// (listType=map keyed by type), not just a single condition.
+	rf := createRulesfile(t, ctx, &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "ssa-semantics", Namespace: testutil.TestNamespace},
+	})
+
+	nodeName := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, rf.Name, testutil.TestNodeName)
+	nodeObj := createRulesfileNode(t, ctx, &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      nodeName,
+			Namespace: testutil.TestNamespace,
+			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, rf.Name, testutil.TestNodeName),
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(rf, artifactv1alpha1.GroupVersion.WithKind("Rulesfile")),
+			},
+		},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
+	})
+	key := types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}
+
 	applyConditions := func(programmed metav1.ConditionStatus, reason, msg string) error {
-		cur := &artifactv1alpha1.Rulesfile{}
+		cur := &artifactv1alpha1.ArtifactNode{}
 		if err := k8sClient.Get(ctx, key, cur); err != nil {
 			return err
 		}
@@ -120,10 +153,10 @@ func TestIntegration_Rulesfile_StatusApplyNoOpThenChange(t *testing.T) {
 			common.NewProgrammedCondition(programmed, reason, msg, cur.GetGeneration()))
 		apimeta.SetStatusCondition(&cur.Status.Conditions,
 			common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, cur.GetGeneration()))
-		return applyRulesfileStatus(ctx, cur)
+		return applyNodeObjStatus(ctx, cur)
 	}
 
-	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.Rulesfile{},
+	testutil.AssertSSAApplyNoOpThenChange(t, ctx, k8sClient, key, &artifactv1alpha1.ArtifactNode{},
 		func() error {
 			return applyConditions(metav1.ConditionTrue, artifact.ReasonProgrammed, artifact.MessageProgrammed)
 		},
@@ -133,7 +166,7 @@ func TestIntegration_Rulesfile_StatusApplyNoOpThenChange(t *testing.T) {
 	)
 
 	// Sanity: both conditions are present and Programmed reflects the final mutation.
-	final := &artifactv1alpha1.Rulesfile{}
+	final := &artifactv1alpha1.ArtifactNode{}
 	require.NoError(t, k8sClient.Get(ctx, key, final))
 	require.Equal(t, metav1.ConditionFalse,
 		apimeta.FindStatusCondition(final.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()).Status)
