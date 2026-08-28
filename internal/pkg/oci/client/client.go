@@ -47,20 +47,6 @@ func NewClient(opts ...Option) *auth.Client {
 	return client
 }
 
-// WithClientID configures the client with a custom client ID for OAuth2.
-func WithClientID(clientID string) Option {
-	return func(c *auth.Client) {
-		c.ClientID = clientID
-	}
-}
-
-// WithForceOAuth2 configures the client to always attempt OAuth2 authentication.
-func WithForceOAuth2(force bool) Option {
-	return func(c *auth.Client) {
-		c.ForceAttemptOAuth2 = force
-	}
-}
-
 // WithCredentialFunc configures the client with a custom credential function.
 func WithCredentialFunc(credFunc auth.CredentialFunc) Option {
 	return func(c *auth.Client) {

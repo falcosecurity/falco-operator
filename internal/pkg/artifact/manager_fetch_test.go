@@ -27,6 +27,7 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	pullerfake "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller/fake"
 )
 
 func TestManager_FetchConfig(t *testing.T) {
@@ -56,7 +57,7 @@ func TestManager_FetchConfig(t *testing.T) {
 			scheme := createTestScheme(t)
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			mockPuller := &puller.MockOCIPuller{
+			mockPuller := &pullerfake.MockOCIPuller{
 				ConfigResult:   tt.configResult,
 				ConfigDigest:   tt.configDigest,
 				FetchConfigErr: tt.fetchErr,
@@ -106,7 +107,7 @@ func TestManager_FetchContent(t *testing.T) {
 			scheme := createTestScheme(t)
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 
-			mockPuller := &puller.MockOCIPuller{
+			mockPuller := &pullerfake.MockOCIPuller{
 				ContentResult:   tt.content,
 				FetchContentErr: tt.fetchErr,
 			}

@@ -24,11 +24,11 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
-	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
@@ -38,16 +38,28 @@ var (
 	uiDefs = resources.FalcosidekickUIDefaults
 )
 
-func newSidekickComponent(name string) *builders.ComponentBuilder {
-	return builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
-		WithName(name).WithNamespace(testutil.TestNamespace)
+func newSidekickComponent(name string) *instancev1alpha1.Component {
+	return &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	}
 }
 
-func newSidekickUIComponent(name string) *builders.ComponentBuilder {
-	return builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekickUI).
-		WithName(name).WithNamespace(testutil.TestNamespace)
+func newSidekickUIComponent(name string) *instancev1alpha1.Component {
+	return &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekickUI},
+		},
+	}
 }
 
 // mustGetContainers extracts the containers list from an unstructured workload.
@@ -90,7 +102,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name:                "default metacollector produces expected base",
 			defs:                mcDefs,
-			comp:                newMetacollectorComponent("test-mc").Build(),
+			comp:                newMetacollectorComponent("test-mc"),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
 			wantTolerationCount: 0,
@@ -103,9 +115,13 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			wantVolumeMinCount: 0,
 		},
 		{
-			name:                "custom version overrides container image",
-			defs:                mcDefs,
-			comp:                newMetacollectorComponent("test-mc").WithVersion("0.2.0").Build(),
+			name: "custom version overrides container image",
+			defs: mcDefs,
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Component.Version = new("0.2.0")
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       fmt.Sprintf("%s:%s", mcDefs.ImageRepository, "0.2.0"),
 			wantTolerationCount: 0,
@@ -118,9 +134,13 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			wantVolumeMinCount: 0,
 		},
 		{
-			name:                "custom replicas are propagated",
-			defs:                mcDefs,
-			comp:                newMetacollectorComponent("test-mc").WithReplicas(5).Build(),
+			name: "custom replicas are propagated",
+			defs: mcDefs,
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Replicas = new(int32(5))
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
 			wantTolerationCount: 0,
@@ -135,8 +155,11 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name: "Recreate strategy overrides default RollingUpdate",
 			defs: mcDefs,
-			comp: newMetacollectorComponent("test-mc").
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Strategy = &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
 			wantTolerationCount: 0,
@@ -151,8 +174,11 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name: "CR labels propagate to pod template",
 			defs: mcDefs,
-			comp: newMetacollectorComponent("test-mc").
-				WithLabels(map[string]string{"team": "security", "env": "prod"}).Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Labels = map[string]string{"team": "security", "env": "prod"}
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
 			wantTolerationCount: 0,
@@ -169,8 +195,15 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name: "custom PodTemplateSpec merges with base preserving probes",
 			defs: mcDefs,
-			comp: newMetacollectorComponent("test-mc").
-				WithImage(mcDefs.ContainerName, "custom-repo/metacollector:custom").Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: mcDefs.ContainerName, Image: "custom-repo/metacollector:custom"}},
+					},
+				}
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       "custom-repo/metacollector:custom",
 			wantTolerationCount: 0,
@@ -185,9 +218,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name: "version is ignored when PodTemplateSpec provides main container",
 			defs: mcDefs,
-			comp: newMetacollectorComponent("test-mc").
-				WithVersion("0.2.0").
-				WithImage(mcDefs.ContainerName, "custom-repo/metacollector:custom").Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Component.Version = new("0.2.0")
+				c.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: mcDefs.ContainerName, Image: "custom-repo/metacollector:custom"}},
+					},
+				}
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       "custom-repo/metacollector:custom",
 			wantTolerationCount: 0,
@@ -202,13 +242,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name: "version applies when PodTemplateSpec has only pod-level fields",
 			defs: mcDefs,
-			comp: newMetacollectorComponent("test-mc").
-				WithVersion("0.2.0").
-				WithPodTemplateSpec(&corev1.PodTemplateSpec{
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Component.Version = new("0.2.0")
+				c.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						NodeSelector: map[string]string{"disktype": "ssd"},
 					},
-				}).Build(),
+				}
+				return c
+			}(),
 			wantContainerCount:  1,
 			wantMainImage:       fmt.Sprintf("%s:%s", mcDefs.ImageRepository, "0.2.0"),
 			wantTolerationCount: 0,
@@ -223,7 +266,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name:               "default falcosidekick produces expected base",
 			defs:               skDefs,
-			comp:               newSidekickComponent("test-sk").Build(),
+			comp:               newSidekickComponent("test-sk"),
 			wantContainerCount: 1,
 			wantMainImage:      skDefs.ImageRepository + ":" + skDefs.ImageTag,
 			wantPodLabels: map[string]string{
@@ -236,7 +279,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		{
 			name:               "falcosidekick-ui has wait-redis init container",
 			defs:               uiDefs,
-			comp:               newSidekickUIComponent("test-ui").Build(),
+			comp:               newSidekickUIComponent("test-ui"),
 			wantContainerCount: 1,
 			wantInitContainers: 1,
 			wantMainImage:      uiDefs.ImageRepository + ":" + uiDefs.ImageTag,

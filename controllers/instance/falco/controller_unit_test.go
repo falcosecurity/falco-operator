@@ -50,6 +50,23 @@ const defaultName = "test"
 // testContainerName is the container name from the registered Falco defaults.
 var testContainerName = resources.FalcoDefaults.ContainerName
 
+// newTestFalco returns a bare Falco fixture named defaultName in testutil.TestNamespace.
+func newTestFalco() *instancev1alpha1.Falco {
+	return &instancev1alpha1.Falco{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      defaultName,
+			Namespace: testutil.TestNamespace,
+		},
+	}
+}
+
+// newTestFalcoType returns a Falco fixture with the given Spec.Type set.
+func newTestFalcoType(t string) *instancev1alpha1.Falco {
+	f := newTestFalco()
+	f.Spec.Type = &t
+	return f
+}
+
 func TestEnsureFinalizer(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 
@@ -62,17 +79,21 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:        "adds finalizer when not present",
-			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
+			falco:       newTestFalco(),
 			wantUpdated: true,
 		},
 		{
-			name:        "no-op when finalizer already present",
-			falco:       builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithFinalizers([]string{finalizer}).Build(),
+			name: "no-op when finalizer already present",
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalco()
+				f.Finalizers = []string{finalizer}
+				return f
+			}(),
 			wantUpdated: false,
 		},
 		{
 			name:     "returns error when patch fails",
-			falco:    builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
+			falco:    newTestFalco(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -115,6 +136,22 @@ func TestHandleDeletion(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 	now := metav1.Now()
 
+	withFinalizer := func() *instancev1alpha1.Falco {
+		f := newTestFalco()
+		f.Finalizers = []string{finalizer}
+		return f
+	}
+	withFinalizerAndDeletion := func() *instancev1alpha1.Falco {
+		f := withFinalizer()
+		f.DeletionTimestamp = &now
+		return f
+	}
+	withDeletionOnly := func() *instancev1alpha1.Falco {
+		f := newTestFalco()
+		f.DeletionTimestamp = &now
+		return f
+	}
+
 	tests := []struct {
 		name                   string
 		falco                  *instancev1alpha1.Falco
@@ -130,57 +167,51 @@ func TestHandleDeletion(t *testing.T) {
 	}{
 		{
 			name:                   "preserves finalizer and resources when not marked for deletion",
-			falco:                  builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithFinalizers([]string{finalizer}).Build(),
+			falco:                  withFinalizer(),
 			createClusterResources: true,
 			wantHandled:            false,
 			wantFinalizerPresent:   true,
 			wantClusterResExist:    true,
 		},
 		{
-			name: "handles deletion when cluster resources do not exist",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:                   "handles deletion when cluster resources do not exist",
+			falco:                  withFinalizerAndDeletion(),
 			createClusterResources: false,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name: "removes cluster resources and finalizer during deletion",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:                   "removes cluster resources and finalizer during deletion",
+			falco:                  withFinalizerAndDeletion(),
 			createClusterResources: true,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name: "returns early when deleted without finalizer",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithDeletionTimestamp(&now).Build(),
+			name:                 "returns early when deleted without finalizer",
+			falco:                withDeletionOnly(),
 			skipFalcoInClient:    true,
 			wantHandled:          true,
 			wantFinalizerPresent: false,
 			wantClusterResExist:  false,
 		},
 		{
-			name: "returns error when ClusterRoleBinding deletion fails",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:         "returns error when ClusterRoleBinding deletion fails",
+			falco:        withFinalizerAndDeletion(),
 			crbDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:      "injected delete error",
 		},
 		{
-			name: "returns error when ClusterRole deletion fails",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:        "returns error when ClusterRole deletion fails",
+			falco:       withFinalizerAndDeletion(),
 			crDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:     "injected delete error",
 		},
 		{
-			name: "returns error when finalizer removal patch fails",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:     "returns error when finalizer removal patch fails",
+			falco:    withFinalizerAndDeletion(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -273,8 +304,11 @@ func TestComputeAvailableCondition(t *testing.T) {
 	}{
 		{
 			name: "deployment available: applies status and emits event",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).WithReplicas(2).Build(),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoType(resources.ResourceTypeDeployment)
+				f.Spec.Replicas = new(int32(2))
+				return f
+			}(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2},
@@ -286,7 +320,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 		},
 		{
 			name:  "daemonset available: applies status and emits event",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDaemonSet).Build(),
+			falco: newTestFalcoType(resources.ResourceTypeDaemonSet),
 			workload: &appsv1.DaemonSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DaemonSetStatus{DesiredNumberScheduled: 3, NumberAvailable: 3},
@@ -342,14 +376,14 @@ func TestCleanupDualDeployments(t *testing.T) {
 	}{
 		{
 			name:  "preserves Deployment when no DaemonSet exists",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco: newTestFalcoType(resources.ResourceTypeDeployment),
 			existingObjs: []client.Object{
 				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
 		},
 		{
 			name:  "deletes DaemonSet when type is Deployment",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco: newTestFalcoType(resources.ResourceTypeDeployment),
 			existingObjs: []client.Object{
 				builders.NewDaemonSet().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
@@ -357,7 +391,7 @@ func TestCleanupDualDeployments(t *testing.T) {
 		},
 		{
 			name:  "deletes Deployment when type is DaemonSet",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDaemonSet).Build(),
+			falco: newTestFalcoType(resources.ResourceTypeDaemonSet),
 			existingObjs: []client.Object{
 				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
@@ -365,13 +399,13 @@ func TestCleanupDualDeployments(t *testing.T) {
 		},
 		{
 			name:    "returns error when Get fails with non-NotFound",
-			falco:   builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco:   newTestFalcoType(resources.ResourceTypeDeployment),
 			getErr:  fmt.Errorf("injected get error"),
 			wantErr: "injected get error",
 		},
 		{
 			name:  "returns error when Delete fails",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco: newTestFalcoType(resources.ResourceTypeDeployment),
 			existingObjs: []client.Object{
 				builders.NewDaemonSet().WithName("test").WithNamespace(testutil.TestNamespace).Build(),
 			},
@@ -462,7 +496,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).Build()
+			falco := newTestFalco()
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco)
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -492,7 +526,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 func TestPatchStatus(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build()
+	falco := newTestFalcoType(resources.ResourceTypeDeployment)
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(falco).
@@ -533,33 +567,37 @@ func TestEnsureDeployment(t *testing.T) {
 		wantKind            string
 	}{
 		{
-			name: "creates Deployment with default values and default Falco version",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).Build(),
+			name:                "creates Deployment with default values and default Falco version",
+			falco:               newTestFalcoType(resources.ResourceTypeDeployment),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            resources.ResourceTypeDeployment,
 		},
 		{
 			name: "creates Deployment with custom version",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).WithVersion("0.38.0").Build(),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoType(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.38.0")
+				return f
+			}(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            resources.ResourceTypeDeployment,
 		},
 		{
-			name: "creates DaemonSet",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDaemonSet).Build(),
+			name:                "creates DaemonSet",
+			falco:               newTestFalcoType(resources.ResourceTypeDaemonSet),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantKind:            resources.ResourceTypeDaemonSet,
 		},
 		{
 			name: "updates existing Deployment",
-			falco: builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).WithVersion("0.39.0").Build(),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoType(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.39.0")
+				return f
+			}(),
 			existingObjs: []client.Object{
 				builders.NewDeployment().WithName("test").WithNamespace(testutil.TestNamespace).
 					WithSelector(map[string]string{
@@ -567,7 +605,7 @@ func TestEnsureDeployment(t *testing.T) {
 					}).
 					AddContainer(&corev1.Container{
 						Name:  testContainerName,
-						Image: image.BuildFalcoImageStringFromVersion("0.38.0"),
+						Image: buildFalcoImageStringFromVersion("0.38.0"),
 					}).Build(),
 			},
 			wantConditionStatus: metav1.ConditionTrue,
@@ -603,11 +641,11 @@ func TestEnsureDeployment(t *testing.T) {
 				require.NotEmpty(t, dep.Spec.Template.Spec.Containers)
 				actualImage := dep.Spec.Template.Spec.Containers[0].Image
 				if tt.falco.Spec.Version != nil {
-					wantImage := image.BuildFalcoImageStringFromVersion(*tt.falco.Spec.Version)
+					wantImage := buildFalcoImageStringFromVersion(*tt.falco.Spec.Version)
 					assert.Equal(t, wantImage, actualImage)
 				} else {
 					// When no version is specified, the controller must use the default from FalcoDefaults.
-					wantImage := image.BuildImageString(image.Registry, image.Repository, image.FalcoImage, resources.FalcoDefaults.ImageTag)
+					wantImage := fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Repository, image.FalcoImage, resources.FalcoDefaults.ImageTag)
 					assert.Equal(t, wantImage, actualImage,
 						"default Falco image must use FalcoDefaults.ImageTag when spec.version is nil")
 				}
@@ -660,8 +698,8 @@ func TestReconcileLabelExclusion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDaemonSet).WithLabels(tt.crLabels).Build()
+			falco := newTestFalcoType(resources.ResourceTypeDaemonSet)
+			falco.Labels = tt.crLabels
 			// Sets the finalizer directly before Reconcile runs.
 			falco.Finalizers = []string{finalizer}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).
@@ -707,9 +745,12 @@ func TestReconcileLabelExclusion(t *testing.T) {
 // user-specified container image from a custom PodTemplateSpec.
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-		WithType(resources.ResourceTypeDeployment).
-		WithImage(testContainerName, "custom-image:latest").Build()
+	falco := newTestFalcoType(resources.ResourceTypeDeployment)
+	falco.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: testContainerName, Image: "custom-image:latest"}},
+		},
+	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -730,8 +771,7 @@ func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 
 func TestEnsureConfigMapError(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-		WithType("InvalidType").Build()
+	falco := newTestFalcoType("InvalidType")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -742,8 +782,7 @@ func TestEnsureConfigMapError(t *testing.T) {
 
 func TestEnsureDeploymentApplyConfigError(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-		WithType("InvalidType").Build()
+	falco := newTestFalcoType("InvalidType")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -758,8 +797,7 @@ func TestEnsureDeploymentApplyConfigError(t *testing.T) {
 func TestEnsureDeploymentOwnerReferenceError(t *testing.T) {
 	// An empty scheme has no GVK registered for Falco, so SetControllerReference fails.
 	emptyScheme := runtime.NewScheme()
-	falco := builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).
-		WithType(resources.ResourceTypeDeployment).Build()
+	falco := newTestFalcoType(resources.ResourceTypeDeployment)
 	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, instancev1alpha1.AddToScheme)).WithObjects(falco).Build()
 	r := NewReconciler(cl, emptyScheme, events.NewFakeRecorder(10))
 
@@ -785,7 +823,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 	}{
 		{
 			name:                "returns error when fetching existing resource fails",
-			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco:               newTestFalcoType(resources.ResourceTypeDeployment),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "injected get error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -793,7 +831,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on create",
-			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco:               newTestFalcoType(resources.ResourceTypeDeployment),
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -801,7 +839,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on update",
-			falco:               builders.NewFalco().WithName("test").WithNamespace(testutil.TestNamespace).WithType(resources.ResourceTypeDeployment).Build(),
+			falco:               newTestFalcoType(resources.ResourceTypeDeployment),
 			existingDeployment:  true,
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",

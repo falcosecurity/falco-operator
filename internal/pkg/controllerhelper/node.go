@@ -23,7 +23,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -94,24 +93,6 @@ func ListMatchingNodes(ctx context.Context, cl client.Client, sel *metav1.LabelS
 		return nil, err
 	}
 	return nodeList.Items, nil
-}
-
-// ListMatchingFalcoNodes returns the subset of nodes that (a) match sel and (b) have at least
-// one Running Falco pod scheduled on them across all Falco CRs in namespace. In DaemonSet mode
-// every matching node has a Falco pod, so the result equals ListMatchingNodes. In Deployment mode
-// only the node(s) hosting a scheduled Falco pod are returned. Nodes excluded by taints or
-// tolerations that prevent Falco from running there are correctly omitted in both modes.
-func ListMatchingFalcoNodes(ctx context.Context, cl client.Client, sel *metav1.LabelSelector, namespace string) ([]corev1.Node, error) {
-	nodes, err := ListMatchingNodes(ctx, cl, sel)
-	if err != nil {
-		return nil, err
-	}
-
-	falcoNodes, err := ListFalcoRunningNodeNames(ctx, cl, namespace)
-	if err != nil {
-		return nil, err
-	}
-	return FilterNodesByName(nodes, falcoNodes), nil
 }
 
 // FilterNodesByName returns the nodes whose names are present in desired. The returned
@@ -212,45 +193,4 @@ func IsBeingDeleted(ctx context.Context, cl client.Client, obj client.Object) (b
 		return false, err
 	}
 	return !fresh.GetDeletionTimestamp().IsZero(), nil
-}
-
-// NodeMatchesSelector checks if a selector matches the node labels.
-func NodeMatchesSelector(ctx context.Context, cl client.Client, nodeName string, labelSelector *metav1.LabelSelector) (bool, error) {
-	logger := log.FromContext(ctx)
-
-	// If the labelSelector is nil, return true.
-	if labelSelector == nil {
-		logger.V(2).Info("LabelSelector is nil, returning true")
-		return true, nil
-	}
-
-	// Fetch the partial object metadata for the node.
-	node := &metav1.PartialObjectMetadata{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Node",
-			APIVersion: "v1",
-		},
-	}
-	logger.V(2).Info("Fetching node", "node", nodeName)
-	if err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
-		logger.Error(err, "unable to fetch node")
-		return false, err
-	}
-
-	// Convert the LabelSelector to a Selector.
-	selector, err := metav1.LabelSelectorAsSelector(labelSelector)
-	if err != nil {
-		logger.Error(err, "invalid label selector", "labelSelector", labelSelector)
-		return false, err
-	}
-
-	// Check if the node matches the selector.
-	logger.V(2).Info("Checking node labelSelector", "node", nodeName, "labelSelector", labelSelector)
-	if selector.Matches(labels.Set(node.Labels)) {
-		logger.V(2).Info("Node matches labelSelector", "node", nodeName)
-		return true, nil
-	} else {
-		logger.V(2).Info("Node does not match labelSelector", "node", nodeName)
-		return false, nil
-	}
 }

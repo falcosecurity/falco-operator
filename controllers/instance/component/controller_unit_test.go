@@ -46,16 +46,28 @@ import (
 
 const defaultName = "test"
 
-func newMetacollectorComponent(name string) *builders.ComponentBuilder {
-	return builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName(name).WithNamespace(testutil.TestNamespace)
+func newMetacollectorComponent(name string) *instancev1alpha1.Component {
+	return &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	}
 }
 
-func newFalcosidekickComponent(name string) *builders.ComponentBuilder {
-	return builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
-		WithName(name).WithNamespace(testutil.TestNamespace)
+func newFalcosidekickComponent(name string) *instancev1alpha1.Component {
+	return &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	}
 }
 
 func TestReconcile_RBACConditionalCreation(t *testing.T) {
@@ -75,7 +87,7 @@ func TestReconcile_RBACConditionalCreation(t *testing.T) {
 	}{
 		{
 			name:                  "metacollector gets ClusterRole but no Role",
-			comp:                  newMetacollectorComponent("test-mc-rbac").Build(),
+			comp:                  newMetacollectorComponent("test-mc-rbac"),
 			wantRoleExists:        false,
 			wantRoleBindingExists: false,
 			wantClusterRoleExists: true,
@@ -84,7 +96,7 @@ func TestReconcile_RBACConditionalCreation(t *testing.T) {
 		},
 		{
 			name:                  "falcosidekick gets Role but no ClusterRole",
-			comp:                  newFalcosidekickComponent("test-sk-rbac").Build(),
+			comp:                  newFalcosidekickComponent("test-sk-rbac"),
 			wantRoleExists:        true,
 			wantRoleBindingExists: true,
 			wantClusterRoleExists: false,
@@ -94,7 +106,7 @@ func TestReconcile_RBACConditionalCreation(t *testing.T) {
 		{
 			name: "unknown component type returns error",
 			comp: func() *instancev1alpha1.Component {
-				c := newMetacollectorComponent("test-unknown").Build()
+				c := newMetacollectorComponent("test-unknown")
 				c.Spec.Component.Type = "nonexistent"
 				return c
 			}(),
@@ -187,7 +199,7 @@ func TestEnsureResourceErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			comp := newMetacollectorComponent("test-mc").Build()
+			comp := newMetacollectorComponent("test-mc")
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp)
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
@@ -228,17 +240,21 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:        "adds finalizer when not present",
-			comp:        newMetacollectorComponent(defaultName).Build(),
+			comp:        newMetacollectorComponent(defaultName),
 			wantUpdated: true,
 		},
 		{
-			name:        "no-op when finalizer already present",
-			comp:        newMetacollectorComponent(defaultName).WithFinalizers([]string{finalizer}).Build(),
+			name: "no-op when finalizer already present",
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent(defaultName)
+				c.Finalizers = []string{finalizer}
+				return c
+			}(),
 			wantUpdated: false,
 		},
 		{
 			name:     "returns error when patch fails",
-			comp:     newMetacollectorComponent(defaultName).Build(),
+			comp:     newMetacollectorComponent(defaultName),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -282,6 +298,22 @@ func TestHandleDeletion(t *testing.T) {
 
 	now := metav1.Now()
 
+	withFinalizer := func() *instancev1alpha1.Component {
+		c := newMetacollectorComponent(defaultName)
+		c.Finalizers = []string{finalizer}
+		return c
+	}
+	withFinalizerAndDeletion := func() *instancev1alpha1.Component {
+		c := withFinalizer()
+		c.DeletionTimestamp = &now
+		return c
+	}
+	withDeletionOnly := func() *instancev1alpha1.Component {
+		c := newMetacollectorComponent(defaultName)
+		c.DeletionTimestamp = &now
+		return c
+	}
+
 	tests := []struct {
 		name                   string
 		comp                   *instancev1alpha1.Component
@@ -296,27 +328,24 @@ func TestHandleDeletion(t *testing.T) {
 		wantClusterResExist    bool
 	}{
 		{
-			name: "preserves finalizer and resources when not marked for deletion",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).Build(),
+			name:                   "preserves finalizer and resources when not marked for deletion",
+			comp:                   withFinalizer(),
 			createClusterResources: true,
 			wantHandled:            false,
 			wantFinalizerPresent:   true,
 			wantClusterResExist:    true,
 		},
 		{
-			name: "handles deletion when cluster resources do not exist",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:                   "handles deletion when cluster resources do not exist",
+			comp:                   withFinalizerAndDeletion(),
 			createClusterResources: false,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
 			wantClusterResExist:    false,
 		},
 		{
-			name: "removes cluster resources and finalizer during deletion",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:                   "removes cluster resources and finalizer during deletion",
+			comp:                   withFinalizerAndDeletion(),
 			createClusterResources: true,
 			wantHandled:            true,
 			wantFinalizerPresent:   false,
@@ -324,30 +353,27 @@ func TestHandleDeletion(t *testing.T) {
 		},
 		{
 			name:                 "returns early when deleted without finalizer",
-			comp:                 newMetacollectorComponent(defaultName).WithDeletionTimestamp(&now).Build(),
+			comp:                 withDeletionOnly(),
 			skipCompInClient:     true,
 			wantHandled:          true,
 			wantFinalizerPresent: false,
 			wantClusterResExist:  false,
 		},
 		{
-			name: "returns error when ClusterRoleBinding deletion fails",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:         "returns error when ClusterRoleBinding deletion fails",
+			comp:         withFinalizerAndDeletion(),
 			crbDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:      "injected delete error",
 		},
 		{
-			name: "returns error when ClusterRole deletion fails",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:        "returns error when ClusterRole deletion fails",
+			comp:        withFinalizerAndDeletion(),
 			crDeleteErr: fmt.Errorf("injected delete error"),
 			wantErr:     "injected delete error",
 		},
 		{
-			name: "returns error when finalizer removal patch fails",
-			comp: newMetacollectorComponent(defaultName).
-				WithFinalizers([]string{finalizer}).WithDeletionTimestamp(&now).Build(),
+			name:     "returns error when finalizer removal patch fails",
+			comp:     withFinalizerAndDeletion(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},
@@ -440,7 +466,11 @@ func TestComputeAvailableCondition(t *testing.T) {
 	}{
 		{
 			name: "deployment available — applies status and emits event",
-			comp: newMetacollectorComponent(defaultName).WithReplicas(2).Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent(defaultName)
+				c.Spec.Replicas = new(int32(2))
+				return c
+			}(),
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2},
@@ -497,15 +527,19 @@ func TestEnsureDeployment(t *testing.T) {
 	}{
 		{
 			name:                "creates deployment with default values",
-			comp:                newMetacollectorComponent("test-mc").Build(),
+			comp:                newMetacollectorComponent("test-mc"),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           defs.ImageRepository + ":" + defs.ImageTag,
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
-			name:                "creates deployment with custom version",
-			comp:                newMetacollectorComponent("test-mc").WithVersion("0.2.0").Build(),
+			name: "creates deployment with custom version",
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Component.Version = new("0.2.0")
+				return c
+			}(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           fmt.Sprintf("%s:%s", defs.ImageRepository, "0.2.0"),
@@ -513,8 +547,11 @@ func TestEnsureDeployment(t *testing.T) {
 		},
 		{
 			name: "creates deployment with Recreate strategy",
-			comp: newMetacollectorComponent("test-mc").
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Strategy = &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+				return c
+			}(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
 			wantImage:           defs.ImageRepository + ":" + defs.ImageTag,
@@ -522,7 +559,11 @@ func TestEnsureDeployment(t *testing.T) {
 		},
 		{
 			name: "updates existing deployment",
-			comp: newMetacollectorComponent("test-mc").WithVersion("0.3.0").Build(),
+			comp: func() *instancev1alpha1.Component {
+				c := newMetacollectorComponent("test-mc")
+				c.Spec.Component.Version = new("0.3.0")
+				return c
+			}(),
 			existingObjs: []client.Object{
 				builders.NewDeployment().WithName("test-mc").WithNamespace(testutil.TestNamespace).
 					WithSelector(map[string]string{
@@ -570,7 +611,12 @@ func TestEnsureDeployment(t *testing.T) {
 func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 	defs := resources.MetacollectorDefaults
-	comp := newMetacollectorComponent("test-mc").WithImage(defs.ContainerName, "custom-image:latest").Build()
+	comp := newMetacollectorComponent("test-mc")
+	comp.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: defs.ContainerName, Image: "custom-image:latest"}},
+		},
+	}
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -592,7 +638,7 @@ func TestEnsureDeploymentWithCustomPodTemplateSpec(t *testing.T) {
 func TestEnsureDeploymentApplyConfigError(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 	invalidDefs := &resources.InstanceDefaults{ResourceType: "InvalidType"}
-	comp := newMetacollectorComponent("test-mc").Build()
+	comp := newMetacollectorComponent("test-mc")
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).Build()
 	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
 
@@ -620,7 +666,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 	}{
 		{
 			name:                "returns error when fetching existing resource fails",
-			comp:                newMetacollectorComponent("test-mc").Build(),
+			comp:                newMetacollectorComponent("test-mc"),
 			getErr:              fmt.Errorf("injected get error"),
 			wantErr:             "injected get error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -628,7 +674,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on create",
-			comp:                newMetacollectorComponent("test-mc").Build(),
+			comp:                newMetacollectorComponent("test-mc"),
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
 			wantConditionStatus: metav1.ConditionFalse,
@@ -636,7 +682,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 		},
 		{
 			name:                "returns error when Apply fails on update",
-			comp:                newMetacollectorComponent("test-mc").Build(),
+			comp:                newMetacollectorComponent("test-mc"),
 			existingDeployment:  true,
 			applyErr:            fmt.Errorf("injected apply error"),
 			wantErr:             "injected apply error",
@@ -692,7 +738,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 
 func TestPatchStatus(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
-	comp := newMetacollectorComponent("test-mc").Build()
+	comp := newMetacollectorComponent("test-mc")
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithObjects(comp).
@@ -765,7 +811,8 @@ func TestReconcileLabelExclusion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			comp := newMetacollectorComponent("test-mc").WithLabels(tt.crLabels).Build()
+			comp := newMetacollectorComponent("test-mc")
+			comp.Labels = tt.crLabels
 			// Pre-set the finalizer so Reconcile proceeds past ensureFinalizer in one pass.
 			comp.Finalizers = []string{finalizer}
 			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(comp).

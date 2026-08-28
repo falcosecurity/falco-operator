@@ -25,13 +25,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
-	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func getArtifactClientCertificate(t *testing.T, ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {
@@ -46,7 +47,12 @@ func TestEnsureArtifactClientCertificate(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("mTLS disabled is a no-op", func(t *testing.T) {
-		falco := createFalco(t, ctx, builders.NewFalco().WithName("test-cert-disabled").WithNamespace(testutil.TestNamespace).Build())
+		falco := createFalco(t, ctx, &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-cert-disabled",
+				Namespace: testutil.TestNamespace,
+			},
+		})
 		reconciler := newTestReconciler()
 		require.NoError(t, reconciler.ensureArtifactClientCertificate(ctx, falco))
 
@@ -55,7 +61,12 @@ func TestEnsureArtifactClientCertificate(t *testing.T) {
 	})
 
 	t.Run("mTLS enabled creates a Certificate with SPIFFE SAN and owner reference", func(t *testing.T) {
-		falco := createFalco(t, ctx, builders.NewFalco().WithName("test-cert-enabled").WithNamespace(testutil.TestNamespace).Build())
+		falco := createFalco(t, ctx, &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-cert-enabled",
+				Namespace: testutil.TestNamespace,
+			},
+		})
 		reconciler := NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100),
 			WithArtifactMTLS("my-cluster-issuer", "my-falco-operator-artifact-ca-bundle", 0, 0))
 
@@ -91,7 +102,12 @@ func TestEnsureArtifactClientCertificate(t *testing.T) {
 	})
 
 	t.Run("second call is idempotent", func(t *testing.T) {
-		falco := createFalco(t, ctx, builders.NewFalco().WithName("test-cert-idempotent").WithNamespace(testutil.TestNamespace).Build())
+		falco := createFalco(t, ctx, &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-cert-idempotent",
+				Namespace: testutil.TestNamespace,
+			},
+		})
 		reconciler := NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100),
 			WithArtifactMTLS("my-cluster-issuer", "my-falco-operator-artifact-ca-bundle", 0, 0))
 
@@ -100,7 +116,12 @@ func TestEnsureArtifactClientCertificate(t *testing.T) {
 	})
 
 	t.Run("custom duration and renewBefore are honored", func(t *testing.T) {
-		falco := createFalco(t, ctx, builders.NewFalco().WithName("test-cert-custom-duration").WithNamespace(testutil.TestNamespace).Build())
+		falco := createFalco(t, ctx, &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-cert-custom-duration",
+				Namespace: testutil.TestNamespace,
+			},
+		})
 		reconciler := NewReconciler(k8sClient, k8sClient.Scheme(), events.NewFakeRecorder(100),
 			WithArtifactMTLS("my-cluster-issuer", "my-falco-operator-artifact-ca-bundle", 48*time.Hour, 12*time.Hour))
 

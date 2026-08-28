@@ -51,6 +51,13 @@ type Versions struct {
 	pluginVersions map[string]string // keys that came from the nested plugin_versions object
 }
 
+// NewVersions constructs a Versions value from the given capabilities and plugin versions.
+// Used by HTTPVersionsFetcher.Fetch and by packages outside compat (e.g. its fake test double)
+// that need to build Versions values despite their fields being unexported.
+func NewVersions(capabilities, pluginVersions map[string]string) *Versions {
+	return &Versions{capabilities: capabilities, pluginVersions: pluginVersions}
+}
+
 // Capability returns the version string for a named capability, and whether it was present.
 func (v *Versions) Capability(name string) (string, bool) {
 	val, ok := v.capabilities[name]
@@ -140,7 +147,7 @@ func (f *HTTPVersionsFetcher) Fetch(ctx context.Context) (*Versions, error) {
 		}
 	}
 
-	return &Versions{capabilities: caps, pluginVersions: pluginCaps}, nil
+	return NewVersions(caps, pluginCaps), nil
 }
 
 // WaitAndFetch blocks until the Falco /versions endpoint at baseURL responds successfully,
@@ -158,32 +165,4 @@ func WaitAndFetch(ctx context.Context, baseURL string) (*Versions, error) {
 		case <-time.After(defaultInterval):
 		}
 	}
-}
-
-// MockVersionsFetcher is a test double for VersionsFetcher.
-type MockVersionsFetcher struct {
-	Result   *Versions
-	FetchErr error
-}
-
-// NewMockVersionsFetcher creates a MockVersionsFetcher that returns the given capabilities on Fetch.
-func NewMockVersionsFetcher(caps map[string]string) *MockVersionsFetcher {
-	return &MockVersionsFetcher{Result: &Versions{capabilities: caps}}
-}
-
-// NewMockVersionsFetcherWithPlugins creates a MockVersionsFetcher whose result reports pluginVersions
-// as loaded plugins — flattened into capabilities too, matching HTTPVersionsFetcher's real behavior —
-// for tests that need PluginVersions() populated, not just Capability()/All().
-func NewMockVersionsFetcherWithPlugins(pluginVersions map[string]string) *MockVersionsFetcher {
-	caps := make(map[string]string, len(pluginVersions))
-	maps.Copy(caps, pluginVersions)
-	return &MockVersionsFetcher{Result: &Versions{capabilities: caps, pluginVersions: pluginVersions}}
-}
-
-// Fetch returns the preset result or error.
-func (m *MockVersionsFetcher) Fetch(_ context.Context) (*Versions, error) {
-	if m.FetchErr != nil {
-		return nil, m.FetchErr
-	}
-	return m.Result, nil
 }

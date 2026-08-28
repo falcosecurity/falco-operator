@@ -26,15 +26,6 @@ import (
 	"strings"
 )
 
-// StringOr returns the value of the environment variable named by key, or
-// fallback if the variable is unset or empty.
-func StringOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 // FlagNameToEnvName translates a flag name (e.g. "artifact-cache-dir") into
 // the name of the environment variable BindFlagEnv checks for it (e.g.
 // "ARTIFACT_CACHE_DIR"): upper-cased, with '-' replaced by '_'.

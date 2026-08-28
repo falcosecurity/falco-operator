@@ -28,16 +28,17 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 func newTestManager() *nodeartifacts.Manager {
-	return newTestManagerWithFetcher(compat.NewMockVersionsFetcher(nil))
+	return newTestManagerWithFetcher(compatfake.NewMockVersionsFetcher(nil))
 }
 
 func newTestManagerWithFetcher(fetcher compat.VersionsFetcher) *nodeartifacts.Manager {
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
 	return nodeartifacts.NewManager(store, fetcher)
 }
 
@@ -208,7 +209,7 @@ func TestManager_CheckRequirement_NotFoundBeforeAnyObservation(t *testing.T) {
 
 func TestManager_CheckRequirement_SatisfiedAfterObservation(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}).Result)
 
@@ -222,7 +223,7 @@ func TestManager_CheckRequirement_SatisfiedAfterObservation(t *testing.T) {
 
 func TestManager_CheckRequirement_NotSatisfiedWhenTooOld(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container": "0.3.0",
 	}).Result)
 
@@ -236,7 +237,7 @@ func TestManager_CheckRequirement_NotSatisfiedWhenTooOld(t *testing.T) {
 
 func TestManager_CheckRequirement_PluginAPIVersionUsesMajorCompatibility(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"plugin_api_version": "3.12.0",
 	}).Result)
 
@@ -253,7 +254,7 @@ func TestManager_CheckRequirement_PluginAPIVersionUsesMajorCompatibility(t *test
 
 func TestManager_CheckDependency_PrimarySatisfied(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container": "0.7.1",
 	}).Result)
 
@@ -269,7 +270,7 @@ func TestManager_CheckDependency_PrimarySatisfied(t *testing.T) {
 
 func TestManager_CheckDependency_AlternativeSatisfied(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container-alt": "1.0.0",
 	}).Result)
 
@@ -307,7 +308,7 @@ func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *t
 	// AddPluginConfig already triggered an opportunistic refresh via the mock fetcher, which
 	// reports nothing for "container". Observing a real version now must land without disturbing
 	// the removal-blocking entry.
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
 
 	provided, found, _, err := m.CheckRequirement("container", "0.4.0")
 	require.NoError(t, err)
@@ -323,7 +324,7 @@ func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *t
 func TestManager_OnFalcoVersionsObserved_CreatesFalcoOwnedEntryForUnknownName(t *testing.T) {
 	m := newTestManager()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}).Result)
 
@@ -336,7 +337,7 @@ func TestManager_OnFalcoVersionsObserved_NotifiesOnNewCapability(t *testing.T) {
 	m := newTestManager()
 	ch := m.Events()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
 
 	select {
 	case <-ch:
@@ -352,7 +353,7 @@ func TestManager_OnFalcoVersionsObserved_NotifiesWhenConfigEntryVersionIsFirstCo
 	require.NoError(t, err)
 	ch := m.Events()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
 
 	select {
 	case <-ch:
@@ -365,7 +366,7 @@ func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
 	m := newTestManager()
 	ch := m.Events()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
 	select {
 	case <-ch:
 	default:
@@ -374,7 +375,7 @@ func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
 
 	// Observing the same value again must not fire an event, even though the Manager's own
 	// bookkeeping went through an unrelated remove/re-add cycle for a different name in between.
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
 	select {
 	case <-ch:
 		t.Fatal("unexpected event: capability value did not change")
@@ -384,10 +385,10 @@ func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
 
 func TestManager_OnFalcoVersionsObserved_NotifiesOnVersionBump(t *testing.T) {
 	m := newTestManager()
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
 	ch := m.Events()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"container": "0.7.2"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.2"}).Result)
 
 	select {
 	case <-ch:
@@ -401,7 +402,7 @@ func TestManager_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
 	chA := m.Events()
 	chB := m.Events()
 
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
 
 	select {
 	case <-chA:
@@ -416,7 +417,7 @@ func TestManager_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
 }
 
 func TestManager_RefreshFalcoVersions_MergesFetchedSnapshot(t *testing.T) {
-	m := newTestManagerWithFetcher(compat.NewMockVersionsFetcher(map[string]string{
+	m := newTestManagerWithFetcher(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}))
 
@@ -431,7 +432,7 @@ func TestManager_RefreshFalcoVersions_MergesFetchedSnapshot(t *testing.T) {
 }
 
 func TestManager_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
-	m := newTestManagerWithFetcher(&compat.MockVersionsFetcher{FetchErr: assert.AnError})
+	m := newTestManagerWithFetcher(&compatfake.MockVersionsFetcher{FetchErr: assert.AnError})
 
 	_, err := m.RefreshFalcoVersions(context.Background())
 
@@ -441,7 +442,7 @@ func TestManager_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
 // TestManager_AddPluginConfig_ConcurrentWithCheckRequirement runs AddPluginConfig and
 // CheckRequirement concurrently to detect deadlocks or data races; run with -race.
 func TestManager_AddPluginConfig_ConcurrentWithCheckRequirement(t *testing.T) {
-	m := newTestManagerWithFetcher(compat.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}))
+	m := newTestManagerWithFetcher(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}))
 	fetcher := &artifact.Fetcher{}
 
 	done := make(chan struct{})

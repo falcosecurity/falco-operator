@@ -46,6 +46,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	pullerfake "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller/fake"
 )
 
 const (
@@ -767,7 +768,7 @@ func TestFetchAndCacheArtifactMeta_NoSources(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_OCICacheHit(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{}
+	mockPuller := &pullerfake.MockOCIPuller{}
 	rf := newTestRulesfile(withRulesfileOCI())
 	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
 
@@ -788,7 +789,7 @@ func TestFetchAndCacheArtifactMeta_OCICacheHit(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_OCICacheMiss(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "engine_version", Version: "0.36.0"}},
 		},
@@ -807,7 +808,7 @@ func TestFetchAndCacheArtifactMeta_OCICacheMiss(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_OCIFetchConfigError(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		FetchConfigErr: fmt.Errorf("registry unavailable"),
 	}
 	rf := newTestRulesfile(withRulesfileOCI())
@@ -824,7 +825,7 @@ func TestFetchAndCacheArtifactMeta_OCIFetchConfigError(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_OCIContentFetchError(t *testing.T) {
 	// The content layer is the only source of required_engine_version and
 	// required_plugin_versions, so a content fetch error is fatal and metadata is not persisted.
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult:    &puller.ArtifactConfig{},
 		ConfigDigest:    "sha256:ok",
 		FetchContentErr: fmt.Errorf("content layer missing"),
@@ -843,7 +844,7 @@ func TestFetchAndCacheArtifactMeta_OCIContentFetchError(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_OCIWithContentRequirements(t *testing.T) {
 	// Content YAML declares engine version requirement.
 	yamlContent := []byte(`- required_engine_version: 22`)
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult:  &puller.ArtifactConfig{},
 		ConfigDigest:  "sha256:content",
 		ContentResult: yamlContent,
@@ -905,7 +906,7 @@ func TestFetchAndCacheArtifactMeta_ConfigMapRequiredKeyMissing(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_InvalidSourceDoesNotPublishPartialAggregate(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
 		},
@@ -959,7 +960,7 @@ func TestFetchAndCacheArtifactMeta_AllConfiguredSources(t *testing.T) {
 			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
 		},
 	}
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
 		},
@@ -990,7 +991,7 @@ func TestFetchAndCacheArtifactMeta_ConfigMapChangeRebuildsCompleteAggregate(t *t
 			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
 		},
 	}
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
 		},
@@ -1030,7 +1031,7 @@ func TestFetchAndCacheArtifactMeta_RemovingSourcesDropsTheirMetadata(t *testing.
 			commonv1alpha1.ConfigMapRulesKey: `- required_engine_version: 15`,
 		},
 	}
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "plugin_api_version", Version: "3.0.0"}},
 		},
@@ -1066,7 +1067,7 @@ func TestFetchAndCacheArtifactMeta_CombinesConstraintsWithoutMaskingConflicts(t 
       version: "0.2.0"
 `},
 	}
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{
 				{Name: "engine_version_semver", Version: "0.60.0"},
@@ -1402,7 +1403,7 @@ func TestReconcile_SourceErrorInvalidatesObservedGeneration(t *testing.T) {
 
 func TestFetchAndCacheArtifactMeta_OCIWithDependencies(t *testing.T) {
 	// FetchConfig returns a dependency with an alternative.
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Dependencies: []puller.ArtifactDependency{
 				{
@@ -1431,7 +1432,7 @@ func TestFetchAndCacheArtifactMeta_OCIWithDependencies(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_OCICacheHitIgnoresDigest(t *testing.T) {
 	// Spec hash matches even though the stored digest is stale, so the cache is still a hit.
 	// Picking up a new image pushed to the same tag requires an explicit spec change.
-	mockPuller := &puller.MockOCIPuller{}
+	mockPuller := &pullerfake.MockOCIPuller{}
 	rf := newTestRulesfile(withRulesfileOCI())
 	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
 
@@ -1545,7 +1546,7 @@ func TestFetchAndCacheBinary_FastPath(t *testing.T) {
 	// call needed.
 	cacheDir := t.TempDir()
 	rf := newTestRulesfile(withRulesfileOCI())
-	mockPuller := &puller.MockOCIPuller{} // must not be called
+	mockPuller := &pullerfake.MockOCIPuller{} // must not be called
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, rf)
 
 	ref := artifact.ResolveReference(rf.Spec.OCIArtifact)
@@ -1571,10 +1572,10 @@ func TestFetchAndCacheBinary_SlowPath(t *testing.T) {
 	cacheDir := t.TempDir()
 	rf := newTestRulesfile(withRulesfileOCI())
 
-	tarGz, err := puller.MakeTarGz("rules.yml", []byte("- rule: test"))
+	tarGz, err := pullerfake.MakeTarGz("rules.yml", []byte("- rule: test"))
 	require.NoError(t, err)
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testRulesfileDigest,
 		Result:              &puller.RegistryResult{RootDigest: testRulesfileDigest, Type: puller.Rulesfile},
 		LayerContent:        tarGz,
@@ -1592,7 +1593,7 @@ func TestFetchAndCacheBinary_SlowPath(t *testing.T) {
 func TestFetchAndCacheBinary_PullError(t *testing.T) {
 	cacheDir := t.TempDir()
 	rf := newTestRulesfile(withRulesfileOCI())
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testRulesfileDigest,
 		PullErr:             fmt.Errorf("registry down"),
 	}
@@ -1668,7 +1669,7 @@ func TestReconcile_FetchAndCacheBinaryError(t *testing.T) {
 	rf := newTestRulesfile(withRulesfileOCI())
 	node := newTestNode()
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
 		ConfigDigest: testRulesfileDigest,
 		PullErr:      fmt.Errorf("registry down"),

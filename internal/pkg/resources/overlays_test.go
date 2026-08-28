@@ -29,7 +29,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 )
 
 func TestGenerateOverlayOptions(t *testing.T) {
@@ -46,23 +45,31 @@ func TestGenerateOverlayOptions(t *testing.T) {
 	}{
 		{
 			name: "Falco with defaults only produces labels option",
-			obj: builders.NewFalco().
-				WithName("test-f").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "falco"}).
-				Build(),
+			obj: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-f",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "falco"},
+				},
+			},
 			defs:         FalcoDefaults,
 			resourceType: ResourceTypeDaemonSet,
 			wantLabels:   map[string]string{"app": "falco"},
 		},
 		{
 			name: "Falco with all optional fields",
-			obj: builders.NewFalco().
-				WithName("test-f").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "falco"}).
-				WithReplicas(3).
-				WithVersion("0.38.0").
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).
-				Build(),
+			obj: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-f",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "falco"},
+				},
+				Spec: instancev1alpha1.FalcoSpec{
+					Replicas: new(int32(3)),
+					Version:  new("0.38.0"),
+					Strategy: &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+				},
+			},
 			defs:         FalcoDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "falco"},
@@ -72,39 +79,52 @@ func TestGenerateOverlayOptions(t *testing.T) {
 		},
 		{
 			name: "Falco with updateStrategy for DaemonSet",
-			obj: builders.NewFalco().
-				WithName("test-f").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "falco"}).
-				WithUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}).
-				Build(),
+			obj: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-f",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "falco"},
+				},
+				Spec: instancev1alpha1.FalcoSpec{
+					UpdateStrategy: &appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType},
+				},
+			},
 			defs:         FalcoDefaults,
 			resourceType: ResourceTypeDaemonSet,
 			wantLabels:   map[string]string{"app": "falco"},
 		},
 		{
 			name: "Falco with PodTemplateSpec propagates containers",
-			obj: builders.NewFalco().
-				WithName("test-f").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "falco"}).
-				WithPodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"disktype": "ssd"},
+			obj: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-f",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "falco"},
+				},
+				Spec: instancev1alpha1.FalcoSpec{
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							NodeSelector: map[string]string{"disktype": "ssd"},
+						},
 					},
-				}).
-				Build(),
+				},
+			},
 			defs:         FalcoDefaults,
 			resourceType: ResourceTypeDaemonSet,
 			wantLabels:   map[string]string{"app": "falco"},
 		},
 		{
 			name: "Falco with conflicting selector labels, selector labels take precedence in pod template",
-			obj: builders.NewFalco().
-				WithName("falco-custom").WithNamespace(testNamespace).
-				WithLabels(map[string]string{
-					"app.kubernetes.io/name":     "falco-operator",
-					"app.kubernetes.io/instance": "instance-1",
-				}).
-				Build(),
+			obj: &instancev1alpha1.Falco{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "falco-custom",
+					Namespace: testNamespace,
+					Labels: map[string]string{
+						"app.kubernetes.io/name":     "falco-operator",
+						"app.kubernetes.io/instance": "instance-1",
+					},
+				},
+			},
 			defs:         FalcoDefaults,
 			resourceType: ResourceTypeDaemonSet,
 			// In pod template, selector labels (name, instance) override user labels.
@@ -116,25 +136,37 @@ func TestGenerateOverlayOptions(t *testing.T) {
 		},
 		{
 			name: "Component with defaults only produces labels option",
-			obj: builders.NewComponent().
-				WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-				WithName("test-mc").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "metacollector"}).
-				Build(),
+			obj: &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mc",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "metacollector"},
+				},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+				},
+			},
 			defs:         MetacollectorDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "metacollector"},
 		},
 		{
 			name: "Component with all optional fields",
-			obj: builders.NewComponent().
-				WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-				WithName("test-mc").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "metacollector"}).
-				WithReplicas(5).
-				WithVersion("0.2.0").
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}).
-				Build(),
+			obj: &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mc",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "metacollector"},
+				},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{
+						Type:    instancev1alpha1.ComponentTypeMetacollector,
+						Version: new("0.2.0"),
+					},
+					Replicas: new(int32(5)),
+					Strategy: &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType},
+				},
+			},
 			defs:         MetacollectorDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "metacollector"},
@@ -144,39 +176,54 @@ func TestGenerateOverlayOptions(t *testing.T) {
 		},
 		{
 			name: "Component with PodTemplateSpec",
-			obj: builders.NewComponent().
-				WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-				WithName("test-mc").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "metacollector"}).
-				WithPodTemplateSpec(&corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						NodeSelector: map[string]string{"zone": "us-east"},
+			obj: &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mc",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "metacollector"},
+				},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+					PodTemplateSpec: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							NodeSelector: map[string]string{"zone": "us-east"},
+						},
 					},
-				}).
-				Build(),
+				},
+			},
 			defs:         MetacollectorDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "metacollector"},
 		},
 		{
 			name: "Falcosidekick component with defaults",
-			obj: builders.NewComponent().
-				WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
-				WithName("test-sk").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "sidekick"}).
-				Build(),
+			obj: &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sk",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "sidekick"},
+				},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+				},
+			},
 			defs:         FalcosidekickDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "sidekick"},
 		},
 		{
 			name: "Falcosidekick-UI component with custom replicas",
-			obj: builders.NewComponent().
-				WithComponentType(instancev1alpha1.ComponentTypeFalcosidekickUI).
-				WithName("test-ui").WithNamespace(testNamespace).
-				WithLabels(map[string]string{"app": "sidekick-ui"}).
-				WithReplicas(3).
-				Build(),
+			obj: &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ui",
+					Namespace: testNamespace,
+					Labels:    map[string]string{"app": "sidekick-ui"},
+				},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekickUI},
+					Replicas:  new(int32(3)),
+				},
+			},
 			defs:         FalcosidekickUIDefaults,
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "sidekick-ui"},
@@ -247,16 +294,27 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			if tt.wantStrategy != "" {
 				strategyType, _, _ := unstructured.NestedString(overlay.Object, "spec", "strategy", "type")
 				assert.Equal(t, tt.wantStrategy, strategyType)
+
+				// Verify mutually exclusive fields: Recreate must NOT have rollingUpdate.
+				if strategyType == string(appsv1.RecreateDeploymentStrategyType) {
+					_, found, _ := unstructured.NestedMap(overlay.Object, "spec", "strategy", "rollingUpdate")
+					assert.False(t, found, "rollingUpdate must be absent for Recreate strategy so SSA removes it")
+				}
 			}
 		})
 	}
 
 	t.Run("DaemonSet updateStrategy is applied in overlay", func(t *testing.T) {
-		obj := builders.NewFalco().
-			WithName("test-f").WithNamespace(testNamespace).
-			WithLabels(map[string]string{"app": "falco"}).
-			WithUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}).
-			Build()
+		obj := &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-f",
+				Namespace: testNamespace,
+				Labels:    map[string]string{"app": "falco"},
+			},
+			Spec: instancev1alpha1.FalcoSpec{
+				UpdateStrategy: &appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType},
+			},
+		}
 		opts := GenerateOverlayOptions(obj)
 		overlay, err := GenerateUserOverlay(ResourceTypeDaemonSet, "test", FalcoDefaults, opts...)
 		require.NoError(t, err)
@@ -266,10 +324,13 @@ func TestGenerateOverlayOptions(t *testing.T) {
 	})
 
 	t.Run("unsupported resource type returns error", func(t *testing.T) {
-		obj := builders.NewFalco().
-			WithName("test-f").WithNamespace(testNamespace).
-			WithLabels(map[string]string{"app": "falco"}).
-			Build()
+		obj := &instancev1alpha1.Falco{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-f",
+				Namespace: testNamespace,
+				Labels:    map[string]string{"app": "falco"},
+			},
+		}
 		opts := GenerateOverlayOptions(obj)
 		_, err := GenerateUserOverlay("StatefulSet", "test", FalcoDefaults, opts...)
 		require.Error(t, err)
@@ -487,8 +548,15 @@ func TestApplyArtifactClientCertOverlay(t *testing.T) {
 // TestWithArtifactClientCertOverlay verifies the artifact-operator sidecar appears exactly once
 // in the overlay's containers after GenerateUserOverlay.
 func TestWithArtifactClientCertOverlay(t *testing.T) {
-	falco := builders.NewFalco().WithName("test-f").WithNamespace(testNamespace).
-		WithType(ResourceTypeDaemonSet).Build()
+	falco := &instancev1alpha1.Falco{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-f",
+			Namespace: testNamespace,
+		},
+		Spec: instancev1alpha1.FalcoSpec{
+			Type: new(ResourceTypeDaemonSet),
+		},
+	}
 
 	opts := append(GenerateOverlayOptions(falco), WithArtifactClientCertOverlay("test-f-artifact-client-tls", "test-falco-operator-artifact-ca-bundle"))
 	overlay, err := GenerateUserOverlay(ResourceTypeDaemonSet, falco.Name, FalcoDefaults, opts...)

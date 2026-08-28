@@ -38,10 +38,10 @@ func TestConfigMapBuilder(t *testing.T) {
 		WithName("my-cm").
 		WithNamespace("ns").
 		WithLabels(labels).
-		WithFinalizers([]string{"test-finalizer"}).
-		WithDeletionTimestamp(&now).
 		WithData(data).
 		Build()
+	cm.Finalizers = []string{"test-finalizer"}
+	cm.DeletionTimestamp = &now
 
 	assert.Equal(t, "my-cm", cm.Name)
 	assert.Equal(t, "ns", cm.Namespace)

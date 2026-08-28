@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -36,14 +37,27 @@ func TestConfigByConfigMapRef(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "no configmap ref returns nil",
-			config: builders.NewConfig().WithName("my-config").WithNamespace(testNamespace).Build(),
-			want:   nil,
+			name: "no configmap ref returns nil",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-config",
+					Namespace: testNamespace,
+				},
+			},
+			want: nil,
 		},
 		{
-			name:   "with configmap ref returns index key",
-			config: builders.NewConfig().WithName("my-config").WithNamespace(testNamespace).WithConfigMapRef(&commonv1alpha1.ConfigMapRef{Name: "my-cm"}).Build(),
-			want:   []string{testNamespace + "/my-cm"},
+			name: "with configmap ref returns index key",
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "my-config",
+					Namespace: testNamespace,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-cm"},
+				},
+			},
+			want: []string{testNamespace + "/my-cm"},
 		},
 	}
 

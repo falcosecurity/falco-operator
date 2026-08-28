@@ -14,15 +14,20 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package filesystem
+// Package fake provides a test double for filesystem.FileSystem.
+package fake
 
 import (
 	"errors"
 	"io"
 	"io/fs"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 )
 
-// MockFileSystem implements FileSystem for testing.
+var _ filesystem.FileSystem = (*MockFileSystem)(nil)
+
+// MockFileSystem implements filesystem.FileSystem for testing.
 type MockFileSystem struct {
 	Files        map[string][]byte
 	StatErr      error

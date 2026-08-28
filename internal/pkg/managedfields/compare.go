@@ -46,15 +46,3 @@ func Compare(current, desired *unstructured.Unstructured) (*typed.Comparison, er
 
 	return currentTyped.Compare(desiredTyped)
 }
-
-// NeedsUpdate checks if the current object needs to be updated to match the desired state.
-// Returns true if there are any differences (additions, modifications, or removals).
-func NeedsUpdate(current, desired *unstructured.Unstructured) (bool, error) {
-	comparison, err := Compare(current, desired)
-	if err != nil {
-		return true, err
-	}
-
-	// If any fields were added, modified, or removed, we need an update
-	return !comparison.Added.Empty() || !comparison.Modified.Empty() || !comparison.Removed.Empty(), nil
-}

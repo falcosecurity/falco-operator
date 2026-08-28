@@ -28,8 +28,8 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
@@ -41,8 +41,8 @@ func TestWarmSyncRunnable_Warmup_Succeeds(t *testing.T) {
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		Build()
 
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	mgr := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
 	r := nodeartifacts.NewWarmSyncRunnable(cl, mgr, "ns", "minikube")
 	require.NoError(t, r.Warmup(context.Background()))
@@ -53,8 +53,8 @@ func TestWarmSyncRunnable_Warmup_WrapsError(t *testing.T) {
 	// exercising Warmup's error-wrapping path.
 	cl := fake.NewClientBuilder().WithScheme(runtime.NewScheme()).Build()
 
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	mgr := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
 	r := nodeartifacts.NewWarmSyncRunnable(cl, mgr, "ns", "minikube")
 	err := r.Warmup(context.Background())

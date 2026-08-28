@@ -32,10 +32,21 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
+
+// removeConfig removes plugin's entry, resolved via ResolveConfigName. Test-only: production
+// code always resolves the config name itself and calls removeByName directly.
+func (pc *pluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
+	pc.removeByName(ResolveConfigName(plugin))
+}
+
+// isEmpty reports whether pc has no configs and no load_plugins entries. Test-only.
+func (pc *pluginsConfig) isEmpty() bool {
+	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
+}
 
 func defaultLibraryPath(name string) string {
 	return artifact.ArtifactPath(artifact.DefaultArtifactDirs(), name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
@@ -665,7 +676,7 @@ func findPluginConfig(configs []pluginConfig, name string) *pluginConfig {
 }
 
 func newPluginConfigTestManager() *Manager {
-	return NewManager(&artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil))
+	return NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 }
 
 func TestManager_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
@@ -740,9 +751,9 @@ func TestManager_AddPluginConfig_SameConfigNameDoesNotRemoveEntry(t *testing.T) 
 }
 
 func TestManager_AddPluginConfig_StoreFailureSurfacesError(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	mockFS.WriteErr = fmt.Errorf("disk full")
-	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil))
+	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "test-plugin"}}
 
 	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, &artifact.Fetcher{})

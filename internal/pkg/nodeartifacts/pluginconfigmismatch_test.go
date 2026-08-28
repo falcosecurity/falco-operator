@@ -24,15 +24,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 // TestManager_PluginLoadMismatch_NeverObserved uses a Manager whose falcoFetcher always fails,
 // so lastFalcoPluginVersions stays nil instead of becoming an observed-but-empty set.
 func TestManager_PluginLoadMismatch_NeverObserved(t *testing.T) {
-	m := newTestManagerWithFetcher(&compat.MockVersionsFetcher{FetchErr: assert.AnError})
+	m := newTestManagerWithFetcher(&compatfake.MockVersionsFetcher{FetchErr: assert.AnError})
 	fetcher := &artifact.Fetcher{}
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestManager_PluginLoadMismatch(t *testing.T) {
 				_, _, err := m.AddPluginConfig(context.Background(), testPlugin(name), nil, fetcher)
 				require.NoError(t, err)
 			}
-			m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcherWithPlugins(tt.observe).Result)
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(tt.observe).Result)
 
 			assert.Equal(t, tt.want, m.PluginLoadMismatch())
 		})
@@ -95,9 +95,9 @@ func TestManager_PluginLoadMismatch(t *testing.T) {
 }
 
 func TestManager_ForceRewritePluginConfig_BypassesDedup(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}
-	m := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 
 	_, file, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
@@ -122,9 +122,9 @@ func TestManager_ForceRewritePluginConfig_BypassesDedup(t *testing.T) {
 }
 
 func TestManager_ForceRewritePluginConfig_PropagatesStoreError(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}
-	m := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 
 	mockFS.WriteErr = assert.AnError

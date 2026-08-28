@@ -61,42 +61,64 @@ func TestHandleDeletion(t *testing.T) {
 	}{
 		{
 			name: "not marked for deletion returns early",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithFinalizers([]string{finalizerName}).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.Finalizers = []string{finalizerName}
+				return cm
+			}(),
 			wantHandled: false,
 		},
 		{
 			name: "no finalizer returns true",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithDeletionTimestamp(&now).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.DeletionTimestamp = &now
+				return cm
+			}(),
 			skipObjInClient: true,
 			wantHandled:     true,
 		},
 		{
 			name: "removes cluster resources and finalizer",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.Finalizers = []string{finalizerName}
+				cm.DeletionTimestamp = &now
+				return cm
+			}(),
 			createClusterResources: true,
 			wantHandled:            true,
 		},
 		{
 			name: "handles deletion when cluster resources do not exist",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.Finalizers = []string{finalizerName}
+				cm.DeletionTimestamp = &now
+				return cm
+			}(),
 			createClusterResources: false,
 			wantHandled:            true,
 		},
 		{
 			name: "returns error when cluster resource deletion fails",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.Finalizers = []string{finalizerName}
+				cm.DeletionTimestamp = &now
+				return cm
+			}(),
 			deleteErr: fmt.Errorf("injected delete error"),
 			wantErr:   "injected delete error",
 		},
 		{
 			name: "returns error when finalizer patch fails",
-			obj: builders.NewConfigMap().WithName("test").WithNamespace("default").
-				WithFinalizers([]string{finalizerName}).WithDeletionTimestamp(&now).Build(),
+			obj: func() *corev1.ConfigMap {
+				cm := builders.NewConfigMap().WithName("test").WithNamespace("default").Build()
+				cm.Finalizers = []string{finalizerName}
+				cm.DeletionTimestamp = &now
+				return cm
+			}(),
 			patchErr: fmt.Errorf("injected patch error"),
 			wantErr:  "injected patch error",
 		},

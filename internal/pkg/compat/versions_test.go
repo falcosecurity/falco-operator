@@ -288,31 +288,3 @@ func TestWaitAndFetch(t *testing.T) {
 		assert.Equal(t, "0.44.1", val)
 	})
 }
-
-func TestMockVersionsFetcher(t *testing.T) {
-	t.Run("returns configured capabilities", func(t *testing.T) {
-		m := NewMockVersionsFetcher(map[string]string{"falco_version": "0.44.1"})
-		v, err := m.Fetch(context.Background())
-		require.NoError(t, err)
-		val, found := v.Capability("falco_version")
-		assert.True(t, found)
-		assert.Equal(t, "0.44.1", val)
-	})
-
-	t.Run("returns configured error", func(t *testing.T) {
-		m := &MockVersionsFetcher{FetchErr: errors.New("fetch failed")}
-		_, err := m.Fetch(context.Background())
-		require.EqualError(t, err, "fetch failed")
-	})
-}
-
-func TestNewMockVersionsFetcherWithPlugins(t *testing.T) {
-	m := NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"})
-	v, err := m.Fetch(context.Background())
-	require.NoError(t, err)
-
-	assert.Equal(t, map[string]string{"container": "0.7.1"}, v.PluginVersions())
-	val, found := v.Capability("container")
-	assert.True(t, found, "plugin entries must also be flattened into capabilities, matching real Fetch behavior")
-	assert.Equal(t, "0.7.1", val)
-}

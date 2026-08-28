@@ -35,9 +35,9 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
@@ -58,13 +58,13 @@ func TestMain(m *testing.M) {
 // newIntegrationReconciler builds a reconciler backed by the real API server but with an
 // in-memory filesystem, so reconciles touch the cluster but not disk.
 func newIntegrationReconciler() *RulesfileReconciler {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	return &RulesfileReconciler{
 		Client:    k8sClient,
 		Scheme:    k8sClient.Scheme(),
 		recorder:  events.NewFakeRecorder(100),
 		fetcher:   &artifact.Fetcher{K8sClient: k8sClient},
-		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
 		nodeName:  testutil.TestNodeName,
 		namespace: testutil.TestNamespace,
 	}
