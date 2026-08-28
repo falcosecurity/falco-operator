@@ -1,0 +1,220 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-selector-node-label
+spec:
+  description: |
+    Validates the full selector lifecycle: a Rulesfile that initially matches no nodes
+    starts matching when the node is labeled, and stops matching when the label is removed.
+
+    Flow:
+    1. Create Falco and a Rulesfile with selector matchLabels: {chainsaw-sel: "enabled"}.
+       No node carries this label → Programmed=Unknown/NoNodesAssigned.
+    2. Label the node that runs the Falco DaemonSet pod.
+       Instance operator detects the new match → creates ArtifactNode → per-node sidecar
+       installs the rules file → Programmed=True.
+    3. Remove the label from the node.
+       Instance operator detects no more matches → deletes ArtifactNode → rules file
+       removed from disk → Programmed=Unknown/NoNodesAssigned.
+
+    The catch clause removes the test label from all nodes to restore cluster state if
+    the test fails mid-run.
+
+  bindings:
+    - name: falco_name
+      value: falco-selector-node-label-test
+    - name: rulesfile_name
+      value: rulesfile-selector-node-label-test
+    - name: test_name
+      value: rulesfile-selector-node-label
+    - name: inline_file
+      value: 50-03-rulesfile-selector-node-label-test-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile-with-non-matching-selector"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                selector:
+                  matchLabels:
+                    chainsaw-sel: "enabled"
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw selector-node-label rule
+                    desc: Rule used in selector lifecycle test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=selector-node-label"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Assert-initially-no-nodes-assigned"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 04: Label-the-falco-node"
+      description: |
+        Retrieve the node name from the Falco DaemonSet pod and apply the selector label.
+        The instance operator watches node label changes and will create an ArtifactNode
+        for the newly matching node.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              NODE=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" \
+                -o jsonpath='{.items[0].spec.nodeName}')
+              if [ -z "$NODE" ]; then
+                echo "ERROR: could not find Falco pod node in namespace $NAMESPACE"
+                exit 1
+              fi
+              kubectl label node "$NODE" chainsaw-sel=enabled --overwrite
+              echo "Labeled node $NODE with chainsaw-sel=enabled"
+
+    - name: "Step 05: Assert-artifact-node-created-and-programmed"
+      description: |
+        After the node is labeled, the instance operator creates an ArtifactNode and the
+        per-node sidecar installs the rules file. Rulesfile Programmed=True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Remove-label-from-node"
+      description: |
+        Remove the selector label. The instance operator detects the node no longer
+        matches the selector, deletes the ArtifactNode, and the per-node sidecar
+        removes the rules file from disk.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              NODE=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" \
+                -o jsonpath='{.items[0].spec.nodeName}')
+              kubectl label node "$NODE" chainsaw-sel- 2>/dev/null || true
+              echo "Removed chainsaw-sel label from node $NODE"
+
+    - name: "Step 08: Wait-for-artifact-node-deletion"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 09: Assert-no-nodes-assigned-again"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 10: Assert-file-removed-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Remove test label from all nodes to restore cluster state.
+      script:
+        content: |
+          kubectl label node --all chainsaw-sel- 2>/dev/null || true
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

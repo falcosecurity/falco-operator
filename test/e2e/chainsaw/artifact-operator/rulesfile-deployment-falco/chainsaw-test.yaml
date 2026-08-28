@@ -1,0 +1,146 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-deployment-falco
+spec:
+  description: |
+    Validates the basic inline Rulesfile lifecycle when Falco runs as a Deployment
+    (rather than the default DaemonSet).
+
+    The instance operator handles both DaemonSet and Deployment Falco types. For a
+    Deployment with 1 replica, the operator creates one ArtifactNode (for the single
+    replica pod's node), and the per-node sidecar in that pod reconciles it.
+
+    This test mirrors rulesfile-basic-inline but with falco_type=Deployment to confirm
+    there is no regression specific to the Deployment type.
+
+  bindings:
+    - name: falco_name
+      value: falco-rulesfile-deployment-test
+    - name: rulesfile_name
+      value: rulesfile-deployment-falco-test
+    - name: test_name
+      value: rulesfile-deployment-falco
+    - name: inline_file
+      value: 50-03-rulesfile-deployment-falco-test-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco-deployment"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw deployment-falco rule
+                    desc: Rule verifying inline Rulesfile lifecycle with Deployment-type Falco.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=deployment-falco"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Assert-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Delete-rulesfile"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 06: Assert-file-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

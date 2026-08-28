@@ -1,0 +1,53 @@
+# Template for creating and asserting a Rulesfile with inline rules.
+#
+# The instance operator parses the inline YAML, creates ArtifactNode objects for
+# each matching node, and the artifact sidecar installs the rules to disk. The
+# template waits for the InlineArtifactProgrammed and Programmed aggregate conditions
+# to reach True on the parent Rulesfile.
+#
+# Required bindings:
+#   - rulesfile_name: Name of the Rulesfile CR to create.
+#   - namespace:      Namespace for the Rulesfile.
+#
+# Optional bindings:
+#   - rulesfile_priority: Priority (0-99). Default: 50.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-rulesfile-inline
+spec:
+  bindings:
+    - name: rulesfile_priority
+      value: 50
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          spec:
+            priority: ($rulesfile_priority)
+            inlineRules:
+              - required_engine_version: "0.30.0"
+              - rule: Chainsaw test rule
+                desc: Minimal rule injected by the chainsaw test suite.
+                condition: "evt.type = execve"
+                output: >
+                  Process executed during chainsaw test
+                  (command=%proc.cmdline container=%container.id)
+                priority: DEBUG
+                tags: [test, chainsaw]
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'InlineArtifactProgrammed']):
+              - status: 'True'
+            (conditions[?type == 'Programmed']):
+              - status: 'True'

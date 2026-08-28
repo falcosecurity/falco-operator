@@ -1,0 +1,278 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-config-removal-order
+spec:
+  description: |
+    Validates that deleting one plugin from a two-plugin setup correctly rewrites the shared
+    plugins config file (removing only the deleted plugin) without removing the file entirely
+    or corrupting the remaining plugin's entry.
+
+    The shared plugins config file (/etc/falco/config.d/99-03-plugins-config-inline.yaml)
+    lists all installed plugins. The per-node sidecar processes plugin config removal in a
+    specific order: removes the config entry first (via removePluginConfig), then deletes
+    the binary. When a second plugin remains, PluginsConfig.isEmpty() is false, so the file
+    is REWRITTEN (not deleted) without the removed plugin's entry.
+
+    Flow:
+    1. Install container plugin → Programmed=True.
+    2. Install json plugin → Programmed=True.
+    3. Assert both .so files on disk. Assert both plugins appear in the config file.
+    4. Delete the json Plugin CR. Wait for its ArtifactNode to be GC'd.
+    5. Assert json .so absent. Assert container .so still present.
+    6. Assert plugin config file still exists with container entry but NOT json.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-config-removal-test
+    - name: container_plugin
+      value: container
+    - name: json_plugin
+      value: json
+    - name: test_name
+      value: plugin-config-removal-order
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: plugin_config_file
+      value: 99-03-plugins-config-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-container-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($container_plugin)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Install-json-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($json_plugin)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Assert-both-binaries-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$container_plugin, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Assert-container-in-plugin-config"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_plugin)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 06: Assert-json-in-plugin-config"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($json_plugin)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 07: Delete-json-plugin"
+      description: Delete the json Plugin CR. No Rulesfile references it, so no finalizer blocks deletion.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($json_plugin)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $json_plugin]))
+            for:
+              deletion: {}
+
+    - name: "Step 08: Assert-json-binary-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$json_plugin, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 09: Assert-container-binary-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$container_plugin, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 10: Assert-plugin-config-file-still-exists"
+      description: File must NOT be deleted; container still has an entry.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: ($plugin_config_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 11: Assert-container-still-in-plugin-config"
+      description: Container plugin entry must remain intact in the rewritten config file.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_plugin)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 12: Assert-json-absent-from-plugin-config"
+      description: |
+        After json Plugin deletion, its load_plugins entry and plugins[] entry must be gone.
+        The script checks for json count == 0 in load_plugins.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              MAX_RETRIES=120
+              RETRY_DELAY=2
+              LAST_ERROR="no attempts made"
+              for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
+                POD=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" \
+                  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+                if [ -z "$POD" ]; then
+                  LAST_ERROR="pod not found"
+                  sleep "$RETRY_DELAY"; continue
+                fi
+                CONTENT=$(kubectl exec -n "$NAMESPACE" "$POD" -c falco -- \
+                  sh -c "cat /etc/falco/config.d/99-03-plugins-config-inline.yaml 2>/dev/null" 2>/dev/null || true)
+                if [ -z "$CONTENT" ]; then
+                  LAST_ERROR="config file not readable"
+                  sleep "$RETRY_DELAY"; continue
+                fi
+                CONFIG_JSON=$(printf '%s' "$CONTENT" | yq -o=json '.' 2>/dev/null || true)
+                if [ -z "$CONFIG_JSON" ]; then
+                  LAST_ERROR="failed to parse config YAML"
+                  sleep "$RETRY_DELAY"; continue
+                fi
+                COUNT=$(printf '%s' "$CONFIG_JSON" | jq '[.load_plugins[]? | select(. == "json")] | length')
+                if [ "$COUNT" -eq "0" ]; then
+                  printf '%s' "$CONFIG_JSON" | jq -c \
+                    '{"status":"success","message":"json not found in load_plugins","load_plugins":.load_plugins}'
+                  exit 0
+                fi
+                LAST_ERROR="json still in load_plugins: count=$COUNT"
+                sleep "$RETRY_DELAY"
+              done
+              echo "{\"status\":\"failure\",\"message\":\"$LAST_ERROR\",\"attempts\":$MAX_RETRIES}"
+              exit 1
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

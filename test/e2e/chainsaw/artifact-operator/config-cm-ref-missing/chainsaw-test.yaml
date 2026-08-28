@@ -1,0 +1,206 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-cm-ref-missing
+spec:
+  description: |
+    Validates that updating configMapRef.name to a ConfigMap that does not exist
+    sets ResolvedRefs=False and Programmed=False, while the previously installed
+    config file is preserved on disk.
+
+    Config's generation gate is ALWAYS active (unlike Rulesfile/Plugin which only gate
+    in enforce mode). The per-node controller defers until ObservedGeneration is stamped,
+    then enforceReferenceResolution fails → ResolvedRefs=False → Programmed=False.
+    ensureConfig is still called but the CM fetch fails → ConfigMapArtifactProgrammed=False.
+    The old file on disk is NOT removed (a broken update must never delete a working install).
+
+    Setup: Falco (real). Config CR with CM-A reference, Programmed=True, file on disk.
+
+    After patching configMapRef.name to nonexistent CM:
+    - ResolvedRefs=False/ReferenceResolutionFailed on Config and ArtifactNode.
+    - Programmed=False.
+    - Old config file still present on disk with CM-A content.
+
+  bindings:
+    - name: falco_name
+      value: falco-config-cm-ref-missing-test
+    - name: config_name
+      value: config-cm-ref-missing-test
+    - name: cm_a_name
+      value: config-cm-ref-missing-cm-a
+    - name: test_name
+      value: config-cm-ref-missing
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-configmap-A"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_a_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: config-a.yaml
+            - name: data_key
+              value: config.yaml
+
+    - name: "Step 03: Create-config-pointing-to-A"
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                configMapRef:
+                  name: config-cm-ref-missing-cm-a
+
+    - name: "Step 04: Assert-initial-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-cm-ref-missing-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-cm-a-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: content_pattern
+              value: "marker: config-cm-ref-missing-a"
+
+    - name: "Step 07: Swap-configMapRef-to-nonexistent"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef:
+                  name: config-cm-ref-missing-cm-does-not-exist
+
+    - name: "Step 08: Assert-reference-resolution-failed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'False'
+                    reason: ReferenceResolutionFailed
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'False'
+                    reason: ReferenceResolutionFailed
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: "Step 09: Assert-old-file-still-on-filesystem"
+      description: Broken update must not remove the working install.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-cm-ref-missing-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 10: Assert-old-content-still-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: content_pattern
+              value: "marker: config-cm-ref-missing-a"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

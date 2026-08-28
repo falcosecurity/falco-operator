@@ -1,0 +1,471 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-source-removed
+spec:
+  description: |
+    Validates progressive source removal from a multi-source Rulesfile (OCI, ConfigMap,
+    inline). All three sources are installed, then removed one by one. After each removal:
+    the removed source's file is deleted from the node filesystem, its per-source condition
+    is removed from the Rulesfile and ArtifactNode, and the remaining sources stay intact.
+    Removing the last source (all sources nil) triggers a full cleanup: DependenciesSatisfied
+    is removed, the final file is deleted, and Programmed flips to False.
+
+    Steps:
+    1.  Create a Falco DaemonSet.
+    2.  Install the container plugin to satisfy the falco-rules OCI dependency.
+    3.  Create a ConfigMap with rules.
+    4.  Create a Rulesfile with all three sources (OCI, ConfigMap, inline).
+    5.  Assert all five conditions True on both Rulesfile and ArtifactNode (3 installed).
+    6.  Assert OCI file is present on the node filesystem.
+    7.  Assert ConfigMap file is present on the node filesystem.
+    8.  Assert inline file is present on the node filesystem.
+    9.  Remove inlineRules from spec; assert InlineArtifactProgrammed gone, OCI+CM remain
+        True, Programmed=True, installedArtifacts=2.
+    10. Assert inline file is absent from the node filesystem.
+    11. Assert OCI file is still present.
+    12. Assert ConfigMap file is still present.
+    13. Remove configMapRef from spec; assert ConfigMapArtifactProgrammed gone, OCI remains
+        True, Programmed=True, installedArtifacts=1.
+    14. Assert ConfigMap file is absent from the node filesystem.
+    15. Assert OCI file is still present.
+    16. Remove ociArtifact from spec (all sources now nil); enforceRulesfileCompatibility
+        takes the all-nil path, removes DependenciesSatisfied, and returns skip=false so
+        ensureRulesfile's own stale-entry cleanup runs: the OCI file is deleted and
+        OCIArtifactProgrammed is removed too. With no conditions left to gate on, Programmed
+        becomes False/ProgramFailed. Assert DependenciesSatisfied and OCIArtifactProgrammed
+        both absent, Programmed=False/ProgramFailed, installedArtifacts=0.
+    17. Assert the OCI file is now absent from the node filesystem (cleaned up, not stale).
+
+  bindings:
+    - name: falco_name
+      value: falco-source-removed-test
+    - name: rulesfile_name
+      value: rulesfile-source-removed-test
+    - name: configmap_name
+      value: rulesfile-source-removed-cm
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: rulesfile-source-removed
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-container-plugin"
+      description: Install the container plugin to satisfy the falco-rules OCI dep.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Create-rules-configmap"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($configmap_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: rules.yaml
+
+    - name: "Step 04: Create-rulesfile"
+      description: Create the Rulesfile with all three sources (OCI + ConfigMap + inline).
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+                configMapRef:
+                  name: ($configmap_name)
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw source-removed inline rule
+                    desc: Inline rule that will be removed from the spec.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline source=inline"
+                    priority: DEBUG
+                    tags: [test, chainsaw, source-removed]
+
+    - name: "Step 05: Assert-initial-conditions"
+      description: All five conditions must be True before any source is removed.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 3
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Assert-oci-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-source-removed-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-source-removed-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 08: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-source-removed-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 09: Remove-inline-source"
+      description: |
+        Remove inlineRules from spec. ensureRulesfile's stale-entry cleanup deletes the
+        inline file and removes InlineArtifactProgrammed from the node's conditions. OCI
+        and ConfigMap sources remain installed; DependenciesSatisfied and Programmed stay True.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules: null
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'InlineArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 10: Assert-inline-file-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-source-removed-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 11: Assert-oci-file-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-source-removed-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 12: Assert-cm-file-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-source-removed-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 13: Remove-configmap-source"
+      description: |
+        Remove configMapRef from spec. The CM file is deleted and ConfigMapArtifactProgrammed
+        is removed from conditions. The OCI source remains; DependenciesSatisfied and
+        Programmed stay True.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef: null
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ConfigMapArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'InlineArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'ConfigMapArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 14: Assert-cm-file-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-source-removed-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 15: Assert-oci-file-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-source-removed-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 16: Remove-all-sources"
+      description: |
+        Remove the last source (ociArtifact). With all sources nil, enforceRulesfileCompatibility
+        removes DependenciesSatisfied and returns skip=false, so ensureRulesfile's own
+        stale-entry cleanup runs: the OCI file is deleted from disk and OCIArtifactProgrammed
+        is removed too. With no conditions left to gate on, Programmed becomes False with
+        reason ProgramFailed ("no conditions to gate on").
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact: null
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 17: Assert-oci-file-removed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-source-removed-test-oci.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

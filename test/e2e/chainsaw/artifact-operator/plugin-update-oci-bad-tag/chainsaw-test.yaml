@@ -1,0 +1,137 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-update-oci-bad-tag
+spec:
+  description: |
+    Validates that updating a Plugin's OCI tag to one that does not exist in the
+    registry sets Programmed=False on the parent while leaving the previously installed
+    plugin binary untouched on disk.
+
+    The instance operator owns the OCI metadata fetch (fetchAndCacheArtifactMeta). When
+    the tag cannot be resolved, it sets Programmed=False / OCIArtifactProgramFailed
+    directly on the Plugin CR and does not advance ObservedGeneration, so per-node
+    operators remain deferred and the old binary is never touched.
+
+    Setup: Falco (real, enforce mode). Container plugin installed from the local OCI
+    registry, reaching Programmed=True with the .so on disk.
+
+    After patching the OCI tag to a nonexistent value:
+    - Programmed=False, reason=OCIArtifactProgramFailed on the Plugin.
+    - The .so on disk is NOT removed.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-update-oci-bad-tag-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-update-oci-bad-tag
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-plugin-with-valid-tag"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Assert-binary-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 04: Update-oci-tag-to-bad"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    tag: this-tag-does-not-exist
+
+    - name: "Step 05: Assert-programmed-false"
+      description: |
+        The instance operator cannot resolve the new tag and sets Programmed=False
+        with reason OCIArtifactProgramFailed directly on the Plugin CR.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: OCIArtifactProgramFailed
+
+    - name: "Step 06: Assert-old-binary-still-on-filesystem"
+      description: The failed update must not remove the previously installed binary.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

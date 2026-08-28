@@ -1,0 +1,159 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-oci-bad-tag
+spec:
+  description: |
+    Validates that updating a Rulesfile's OCI tag to one that does not exist in the
+    registry sets Programmed=False on the parent while leaving the previously installed
+    rules file untouched on disk.
+
+    The instance operator owns the OCI metadata fetch (fetchAndCacheArtifactMeta). When
+    the tag cannot be resolved, it sets Programmed=False / ProgramFailed directly on the
+    Rulesfile CR and does not advance ObservedGeneration, so per-node operators remain
+    deferred and the old file is never touched.
+
+    Setup: Falco (real, enforce mode). Rulesfile initially backed by
+    falco-test/rulesfile-engine-req-met:latest (engine requirement only, no plugin dep),
+    reaching Programmed=True with the rules file on disk.
+
+    After patching the OCI tag to a nonexistent value:
+    - Programmed=False, reason=ProgramFailed on the Rulesfile.
+    - The rules file on disk is NOT removed.
+
+  bindings:
+    - name: falco_name
+      value: falco-update-oci-bad-tag-test
+    - name: rulesfile_name
+      value: rulesfile-update-oci-bad-tag-test
+    - name: test_name
+      value: rulesfile-update-oci-bad-tag
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: oci_file
+      value: 50-01-rulesfile-update-oci-bad-tag-test-oci.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile-with-valid-tag"
+      description: |
+        OCI rulesfile with engine requirement only (no plugin dep) so it reaches
+        Programmed=True without needing an additional plugin install.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 03: Assert-initially-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Update-oci-tag-to-bad"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    tag: this-tag-does-not-exist
+
+    - name: "Step 06: Assert-programmed-false"
+      description: |
+        The instance operator cannot resolve the new tag and sets Programmed=False
+        with reason ProgramFailed directly on the Rulesfile CR.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 07: Assert-old-file-still-on-filesystem"
+      description: The failed update must not remove the previously installed rules file.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

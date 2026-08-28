@@ -1,0 +1,252 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-multi
+spec:
+  description: |
+    Validates that two plugins (container and k8saudit) can be installed side by side,
+    both landing correctly in the single shared plugins-config file:
+    1. Create a Falco DaemonSet.
+    2. Install the container Plugin with a custom initConfig.
+    3. Install the k8saudit Plugin with a custom openParams.
+    4. For each plugin, assert its entry in the shared config file is structurally sane:
+       appears in load_plugins exactly once, exactly one plugins: entry with that name,
+       and its config (initConfig or openParams) matches what was configured.
+    5. Assert both .so binaries are present on the node filesystem.
+    6. Assert Falco's /versions REST API reports both plugins as loaded.
+    7. Delete both Plugin CRs.
+    8. Assert both ArtifactNodes are garbage-collected.
+    9. Assert both .so binaries are absent from the node filesystem.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-multi-test
+    - name: container_plugin_name
+      value: container
+    - name: k8saudit_plugin_name
+      value: k8saudit
+    - name: test_name
+      value: plugin-multi
+
+  steps:
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Install-container-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($container_plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container
+                initConfig:
+                  label_max_len: 100
+                  with_size: false
+
+    - name: Install-k8saudit-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($k8saudit_plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-k8saudit
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                openParams: "http://:9765/k8s-audit"
+
+    - name: Assert-container-config-sane
+      description: Verify the container plugin's entry in the shared config file is correct.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_plugin_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len": 100, "with_size": false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Assert-k8saudit-config-sane
+      description: Verify the k8saudit plugin's entry in the shared config file is correct.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($k8saudit_plugin_name)
+              - name: EXPECTED_OPEN_PARAMS
+                value: "http://:9765/k8s-audit"
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Assert-container-so-on-filesystem
+      description: Verify the container.so binary is present on the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$container_plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Assert-k8saudit-so-on-filesystem
+      description: Verify the k8saudit.so binary is present on the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$k8saudit_plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Assert-plugins-loaded-in-falco
+      description: Verify Falco's /versions REST API reports both plugins as loaded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($container_plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($k8saudit_plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Delete-plugins
+      description: Delete both Plugin CRs and wait for their ArtifactNodes to be garbage-collected.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($container_plugin_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($k8saudit_plugin_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $container_plugin_name]))
+            for:
+              deletion: {}
+            timeout: 120s
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $k8saudit_plugin_name]))
+            for:
+              deletion: {}
+            timeout: 120s
+
+    - name: Assert-container-so-absent-from-filesystem
+      description: Verify the container.so binary has been removed from the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$container_plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: Assert-k8saudit-so-absent-from-filesystem
+      description: Verify the k8saudit.so binary has been removed from the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$k8saudit_plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

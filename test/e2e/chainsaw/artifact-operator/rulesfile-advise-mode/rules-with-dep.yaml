@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: json
+      version: 0.7.0
+- rule: JSON advise mode configmap rule
+  desc: Rule from configmap used by chainsaw advise-mode test (should reach disk despite dep being unmet).
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline"
+  priority: DEBUG
+  tags: [test, chainsaw]

@@ -1,0 +1,202 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-remove-cm
+spec:
+  description: |
+    Validates that nulling out the ConfigMap source from a 2-source Config CR removes
+    only the configmap file while the inline file is preserved.
+
+    Setup: Falco (real). Config CR with both inline (log_level: info) and CM sources.
+    Both conditions True. Two files in /etc/falco/config.d.
+
+    After patching spec.configMapRef to null:
+    - ConfigMapArtifactProgrammed condition removed.
+    - ResolvedRefs condition removed (no more CM ref to check).
+    - CM file (50-02-…-configmap.yaml) deleted from disk.
+    - InlineArtifactProgrammed=True, Programmed=True remain True.
+    - Inline file (50-03-…-inline.yaml) preserved on disk.
+    - installedArtifacts count drops to 1.
+
+  bindings:
+    - name: falco_name
+      value: falco-config-remove-cm-test
+    - name: config_name
+      value: config-remove-cm-test
+    - name: cm_name
+      value: config-remove-cm-configmap
+    - name: test_name
+      value: config-remove-cm
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-configmap"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: config-cm.yaml
+            - name: data_key
+              value: config.yaml
+
+    - name: "Step 03: Create-config-both-sources"
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                config:
+                  json_output: false
+                  log_level: info
+                configMapRef:
+                  name: config-remove-cm-configmap
+
+    - name: "Step 04: Assert-initial-both-sources-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              status:
+                (length(installedArtifacts) == `2`): true
+
+    - name: "Step 05: Assert-both-files-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-remove-cm-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Remove-cm-source"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef: null
+
+    - name: "Step 07: Assert-cm-condition-removed-inline-remains"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'ResolvedRefs'] | length(@)): 0
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              status:
+                (length(installedArtifacts) == `1`): true
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/config.d/50-03-config-remove-cm-test-inline.yaml
+
+    - name: "Step 08: Assert-cm-file-deleted"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-remove-cm-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 09: Assert-inline-file-preserved"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-config-remove-cm-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

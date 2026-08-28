@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: json
+      version: "0.7.0"
+- rule: Chainsaw deps-add-source-unmet-req CM rule
+  desc: ConfigMap rule declaring a json plugin requirement that is not satisfied by mock versions.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-unmet-req"
+  priority: DEBUG
+  tags: [test, chainsaw, deps]

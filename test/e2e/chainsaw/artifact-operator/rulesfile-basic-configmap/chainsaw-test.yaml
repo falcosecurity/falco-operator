@@ -1,0 +1,157 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-basic-configmap
+spec:
+  description: |
+    Validates the full ConfigMap Rulesfile lifecycle against a real Falco instance:
+    1. Create a Falco DaemonSet.
+    2. Create a ConfigMap with simple rules (no requirements).
+    3. Create a Rulesfile pointing at the ConfigMap.
+    4. Assert DependenciesSatisfied=True, ConfigMapArtifactProgrammed=True, Programmed=True
+       on both the Rulesfile and ArtifactNode.
+    5. Assert the rules file is present on the node filesystem.
+    6. Delete the Rulesfile.
+    7. Assert the ArtifactNode is garbage-collected.
+    8. Assert the rules file is absent from the node filesystem.
+
+  bindings:
+    - name: falco_name
+      value: falco-rulesfile-basic-configmap-test
+    - name: rulesfile_name
+      value: rulesfile-basic-configmap-test
+    - name: rules_cm_name
+      value: rulesfile-basic-configmap-rules-cm
+    - name: test_name
+      value: rulesfile-basic-configmap
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules.yaml
+
+    - name: "Step 03: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-basic-configmap-rules-cm
+
+    - name: "Step 04: Assert-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-basic-configmap-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Delete-rulesfile"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 07: Assert-file-absent-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-basic-configmap-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

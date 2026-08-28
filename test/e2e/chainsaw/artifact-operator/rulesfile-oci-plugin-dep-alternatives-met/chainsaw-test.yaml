@@ -1,0 +1,176 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-plugin-dep-alternatives-met
+spec:
+  description: |
+    Validates that a Rulesfile whose OCI config layer declares an alternative plugin
+    dependency becomes DependenciesSatisfied=True when the alternative (not the primary)
+    is installed.
+
+    The OCI artifact falco-test/rulesfile-plugin-dep-alternatives:latest is pushed with:
+      --depends-on "json:999.0.0|container:0.1.0"
+    Primary dependency: json>=999.0.0, never met (json 0.7.4 is installed but 0.7.4 < 999.0.0).
+    Alternative dependency: container>=0.1.0, met by container 0.7.1.
+
+    The instance operator stores the parsed dependency (including alternatives) in
+    ArtifactMeta.Dependencies. The per-node sidecar's enforceRulesfileCompatibility iterates
+    alternatives and sets DependenciesSatisfied=True when any alternative is satisfied.
+
+    Setup: Falco (enforce mode). Container plugin installed. Rulesfile from
+    falco-test/rulesfile-plugin-dep-alternatives:latest.
+
+    Expected outcome:
+    - DependenciesSatisfied=True (container:0.1.0 alternative met).
+    - OCIArtifactProgrammed=True.
+    - Programmed=True.
+    - Rules file present on disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-dep-alternatives-test
+    - name: rulesfile_name
+      value: rulesfile-plugin-dep-alternatives-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: rulesfile-oci-plugin-dep-alternatives-met
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: oci_file
+      value: 50-01-rulesfile-plugin-dep-alternatives-test-oci.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-container-plugin"
+      description: |
+        Install the container plugin so the alternative dependency (container>=0.1.0) is met.
+        The primary dependency (json>=999.0.0) is never met by any real Falco.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Create-rulesfile-with-alternative-dep"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-plugin-dep-alternatives
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 04: Assert-alternative-dep-met"
+      description: |
+        Primary dep json>=999.0.0 is not met. Alternative container>=0.1.0 IS met.
+        enforceRulesfileCompatibility checks alternatives and sets DependenciesSatisfied=True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Delete-rulesfile"
+      description: |
+        Delete the Rulesfile first so the per-node artifact operator stops
+        blocking removal of the plugin config, releasing the Plugin's
+        node-objects-in-use finalizer before chainsaw cleanup attempts to
+        delete it.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

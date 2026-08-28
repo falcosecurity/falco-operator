@@ -1,0 +1,99 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-oci-api-version-unmet
+spec:
+  description: |
+    Validates that a Plugin backed by a local OCI artifact whose config layer declares
+    required plugin_api_version=9.99.0 is blocked in enforce mode against a real Falco
+    instance (which will never satisfy an impossibly high plugin API version).
+
+    The OCI artifact (falco-test/plugin-api-unmet) was pushed with:
+      falcoctl registry push --type plugin --requires plugin_api_version:9.99.0
+
+    Expected outcome:
+    - DependenciesSatisfied=False, reason=DependenciesNotSatisfied.
+    - Programmed=False (enforce mode gates installation on DependenciesSatisfied).
+    - No plugin binary written; installedArtifacts is empty.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-oci-api-version-unmet-test
+    - name: plugin_name
+      value: plugin-oci-api-version-unmet-test
+    - name: test_name
+      value: plugin-oci-api-version-unmet
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-plugin"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-api-unmet
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Assert-blocked-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

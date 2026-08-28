@@ -1,0 +1,368 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-priority-multi
+spec:
+  description: |
+    Validates that changing spec.priority renames both the inline and ConfigMap
+    disk files, and that updated content in both sources is reflected on disk.
+
+    Setup: Falco (real, enforce mode). Rulesfile with inline + ConfigMap sources at
+    priority=30. Inline declares required_engine_version=0.30.0 (always met). Files on disk:
+      30-03-rulesfile-update-priority-multi-test-inline.yaml   (marker=inline-prio-multi-30)
+      30-02-rulesfile-update-priority-multi-test-configmap.yaml (marker=cm-prio-multi-v1)
+
+    After patching spec.priority=70, updating inline rule output to
+    "marker=inline-prio-multi-70", and updating the ConfigMap data to
+    "marker=cm-prio-multi-v2":
+    - Old 30-03-... and 30-02-... files are deleted.
+    - New 70-03-... and 70-02-... files appear with updated content.
+    - DependenciesSatisfied=True, InlineArtifactProgrammed=True,
+      ConfigMapArtifactProgrammed=True, Programmed=True all remain True.
+
+  bindings:
+    - name: falco_name
+      value: falco-update-priority-multi-test
+    - name: rulesfile_name
+      value: rulesfile-update-priority-multi-test
+    - name: rules_cm_name
+      value: rulesfile-update-priority-multi-rules-cm
+    - name: test_name
+      value: rulesfile-update-priority-multi
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap-v1"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules-v1.yaml
+
+    - name: "Step 03: Create-rulesfile-inline-and-cm-priority-30"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                priority: 30
+                configMapRef:
+                  name: rulesfile-update-priority-multi-rules-cm
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-priority-multi inline rule
+                    desc: Inline rule for testing priority + content update with multiple sources.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-prio-multi-30"
+                    priority: DEBUG
+                    tags: [test, chainsaw, priority]
+
+    - name: "Step 04: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/30-03-rulesfile-update-priority-multi-test-inline.yaml
+                    priority: 30
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/30-02-rulesfile-update-priority-multi-test-configmap.yaml
+                    priority: 30
+
+    - name: "Step 05: Assert-prio30-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-03-rulesfile-update-priority-multi-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-prio30-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-02-rulesfile-update-priority-multi-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-initial-inline-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=inline-prio-multi-30"
+
+    - name: "Step 08: Assert-initial-cm-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-prio-multi-v1"
+
+    - name: "Step 09: Update-priority-to-70-and-both-contents"
+      description: |
+        Patch Rulesfile spec.priority to 70 with updated inline content, and
+        apply updated ConfigMap data. Both sources are updated simultaneously.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                priority: 70
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-priority-multi inline rule
+                    desc: Inline rule for testing priority + content update with multiple sources.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-prio-multi-70"
+                    priority: DEBUG
+                    tags: [test, chainsaw, priority]
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($rules_cm_name)
+                namespace: ($namespace)
+              data:
+                rules.yaml: |
+                  - rule: Chainsaw update-priority-multi CM rule v2
+                    desc: ConfigMap rule for testing priority + content update with multiple sources.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=cm-prio-multi-v2"
+                    priority: DEBUG
+                    tags: [test, chainsaw, priority]
+
+    - name: "Step 10: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/70-03-rulesfile-update-priority-multi-test-inline.yaml
+                    priority: 70
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/70-02-rulesfile-update-priority-multi-test-configmap.yaml
+                    priority: 70
+
+    - name: "Step 11: Assert-old-prio30-inline-file-gone"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-03-rulesfile-update-priority-multi-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 12: Assert-old-prio30-cm-file-gone"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-02-rulesfile-update-priority-multi-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 13: Assert-new-prio70-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 70-03-rulesfile-update-priority-multi-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 14: Assert-new-prio70-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 70-02-rulesfile-update-priority-multi-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 15: Assert-updated-inline-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=inline-prio-multi-70"
+
+    - name: "Step 16: Assert-updated-cm-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-prio-multi-v2"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

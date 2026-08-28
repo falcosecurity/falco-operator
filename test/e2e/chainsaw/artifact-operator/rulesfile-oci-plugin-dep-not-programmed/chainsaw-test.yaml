@@ -1,0 +1,171 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-plugin-dep-not-programmed
+spec:
+  description: |
+    Validates that a Plugin which can never be programmed (bad OCI tag) never
+    acquires any owned ArtifactNode, and can therefore be deleted immediately:
+    there is nothing for the node-objects-in-use finalizer to wait on.
+
+    The OCI artifact (falco-test/rulesfile-official) declares a container plugin
+    dependency. The container Plugin is created with a nonexistent OCI tag so it
+    can never be fetched or programmed. Because the plugin is not programmed, the
+    Rulesfile's dependency is unmet and the Rulesfile itself is not programmed.
+
+    Scenario:
+      1. Create Falco in enforce mode.
+      2. Create the Rulesfile: dependency unmet, Programmed=False.
+      3. Create the Plugin "container" with a bad OCI tag: it can never be
+         programmed (ArtifactMeta cannot be fetched).
+      4. Assert the Rulesfile is not programmed and the Plugin is not programmed
+         with reason OCIArtifactProgramFailed.
+      5. Assert the Plugin has NO owned ArtifactNode objects: fetchAndCacheArtifactMeta
+         fails before any ArtifactNode is ever created for this Plugin, so there is
+         nothing for the deletion-blocking mechanism to hold on to.
+      6. Delete the Plugin: deletion must complete immediately (no blocking
+         finalizer).
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-plugin-dep-not-programmed-test
+    - name: rulesfile_name
+      value: rulesfile-oci-plugin-dep-not-programmed-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: rulesfile-oci-plugin-dep-not-programmed
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Real Falco in enforce mode.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: Rulesfile from the local OCI registry; declares a container plugin dependency.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 03: Create-plugin-bad-tag"
+      description: |
+        Create the container Plugin with a nonexistent OCI tag so it cannot be
+        fetched or programmed. We use apply-plugin (not apply-assert-plugin) because
+        we explicitly do not want to wait for Programmed=True.
+      use:
+        template: ../../common/_step_templates/apply-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: this-tag-does-not-exist
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+
+    - name: "Step 04: Assert-not-programmed"
+      description: |
+        The container dependency is unmet (plugin not loaded in Falco) so enforce
+        mode keeps the Rulesfile blocked: DependenciesSatisfied=False, Programmed=False.
+        The Plugin is not programmed either: the instance operator could not fetch its
+        OCI metadata (bad tag) and set Programmed=False with reason OCIArtifactProgramFailed.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: OCIArtifactProgramFailed
+
+    - name: "Step 05: Assert-no-node-object-for-plugin"
+      description: |
+        fetchAndCacheArtifactMeta failed (bad OCI tag), so the instance operator
+        returned before ever creating an ArtifactNode for this Plugin. With no
+        owned ArtifactNode, node-objects-in-use has nothing to hold deletion open for.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+
+    - name: "Step 06: Delete-plugin-succeeds"
+      description: |
+        Delete the plugin. With no owned ArtifactNode objects, node-objects-in-use
+        is never set and the deletion must complete without being blocked.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($plugin_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

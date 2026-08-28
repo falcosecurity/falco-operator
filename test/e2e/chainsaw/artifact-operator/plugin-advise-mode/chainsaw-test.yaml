@@ -1,0 +1,132 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-advise-mode
+spec:
+  description: |
+    Validates advise mode (--enforce-requirements=false): the plugin is installed to the
+    filesystem even when its plugin_api_version requirement is unmet, but the
+    DependenciesSatisfied condition is set to False with reason
+    DependenciesNotSatisfiedInstalledAnyway, and Programmed remains True.
+
+    The local registry artifact plugin-api-unmet:latest is a json 0.7.4 binary that
+    declares plugin_api_version:9.99.0, always a major-version mismatch against any
+    real Falco's plugin_api_version (currently 3.x). In enforce mode this would block
+    installation; in advise mode it proceeds. The installed plugin is named "json".
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-advise-mode-test
+    - name: plugin_name
+      value: json
+    - name: test_name
+      value: plugin-advise-mode
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Create a real Falco DaemonSet with --enforce-requirements=false (advise mode).
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: enforce_requirements
+              value: "--enforce-requirements=false"
+
+    - name: "Step 02: Install-json-plugin-with-unmet-api-req"
+      description: |
+        Install the json plugin from the local registry using the plugin-api-unmet artifact
+        (json 0.7.4 binary requiring plugin_api_version:9.99.0, always unmet).
+        apply-assert-plugin.yaml asserts Programmed=True and OCIArtifactProgrammed=True.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-api-unmet
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Assert-installed-anyway"
+      description: |
+        In advise mode the plugin installs despite the major-version mismatch.
+        DependenciesSatisfied must be False with reason
+        DependenciesNotSatisfiedInstalledAnyway, and Programmed must be True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 04: Assert-so-on-filesystem"
+      description: The json.so must be present on the node filesystem even though deps are unmet.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

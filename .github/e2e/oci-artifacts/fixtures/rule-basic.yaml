@@ -1,0 +1,6 @@
+- rule: Test rule
+  desc: Minimal rule used for OCI artifact testing.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline"
+  priority: DEBUG
+  tags: [test]

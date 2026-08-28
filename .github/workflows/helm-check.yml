@@ -28,7 +28,9 @@ jobs:
           check-latest: true
 
       - name: Verify chart README is in sync
-        run: make chart-docs-check
+        run: |
+          go tool helm-docs -c ./chart/falco-operator -t ./README.gotmpl -o ./README.md
+          git diff --exit-code -- chart/falco-operator/README.md
 
       - name: Setup Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

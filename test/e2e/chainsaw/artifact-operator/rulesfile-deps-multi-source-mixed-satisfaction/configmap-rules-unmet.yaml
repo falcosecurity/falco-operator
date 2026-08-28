@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: container
+      version: "999.0.0"
+- rule: Chainsaw multi-source-mixed CM rule (unmet)
+  desc: ConfigMap rule declaring a container plugin requirement no installed version can satisfy.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-multi-mixed-unmet"
+  priority: DEBUG
+  tags: [test, chainsaw, deps]

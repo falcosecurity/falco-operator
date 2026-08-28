@@ -1,0 +1,47 @@
+# Template for pinning a minimal Falco-labelled pod to a KWOK-managed fake Node so that
+# ListMatchingFalcoNodes includes that node. The pod carries the
+# app.kubernetes.io/instance label that the aggregator controller's Pod watch predicate
+# requires to trigger re-reconciliation. KWOK automatically advances pods assigned to its
+# nodes to Running status: no real container runtime is involved.
+#
+# Required bindings:
+#   - pod_name: unique Pod name for this test run (derive from $namespace to avoid collisions)
+#   - falco_name: name of the Falco CR in the same namespace
+#   - node_name: name of the KWOK node the pod is pinned to
+#
+# The pod is namespace-scoped and covered by chainsaw's automatic per-test namespace cleanup,
+# but callers may still delete it explicitly in `catch` blocks if a mid-test failure must not
+# leave a pod targeting a fake node behind for a subsequent run.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: create-falco-pod-on-fake-node
+spec:
+  try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ($pod_name)
+            namespace: ($namespace)
+            labels:
+              app.kubernetes.io/instance: ($falco_name)
+          spec:
+            nodeName: ($node_name)
+            tolerations:
+              - key: kwok.x-k8s.io/node
+                value: fake
+                effect: NoSchedule
+            containers:
+              - name: pause
+                image: registry.k8s.io/pause:3.9
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: ($pod_name)
+            namespace: ($namespace)
+          status:
+            phase: Running

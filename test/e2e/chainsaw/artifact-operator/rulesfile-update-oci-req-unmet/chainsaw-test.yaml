@@ -1,0 +1,190 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-oci-req-unmet
+spec:
+  description: |
+    Validates that updating a Rulesfile's OCI artifact to one with an unmet engine
+    requirement rejects the update and preserves the previously installed file.
+
+    This is distinct from rulesfile-update-oci-bad-tag: here the instance operator
+    successfully fetches OCI metadata for the new tag (the image exists and
+    ObservedGeneration IS stamped). The failure happens at the per-node sidecar's
+    enforceRulesfileCompatibility check: engine_version_semver 999.0.0 is never
+    satisfied by any real Falco, so the update is rejected with reason
+    DependenciesNotSatisfiedUpdateRejected (a prior install exists).
+
+    Setup: Falco (real, enforce mode). Rulesfile installed from
+    falco-test/rulesfile-engine-req-met:latest (engine req 0.0.1, always met),
+    reaching Programmed=True with the rules file on disk.
+
+    After patching the OCI repository to rulesfile-engine-req-unmet:latest (req 999.0.0):
+    - DependenciesSatisfied=False, reason=DependenciesNotSatisfiedUpdateRejected.
+    - Programmed=False.
+    - OCIArtifactProgrammed=True (the old file is still on disk from previous install).
+    - The rules file on disk is NOT removed.
+
+  bindings:
+    - name: falco_name
+      value: falco-update-oci-req-unmet-test
+    - name: rulesfile_name
+      value: rulesfile-update-oci-req-unmet-test
+    - name: test_name
+      value: rulesfile-update-oci-req-unmet
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: oci_file
+      value: 50-01-rulesfile-update-oci-req-unmet-test-oci.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile-with-met-req"
+      description: |
+        Install from rulesfile-engine-req-met:latest (engine requirement 0.0.1, always met)
+        so the initial install reaches Programmed=True with the file on disk.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 03: Assert-initially-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Patch-oci-repo-to-unmet-requirement"
+      description: |
+        Switch the OCI repository to rulesfile-engine-req-unmet:latest (engine req 999.0.0).
+        The instance operator will successfully fetch the metadata for this tag and stamp
+        ObservedGeneration. The per-node sidecar then detects the unmet engine requirement
+        and rejects the update.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-unmet
+
+    - name: "Step 06: Assert-update-rejected"
+      description: |
+        DependenciesSatisfied=False with reason DependenciesNotSatisfiedUpdateRejected because
+        a prior install exists and the new requirement (engine 999.0.0) is unmet.
+        OCIArtifactProgrammed=True because the old file is still on disk.
+        Programmed=False because DependenciesSatisfied gates Programmed in enforce mode.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: "Step 07: Assert-old-file-preserved"
+      description: A rejected update must never remove the previously installed file.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,44 @@
+# Template for creating a Plugin CR from an OCI artifact.
+# Unlike apply-assert-plugin.yaml, this only applies the resource, with no assert for
+# Programmed=True, since callers that expect the plugin to be blocked (e.g. an
+# unsatisfied compatibility requirement) need to write their own assertions.
+#
+# Required bindings:
+#   - plugin_name:         Name of the Plugin CR to create.
+#   - namespace:           Namespace for the Plugin.
+#   - plugin_oci_repo:     OCI image repository (e.g., "falcosecurity/plugins/plugin/container").
+#   - plugin_oci_tag:      OCI image tag (e.g., "latest").
+#   - plugin_oci_registry: OCI registry hostname (e.g., "ghcr.io").
+#
+# Optional bindings:
+#   - plugin_config: Plugin spec.config object (name, initConfig, openParams, libraryPath).
+#                     Default: {} (no overrides: falls back to the plugin's own defaults).
+#   - plugin_plain_http: Set to true for plain-HTTP registries (e.g., local test registry).
+#                         Default: false.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-plugin
+spec:
+  bindings:
+    - name: plugin_config
+      value: {}
+    - name: plugin_plain_http
+      value: false
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Plugin
+          metadata:
+            name: ($plugin_name)
+            namespace: ($namespace)
+          spec:
+            ociArtifact:
+              image:
+                repository: ($plugin_oci_repo)
+                tag: ($plugin_oci_tag)
+              registry:
+                name: ($plugin_oci_registry)
+                plainHTTP: ($plugin_plain_http)
+            config: ($plugin_config)

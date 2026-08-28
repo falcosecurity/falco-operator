@@ -1,0 +1,6 @@
+- rule: Chainsaw update-remove-cm configmap rule
+  desc: ConfigMap rule to be removed in the update step.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-removed"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

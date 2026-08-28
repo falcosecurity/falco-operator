@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: container
+      version: "0.4.0"
+- rule: Chainsaw multi-source-mixed CM rule (met)
+  desc: ConfigMap rule declaring a container plugin requirement the installed version satisfies.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-multi-mixed-met"
+  priority: DEBUG
+  tags: [test, chainsaw, deps]

@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw update-cm-ref-swap rule A
+  desc: Rule from ConfigMap A for testing ref swap.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-ref-a"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

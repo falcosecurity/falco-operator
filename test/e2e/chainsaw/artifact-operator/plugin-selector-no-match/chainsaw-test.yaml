@@ -1,0 +1,95 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-selector-no-match
+spec:
+  description: |
+    Validates that a Plugin with a spec.selector that matches no cluster nodes results
+    in Programmed=Unknown/NoNodesAssigned on the parent CR and no ArtifactNodes created.
+
+    Unlike the rulesfile variant, the Plugin has an OCI source, so the instance operator
+    first fetches OCI metadata (which succeeds: local registry). Then it evaluates the
+    selector against cluster nodes: no match → zero ArtifactNodes → aggregate sets
+    Programmed=Unknown/NoNodesAssigned.
+
+    The .so binary is never written to disk since no per-node sidecar runs.
+
+  bindings:
+    - name: falco_name
+      value: falco-selector-no-match-plugin-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-selector-no-match
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-plugin-with-non-matching-selector"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-selector-no-match: "true"
+
+    - name: "Step 03: Assert-no-nodes-assigned"
+      description: |
+        OCI fetch succeeds but selector matches no nodes → zero ArtifactNodes created →
+        Programmed=Unknown/NoNodesAssigned. No .so written to disk.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,93 @@
+# Template for creating and asserting a Falco instance backed by a mock /versions server.
+#
+# An initContainer seeds the mock JSON from a ConfigMap into a shared volume, and a
+# busybox sidecar serves it over HTTP on port 8778. The artifact-operator is pointed
+# at that mock server so tests can control what Falco reports without a real Falco binary.
+#
+# Required bindings:
+#   - falco_name:          Name of the Falco CR to create.
+#   - namespace:           Namespace where the Falco instance will run.
+#   - mock_configmap_name: Name of the ConfigMap whose 'versions' key contains the mock JSON.
+#
+# Required env vars (no fallback: the suite fails loudly if these aren't set, rather than
+# silently defaulting to some particular person's image):
+#   - CHAINSAW_FALCO_IMAGE
+#   - CHAINSAW_ARTIFACT_OPERATOR_IMAGE
+#
+# Optional bindings:
+#   - enforce_requirements:    Full --enforce-requirements flag value passed to artifact-operator. Default: "--enforce-requirements=true".
+#   - falco_version:           Falco version string. Default: "0.44.1".
+#   - falco_image:             Falco container image. Default: $CHAINSAW_FALCO_IMAGE env var.
+#   - artifact_operator_image: artifact-operator sidecar image. Default: $CHAINSAW_ARTIFACT_OPERATOR_IMAGE env var.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-falco-mock-versions
+spec:
+  bindings:
+    - name: enforce_requirements
+      value: "--enforce-requirements=true"
+    - name: falco_version
+      value: "0.44.1"
+    - name: falco_image
+      value: (env('CHAINSAW_FALCO_IMAGE'))
+    - name: artifact_operator_image
+      value: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
+  try:
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          spec:
+            version: ($falco_version)
+            type: DaemonSet
+            podTemplateSpec:
+              spec:
+                shareProcessNamespace: true
+                initContainers:
+                  - name: seed-mock-versions
+                    image: busybox
+                    command: ["cp", "/mock-configmap/versions", "/mock/versions"]
+                    volumeMounts:
+                      - name: mock-versions-configmap
+                        mountPath: /mock-configmap
+                        readOnly: true
+                      - name: mock-versions
+                        mountPath: /mock
+                containers:
+                  - name: falco
+                    image: ($falco_image)
+                    tty: true
+                  - name: artifact-operator
+                    image: ($artifact_operator_image)
+                    imagePullPolicy: Never
+                    args:
+                      - "--falco-url=http://localhost:8778"
+                      - ($enforce_requirements)
+                  - name: mock-falco-versions
+                    image: busybox
+                    command: ["httpd", "-f", "-p", "8778", "-h", "/mock"]
+                    volumeMounts:
+                      - name: mock-versions
+                        mountPath: /mock
+                volumes:
+                  - name: mock-versions-configmap
+                    configMap:
+                      name: ($mock_configmap_name)
+                  - name: mock-versions
+                    emptyDir: {}
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'Reconciled']):
+              - status: 'True'
+            (conditions[?type == 'Available']):
+              - status: 'True'

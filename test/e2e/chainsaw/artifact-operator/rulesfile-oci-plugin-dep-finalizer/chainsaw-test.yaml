@@ -1,0 +1,367 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-plugin-dep-finalizer
+spec:
+  description: |
+    Validates the full dependency lifecycle of a rulesfile with a container
+    dependency and the deletion protection of the plugin it depends on.
+
+    The OCI artifact (falco-test/rulesfile-official) carries the Falco distribution
+    rules (falco-rules 5.1.0 release), which declares:
+      - required_engine_version: 0.57.0  (met: real Falco 0.44.1 reports engine 0.62.0)
+      - required_plugin_versions: [{container, 0.4.0}]  (met only once the container
+        plugin is installed and loaded by Falco)
+
+    Scenario:
+      1. Create the Rulesfile before any plugin exists: the container dependency is
+         unmet, so enforce mode blocks installation (DependenciesSatisfied=False,
+         reason=DependenciesNotSatisfied, Programmed=False, no file on disk).
+      2. Install the container plugin from the local OCI registry and wait until
+         Falco's /versions reports it. The rulesfile is re-evaluated (the node-side
+         controller re-enqueues RulesfileNodes when a PluginNode changes) and gets
+         installed: DependenciesSatisfied=True, OCIArtifactProgrammed=True,
+         Programmed=True, file present on the node.
+      3. Deleting the Plugin is then blocked: the per-node artifact operator on the
+         node running Falco refuses to remove the plugin's config/binary (and
+         therefore its own ArtifactNode finalizer) because the Rulesfile still
+         structurally depends on it: tracked authoritatively in-memory by that
+         node's nodeartifacts.Manager, not by any status field on the Plugin CR.
+         That keeps the ArtifactNode around, which in turn keeps the Plugin's own
+         artifact.falcosecurity.dev/node-objects-in-use finalizer in place. The
+         block is also surfaced as a DeletionBlocked=True condition on the Plugin,
+         aggregated up from the ArtifactNode.
+      4. The Plugin object keeps its deletionTimestamp but is never removed while
+         blocked, and the installed rules stay on disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-plugin-dep-finalizer-test
+    - name: rulesfile_name
+      value: rulesfile-oci-plugin-dep-finalizer-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: rulesfile-oci-plugin-dep-finalizer
+    - name: oci_file
+      value: 50-01-rulesfile-oci-plugin-dep-finalizer-test-oci.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Real Falco in enforce mode; no container plugin loaded so the dep will be unmet.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: Falco rules from the local OCI registry, created before the plugin.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Assert-deps-unmet"
+      description: |
+        The rules requirements are parsed into Status.ArtifactMeta (engine
+        requirement from the OCI config layer + YAML content, container dependency
+        from the OCI config layer and YAML content). The container plugin is not loaded, so enforce mode
+        blocks installation: DependenciesSatisfied=False, Programmed=False.
+        OCIArtifactProgrammed=False is also explicitly set on skip (even though
+        ensureRulesfile never ran) to ensure the aggregator shows the correct blocked
+        state on the parent Rulesfile: without it an absent condition on this node
+        could let a True from another node win unopposed in AggregateConditions.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (artifactMeta.requirements[?name == 'engine_version_semver']):
+                  - version: "0.57.0"
+                (artifactMeta.dependencies[?name == 'container']):
+                  - version: "0.4.0"
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+
+    - name: "Step 04: Assert-no-file-on-filesystem"
+      description: ensureRulesfile was skipped; the rules file must not be written.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 05: Install-container-plugin"
+      description: Install the container plugin from the local OCI registry.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 06: Verify-container-loaded-in-falco"
+      description: Poll Falco's /versions REST API until container appears in plugin_versions.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 07: Assert-deps-satisfied"
+      description: |
+        With the container plugin loaded (0.7.1 >= 0.4.0), the dependency is met and
+        the rulesfile is installed: DependenciesSatisfied=True,
+        OCIArtifactProgrammed=True, Programmed=True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'oci']):
+                  - path: (join('', ['/etc/falco/rules.d/', $oci_file]))
+                    priority: 50
+
+    - name: "Step 08: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 09: Assert-plugin-node-object-present"
+      description: |
+        The Plugin's ArtifactNode must exist and be Programmed=True: this is the
+        object whose per-node finalizer will refuse to clear once deletion is
+        requested below, for as long as the Rulesfile still depends on it.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 10: Delete-plugin-blocked"
+      description: |
+        Request Plugin deletion (--wait=false) and verify for a hold window that the
+        object persists with a deletionTimestamp and the in-use finalizer: the
+        deletion must stay blocked while the Rulesfile references the plugin.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_plugin_deletion_blocked.sh
+
+    - name: "Step 11: Assert-plugin-still-present"
+      description: |
+        After the hold window the Plugin must still exist with its node-objects-in-use
+        finalizer, and the instance aggregator must have surfaced the per-node block
+        as a DeletionBlocked=True condition (reason PluginConfigStillRequired) on the
+        Plugin itself, not just observable via the ArtifactNode or per-node logs.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+
+    - name: "Step 12: Assert-rulesfile-still-on-filesystem"
+      description: The blocked deletion leaves the installed rules untouched.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 13: Delete-rulesfile"
+      description: Remove the Rulesfile so the plugin finalizer is released and the file is cleaned up.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 14: Wait-plugin-deleted"
+      description: Once the Rulesfile no longer references the plugin, the blocked deletion should complete.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($plugin_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 15: Assert-file-removed"
+      description: The rulesfile file must be removed from the node filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+

@@ -1,0 +1,239 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-deps-add-source-unmet-req
+spec:
+  description: |
+    Validates that adding a new source whose requirements are not satisfied
+    blocks the update and leaves the previously-installed state intact.
+
+    Setup: real Falco in enforce mode. No json plugin is loaded, so any rule that
+    declares required_plugin_versions=[{json, 0.7.0}] will have an unmet dependency.
+    Rulesfile starts with an inline-only source that has no requirements (all met).
+    Both sources are installed and Programmed=True.
+
+    After adding a ConfigMap source (simple-rules.yaml) that declares
+    required_plugin_versions=[{json, 0.7.0}], not present in Falco since no json plugin
+    is loaded, the merged requirements include an unmet dependency:
+    - DependenciesSatisfied=False, reason=DependenciesNotSatisfiedUpdateRejected
+      (artifacts already installed; enforce gate blocks the update).
+    - ensureRulesfile is skipped: InlineArtifactProgrammed=True persists (stale);
+      ConfigMapArtifactProgrammed is never set.
+    - Programmed=False.
+    - installedArtifacts still has only the inline entry (unchanged).
+    - The inline file is still on disk; no ConfigMap file is written.
+
+  bindings:
+    - name: falco_name
+      value: falco-deps-add-source-unmet-req-test
+    - name: rulesfile_name
+      value: rulesfile-deps-add-source-unmet-req-test
+    - name: rules_cm_name
+      value: rulesfile-deps-add-source-unmet-req-cm
+    - name: test_name
+      value: rulesfile-deps-add-source-unmet-req
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Real Falco in enforce mode; no json plugin loaded so plugin dep will be unmet.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap"
+      description: Pre-create the CM that declares the unmet json plugin requirement.
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules.yaml
+
+    - name: "Step 03: Create-rulesfile-inline-only"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw deps-add-source-unmet-req inline rule
+                    desc: Inline rule whose engine req is satisfied by falco.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-initial-met"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+
+    - name: "Step 04: Assert-initial-installed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/50-03-rulesfile-deps-add-source-unmet-req-test-inline.yaml
+                    priority: 50
+
+    - name: "Step 05: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-deps-add-source-unmet-req-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Add-configMapRef-with-unmet-plugin-req"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef:
+                  name: rulesfile-deps-add-source-unmet-req-cm
+
+    - name: "Step 07: Assert-update-rejected"
+      description: |
+        Merged requirements now include an unmet json plugin dep.
+        alreadyInstalled=true → DependenciesNotSatisfiedUpdateRejected.
+        ensureRulesfile skipped: inline state is stale-but-preserved,
+        CM source condition is never set, Programmed=False.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/50-03-rulesfile-deps-add-source-unmet-req-test-inline.yaml
+                    priority: 50
+                (length(installedArtifacts[?medium == 'configmap'])): 0
+
+    - name: "Step 08: Assert-inline-file-still-on-filesystem"
+      description: Stale cleanup skipped; inline file must remain.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-deps-add-source-unmet-req-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 09: Assert-cm-file-never-written"
+      description: ensureRulesfile never ran for the CM source; no CM file on disk.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-deps-add-source-unmet-req-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,256 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-inline-plugin-dep-enforce
+spec:
+  description: |
+    Validates that an inline Rulesfile whose YAML content declares a required_plugin_versions
+    entry is correctly gate-checked and then permitted once the plugin is installed.
+
+    For inline sources, requirements are extracted by the per-node sidecar via
+    appendYAMLRequirements at reconcile time (not by the instance operator from an OCI config
+    layer). This tests the appendYAMLRequirements code path and the per-node watch trigger
+    that re-evaluates the Rulesfile when the container Plugin becomes Programmed=True.
+
+    Flow:
+    1. Create Falco (enforce mode). Create inline Rulesfile with required_plugin_versions:
+       [{name: container, version: 0.1.0}]. Container plugin not installed.
+       → DependenciesSatisfied=False/DependenciesNotSatisfied, Programmed=False, no file.
+    2. Install container plugin from local OCI registry → Plugin Programmed=True.
+       The watch trigger (Plugin ArtifactNode → Rulesfile ArtifactNode) causes re-reconcile.
+       → DependenciesSatisfied=True, InlineArtifactProgrammed=True, Programmed=True, file on disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-inline-plugin-dep-enforce-test
+    - name: rulesfile_name
+      value: rulesfile-inline-plugin-dep-enforce-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: rulesfile-inline-plugin-dep-enforce
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: inline_file
+      value: 50-03-rulesfile-inline-plugin-dep-enforce-test-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-inline-rulesfile-with-plugin-dep"
+      description: |
+        Inline content declares required_plugin_versions for container>=0.1.0.
+        The per-node sidecar's appendYAMLRequirements parses this at reconcile time.
+        With no container plugin installed the dep is unmet → blocked in enforce mode.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: container
+                        version: "0.1.0"
+                  - rule: Chainsaw inline plugin dep rule
+                    desc: Rule requiring container plugin, tests appendYAMLRequirements path.
+                    condition: "evt.type = execve"
+                    output: "container=%container.name marker=inline-plugin-dep"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Assert-dep-unmet-blocked"
+      description: Container plugin not installed → DependenciesNotSatisfied → Programmed=False.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: "Step 04: Assert-no-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 05: Install-container-plugin"
+      description: |
+        Install the container plugin from the local OCI registry. Once it reaches
+        Programmed=True, the per-node watch triggers a Rulesfile re-reconcile.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 06: Assert-dep-met-programmed"
+      description: |
+        Container plugin Programmed=True triggers Rulesfile re-reconcile.
+        appendYAMLRequirements finds container dep, checks version ≥ 0.1.0 (met by 0.7.1).
+        DependenciesSatisfied=True, InlineArtifactProgrammed=True, Programmed=True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 07: Assert-file-written"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "true"
+
+    # ──────────────────────────────────────────────────────────────────
+    # Explicit teardown in dependency order. Chainsaw's automatic end-of-test
+    # cleanup deletes created resources without regard for the plugin's
+    # node-objects-in-use finalizer: it can issue the Plugin delete before the
+    # Rulesfile delete, which the per-node artifact operator correctly blocks
+    # forever (it won't remove the plugin config a Rulesfile still depends on)
+    # since nothing then deletes the Rulesfile to release it, wedging
+    # namespace teardown. Deleting in the right order here (and confirming the
+    # block is real, not just assumed) avoids that.
+    # A dedicated test (plugin-rulesfile-dep-finalizer-scenarios) covers this
+    # deletion-blocking mechanism's full behavior matrix; this is just enough
+    # to self-clean.
+    # ──────────────────────────────────────────────────────────────────
+
+    - name: "Step 08: Delete-plugin-blocked"
+      description: |
+        The Rulesfile is Programmed=True and still declares the container
+        dependency, so the node running Falco still needs the plugin: its
+        per-node artifact operator will refuse to remove the plugin config,
+        keeping the ArtifactNode (and therefore the Plugin's
+        node-objects-in-use finalizer) in place. Deleting it now must stay
+        blocked, not disappear.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_plugin_deletion_blocked.sh
+
+    - name: "Step 09: Delete-rulesfile"
+      description: |
+        Removing the Rulesfile drops the dependency; the per-node artifact
+        operator can now remove the plugin config and its own ArtifactNode
+        finalizer, which releases node-objects-in-use and unblocks the
+        pending Plugin deletion from Step 08.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+            content: |
+              kubectl delete rulesfiles.artifact.falcosecurity.dev \
+                "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 10: Wait-plugin-node-object-deleted"
+      description: |
+        Isolates per-node cleanup from the final parent deletion below: if
+        this hangs, the artifact-operator sidecar isn't releasing the node
+        object, not the instance-operator's finalizer logic.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 11: Wait-plugin-deleted"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($plugin_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

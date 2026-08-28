@@ -1,0 +1,52 @@
+# Creates a Config CR from a caller-supplied spec.
+# All ConfigSpec fields are optional (omitempty), so callers set only what they need.
+# This template only applies the resource. Add an assert step in the test for condition checks,
+# since expected conditions vary by test scenario.
+#
+# Required bindings:
+#   - config_name: Name of the Config CR.
+#   - namespace:   Namespace.
+#
+# Optional bindings:
+#   - config_spec: Full spec object. Default: {} (no sources, priority defaults to 50 via CRD).
+#
+# Examples:
+#
+#   Inline config:
+#     - name: config_spec
+#       value:
+#         config:
+#           json_output: false
+#           log_level: info
+#
+#   ConfigMap-sourced config:
+#     - name: config_spec
+#       value:
+#         configMapRef:
+#           name: my-falco-config-cm
+#
+#   Both sources + custom priority:
+#     - name: config_spec
+#       value:
+#         priority: 80
+#         config:
+#           json_output: false
+#         configMapRef:
+#           name: my-falco-config-cm
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-config
+spec:
+  bindings:
+    - name: config_spec
+      value: {}
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Config
+          metadata:
+            name: ($config_name)
+            namespace: ($namespace)
+          spec: ($config_spec)

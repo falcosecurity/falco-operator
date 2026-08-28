@@ -1,0 +1,75 @@
+# Template for creating a KWOK-managed fake Node, e.g. to exercise node-label-based logic
+# (architecture/OS matching, selectors) without needing real hardware for that architecture.
+# Requires KWOK to be pre-installed on the cluster (kwok.sigs.k8s.io): this template only
+# creates the Node object; it does not install KWOK itself.
+#
+# Node is cluster-scoped and NOT covered by chainsaw's automatic per-test namespace cleanup:
+# callers must explicitly delete it (a plain `delete:` step; not worth its own template) once
+# done, both on the success path and in `catch`, so a failed test doesn't leave a stray Node
+# behind for later runs.
+#
+# Required bindings:
+#   - node_name: Unique Node name for this test run (e.g. derived from $namespace, since Node
+#                is cluster-scoped and names must not collide across parallel test runs).
+#   - node_arch: e.g. "arm64".
+#
+# Optional bindings:
+#   - node_os:    Default: "linux".
+#   - node_group: Sets a fixed "chainsaw-node-group" label to this value. Lets a caller scope a
+#                 CR's spec.selector to exactly the fake node(s) it created (e.g. matchLabels:
+#                 {chainsaw-node-group: ($namespace)}), instead of matching every KWOK fake node
+#                 cluster-wide, including ones from other parallel tests. Default: "" (label
+#                 still present with an empty value, harmless if unused).
+#
+# Labels set on the Node: kubernetes.io/arch, kubernetes.io/os, kubernetes.io/hostname (all
+# derived from the bindings above), chainsaw-node-group, and a fixed type=kwok label. A single
+# fixed extra label (not a generic caller-supplied map) is deliberate: chainsaw's merge()
+# JMESPath function rejects an empty-object argument at the type check (`invalid type for:
+# map[], expected: []functions.JpType{"object"}`), so a variadic "merge caller-supplied labels
+# over fixed ones" design isn't safe to default to {}.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-fake-node
+spec:
+  bindings:
+    - name: node_os
+      value: linux
+    - name: node_group
+      value: ""
+  try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            name: ($node_name)
+            annotations:
+              node.alpha.kubernetes.io/ttl: "0"
+              kwok.x-k8s.io/node: fake
+            labels:
+              kubernetes.io/arch: ($node_arch)
+              kubernetes.io/os: ($node_os)
+              kubernetes.io/hostname: ($node_name)
+              type: kwok
+              chainsaw-node-group: ($node_group)
+          spec:
+            taints:
+              - effect: NoSchedule
+                key: kwok.x-k8s.io/node
+                value: fake
+          status:
+            allocatable:
+              cpu: "4"
+              memory: 8Gi
+              pods: "110"
+            capacity:
+              cpu: "4"
+              memory: 8Gi
+              pods: "110"
+            nodeInfo:
+              architecture: ($node_arch)
+              kubeletVersion: fake
+              kubeProxyVersion: fake
+              operatingSystem: ($node_os)
+            phase: Running

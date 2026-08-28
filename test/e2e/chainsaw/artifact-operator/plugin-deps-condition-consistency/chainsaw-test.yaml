@@ -1,0 +1,401 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-deps-condition-consistency
+spec:
+  description: |
+    Verifies that when one ArtifactNode has DependenciesSatisfied=False and explicitly sets
+    ConfigProgrammed=False and OCIArtifactProgrammed=False (the behaviour introduced by the fix to
+    controllers/artifact/plugin/controller.go), the Plugin-level aggregate shows those conditions as
+    False, NOT as True from a sibling node that has them set to True.
+
+    Background: before the fix, a blocked per-node sidecar (DependenciesSatisfied=False, artifact
+    never installed) would leave ConfigProgrammed and OCIArtifactProgrammed ABSENT from its
+    ArtifactNode. AggregateConditions' "absent = ignored" rule would then let the sibling node's
+    ConfigProgrammed=True win unopposed in the aggregate, producing a misleading Plugin status of
+    ConfigProgrammed=True even though not all nodes had the plugin installed.
+
+    The fix ensures the blocked per-node sidecar explicitly sets ConfigProgrammed=False and
+    OCIArtifactProgrammed=False so AggregateConditions' "False beats True" rule can apply.
+
+    This test directly status-patches the two ArtifactNodes to simulate what the fixed per-node
+    sidecar reports: it does not run a real sidecar, which makes the aggregation invariant
+    testable in isolation from sidecar logic and without needing the real per-node operator to run
+    on a KWOK node.
+
+    Scenario 1: blocked node forces False even with a healthy sibling (False beats True):
+      Node A: DependenciesSatisfied=False, ConfigProgrammed=False, OCIArtifactProgrammed=False,
+              Programmed=False  (requirements not met, artifact never installed)
+      Node B: DependenciesSatisfied=True, ConfigProgrammed=True, OCIArtifactProgrammed=True,
+              Programmed=True   (requirements met, artifact installed)
+      Expected: Plugin shows all four conditions False.
+
+    Scenario 2: both nodes healthy (aggregate recovers to all True):
+      Node A patched to all True (requirements now satisfied, artifact installed).
+      Node B unchanged (still True).
+      Expected: Plugin shows all four conditions True, with no "(failing nodes: ...)" suffix
+      lingering from Scenario 1.
+
+  bindings:
+    - name: plugin_name
+      value: deps-consistency-plugin
+    - name: test_name
+      value: plugin-deps-condition-consistency
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: node_a_name
+      value: (join('-', ['deps-cons-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['deps-cons-b', $namespace]))
+    - name: falco_name
+      value: deps-consistency-falco
+    - name: falco_pod_a_name
+      value: (join('-', ['deps-cons-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['deps-cons-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-a"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Create-fake-node-b"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 03: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; its name is used by ListMatchingFalcoNodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 04: Create-falco-pod-on-node-a"
+      description: Stub pod pinned to node-a so ListMatchingFalcoNodes returns it; KWOK advances it to Running.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 05: Create-falco-pod-on-node-b"
+      description: Stub pod pinned to node-b so ListMatchingFalcoNodes returns it; KWOK advances it to Running.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 06: Create-plugin"
+      description: OCI-sourced Plugin. Selector matches both fake nodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+
+    - name: "Step 07: Assert-both-artifact-nodes-exist"
+      description: |
+        Both fake nodes match the selector, so the instance aggregator creates two ArtifactNodes.
+        Names follow the deterministic format: "plugin--<pluginName>--<nodeName>".
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_a_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_b_name)
+
+    - name: "Step 08: Patch-node-a-artifactnode-to-blocked"
+      description: |
+        Scenario 1. Simulates what the fixed per-node sidecar reports when DependenciesSatisfied=False
+        and the artifact was NEVER installed: it explicitly sets ConfigProgrammed=False and
+        OCIArtifactProgrammed=False so those condition types are present (and False) for the
+        aggregator to act on, rather than absent and silently ignored.
+
+        Status-subresource patch: ArtifactNode has +kubebuilder:subresource:status, so a plain
+        patch would be silently ignored for status fields.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: DependenciesSatisfied
+                    status: "False"
+                    reason: SimulatedDepsNotSatisfied
+                    message: Simulated blocked node (requirements not met, never installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: ConfigProgrammed
+                    status: "False"
+                    reason: SimulatedDepsNotSatisfied
+                    message: Simulated blocked node (requirements not met, never installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: OCIArtifactProgrammed
+                    status: "False"
+                    reason: SimulatedDepsNotSatisfied
+                    message: Simulated blocked node (requirements not met, never installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: Programmed
+                    status: "False"
+                    reason: SimulatedDepsNotSatisfied
+                    message: Simulated blocked node (requirements not met, never installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+
+    - name: "Step 09: Patch-node-b-artifactnode-to-healthy"
+      description: |
+        Scenario 1. Simulates a healthy per-node sidecar on node-b where dependencies are met and
+        the artifact is installed: all four conditions True, alongside node-a's all-False.
+        Both nodes are patched before the assertion so the aggregator sees both simultaneously when
+        the ArtifactNode watch fires the Plugin reconcile.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: DependenciesSatisfied
+                    status: "True"
+                    reason: SimulatedDepsOk
+                    message: Simulated healthy node (requirements met, artifact installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: ConfigProgrammed
+                    status: "True"
+                    reason: SimulatedDepsOk
+                    message: Simulated healthy node (requirements met, artifact installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: OCIArtifactProgrammed
+                    status: "True"
+                    reason: SimulatedDepsOk
+                    message: Simulated healthy node (requirements met, artifact installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: Programmed
+                    status: "True"
+                    reason: SimulatedDepsOk
+                    message: Simulated healthy node (requirements met, artifact installed).
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+
+    - name: "Step 10: Assert-plugin-false-wins-for-all-install-conditions"
+      description: |
+        Scenario 1. The Plugin aggregate must show False for DependenciesSatisfied, ConfigProgrammed,
+        OCIArtifactProgrammed, and Programmed, even though node-b has all conditions True.
+
+        This is the core invariant fixed in controllers/artifact/plugin/controller.go: when a
+        blocked node explicitly sets ConfigProgrammed=False and OCIArtifactProgrammed=False,
+        AggregateConditions' "worst status wins" rule applies to ALL condition types, not just
+        Programmed. ConfigProgrammed and OCIArtifactProgrammed accurately reflect that the plugin
+        is not fully installed on the cluster.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: "Step 11: Patch-both-artifactnodes-to-healthy"
+      description: |
+        Scenario 2. Node A's requirements are now satisfied and the artifact is installed: all four
+        conditions flip to True. Both nodes get the SAME reason/message deliberately, for the same
+        List-order-independence reason as artifact-multi-node-aggregation Step 10: AggregateConditions'
+        "first True wins" depends on ListOwnedNodes' List order, which is not guaranteed stable.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: DependenciesSatisfied
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: ConfigProgrammed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: OCIArtifactProgrammed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: Programmed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: DependenciesSatisfied
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: ConfigProgrammed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: OCIArtifactProgrammed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+                  - type: Programmed
+                    status: "True"
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+
+    - name: "Step 12: Assert-plugin-all-true-after-unblock"
+      description: |
+        Scenario 2. With both nodes reporting all conditions True, the Plugin aggregate must reflect
+        all True and carry no "(failing nodes: ...)" suffix lingering from Scenario 1.
+        Proves the aggregate correctly recovers when the blocked node's status clears.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    reason: SimulatedAllHealthy
+                    message: All nodes healthy for deps-condition-consistency test.
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not
+        leave either behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

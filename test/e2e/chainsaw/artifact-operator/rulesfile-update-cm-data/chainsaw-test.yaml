@@ -1,0 +1,219 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-cm-data
+spec:
+  description: |
+    Validates that updating the data inside the referenced ConfigMap causes the
+    disk file to be overwritten with the new content.
+
+    Setup: Falco (real, enforce mode). ConfigMap contains rules with no requirements
+    and output "marker=cm-v1". Rulesfile references that ConfigMap.
+
+    After replacing the ConfigMap's data with v2 content ("marker=cm-v2"):
+    - DependenciesSatisfied=True and ConfigMapArtifactProgrammed=True remain True.
+    - The disk file now contains "marker=cm-v2".
+
+  bindings:
+    - name: falco_name
+      value: falco-update-cm-data-test
+    - name: rulesfile_name
+      value: rulesfile-update-cm-data-test
+    - name: rules_cm_name
+      value: rulesfile-update-cm-data-rules-cm
+    - name: test_name
+      value: rulesfile-update-cm-data
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap-v1"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules-v1.yaml
+
+    - name: "Step 03: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-update-cm-data-rules-cm
+
+    - name: "Step 04: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-cm-data-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 05: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-cm-data-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-v1-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-v1"
+
+    - name: "Step 07: Update-configmap-to-v2"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules-v2.yaml
+
+    - name: "Step 08: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-cm-data-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 09: Assert-file-still-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-cm-data-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 10: Assert-v2-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-v2"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

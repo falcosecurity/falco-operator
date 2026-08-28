@@ -1,0 +1,299 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-pod-scoped-to-falco-nodes
+spec:
+  description: |
+    Proves that ArtifactNode creation is scoped to nodes where a Running Falco pod exists,
+    not to all nodes matching a CR's spec.selector. Uses two KWOK-simulated fake nodes that
+    both match the Plugin selector; only one of them gets a Running Falco pod at a time.
+
+    This directly exercises the ListMatchingFalcoNodes function
+    (internal/pkg/controllerhelper/node.go) and the Pod watch predicate that re-triggers
+    reconciliation when a pod with app.kubernetes.io/instance label changes.
+
+    Scenario 1, only the pod node gets an ArtifactNode:
+    - node-a and node-b both carry the chainsaw-node-group label matching the Plugin's selector.
+    - A Falco CR and a stub pod are created for node-a only.
+    - Assert: ArtifactNode exists for node-a.
+    - Assert: ArtifactNode does NOT exist for node-b.
+    - Plugin status: Programmed=Unknown/Pending (at least one node is assigned).
+
+    Scenario 2, pod moves to node-b: node-b gets its own ArtifactNode and node-a's is removed:
+    - Delete the pod on node-a (simulating eviction/reschedule).
+    - Create a stub pod on node-b.
+    - Assert: ArtifactNode for node-b is created.
+    - Assert: ArtifactNode for node-a is deleted (the desired set is derived from nodes with a
+      Running Falco pod, not merely from selector match, so losing the pod removes the node's
+      ArtifactNode; a later pod on that node causes it to be created again).
+    - Plugin status: Programmed=Unknown/Pending (node-b assigned).
+
+  bindings:
+    - name: plugin_name
+      value: pod-scoped-plugin
+    - name: test_name
+      value: artifact-pod-scoped-to-falco-nodes
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: node_a_name
+      value: (join('-', ['scoped-node-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['scoped-node-b', $namespace]))
+    - name: falco_name
+      value: pod-scoped-falco
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-a"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Create-fake-node-b"
+      description: Both nodes match the Plugin selector; only node-a will have a Running Falco pod initially.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 03: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; its name is used by ListMatchingFalcoNodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 04: Create-falco-pod-on-node-a"
+      description: |
+        Stub pod pinned to node-a; KWOK advances it to Running. Once Running, the Pod watch
+        triggers reconciliation and the controller includes node-a in ListMatchingFalcoNodes.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 05: Create-plugin"
+      description: Plugin selector matches both fake nodes; only node-a (which has a Running Falco pod) should get an ArtifactNode.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+
+    - name: "Step 06: Assert-scenario-1-only-node-a-gets-artifactnode"
+      description: |
+        Scenario 1. ArtifactNode for node-a must exist (Falco pod Running there).
+        ArtifactNode for node-b must NOT exist (no Falco pod, even though node-b matches the selector).
+        Plugin must be Programmed=Unknown/Pending (node-a is assigned).
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              spec:
+                nodeName: ($node_a_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 07: Delete-falco-pod-on-node-a"
+      description: |
+        Scenario 2. Simulate the Falco pod being evicted from node-a (e.g. rescheduled to
+        another node). The Pod deletion triggers the Pod watch, which re-enqueues the Plugin.
+        On the next reconcile, node-a is no longer returned by ListMatchingFalcoNodes.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_a_name)
+              namespace: ($namespace)
+
+    - name: "Step 08: Create-falco-pod-on-node-b"
+      description: |
+        Scenario 2. New pod on node-b simulates the Falco pod landing after the reschedule.
+        KWOK advances it to Running; the Pod watch triggers reconciliation.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 09: Assert-scenario-2-node-b-gets-artifactnode"
+      description: |
+        Scenario 2. ArtifactNode for node-b must be created (Falco pod is now Running there).
+        ArtifactNode for node-a must be deleted, since the desired set only includes nodes with
+        a Running Falco pod, so losing node-a's pod removes its ArtifactNode.
+        Plugin must still be Programmed=Unknown/Pending (node-b assigned).
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_b_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 10: Delete-plugin"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+
+    - name: "Step 11: Wait-for-artifactnode-cleanup"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 12: Delete-fake-nodes-and-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not
+        leave either behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

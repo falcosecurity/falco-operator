@@ -1,0 +1,245 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-node-self-healing
+spec:
+  description: |
+    Exercises the instance operators' self-healing of an ArtifactNode that's mutated
+    out-of-band, not via a Node or CR selector change (that's artifact-node-lifecycle's
+    scope), but via direct manipulation of the ArtifactNode object itself, simulating a
+    crash, bug, or stray manual kubectl action. Uses one KWOK-simulated fake Node with a
+    minimal Falco CR and pod so that ListMatchingFalcoNodes includes the fake node.
+
+    Only Plugin is exercised, not all three kinds: both scenarios below prove a generic,
+    kind-agnostic mechanism (the ArtifactNode watch's owner-routing via
+    EnqueueRequestForOwner, and EnforceNodeObjectMeta's restoration logic in
+    internal/pkg/controllerhelper/nodeobject.go:106-171); artifact-node-lifecycle already
+    proves EnsureNodeObject is called correctly per-kind for Rulesfile/Config, so duplicating
+    that here for a mechanism that doesn't vary by kind would add steps without adding signal.
+
+    Because no real per-node sidecar ever reconciles an ArtifactNode on a fake node, it keeps
+    its CRD-defaulted Programmed=Unknown/Pending condition forever. The Falco CR and pod are
+    minimal stubs: no actual Falco runs; only the label is checked by ListMatchingFalcoNodes.
+
+    Scenarios:
+    1. Delete the Plugin's ArtifactNode directly (not via node/selector change). Assert it
+       gets recreated: EnqueueRequestForOwner (the ArtifactNode watch) must notice the delete
+       event and requeue the owning Plugin, whose reconcile recreates it via EnsureNodeObject.
+    2. Corrupt the same ArtifactNode's artifact.falcosecurity.dev/kind label directly. Assert
+       it gets restored: EnforceNodeObjectMeta must detect the drift on the next reconcile and
+       patch it back. Only the label is corrupted, not the owner reference: corrupting the
+       owner reference would break the very signal EnqueueRequestForOwner needs to route the
+       watch event to the right parent, which is the mechanism this scenario is trying to
+       observe self-healing through, not the one under test.
+
+  bindings:
+    - name: plugin_name
+      value: node-self-healing-plugin
+    - name: test_name
+      value: artifact-node-self-healing
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: node_name
+      value: (join('-', ['self-healing-node', $namespace]))
+    - name: falco_name
+      value: self-healing-falco
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; only its name is used by ListMatchingFalcoNodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod-on-fake-node"
+      description: Stub pod pinned to the fake node so ListMatchingFalcoNodes returns it; KWOK advances it to Running.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 02: Create-plugin"
+      description: OCI-sourced Plugin (Plugin has no inline source option), selector scoped to this test's fake node.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+
+    - name: "Step 03: Assert-artifact-node-created"
+      description: |
+        The fake node matches the selector, so the aggregator creates one ArtifactNode. No
+        real per-node sidecar ever reconciles it, so it keeps the CRD default
+        Programmed=Unknown/Pending.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_name]))
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              spec:
+                nodeName: ($node_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 04: Delete-artifactnode-directly"
+      description: |
+        Scenario 1. Deletes the ArtifactNode itself, bypassing node/selector changes
+        entirely, simulates a crash, bug, or stray manual `kubectl delete` of a managed
+        child object.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              name: (join('--', ['plugin', $plugin_name, $node_name]))
+              namespace: ($namespace)
+
+    - name: "Step 05: Assert-artifactnode-recreated-after-direct-deletion"
+      description: |
+        Scenario 1. The ArtifactNode watch (EnqueueRequestForOwner) must notice the delete
+        event and requeue the Plugin, whose reconcile recreates it via EnsureNodeObject, a
+        fresh object, so it's back to the CRD-defaulted Programmed=Unknown/Pending.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 06: Corrupt-artifactnode-label"
+      description: |
+        Scenario 2. A JSON merge patch to metadata.labels only touches the key given:
+        artifact.falcosecurity.dev/parent and artifact.falcosecurity.dev/node are left alone,
+        isolating this to exactly the drift EnforceNodeObjectMeta needs to detect and fix.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_name]))
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/kind: corrupted-by-test
+
+    - name: "Step 07: Assert-artifactnode-label-restored-after-drift"
+      description: Scenario 2. EnforceNodeObjectMeta must have detected the mismatch and patched the label back.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_name]))
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/kind: plugin
+
+    - name: "Step 08: Delete-plugin"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+
+    - name: "Step 09: Wait-for-artifactnode-cleanup"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 10: Delete-fake-node-and-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not
+        leave it behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)

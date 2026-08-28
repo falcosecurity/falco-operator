@@ -1,0 +1,385 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-advise-mode
+spec:
+  description: |
+    Validates advise mode (--enforce-requirements=false) for Rulesfiles across all three
+    source types (inline, OCI, ConfigMap) and their combination: each installs to the
+    filesystem even when plugin dependencies are unmet, DependenciesSatisfied is set to
+    False with reason DependenciesNotSatisfiedInstalledAnyway, and Programmed remains True.
+
+    - Inline: declares json >= 0.7.0; json is not installed.
+    - OCI:    falco-rules:latest depends on the container plugin, which is not installed.
+    - ConfigMap: contains rules with a json >= 0.7.0 dep; json is not installed.
+    - All three combined: all sources install, all source conditions are True.
+
+  bindings:
+    - name: falco_name
+      value: falco-rulesfile-advise-mode-test
+    - name: rulesfile_inline_name
+      value: rulesfile-advise-mode-inline
+    - name: rulesfile_oci_name
+      value: rulesfile-advise-mode-oci
+    - name: rulesfile_cm_name
+      value: rulesfile-advise-mode-cm
+    - name: rulesfile_all_name
+      value: rulesfile-advise-mode-all
+    - name: rules_cm_name
+      value: rulesfile-advise-mode-rules-cm
+    - name: test_name
+      value: rulesfile-advise-mode
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: |
+        Create a Falco DaemonSet with --enforce-requirements=false (advise mode).
+        The artifact-operator sidecar points at the real Falco /versions endpoint:
+        no mock needed, the required plugins are simply absent from /versions.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: enforce_requirements
+              value: "--enforce-requirements=false"
+
+    - name: "Step 02: Create-rules-configmap"
+      description: Create a ConfigMap with rules that declare a json >= 0.7.0 dep (unmet).
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: rules-with-dep.yaml
+
+    # --- Inline only ---
+
+    - name: "Step 03: Create-rulesfile-inline"
+      description: Rulesfile with inline rules declaring json >= 0.7.0 (dep unmet).
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_inline_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: json
+                        version: 0.7.0
+                  - rule: JSON advise mode inline rule
+                    desc: Rule used by chainsaw advise-mode inline test (should reach disk despite dep being unmet).
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline"
+                    priority: DEBUG
+                    tags: [test, chainsaw]
+
+    - name: "Step 04: Assert-inline-installed-anyway"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_inline_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_inline_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-inline-file-on-filesystem"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_inline_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+    # --- OCI only ---
+
+    - name: "Step 06: Create-rulesfile-oci"
+      description: |
+        Rulesfile sourced from falco-rules:latest, which depends on the container plugin.
+        The container plugin is not installed, so the dep is unmet.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_oci_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 07: Assert-oci-installed-anyway"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_oci_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_oci_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 08: Assert-oci-file-on-filesystem"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_oci_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+    # --- ConfigMap only ---
+
+    - name: "Step 09: Create-rulesfile-configmap"
+      description: Rulesfile sourced from the ConfigMap, which contains a json >= 0.7.0 dep (unmet).
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-advise-mode-rules-cm
+
+    - name: "Step 10: Assert-configmap-installed-anyway"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_cm_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_cm_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 11: Assert-configmap-file-on-filesystem"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_cm_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+    # --- All three sources ---
+
+    - name: "Step 12: Create-rulesfile-all-sources"
+      description: |
+        Rulesfile combining all three sources. Inline and ConfigMap declare a json dep;
+        OCI (falco-rules) depends on the container plugin. All deps are unmet but all
+        sources install in advise mode.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_all_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: json
+                        version: 0.7.0
+                  - rule: JSON advise mode all-sources inline rule
+                    desc: Inline rule for the all-sources advise-mode test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline"
+                    priority: DEBUG
+                    tags: [test, chainsaw]
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+                configMapRef:
+                  name: rulesfile-advise-mode-rules-cm
+
+    - name: "Step 13: Assert-all-sources-installed-anyway"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_all_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_all_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 14: Assert-all-sources-file-on-filesystem"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_all_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

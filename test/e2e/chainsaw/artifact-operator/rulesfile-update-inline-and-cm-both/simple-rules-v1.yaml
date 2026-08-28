@@ -1,0 +1,6 @@
+- rule: Chainsaw update-inline-and-cm-both CM rule v1
+  desc: ConfigMap rule for testing simultaneous inline + CM content update.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-both-v1"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

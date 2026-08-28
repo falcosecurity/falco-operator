@@ -1,0 +1,273 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-source-removed-deps-advise
+spec:
+  description: |
+    Validates advise-mode behavior when the source that declared requirements is removed.
+
+    Setup: real Falco in advise mode (--enforce-requirements=false). Rulesfile has two
+    sources:
+      - InlineRules: contains required_engine_version=0.30.0 (always met; the dep-declaring
+        source for this test)
+      - ConfigMap: a plain rule with no requirements
+
+    Both are installed. ArtifactMeta is derived from both sources merged; the engine version
+    check passes (real engine version ≥ 0.30.0) → DependenciesSatisfied=True, Programmed=True.
+
+    After removing inlineRules from spec:
+    - fetchAndCacheArtifactMeta now parses only the ConfigMap (no requirements found)
+      → ArtifactMeta=nil.
+    - enforceRulesfileCompatibility sees ArtifactMeta==nil with no OCI source: in advise mode
+      it sets DependenciesSatisfied=True (no requirements is fine) and returns skip=false.
+    - ensureRulesfile runs: stale inline file IS deleted, InlineArtifactProgrammed is removed
+      from conditions, ConfigMap source is verified/installed. installedArtifacts drops to 1.
+    - Programmed stays True: advise mode skips DependenciesSatisfied in the gate, and
+      ConfigMapArtifactProgrammed=True satisfies the remaining condition.
+
+    Steps:
+    1. Create a real Falco DaemonSet in advise mode.
+    2. Create a ConfigMap from simple-rules.yaml (no requirements).
+    3. Create a Rulesfile with inline (required_engine_version=0.30.0) + ConfigMap (no reqs).
+    4. Assert both sources are installed and Programmed=True.
+    5. Assert inline file is present on the node filesystem.
+    6. Assert ConfigMap file is present on the node filesystem.
+    7. Remove inlineRules from spec; assert DependenciesSatisfied=True,
+       InlineArtifactProgrammed absent (cleanup ran), ConfigMapArtifactProgrammed=True,
+       Programmed=True, installedArtifacts=1.
+    8. Assert inline file ABSENT from the node filesystem (stale cleanup ran).
+    9. Assert ConfigMap file STILL present on the node filesystem.
+
+  bindings:
+    - name: falco_name
+      value: falco-src-removed-deps-advise-test
+    - name: rulesfile_name
+      value: rulesfile-src-removed-deps-test
+    - name: configmap_name
+      value: rulesfile-src-removed-deps-advise-cm
+    - name: test_name
+      value: rulesfile-source-removed-deps-advise
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Create a real Falco DaemonSet in advise mode (--enforce-requirements=false).
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: enforce_requirements
+              value: "--enforce-requirements=false"
+
+    - name: "Step 02: Create-rules-configmap"
+      description: Create the ConfigMap from simple-rules.yaml (no requirements).
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($configmap_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules.yaml
+
+    - name: "Step 03: Create-rulesfile"
+      description: |
+        Create the Rulesfile with inline (required_engine_version=0.30.0, always met by any
+        real Falco) and ConfigMap (no requirements). Requirements from both sources are merged
+        by the instance controller; the engine version check passes.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef:
+                  name: ($configmap_name)
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw source-removed-deps inline rule
+                    desc: Inline rule with engine version requirement.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline source=inline"
+                    priority: DEBUG
+                    tags: [test, chainsaw, source-removed-deps]
+
+    - name: "Step 04: Assert-initial-conditions"
+      description: Both sources installed; DependenciesSatisfied=True (engine req met).
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-src-removed-deps-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-src-removed-deps-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Remove-inline-source"
+      description: |
+        Remove inlineRules from spec. The remaining ConfigMap source has no requirements, so
+        fetchAndCacheArtifactMeta sets ArtifactMeta=nil. With ArtifactMeta==nil and no OCI,
+        enforceRulesfileCompatibility sets DependenciesSatisfied=True in advise mode and
+        returns skip=false. ensureRulesfile runs: stale inline file IS deleted,
+        InlineArtifactProgrammed is removed from conditions, and installedArtifacts drops to
+        1. Programmed stays True because advise mode skips DependenciesSatisfied in the gate,
+        and ConfigMapArtifactProgrammed=True satisfies it.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules: null
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed'] | length(@)): 0
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 08: Assert-inline-file-absent"
+      description: |
+        ensureRulesfile ran in advise mode and deleted the stale inline file; it must now
+        be absent from the node filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-src-removed-deps-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 09: Assert-cm-file-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-src-removed-deps-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

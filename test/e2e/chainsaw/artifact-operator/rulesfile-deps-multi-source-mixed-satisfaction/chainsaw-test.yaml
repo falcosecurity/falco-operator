@@ -1,0 +1,414 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-deps-multi-source-mixed-satisfaction
+spec:
+  description: |
+    Regression test for the instance controller's cross-source metadata aggregation: one
+    Rulesfile combining OCI, ConfigMap, and inline sources must merge requirements/dependencies
+    from all three into a single DependenciesSatisfied check, not let one source's success mask
+    another's unmet requirement.
+
+    Cycles through each source in turn, toggling only that one source between unmet and met
+    while keeping the other two fixed, so each transition unambiguously isolates that source's
+    own contribution to the aggregate:
+    1. Create the Rulesfile with OCI unmet (ConfigMap and inline already met). Assert False.
+    2. Fix OCI (swap to a met OCI artifact). Assert True.
+    3. Break ConfigMap (unmet). Assert False.
+    4. Fix ConfigMap (met). Assert True.
+    5. Break inline (unmet). Assert False.
+    6. Fix inline (met). Assert True, final: all three sources present and satisfied together,
+       all three files on disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-deps-multi-source-mixed-test
+    - name: rulesfile_name
+      value: rulesfile-deps-multi-source-mixed-test
+    - name: rules_cm_name
+      value: rulesfile-deps-multi-source-mixed-cm
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: test_name
+      value: rulesfile-deps-multi-source-mixed-satisfaction
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-container-plugin"
+      description: |
+        The container plugin (real version 0.7.1) is the one dependency knob ConfigMap and
+        inline toggle between unmet (>=999.0.0) and met (>=0.4.0) throughout this test; install
+        it once up front so their initial "met" states are genuinely met from the start.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: container
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Create-configmap-met"
+      description: Starts on the "met" fixture (container >= 0.4.0); only OCI is unmet to begin with.
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: configmap-rules-met.yaml
+
+    - name: "Step 04: Create-rulesfile-oci-unmet"
+      description: |
+        All three sources on one Rulesfile from the start. OCI points at
+        falco-test/rulesfile-plugin-dep-unmet (depends-on json >= 999.0.0, never met: json is
+        never installed in this test). ConfigMap and inline both declare container >= 0.4.0
+        (met). If OCI's failure were masking or being masked by the other sources instead of
+        genuinely aggregating, this wouldn't come out False.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-plugin-dep-unmet
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                configMapRef:
+                  name: ($rules_cm_name)
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: container
+                        version: "0.4.0"
+                  - rule: Chainsaw multi-source-mixed inline rule (met)
+                    desc: Inline rule declaring a container plugin requirement the installed version satisfies.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-multi-mixed-met"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 05: Fix-oci-source"
+      description: |
+        Partial patch: only spec.ociArtifact changes, ConfigMap/inline are left untouched.
+        Swaps to falco-test/rulesfile-official (depends-on container >= 0.4.0, met, container
+        already installed above). All three sources are now met simultaneously.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Break-configmap-source"
+      description: |
+        Re-applies the same-named ConfigMap with the unmet fixture (container >= 999.0.0), the
+        same way rulesfile-update-cm-data simulates a ConfigMap update: re-invoking this
+        template with a different source_file. OCI and inline are unchanged from Step 05's met
+        state, so this isolates ConfigMap as the only variable.
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: configmap-rules-unmet.yaml
+
+    - name: "Step 07: Assert-configmap-unmet"
+      description: |
+        Reason is DependenciesNotSatisfiedUpdateRejected, not the plain DependenciesNotSatisfied
+        from Step 04: the ConfigMap source was already successfully installed (from Step 05's
+        fixed state), so this is an update to an already-installed artifact being rejected, not
+        a first-time failure (internal/pkg/artifact/compatibility_outcome.go). The previously
+        installed content stays on disk untouched either way.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 08: Fix-configmap-source"
+      description: Re-applies the ConfigMap with the met fixture again (container >= 0.4.0).
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: configmap-rules-met.yaml
+
+    - name: "Step 09: Assert-configmap-fixed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 10: Break-inline-source"
+      description: |
+        Full re-specification of spec.inlineRules (patch merges spec.inlineRules as a whole
+        array, not per-element), switching its requirement to container >= 999.0.0. OCI and
+        ConfigMap are unchanged from Step 09's met state, isolating inline as the only variable.
+        Reason is DependenciesNotSatisfiedUpdateRejected, not the plain DependenciesNotSatisfied
+        from Step 04: the inline source was already successfully installed, so this is a
+        rejected update, not a first-time failure (same as Step 07's ConfigMap break).
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: container
+                        version: "999.0.0"
+                  - rule: Chainsaw multi-source-mixed inline rule (unmet)
+                    desc: Inline rule declaring a container plugin requirement no installed version can satisfy.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-multi-mixed-unmet"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 11: Fix-inline-source"
+      description: |
+        Back to the met inline requirement (container >= 0.4.0). Final state: all three
+        sources present on one Rulesfile, all three satisfied simultaneously.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: container
+                        version: "0.4.0"
+                  - rule: Chainsaw multi-source-mixed inline rule (met)
+                    desc: Inline rule declaring a container plugin requirement the installed version satisfies.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-multi-mixed-met"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 3
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 12: Assert-oci-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-deps-multi-source-mixed-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 13: Assert-configmap-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-deps-multi-source-mixed-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 14: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-deps-multi-source-mixed-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 15: Delete-rulesfile"
+      description: Cleanup, matching rulesfile-basic-all's teardown pattern.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

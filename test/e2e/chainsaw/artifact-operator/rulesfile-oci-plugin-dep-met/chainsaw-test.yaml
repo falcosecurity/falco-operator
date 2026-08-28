@@ -1,0 +1,157 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-plugin-dep-met
+spec:
+  description: |
+    Validates that a Rulesfile backed by a local OCI artifact whose config layer declares
+    a dependency on json>=0.7.0 is installed when the json plugin is actually loaded in Falco.
+
+    The OCI artifact (falco-test/rulesfile-plugin-dep-met) was pushed with:
+      falcoctl registry push --depends-on json:0.7.0
+
+    The json plugin is installed from the local OCI registry and Falco is verified to report
+    it in /versions before the Rulesfile is created, ensuring the dependency check uses real
+    plugin data.
+
+    Expected outcome:
+    - DependenciesSatisfied=True (json is loaded and satisfies >=0.7.0).
+    - OCIArtifactProgrammed=True, Programmed=True.
+    - OCI file written to the node filesystem.
+    - installedArtifacts has one entry for oci medium.
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-plugin-dep-met-test
+    - name: rulesfile_name
+      value: rulesfile-oci-plugin-dep-met-test
+    - name: test_name
+      value: rulesfile-oci-plugin-dep-met
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-json-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: json
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Verify-json-loaded-in-falco"
+      description: Wait until Falco's /versions reports the json plugin as loaded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: json
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 04: Create-rulesfile-oci-local"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-plugin-dep-met
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 05: Assert-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'oci']):
+                  - path: /etc/falco/rules.d/50-01-rulesfile-oci-plugin-dep-met-test-oci.yaml
+                    priority: 50
+
+    - name: "Step 06: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-oci-plugin-dep-met-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

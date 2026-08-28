@@ -1,0 +1,726 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-node-lifecycle
+spec:
+  description: |
+    Exercises the instance operators' generic Node-lifecycle reconciliation: the shared
+    ListMatchingNodes / EnsureNodeObject / DeleteStaleNodeObjects logic in
+    internal/pkg/controllerhelper, used identically by the Plugin, Rulesfile, and Config
+    aggregators, using two KWOK-simulated fake Nodes instead of real hardware. A minimal
+    Falco CR and one stub pod per fake node are created so that ListMatchingFalcoNodes
+    includes each fake node when it is present and has a Running pod.
+
+    Scope note: this test covers only the physical Node object's own lifecycle (created,
+    deleted, relabeled). Two related but distinct concerns have their own dedicated tests
+    instead, to keep this one focused:
+      - Self-healing of a manually deleted/corrupted ArtifactNode: artifact-node-self-healing.
+      - Selector-matching correctness itself (CR-side selector changes, matchExpressions,
+        multiple CRs of the same kind reacting to one Node event): artifact-selector-matching.
+
+    All three CRs use a selector scoped to chainsaw-node-group=($namespace), a label only this
+    test's own fake nodes carry, so matching is isolated from the real cluster node and from
+    other tests' fake nodes running in parallel.
+
+    Because no real per-node sidecar ever reconciles an ArtifactNode on a fake node, each one
+    keeps its CRD-defaulted Programmed=Unknown/Pending condition forever, and the parent CR's
+    aggregated Programmed condition follows suit (Unknown/Pending, not True) whenever exactly
+    one such ArtifactNode exists. Programmed=Unknown/NoNodesAssigned is the zero-ArtifactNode
+    case, still produced by AggregateConditions the same way it is with a real cluster.
+
+    Since EnsureNodeObject itself never sets a finalizer on an ArtifactNode (only a real
+    per-node sidecar does, once it actually claims one: see
+    internal/pkg/controllerhelper/nodeobject.go:178-220), a fake node's ArtifactNode is
+    normally deleted trivially, never exercising ClearFinalizersIfNodeGone's force-clear
+    branch (node.go:40-60). Step 06 closes that gap by directly patching a finalizer onto
+    each ArtifactNode to simulate a real sidecar having claimed it, so Step 08's wait only
+    succeeds if that branch actually fires once fake-node-a is gone.
+
+    Scenarios (state transitions of the underlying Node objects; the three CRs are otherwise
+    untouched after creation):
+    1. Create fake-node-a, then all three CRs (selector matches fake-node-a immediately).
+       Assert an ArtifactNode exists per CR, and each CR is Programmed=Unknown/Pending.
+    2. Patch a simulated finalizer onto each ArtifactNode, then delete fake-node-a outright
+       (Node is gone). Assert each ArtifactNode is still actually deleted (proving
+       ClearFinalizersIfNodeGone's force-clear branch, not just the ordinary no-finalizer
+       delete path) and each CR reverts to Programmed=Unknown/NoNodesAssigned.
+    3. Create fake-node-b, a new Node joining later, without touching any CR. Assert a new
+       ArtifactNode is created per CR purely from the Node watch, and each CR returns to
+       Programmed=Unknown/Pending.
+    4. Remove the chainsaw-node-group label from fake-node-b (Node still exists, just no
+       longer matches, the relabel-away case, distinct from Node deletion). Assert each
+       ArtifactNode is deleted and each CR reverts to Programmed=Unknown/NoNodesAssigned.
+    5. Re-add the label to fake-node-b. Assert each ArtifactNode is recreated and each CR
+       returns to Programmed=Unknown/Pending.
+
+  bindings:
+    - name: plugin_name
+      value: node-lifecycle-plugin
+    - name: rulesfile_name
+      value: node-lifecycle-rulesfile
+    - name: config_name
+      value: node-lifecycle-config
+    - name: test_name
+      value: artifact-node-lifecycle
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: node_a_name
+      value: (join('-', ['lifecycle-node-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['lifecycle-node-b', $namespace]))
+    - name: falco_name
+      value: node-lifecycle-falco
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-a"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; its name is used by ListMatchingFalcoNodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod-on-node-a"
+      description: Stub pod pinned to node-a so ListMatchingFalcoNodes returns it; KWOK advances it to Running.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 02: Create-plugin"
+      description: OCI-sourced Plugin (Plugin has no inline source option), selector scoped to this test's fake nodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+
+    - name: "Step 03: Create-rulesfile"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw artifact-node-lifecycle rule
+                    desc: Rule used to verify Node-lifecycle reconciliation.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=artifact-node-lifecycle"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 04: Create-config"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                config:
+                  json_output: false
+
+    - name: "Step 05: Assert-artifact-nodes-created-for-node-a"
+      description: |
+        fake-node-a matches all three selectors, so the aggregator creates one ArtifactNode
+        per CR. No real per-node sidecar ever reconciles it, so it keeps the CRD default
+        Programmed=Unknown/Pending, and each parent CR's aggregate follows suit.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              spec:
+                nodeName: ($node_a_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              spec:
+                nodeName: ($node_a_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              spec:
+                nodeName: ($node_a_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 06: Add-simulated-finalizer-to-node-a-artifactnodes"
+      description: |
+        Simulates a real per-node sidecar having claimed each ArtifactNode by setting its own
+        finalizer while it works: EnsureNodeObject itself never sets one
+        (internal/pkg/controllerhelper/nodeobject.go:178-220); only a real per-node sidecar
+        does, and none ever runs on a KWOK fake node (tainted NoSchedule). Without this step,
+        deleteNodeObject's plain Delete would already succeed on its own, never actually
+        exercising ClearFinalizersIfNodeGone's force-clear branch (node.go:40-60). With a
+        finalizer present, Step 08's wait only succeeds if that branch correctly fires once
+        fake-node-a is gone; if it were broken, that wait would hang until its own timeout.
+        Names are the deterministic NodeObjectName format: "<kind>--<artifactName>--<nodeName>".
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                namespace: ($namespace)
+                finalizers:
+                  - chainsaw.kyverno.io/simulated-node-hold
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['rulesfile', $rulesfile_name, $node_a_name]))
+                namespace: ($namespace)
+                finalizers:
+                  - chainsaw.kyverno.io/simulated-node-hold
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['config', $config_name, $node_a_name]))
+                namespace: ($namespace)
+                finalizers:
+                  - chainsaw.kyverno.io/simulated-node-hold
+
+    - name: "Step 07: Delete-fake-node-a"
+      description: Scenario 2, the Node itself is gone, not just relabeled.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+
+    - name: "Step 08: Wait-for-artifact-nodes-deleted-after-node-a-gone"
+      description: |
+        Each ArtifactNode here carries the finalizer injected in Step 06, so this wait only
+        completes if ClearFinalizersIfNodeGone's force-clear branch actually fires now that
+        fake-node-a is gone, not merely DeleteStaleNodeObjects' ordinary no-finalizer path.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 09: Assert-no-nodes-assigned-after-node-a-deleted"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 10: Create-fake-node-b"
+      description: |
+        Scenario 3: a brand-new Node joining the cluster, matching all three CRs' selectors
+        without any of the CRs themselves being touched.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 10b: Create-falco-pod-on-node-b"
+      description: Stub pod pinned to node-b so ListMatchingFalcoNodes returns it when it exists and matches.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 11: Assert-artifact-nodes-created-for-node-b"
+      description: Same shape as Step 05, now for fake-node-b, proving the Node watch alone (no CR change) is enough.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              spec:
+                nodeName: ($node_b_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              spec:
+                nodeName: ($node_b_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              spec:
+                nodeName: ($node_b_name)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 12: Remove-node-group-label-from-node-b"
+      description: |
+        Scenario 4: the Node itself still exists, it simply no longer matches (distinct code
+        path from Step 07's Node deletion, though both end up deleting the ArtifactNode).
+      try:
+        - script:
+            env:
+              - name: NODE_B_NAME
+                value: ($node_b_name)
+            content: |
+              kubectl label node "$NODE_B_NAME" chainsaw-node-group-
+              echo "Removed chainsaw-node-group label from $NODE_B_NAME"
+
+    - name: "Step 13: Wait-for-artifact-nodes-deleted-after-relabel"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 14: Assert-no-nodes-assigned-after-relabel"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 15: Re-add-node-group-label-to-node-b"
+      description: Scenario 5, relabel back onto the (still existing) Node b.
+      try:
+        - script:
+            env:
+              - name: NODE_B_NAME
+                value: ($node_b_name)
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              kubectl label node "$NODE_B_NAME" chainsaw-node-group="$NAMESPACE" --overwrite
+              echo "Re-added chainsaw-node-group=$NAMESPACE to $NODE_B_NAME"
+
+    - name: "Step 16: Assert-artifact-nodes-recreated-after-relabel-back"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              spec:
+                nodeName: ($node_b_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              spec:
+                nodeName: ($node_b_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              spec:
+                nodeName: ($node_b_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 17: Delete-plugin-rulesfile-config"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($config_name)
+              namespace: ($namespace)
+
+    - name: "Step 18: Wait-for-final-artifact-node-cleanup"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 19: Delete-fake-node-b-and-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not
+        leave either behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

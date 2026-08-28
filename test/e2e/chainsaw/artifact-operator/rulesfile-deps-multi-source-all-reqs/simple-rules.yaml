@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: json
+      version: "0.7.0"
+- rule: Chainsaw deps-multi-source-all-reqs CM rule
+  desc: ConfigMap rule that declares a json plugin version requirement.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-multi-req"
+  priority: DEBUG
+  tags: [test, chainsaw, deps]

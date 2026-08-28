@@ -1,0 +1,39 @@
+# Template for creating and asserting a Component instance (metacollector, falcosidekick, or
+# falcosidekick-ui).
+#
+# Applies only spec.component.type - no version/replicas override - so the test exercises the
+# operator's own defaults end-to-end (image, ports, probes, RBAC, Service). Waits for every
+# condition (Reconciled and Available) to reach True. Unlike apply-assert-falco.yaml, Available
+# is asserted here for real: Component images have no kernel/eBPF driver dependency, so the real
+# upstream image is expected to actually become Ready in-cluster.
+#
+# Required bindings:
+#   - component_name: Name of the Component CR to create.
+#   - component_type: "metacollector", "falcosidekick", or "falcosidekick-ui".
+#   - namespace:      Namespace where the component will run.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-component
+spec:
+  try:
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+            namespace: ($namespace)
+          spec:
+            component:
+              type: ($component_type)
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+            namespace: ($namespace)
+          status:
+            ~.(conditions):
+              status: 'True'

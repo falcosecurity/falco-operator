@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw update-add-inline-to-cm configmap rule
+  desc: ConfigMap rule for testing source addition.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-initial"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

@@ -1,0 +1,268 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-requirements
+spec:
+  description: |
+    Validates the plugin_api_version compatibility check deterministically, by feeding the
+    artifact-operator a fully mocked Falco /versions response instead of relying on the real
+    Falco build's actual capabilities:
+    1. Create a ConfigMap with a mocked /versions response reporting plugin_api_version=2.99.0
+       (wrong major: the real container plugin (0.7.1) requires plugin_api_version 3.10.0).
+    2. Create a Falco DaemonSet whose artifact-operator sidecar is pointed (--falco-url) at a
+       3rd "mock-falco-versions" container (busybox httpd) instead of the real Falco process's
+       own /versions endpoint. An init container seeds the mock content from the ConfigMap into
+       a writable emptyDir once at pod startup; the httpd container serves that emptyDir. Runs
+       with --enforce-requirements=true (the default), so the plugin is blocked
+       (DependenciesSatisfied=Unknown) until OCI metadata arrives rather than racing ahead
+       and installing before it's known whether the requirement is satisfied.
+    3. Create a container Plugin CR.
+    4. Assert DependenciesSatisfied=False / Programmed=False (major-version mismatch blocks it),
+       the .so never reaches the node filesystem, and no config entry is written to the shared
+       plugins-config file either.
+    5. Overwrite the mock content (via a direct kubectl exec write into a writable emptyDir,
+       not a ConfigMap update) to report plugin_api_version=3.10.0 (same major, meets the
+       minimum); assert DependenciesSatisfied/Programmed flip to True, and the .so plus its
+       shared config entry now land on disk.
+
+    The Plugin controller's compatibility check queries Falco's /versions live on every
+    reconcile (via the same compat.VersionsFetcher/VersionsWatcher wiring Rulesfile already
+    uses), and PluginReconciler.SetupWithManager watches the versions-changed event channel,
+    so the content change genuinely triggers re-evaluation, not just a lucky poll. The mock
+    content lives on a plain emptyDir (seeded once at pod startup by an init container from
+    the ConfigMap below), not a ConfigMap-backed volume: writing directly into a mounted
+    ConfigMap volume is unreliable (kubelet's own sync can revert it), and re-applying the
+    ConfigMap and waiting for kubelet to propagate the volume update can take up to ~60s. A
+    direct exec write into the emptyDir takes effect on the very next request.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-requirements-test
+    - name: plugin_name
+      value: container
+    - name: mock_configmap_name
+      value: mock-falco-versions
+    - name: test_name
+      value: plugin-requirements
+
+  steps:
+    - name: Create-mock-versions-configmap
+      description: Create a ConfigMap whose "versions" key mocks Falco's /versions response.
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($mock_configmap_name)
+            - name: data_key
+              value: versions
+            - name: source_file
+              value: mock-versions.json
+
+    - name: Create-falco
+      description: |
+        Create a Falco DaemonSet with a mock /versions server (enforce mode, the default).
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-mock-versions.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: mock_configmap_name
+              value: ($mock_configmap_name)
+
+    - name: Create-container-plugin
+      description: Create the container Plugin CR (no custom config needed for this test).
+      use:
+        template: ../../common/_step_templates/apply-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: Assert-deps-not-satisfied
+      description: |
+        Falco mock-reports plugin_api_version=2.99.0, but the real container plugin requires
+        3.10.0 (major mismatch); DependenciesSatisfied must be False and the plugin never
+        gets programmed.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: Assert-so-absent-from-filesystem
+      description: The container.so must never have reached the node filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: Assert-config-absent-from-filesystem
+      description: |
+        The plugin isn't Programmed yet, so ensurePluginConfig hasn't run and the shared
+        plugins-config file must not exist yet.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 99-03-plugins-config-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: Update-mock-versions-to-satisfied
+      description: |
+        Overwrite the mock content directly (kubectl exec into the writable emptyDir, not a
+        ConfigMap update) to report plugin_api_version=3.10.0, same major as required, meets
+        the minimum. No plugin or Falco state changes; only Falco's mocked capability, and it
+        takes effect immediately rather than waiting on kubelet volume-sync.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: mock-falco-versions
+              - name: REMOTE_PATH
+                value: /mock/versions
+              - name: LOCAL_FILE
+                value: mock-versions-satisfied.json
+            content: |
+              bash ../../common/scripts/write_file_on_node.sh
+
+    - name: Assert-deps-satisfied-and-programmed
+      description: |
+        Once the artifact-operator's VersionsWatcher picks up the updated mock content and
+        re-triggers the Plugin's reconcile, DependenciesSatisfied must flip to True and the
+        plugin must become Programmed.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+
+    - name: Assert-so-on-filesystem
+      description: The container.so must now be present on the node filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Assert-config-sane
+      description: The container plugin's entry in the shared config file must now be correct.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
