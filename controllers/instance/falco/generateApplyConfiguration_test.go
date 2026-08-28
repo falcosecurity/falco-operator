@@ -17,21 +17,33 @@
 package falco
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
-	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
 var falcoDefs = resources.FalcoDefaults
+
+// buildFalcoImageStringFromVersion builds the expected Falco image string for a given
+// version, defaulting to FalcoTag when version is empty, for comparison against
+// controller output in tests.
+func buildFalcoImageStringFromVersion(version string) string {
+	if version == "" {
+		version = image.FalcoTag
+	}
+	return fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Repository, image.FalcoImage, version)
+}
 
 // mustGetContainers extracts the containers list from an unstructured workload.
 func mustGetContainers(t *testing.T, obj *unstructured.Unstructured) []any {
@@ -55,10 +67,20 @@ func mustFindContainer(t *testing.T, containers []any, name string) map[string]a
 	return nil
 }
 
+// newTestFalcoName returns a bare Falco fixture named "test-f" in testutil.TestNamespace.
+func newTestFalcoName() *instancev1alpha1.Falco {
+	return &instancev1alpha1.Falco{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-f",
+			Namespace: testutil.TestNamespace,
+		},
+	}
+}
+
 func TestGenerateApplyConfiguration(t *testing.T) {
 	tests := []struct {
 		name                string
-		falco               *builders.FalcoBuilder
+		falco               *instancev1alpha1.Falco
 		wantKind            string
 		wantContainerCount  int
 		wantMainImage       string
@@ -72,10 +94,10 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	}{
 		{
 			name:                "default DaemonSet produces expected base with sidecar as regular container",
-			falco:               builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace),
+			falco:               newTestFalcoName(),
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -86,11 +108,14 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "Deployment type produces Deployment kind",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				return f
+			}(),
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -102,12 +127,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "custom version overrides container image",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).WithVersion("0.38.0"),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.38.0")
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
+			wantMainImage:       buildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -119,12 +148,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "custom replicas are propagated in Deployment",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).WithReplicas(3),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Replicas = new(int32(3))
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -136,13 +169,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "Recreate strategy overrides default RollingUpdate",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).
-				WithStrategy(appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Strategy = &appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -154,12 +190,15 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "OnDelete updateStrategy overrides default RollingUpdate for DaemonSet",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithUpdateStrategy(appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.UpdateStrategy = &appsv1.DaemonSetUpdateStrategy{Type: appsv1.OnDeleteDaemonSetStrategyType}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -170,12 +209,15 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "CR labels propagate to pod template",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithLabels(map[string]string{"team": "security", "env": "prod"}),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Labels = map[string]string{"team": "security", "env": "prod"}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDaemonSet,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion(""),
+			wantMainImage:       buildFalcoImageStringFromVersion(""),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -188,9 +230,16 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "custom PodTemplateSpec merges with base preserving probes and volumes",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).
-				WithImage(testContainerName, "custom-repo/falco:custom"),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: testContainerName, Image: "custom-repo/falco:custom"}},
+					},
+				}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
@@ -206,10 +255,17 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "version is ignored when PodTemplateSpec provides main container",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).
-				WithVersion("0.38.0").
-				WithImage(testContainerName, "custom-repo/falco:custom"),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.38.0")
+				f.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: testContainerName, Image: "custom-repo/falco:custom"}},
+					},
+				}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
@@ -225,18 +281,21 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "version applies when PodTemplateSpec has only pod-level fields",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).
-				WithVersion("0.38.0").
-				WithPodTemplateSpec(&corev1.PodTemplateSpec{
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.38.0")
+				f.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						NodeSelector: map[string]string{"disktype": "ssd"},
 					},
-				}),
+				}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  2,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
+			wantMainImage:       buildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -248,18 +307,21 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "version applies when PodTemplateSpec has only a sidecar container",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType(resources.ResourceTypeDeployment).
-				WithVersion("0.38.0").
-				WithPodTemplateSpec(&corev1.PodTemplateSpec{
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new(resources.ResourceTypeDeployment)
+				f.Spec.Version = new("0.38.0")
+				f.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "my-sidecar", Image: "sidecar:latest"}},
 					},
-				}),
+				}
+				return f
+			}(),
 
 			wantKind:            resources.ResourceTypeDeployment,
 			wantContainerCount:  3,
-			wantMainImage:       image.BuildFalcoImageStringFromVersion("0.38.0"),
+			wantMainImage:       buildFalcoImageStringFromVersion("0.38.0"),
 			wantTolerationCount: len(falcoDefs.Tolerations),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-f",
@@ -271,15 +333,18 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 		},
 		{
 			name: "invalid type returns error",
-			falco: builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-				WithType("InvalidType"),
+			falco: func() *instancev1alpha1.Falco {
+				f := newTestFalcoName()
+				f.Spec.Type = new("InvalidType")
+				return f
+			}(),
 			wantErr: "unsupported resource type",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			falco := tt.falco.Build()
+			falco := tt.falco
 			result, err := generateApplyConfiguration(falco, tt.wantKind, "", "")
 
 			if tt.wantErr != "" {
@@ -381,8 +446,8 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 // TestGenerateApplyConfigurationSidecarProbes verifies that the sidecar container retains its
 // liveness/readiness probes, env vars, and volumeMounts after the merge.
 func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
-	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-		WithType(resources.ResourceTypeDeployment).Build()
+	falco := newTestFalcoName()
+	falco.Spec.Type = new(resources.ResourceTypeDeployment)
 
 	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, "", "")
 	require.NoError(t, err)
@@ -401,18 +466,17 @@ func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
 // merges mTLS volume mounts into an existing, user-customized artifact-operator sidecar container
 // rather than appending a duplicate entry.
 func TestGenerateApplyConfigurationMTLSWithUserSidecarOverride(t *testing.T) {
-	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-		WithType(resources.ResourceTypeDaemonSet).
-		WithPodTemplateSpec(&corev1.PodTemplateSpec{
-			Spec: corev1.PodSpec{
-				Containers: []corev1.Container{
-					{Name: "falco", Image: "docker.io/my-registry/falco-supervisor:0.44.1"},
-					{Name: falcoDefs.SidecarContainerName, Image: "docker.io/my-registry/artifact-operator:latest", ImagePullPolicy: corev1.PullNever},
-				},
-				ShareProcessNamespace: new(true),
+	falco := newTestFalcoName()
+	falco.Spec.Type = new(resources.ResourceTypeDaemonSet)
+	falco.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{
+				{Name: "falco", Image: "docker.io/my-registry/falco-supervisor:0.44.1"},
+				{Name: falcoDefs.SidecarContainerName, Image: "docker.io/my-registry/artifact-operator:latest", ImagePullPolicy: corev1.PullNever},
 			},
-		}).
-		Build()
+			ShareProcessNamespace: new(true),
+		},
+	}
 
 	result, err := generateApplyConfiguration(
 		falco, resources.ResourceTypeDaemonSet, "test-f-artifact-client-tls", "test-falco-operator-artifact-ca-bundle",
@@ -452,8 +516,8 @@ func TestGenerateApplyConfigurationMTLSWithUserSidecarOverride(t *testing.T) {
 // TestGenerateApplyConfigurationConfigMapVolume verifies that the configmap volume and its
 // volumeMount are added to the generated pod spec.
 func TestGenerateApplyConfigurationConfigMapVolume(t *testing.T) {
-	falco := builders.NewFalco().WithName("test-f").WithNamespace(testutil.TestNamespace).
-		WithType(resources.ResourceTypeDeployment).Build()
+	falco := newTestFalcoName()
+	falco.Spec.Type = new(resources.ResourceTypeDeployment)
 
 	result, err := generateApplyConfiguration(falco, resources.ResourceTypeDeployment, "", "")
 	require.NoError(t, err)

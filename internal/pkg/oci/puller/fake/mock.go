@@ -14,7 +14,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package puller
+// Package fake provides a test double for puller.Puller.
+package fake
 
 import (
 	"archive/tar"
@@ -25,12 +26,16 @@ import (
 	"io"
 
 	"oras.land/oras-go/v2/registry/remote/auth"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
-// MockOCIPuller implements Puller for testing.
+var _ puller.Puller = (*MockOCIPuller)(nil)
+
+// MockOCIPuller implements puller.Puller for testing.
 type MockOCIPuller struct {
 	// Result is returned on a successful pull. Must be set when PullErr is nil.
-	Result *RegistryResult
+	Result *puller.RegistryResult
 	// PullErr is returned instead of pulling when set.
 	PullErr error
 	// AllowNilResult makes Pull return (nil, nil) when Result is nil.
@@ -41,7 +46,7 @@ type MockOCIPuller struct {
 	PullCalls    []PullCall
 
 	// ConfigResult is returned by FetchConfig when FetchConfigErr is nil.
-	ConfigResult *ArtifactConfig
+	ConfigResult *puller.ArtifactConfig
 	// ConfigDigest is the digest string returned by FetchConfig.
 	ConfigDigest string
 	// FetchConfigErr is returned by FetchConfig when set.
@@ -66,11 +71,11 @@ type PullCall struct {
 	Ref  string
 	OS   string
 	Arch string
-	Opts *RegistryOptions
+	Opts *puller.RegistryOptions
 }
 
 // FetchConfig records the call and returns the preset config result.
-func (m *MockOCIPuller) FetchConfig(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) (*ArtifactConfig, string, error) {
+func (m *MockOCIPuller) FetchConfig(_ context.Context, ref string, _ auth.CredentialFunc, _ *puller.RegistryOptions) (*puller.ArtifactConfig, string, error) {
 	m.FetchConfigCalls = append(m.FetchConfigCalls, ref)
 	if m.FetchConfigErr != nil {
 		return nil, "", m.FetchConfigErr
@@ -79,7 +84,7 @@ func (m *MockOCIPuller) FetchConfig(_ context.Context, ref string, _ auth.Creden
 }
 
 // ResolveDigest records the call and returns the preset digest result.
-func (m *MockOCIPuller) ResolveDigest(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) (string, error) {
+func (m *MockOCIPuller) ResolveDigest(_ context.Context, ref string, _ auth.CredentialFunc, _ *puller.RegistryOptions) (string, error) {
 	m.ResolveDigestCalls = append(m.ResolveDigestCalls, ref)
 	if m.ResolveDigestErr != nil {
 		return "", m.ResolveDigestErr
@@ -88,7 +93,7 @@ func (m *MockOCIPuller) ResolveDigest(_ context.Context, ref string, _ auth.Cred
 }
 
 // FetchContent records the call and returns the preset content bytes.
-func (m *MockOCIPuller) FetchContent(_ context.Context, ref string, _ auth.CredentialFunc, _ *RegistryOptions) ([]byte, error) {
+func (m *MockOCIPuller) FetchContent(_ context.Context, ref string, _ auth.CredentialFunc, _ *puller.RegistryOptions) ([]byte, error) {
 	m.FetchContentCalls = append(m.FetchContentCalls, ref)
 	if m.FetchContentErr != nil {
 		return nil, m.FetchContentErr
@@ -97,7 +102,7 @@ func (m *MockOCIPuller) FetchContent(_ context.Context, ref string, _ auth.Crede
 }
 
 // Pull records the call, writes LayerContent to dst, and returns the preset result.
-func (m *MockOCIPuller) Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *RegistryOptions, dst io.Writer) (*RegistryResult, error) {
+func (m *MockOCIPuller) Pull(ctx context.Context, ref, os, arch string, creds auth.CredentialFunc, opts *puller.RegistryOptions, dst io.Writer) (*puller.RegistryResult, error) {
 	m.PullCalls = append(m.PullCalls, PullCall{Ref: ref, OS: os, Arch: arch, Opts: opts})
 	if m.PullErr != nil {
 		return nil, m.PullErr

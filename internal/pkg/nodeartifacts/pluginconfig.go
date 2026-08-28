@@ -138,10 +138,6 @@ func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Pl
 	pc.LoadPlugins = append(pc.LoadPlugins, config.Name)
 }
 
-func (pc *pluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
-	pc.removeByName(ResolveConfigName(plugin))
-}
-
 func (pc *pluginsConfig) removeByName(name string) {
 	for i, c := range pc.Configs {
 		if c.Name == name {
@@ -164,10 +160,6 @@ func (pc *pluginsConfig) toString() (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func (pc *pluginsConfig) isEmpty() bool {
-	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
 }
 
 // AddPluginConfig ensures plugin's entry is present and current in the shared plugins-config

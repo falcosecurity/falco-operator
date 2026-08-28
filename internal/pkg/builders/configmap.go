@@ -56,18 +56,6 @@ func (b *ConfigMapBuilder) WithLabels(labels map[string]string) *ConfigMapBuilde
 	return b
 }
 
-// WithFinalizers sets the finalizers.
-func (b *ConfigMapBuilder) WithFinalizers(finalizers []string) *ConfigMapBuilder {
-	b.cm.Finalizers = finalizers
-	return b
-}
-
-// WithDeletionTimestamp sets the deletion timestamp.
-func (b *ConfigMapBuilder) WithDeletionTimestamp(ts *metav1.Time) *ConfigMapBuilder {
-	b.cm.DeletionTimestamp = ts
-	return b
-}
-
 // WithData sets the data map.
 func (b *ConfigMapBuilder) WithData(data map[string]string) *ConfigMapBuilder {
 	b.cm.Data = data

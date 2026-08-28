@@ -45,6 +45,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	pullerfake "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller/fake"
 )
 
 const (
@@ -715,7 +716,7 @@ func TestFetchAndCacheArtifactMeta_NoOCI(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_CacheHit(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{}
+	mockPuller := &pullerfake.MockOCIPuller{}
 	plugin := newTestPlugin(withPluginOCI())
 	r, _ := newTestReconcilerWithPuller(t, mockPuller, plugin)
 
@@ -735,7 +736,7 @@ func TestFetchAndCacheArtifactMeta_CacheHit(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_CacheHitIgnoresDigest(t *testing.T) {
 	// Spec hash matches even though the stored digest is stale, so the cache is still a hit.
 	// Picking up a new image pushed to the same tag requires an explicit spec change.
-	mockPuller := &puller.MockOCIPuller{}
+	mockPuller := &pullerfake.MockOCIPuller{}
 	plugin := newTestPlugin(withPluginOCI())
 	r, _ := newTestReconcilerWithPuller(t, mockPuller, plugin)
 
@@ -753,7 +754,7 @@ func TestFetchAndCacheArtifactMeta_CacheHitIgnoresDigest(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_NoCacheNoStatus(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
 		ConfigDigest: "sha256:fresh",
 	}
@@ -768,7 +769,7 @@ func TestFetchAndCacheArtifactMeta_NoCacheNoStatus(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_FetchConfigError(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		FetchConfigErr: fmt.Errorf("registry unavailable"),
 	}
 	plugin := newTestPlugin(withPluginOCI())
@@ -783,7 +784,7 @@ func TestFetchAndCacheArtifactMeta_FetchConfigError(t *testing.T) {
 }
 
 func TestFetchAndCacheArtifactMeta_WithDependencies(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{
 			Dependencies: []puller.ArtifactDependency{
 				{
@@ -942,7 +943,7 @@ func TestReconcile_SecondListNodeObjectsError(t *testing.T) {
 }
 
 func TestReconcile_FetchAndCacheError(t *testing.T) {
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		FetchConfigErr: fmt.Errorf("registry down"),
 	}
 	plugin := newTestPlugin(withPluginOCI())
@@ -1034,7 +1035,7 @@ func TestFetchAndCacheBinaries_FastPath(t *testing.T) {
 	// call needed.
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
-	mockPuller := &puller.MockOCIPuller{} // must not be called
+	mockPuller := &pullerfake.MockOCIPuller{} // must not be called
 	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin)
 
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
@@ -1061,10 +1062,10 @@ func TestFetchAndCacheBinaries_SlowPath(t *testing.T) {
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
 
-	tarGz, err := puller.MakeTarGz("plugin.so", []byte("plugin-binary-content"))
+	tarGz, err := pullerfake.MakeTarGz("plugin.so", []byte("plugin-binary-content"))
 	require.NoError(t, err)
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testPluginDigest,
 		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
@@ -1085,7 +1086,7 @@ func TestFetchAndCacheBinaries_SlowPath(t *testing.T) {
 func TestFetchAndCacheBinaries_PullError(t *testing.T) {
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testPluginDigest,
 		PullErr:             fmt.Errorf("registry unreachable"),
 	}
@@ -1102,10 +1103,10 @@ func TestFetchAndCacheBinaries_DeduplicatesPlatforms(t *testing.T) {
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
 
-	tarGz, err := puller.MakeTarGz("plugin.so", []byte("data"))
+	tarGz, err := pullerfake.MakeTarGz("plugin.so", []byte("data"))
 	require.NoError(t, err)
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testPluginDigest,
 		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
@@ -1125,10 +1126,10 @@ func TestFetchAndCacheBinaries_MultiplePlatforms(t *testing.T) {
 	cacheDir := t.TempDir()
 	plugin := newTestPlugin(withPluginOCI())
 
-	tarGz, err := puller.MakeTarGz("plugin.so", []byte("data"))
+	tarGz, err := pullerfake.MakeTarGz("plugin.so", []byte("data"))
 	require.NoError(t, err)
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ResolveDigestResult: testPluginDigest,
 		Result:              &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
 		LayerContent:        tarGz,
@@ -1209,7 +1210,7 @@ func TestReconcile_FetchAndCacheBinariesError(t *testing.T) {
 	plugin := newTestPlugin(withPluginOCI())
 	node := newTestNode(testutil.TestNodeName, map[string]string{"kubernetes.io/os": "linux", "kubernetes.io/arch": "amd64"})
 
-	mockPuller := &puller.MockOCIPuller{
+	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
 		ConfigDigest: testPluginDigest,
 		PullErr:      fmt.Errorf("registry down"),

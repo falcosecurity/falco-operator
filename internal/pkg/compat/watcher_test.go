@@ -31,9 +31,25 @@ func versionsWithPlugins(plugins map[string]string) *Versions {
 	return &Versions{pluginVersions: plugins}
 }
 
+// mockVersionsFetcher is a local test double for VersionsFetcher. It can't be replaced by the
+// compat/fake package here: this file is a white-box (package compat) test that also reaches
+// into VersionsWatcher's unexported fields and methods, and compat/fake imports compat, so
+// importing it back from an internal compat test would form an import cycle.
+type mockVersionsFetcher struct {
+	Result   *Versions
+	FetchErr error
+}
+
+func (m *mockVersionsFetcher) Fetch(_ context.Context) (*Versions, error) {
+	if m.FetchErr != nil {
+		return nil, m.FetchErr
+	}
+	return m.Result, nil
+}
+
 func TestVersionsWatcher_poll(t *testing.T) {
 	t.Run("plugin loaded sends event", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		ch := w.Events()
 		require.NoError(t, w.poll(context.Background()))
@@ -45,7 +61,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("same plugin set sends no event", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		ch := w.Events()
 		require.NoError(t, w.poll(context.Background()))
@@ -60,7 +76,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("plugin version bump sends event", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		ch := w.Events()
 		require.NoError(t, w.poll(context.Background()))
@@ -76,7 +92,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("unchanged capabilities send no event", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: &Versions{
+		m := &mockVersionsFetcher{Result: &Versions{
 			capabilities:   map[string]string{"engine_version_semver": "0.62.0"},
 			pluginVersions: map[string]string{},
 		}}
@@ -97,7 +113,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 		// In practice engine/Falco version are fixed for a running binary, but a mocked
 		// /versions endpoint (used in e2e tests) can change a top-level capability like
 		// plugin_api_version without touching plugin_versions — this must still be detected.
-		m := &MockVersionsFetcher{Result: &Versions{
+		m := &mockVersionsFetcher{Result: &Versions{
 			capabilities:   map[string]string{"plugin_api_version": "2.99.0"},
 			pluginVersions: map[string]string{},
 		}}
@@ -119,7 +135,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("fetch error resets cached state and returns error", func(t *testing.T) {
-		m := &MockVersionsFetcher{FetchErr: errors.New("unreachable")}
+		m := &mockVersionsFetcher{FetchErr: errors.New("unreachable")}
 		w := NewVersionsWatcher(m, time.Hour)
 		w.lastPluginVersions = map[string]string{"container": "0.7.1"}
 		w.lastCapabilities = map[string]string{"plugin_api_version": "3.10.0"}
@@ -133,7 +149,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("successful fetch after error triggers event", func(t *testing.T) {
-		m := &MockVersionsFetcher{FetchErr: errors.New("unreachable")}
+		m := &mockVersionsFetcher{FetchErr: errors.New("unreachable")}
 		w := NewVersionsWatcher(m, time.Hour)
 		ch := w.Events()
 		w.lastPluginVersions = map[string]string{"container": "0.7.1"}
@@ -150,7 +166,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("full channel does not block", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		ch := w.Events()
 		require.NoError(t, w.poll(context.Background())) // fills channel (cap=1)
@@ -170,7 +186,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("sink fires on every successful poll, including unchanged values", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		var sinkCalls int
 		var lastSeen *Versions
@@ -190,7 +206,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 	})
 
 	t.Run("sink is not called on fetch error", func(t *testing.T) {
-		m := &MockVersionsFetcher{FetchErr: errors.New("unreachable")}
+		m := &mockVersionsFetcher{FetchErr: errors.New("unreachable")}
 		w := NewVersionsWatcher(m, time.Hour)
 		var sinkCalls int
 		w.SetSink(func(*Versions) { sinkCalls++ })
@@ -205,7 +221,7 @@ func TestVersionsWatcher_poll(t *testing.T) {
 		// Regression test: Events() used to return a single shared channel, so two
 		// controllers each calling it would race as competing consumers — only one would
 		// ever see a given event. Each call must now return an independent channel.
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Hour)
 		chA := w.Events()
 		chB := w.Events()
@@ -229,14 +245,14 @@ func TestVersionsWatcher_Start(t *testing.T) {
 		// Run Start synchronously until the context deadline so the ticker fires several
 		// times through the error branch (line with logger.V(4).Info), confirming it does
 		// not block or panic when every fetch fails.
-		w := NewVersionsWatcher(&MockVersionsFetcher{FetchErr: errors.New("unreachable")}, time.Millisecond)
+		w := NewVersionsWatcher(&mockVersionsFetcher{FetchErr: errors.New("unreachable")}, time.Millisecond)
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
 		require.NoError(t, w.Start(ctx))
 	})
 
 	t.Run("stops cleanly on context cancellation", func(t *testing.T) {
-		w := NewVersionsWatcher(&MockVersionsFetcher{FetchErr: errors.New("not ready")}, time.Millisecond)
+		w := NewVersionsWatcher(&mockVersionsFetcher{FetchErr: errors.New("not ready")}, time.Millisecond)
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		go func() { done <- w.Start(ctx) }()
@@ -250,7 +266,7 @@ func TestVersionsWatcher_Start(t *testing.T) {
 	})
 
 	t.Run("publishes event when plugin set changes", func(t *testing.T) {
-		m := &MockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Millisecond)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()

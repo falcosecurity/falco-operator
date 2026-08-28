@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 )
 
 func sha256hex(data []byte) string {
@@ -33,8 +33,8 @@ func sha256hex(data []byte) string {
 	return hex.EncodeToString(h[:])
 }
 
-func newTestStore() (*LocalStore, *filesystem.MockFileSystem) {
-	mockFS := filesystem.NewMockFileSystem()
+func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
+	mockFS := fsfake.NewMockFileSystem()
 	dirs := ArtifactDirs{
 		Plugin:    "/plugins",
 		Rulesfile: "/rulesfiles",

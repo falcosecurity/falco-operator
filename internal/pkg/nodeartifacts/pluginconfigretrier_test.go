@@ -25,25 +25,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
 
 // TestPluginConfigRetrier_ForcesRewriteAfterMismatchPersists runs the retrier loop and verifies a
 // persistent mismatch eventually triggers a forced rewrite, observed as a Rename call on the mock
-// filesystem. It sleeps for a fixed duration and reads mockFS only after Start returns, since
+// fsfake. It sleeps for a fixed duration and reads mockFS only after Start returns, since
 // mockFS is not safe for concurrent access.
 func TestPluginConfigRetrier_ForcesRewriteAfterMismatchPersists(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}
-	m := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
 	require.NoError(t, err)
 	// Falco never reports "container" loaded: a permanent mismatch for this test's duration.
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcherWithPlugins(map[string]string{}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{}).Result)
 	require.True(t, m.PluginLoadMismatch())
 
 	renamesBefore := len(mockFS.RenameCalls)
@@ -69,14 +69,14 @@ func TestPluginConfigRetrier_ForcesRewriteAfterMismatchPersists(t *testing.T) {
 // TestPluginConfigRetrier_NoMismatchNeverRewrites verifies the retrier does not force a rewrite
 // when desired and observed plugins already agree.
 func TestPluginConfigRetrier_NoMismatchNeverRewrites(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}
-	m := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
 	require.NoError(t, err)
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
 	require.False(t, m.PluginLoadMismatch())
 
 	renamesBefore := len(mockFS.RenameCalls)
@@ -103,14 +103,14 @@ func TestPluginConfigRetrier_NoMismatchNeverRewrites(t *testing.T) {
 // TestPluginConfigRetrier_ForceRewriteErrorIsLoggedAndRetried verifies a forced-rewrite failure
 // does not stop the retrier loop; it retries on the next tick.
 func TestPluginConfigRetrier_ForceRewriteErrorIsLoggedAndRetried(t *testing.T) {
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}
-	m := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
 	require.NoError(t, err)
-	m.OnFalcoVersionsObserved(compat.NewMockVersionsFetcherWithPlugins(map[string]string{}).Result)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{}).Result)
 	mockFS.WriteErr = assert.AnError
 
 	retrier := nodeartifacts.NewPluginConfigRetrier(m, fetcher, time.Millisecond, 5*time.Millisecond)

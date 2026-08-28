@@ -28,8 +28,8 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
@@ -96,8 +96,8 @@ func TestWarmSync_PopulatesFromExistingArtifactNodes(t *testing.T) {
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		Build()
 
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	mgr := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
 	require.NoError(t, nodeartifacts.WarmSync(context.Background(), cl, mgr, "ns", "minikube"))
 
@@ -154,8 +154,8 @@ func TestWarmSync_IgnoresOtherNodes(t *testing.T) {
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		Build()
 
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	mgr := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
 	// Warm-syncing "minikube", which has no ArtifactNodes of its own, must not pick up
 	// "other-node"'s entries.
@@ -210,8 +210,8 @@ func TestWarmSync_SkipsNodesBeingDeleted(t *testing.T) {
 		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		Build()
 
-	store := &artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	mgr := nodeartifacts.NewManager(store, compat.NewMockVersionsFetcher(nil))
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
 	require.NoError(t, nodeartifacts.WarmSync(context.Background(), cl, mgr, "ns", "minikube"))
 

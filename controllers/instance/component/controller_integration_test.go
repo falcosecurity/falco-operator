@@ -40,7 +40,6 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
-	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
@@ -140,9 +139,15 @@ func TestReconcile_NonExistent(t *testing.T) {
 func TestReconcile_FullReconciliation(t *testing.T) {
 	ctx := context.Background()
 	defs := resources.MetacollectorDefaults
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-full").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-full",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 5)
@@ -210,9 +215,15 @@ func TestReconcile_FullReconciliation(t *testing.T) {
 // TestReconcile_Deletion verifies that deletion removes cluster-scoped resources and the finalizer.
 func TestReconcile_Deletion(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-delete").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-delete",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 3)
@@ -252,10 +263,16 @@ func TestReconcile_Deletion(t *testing.T) {
 // TestReconcile_UpdateDeployment verifies that updating the spec propagates changes to the Deployment.
 func TestReconcile_UpdateDeployment(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-update").WithNamespace(testutil.TestNamespace).
-		WithReplicas(1).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-update",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+			Replicas:  new(int32(1)),
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 5)
@@ -290,9 +307,15 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 // TestReconcile_StatusPersisted verifies that status conditions are actually persisted to the API server.
 func TestReconcile_StatusPersisted(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-status").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-status",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 5)
@@ -319,9 +342,15 @@ func TestReconcile_StatusPersisted(t *testing.T) {
 // TestReconcile_StatusInfo verifies that status.version and status.resourceType are set after reconciliation.
 func TestReconcile_StatusInfo(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-status-info").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-status-info",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 3)
@@ -339,9 +368,15 @@ func TestReconcile_StatusInfo(t *testing.T) {
 // do NOT get an empty ClusterRole.
 func TestReconcile_FalcosidekickRoleCreation(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeFalcosidekick).
-		WithName("test-sidekick-rbac").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sidekick-rbac",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 5)
@@ -385,9 +420,15 @@ func TestReconcile_FalcosidekickRoleCreation(t *testing.T) {
 // recreates a sub-resource (ServiceAccount) that was deleted externally.
 func TestReconcile_RecoveryAfterSubResourceDeletion(t *testing.T) {
 	ctx := context.Background()
-	comp := createComponent(t, ctx, builders.NewComponent().
-		WithComponentType(instancev1alpha1.ComponentTypeMetacollector).
-		WithName("test-recovery").WithNamespace(testutil.TestNamespace).Build())
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-recovery",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
 
 	reconciler := newTestReconciler()
 	reconcileN(t, ctx, reconciler, comp.Name, 5)

@@ -30,6 +30,7 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	pullerfake "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller/fake"
 )
 
 func TestFetchOCIAuthSecret(t *testing.T) {
@@ -171,7 +172,7 @@ func TestFetchContent(t *testing.T) {
 			if len(tt.objects) > 0 {
 				builder = builder.WithObjects(tt.objects...)
 			}
-			mockPuller := &puller.MockOCIPuller{
+			mockPuller := &pullerfake.MockOCIPuller{
 				ContentResult:   tt.contentResult,
 				FetchContentErr: tt.fetchContentErr,
 			}

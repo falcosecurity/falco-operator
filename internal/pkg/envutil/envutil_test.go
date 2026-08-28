@@ -22,55 +22,6 @@ import (
 	"testing"
 )
 
-func TestStringOr(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      string
-		envValue string
-		setEnv   bool
-		fallback string
-		want     string
-	}{
-		{
-			name:     "returns env var value when set",
-			key:      "ENVUTIL_TEST_VAR",
-			envValue: "from-env",
-			setEnv:   true,
-			fallback: "fallback",
-			want:     "from-env",
-		},
-		{
-			name:     "returns fallback when env var unset",
-			key:      "ENVUTIL_TEST_VAR",
-			setEnv:   false,
-			fallback: "fallback",
-			want:     "fallback",
-		},
-		{
-			name:     "returns fallback when env var set to empty string",
-			key:      "ENVUTIL_TEST_VAR",
-			envValue: "",
-			setEnv:   true,
-			fallback: "fallback",
-			want:     "fallback",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.setEnv {
-				t.Setenv(tt.key, tt.envValue)
-			}
-
-			got := StringOr(tt.key, tt.fallback)
-
-			if got != tt.want {
-				t.Errorf("StringOr(%q, %q) = %q, want %q", tt.key, tt.fallback, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestFlagNameToEnvName(t *testing.T) {
 	tests := []struct {
 		flagName string

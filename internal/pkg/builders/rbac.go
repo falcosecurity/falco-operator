@@ -184,12 +184,6 @@ func (b *RoleBindingBuilder) WithName(name string) *RoleBindingBuilder {
 	return b
 }
 
-// WithGenerateName sets the generate name prefix.
-func (b *RoleBindingBuilder) WithGenerateName(generateName string) *RoleBindingBuilder {
-	b.rb.GenerateName = generateName
-	return b
-}
-
 // WithNamespace sets the namespace.
 func (b *RoleBindingBuilder) WithNamespace(namespace string) *RoleBindingBuilder {
 	b.rb.Namespace = namespace

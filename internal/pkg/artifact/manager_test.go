@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	pullerfake "github.com/falcosecurity/falco-operator/internal/pkg/oci/puller/fake"
 )
 
 // createTestScheme creates a runtime scheme with corev1 types registered.
@@ -50,7 +50,7 @@ func TestNewManager(t *testing.T) {
 	t.Run("WithOCIPuller sets custom puller", func(t *testing.T) {
 		scheme := createTestScheme(t)
 		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-		mockPuller := &puller.MockOCIPuller{}
+		mockPuller := &pullerfake.MockOCIPuller{}
 		manager := NewManagerWithOptions(fakeClient, "ns", WithOCIPuller(mockPuller))
 		require.NotNil(t, manager)
 		assert.Equal(t, mockPuller, manager.ociPuller)

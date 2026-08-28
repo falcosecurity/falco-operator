@@ -43,9 +43,9 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
-	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
 )
@@ -157,14 +157,14 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
 
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 
 	return &PluginReconciler{
 		Client:   cl,
 		Scheme:   s,
 		recorder: events.NewFakeRecorder(100),
 		fetcher:  newTestFetcher(cl),
-		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
 		nodeName: testutil.TestNodeName,
 	}, cl
 }
@@ -172,8 +172,8 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 func TestNewPluginReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: filesystem.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-		compat.NewMockVersionsFetcher(nil))
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+		compatfake.NewMockVersionsFetcher(nil))
 	r := NewPluginReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", false, &artifact.Fetcher{}, store)
 
 	require.NotNil(t, r)
@@ -910,9 +910,9 @@ func TestEnsurePluginConfig(t *testing.T) {
 			}
 
 			if tt.writeErr != nil {
-				mockFS := filesystem.NewMockFileSystem()
+				mockFS := fsfake.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil))
+				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			}
 
 			err := r.ensurePluginConfig(context.Background(), tt.plugin, nodeObj)
@@ -1074,14 +1074,14 @@ func TestFindNodeObjectsForSecret(t *testing.T) {
 		WithIndex(&artifactv1alpha1.Plugin{}, index.SecretOnPlugin, index.PluginBySecretRef).
 		Build()
 
-	mockFS := filesystem.NewMockFileSystem()
+	mockFS := fsfake.NewMockFileSystem()
 
 	r := &PluginReconciler{
 		Client:   cl,
 		Scheme:   s,
 		recorder: events.NewFakeRecorder(100),
 		fetcher:  newTestFetcher(cl),
-		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compat.NewMockVersionsFetcher(nil)),
+		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
 		nodeName: testutil.TestNodeName,
 	}
 
@@ -1328,7 +1328,7 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 			r, _ := newTestReconciler(t)
 			r.enforceRequirements = tt.enforceRequirements
 			if tt.falcoErr == nil && tt.falcoCaps != nil {
-				r.store.OnFalcoVersionsObserved(compat.NewMockVersionsFetcher(tt.falcoCaps).Result)
+				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcoCaps).Result)
 			}
 			nodeObj := newTestPluginNodeObj()
 			if tt.preInstalled {

@@ -133,12 +133,12 @@ func TestRoleBindingBuilder(t *testing.T) {
 	roleRef := rbacv1.RoleRef{Kind: "Role", Name: "my-role", APIGroup: "rbac.authorization.k8s.io"}
 
 	rb := NewRoleBinding().
-		WithGenerateName("prefix-").
 		WithNamespace("ns").
 		WithLabels(labels).
 		AddSubject(rbacv1.Subject{Kind: "ServiceAccount", Name: "sa", Namespace: "ns"}).
 		WithRoleRef(roleRef).
 		Build()
+	rb.GenerateName = "prefix-"
 
 	assert.Equal(t, "prefix-", rb.GenerateName)
 	assert.Equal(t, "ns", rb.Namespace)

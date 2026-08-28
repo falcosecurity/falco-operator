@@ -24,7 +24,31 @@ jobs:
         with:
           version: v2.11.1
           only-new-issues: true
-  
+
+  deadcode:
+    name: Check for dead code
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run deadcode
+        run: |
+          if ! output=$(go tool deadcode ./cmd/... 2>&1); then
+            echo "$output"
+            exit 1
+          fi
+          if [ -n "$output" ]; then
+            echo "$output"
+            echo "::error::Dead code found (see above). Remove it, or if it's only needed by tests, move it into a _test.go file or a dedicated fake/test-only package."
+            exit 1
+          fi
+
   gomodtidy:
     name: Enforce go.mod tidiness
     runs-on: ubuntu-latest
