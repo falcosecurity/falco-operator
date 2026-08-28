@@ -1,0 +1,203 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-deps-multi-source-all-reqs
+spec:
+  description: |
+    Validates that requirements declared across multiple sources are merged,
+    deduplicated, and all checked against the running Falco version.
+
+    Setup: real Falco in enforce mode. The json plugin is installed from the local
+    OCI registry (plugin-json:latest) so that Falco reports json 0.7.4 in
+    plugin_versions. Rulesfile has two sources:
+      - Inline: declares required_engine_version=0.30.0 (always met by any real Falco).
+      - ConfigMap (simple-rules.yaml): declares required_plugin_versions=[{json, 0.7.0}]
+        (met because json plugin is loaded).
+    The instance controller merges requirements from both sources into ArtifactMeta.
+    The node controller checks all merged requirements against the real Falco /versions.
+    Both are satisfied.
+
+    Expected outcome:
+    - DependenciesSatisfied=True (all merged requirements met).
+    - InlineArtifactProgrammed=True, ConfigMapArtifactProgrammed=True.
+    - Programmed=True.
+    - Both files present on the node filesystem.
+    - installedArtifacts has entries for inline and configmap media.
+
+  bindings:
+    - name: falco_name
+      value: falco-deps-multi-source-all-reqs-test
+    - name: rulesfile_name
+      value: rulesfile-deps-multi-source-all-reqs-test
+    - name: rules_cm_name
+      value: rulesfile-deps-multi-source-all-reqs-cm
+    - name: test_name
+      value: rulesfile-deps-multi-source-all-reqs
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap"
+      description: ConfigMap declares required_plugin_versions for json 0.7.0.
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules.yaml
+
+    - name: "Step 03: Install-json-plugin"
+      description: Install the json plugin from the local OCI registry so Falco reports it in /versions.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: json
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Verify-json-loaded-in-falco"
+      description: Poll Falco's /versions REST API until json appears in plugin_versions.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: json
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 05: Create-rulesfile-inline-and-cm"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-deps-multi-source-all-reqs-cm
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw deps-multi-source-all-reqs inline rule
+                    desc: Inline source declaring engine version requirement.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-multi-req"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+
+    - name: "Step 06: Assert-all-requirements-satisfied"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/50-03-rulesfile-deps-multi-source-all-reqs-test-inline.yaml
+                    priority: 50
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-deps-multi-source-all-reqs-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 07: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-deps-multi-source-all-reqs-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 08: Assert-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-deps-multi-source-all-reqs-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

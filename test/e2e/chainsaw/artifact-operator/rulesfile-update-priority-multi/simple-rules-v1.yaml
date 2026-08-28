@@ -1,0 +1,6 @@
+- rule: Chainsaw update-priority-multi CM rule v1
+  desc: ConfigMap rule for testing priority + content update with multiple sources.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-prio-multi-v1"
+  priority: DEBUG
+  tags: [test, chainsaw, priority]

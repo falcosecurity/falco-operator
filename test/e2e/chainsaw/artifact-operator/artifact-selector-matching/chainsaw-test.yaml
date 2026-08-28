@@ -1,0 +1,624 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-selector-matching
+spec:
+  description: |
+    Exercises selector-matching correctness itself, distinct from artifact-node-lifecycle
+    (which holds the CR's selector fixed and only ever mutates the Node side) and
+    artifact-node-self-healing (which doesn't touch selectors at all). Only Plugin is used
+    throughout: ListMatchingNodes/EnsureNodeObject are kind-agnostic, and
+    artifact-node-lifecycle already proves per-kind wiring for Rulesfile/Config. Uses
+    KWOK-simulated fake Nodes. A single Falco CR is shared across all scenarios; each fake
+    node gets a stub pod so that ListMatchingFalcoNodes includes it while it is present.
+
+    Three independent, sequentially-run, self-contained scenarios (each creates its own
+    Plugin(s)/Node(s) and cleans them up before the next begins), each uses a
+    scenario-specific chainsaw-node-group VALUE (the label KEY is fixed by
+    apply-fake-node.yaml; only the value is parameterized) so scenarios can't accidentally
+    cross-match each other's nodes:
+
+    1. matchExpressions (NotIn): every other selector test in this repo uses matchLabels
+       only (pure equality/AND). ListMatchingNodes converts spec.selector via
+       metav1.LabelSelectorAsSelector, which fully supports In/NotIn/Exists/DoesNotExist, but
+       that path has zero coverage anywhere. Two nodes are created: one whose
+       chainsaw-node-group value is explicitly excluded, one whose value isn't. A Plugin with
+       a NotIn selector, an operator matchLabels literally cannot express, since matchLabels
+       can only assert equality, never inequality, must match the non-excluded node and
+       reject the excluded one.
+
+    2. CR-side selector changes: every Node-matching scenario elsewhere in this suite
+       mutates the *Node's* labels while holding the CR's spec.selector fixed. Nothing
+       proves the reverse: patching a CR's own spec.selector value directly, with the Node
+       held fixed throughout. This exercises the primary CR watch (For(&Plugin{})) rather
+       than the Node watch (Watches(&corev1.Node{}, ...)), a distinct code path that
+       triggers the identical ListMatchingNodes/EnsureNodeObject/DeleteStaleNodeObjects
+       logic, but from a different event source.
+
+    3. Multiple CRs of the same kind reacting to one Node event: every scenario in
+       artifact-node-lifecycle has exactly one Plugin/Rulesfile/Config in existence at a
+       time, so none of them could catch a bug where the Node watch's handler
+       (EnqueueAllOfType, internal/pkg/controllerhelper/enqueue.go:36, which lists ALL CRs
+       of a kind and enqueues all of them on a single Node event) only reconciled the first
+       item in that list instead of every item. Two Plugins with non-overlapping selectors
+       (one group-based, one hostname-based; hostname is unique per node, so it can only
+       ever match the one node it names) both exist before a single new Node is created that
+       matches both; both must react to that one event.
+
+  bindings:
+    - name: test_name
+      value: artifact-selector-matching
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: plugin_notin_name
+      value: selector-matching-notin-plugin
+    - name: node_notin_match_name
+      value: (join('-', ['notin-match', $namespace]))
+    - name: node_notin_excluded_name
+      value: (join('-', ['notin-excluded', $namespace]))
+    - name: notin_excluded_group_value
+      value: chainsaw-selector-matching-excluded
+    - name: plugin_dynamic_name
+      value: selector-matching-dynamic-plugin
+    - name: node_dynamic_name
+      value: (join('-', ['dynamic', $namespace]))
+    - name: dynamic_matching_group_value
+      value: (join('-', ['dynamic-match', $namespace]))
+    - name: dynamic_nonmatching_group_value
+      value: chainsaw-selector-matching-wrong-value
+    - name: plugin_fanout_shared_name
+      value: selector-matching-fanout-shared-plugin
+    - name: plugin_fanout_unique_name
+      value: selector-matching-fanout-unique-plugin
+    - name: node_fanout_name
+      value: (join('-', ['fanout', $namespace]))
+    - name: fanout_group_value
+      value: (join('-', ['fanout-match', $namespace]))
+    - name: falco_name
+      value: selector-matching-falco
+    - name: falco_pod_notin_match_name
+      value: (join('-', ['falco-pod-notin-match', $namespace]))
+    - name: falco_pod_notin_excluded_name
+      value: (join('-', ['falco-pod-notin-excluded', $namespace]))
+    - name: falco_pod_dynamic_name
+      value: (join('-', ['falco-pod-dynamic', $namespace]))
+    - name: falco_pod_fanout_name
+      value: (join('-', ['falco-pod-fanout', $namespace]))
+
+  steps:
+    # --- Shared Falco CR (created once, used by all scenarios) ---
+
+    - name: "Step 00: Create-falco-cr"
+      description: Minimal Falco CR shared across all scenarios, no actual Falco runs; its name is used by ListMatchingFalcoNodes.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    # --- Scenario 1: matchExpressions (NotIn) ---
+
+    - name: "Step 01: Create-node-notin-match"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_notin_match_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: (join('-', ['notin-match-group', $namespace]))
+
+    - name: "Step 01b: Create-falco-pod-on-notin-match"
+      description: Stub pod so ListMatchingFalcoNodes returns node_notin_match when it matches the selector.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_notin_match_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_notin_match_name)
+
+    - name: "Step 02: Create-node-notin-excluded"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_notin_excluded_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($notin_excluded_group_value)
+
+    - name: "Step 02b: Create-falco-pod-on-notin-excluded"
+      description: |
+        Stub pod on node_notin_excluded. The pod is Running but the node is excluded by the Plugin's
+        NotIn selector, so ListMatchingFalcoNodes will not return it (selector filtering happens first).
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_notin_excluded_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_notin_excluded_name)
+
+    - name: "Step 03: Create-plugin-notin"
+      description: |
+        Scenario 1. NotIn matches a node whose chainsaw-node-group value is anything other
+        than notin_excluded_group_value, including node_notin_match's own distinct value,
+        which was never explicitly listed anywhere in this selector.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_notin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: NotIn
+                      values:
+                        - ($notin_excluded_group_value)
+
+    - name: "Step 04: Assert-notin-matches-correct-node-only"
+      description: |
+        Scenario 1. ArtifactNode names are deterministic (NodeObjectName format), so presence
+        and absence can both be asserted precisely by name rather than only by a broader
+        label-selector count.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_notin_name, $node_notin_match_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_notin_match_name)
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_notin_name, $node_notin_excluded_name]))
+                namespace: ($namespace)
+
+    - name: "Step 05: Cleanup-scenario-1"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_notin_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_notin_name]))
+            for:
+              deletion: {}
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_notin_match_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_notin_excluded_name)
+
+    # --- Scenario 2: CR-side selector changes ---
+
+    - name: "Step 06: Create-node-dynamic"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_dynamic_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($dynamic_matching_group_value)
+
+    - name: "Step 06b: Create-falco-pod-on-dynamic-node"
+      description: Stub pod so ListMatchingFalcoNodes returns node_dynamic once the Plugin's selector is updated to match.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_dynamic_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_dynamic_name)
+
+    - name: "Step 07: Create-plugin-dynamic-with-non-matching-selector"
+      description: Scenario 2. Selector deliberately does not match node_dynamic yet.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($dynamic_nonmatching_group_value)
+
+    - name: "Step 08: Assert-plugin-dynamic-no-nodes-assigned"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_dynamic_name, $node_dynamic_name]))
+                namespace: ($namespace)
+
+    - name: "Step 09: Patch-plugin-dynamic-selector-to-match"
+      description: |
+        Scenario 2. node_dynamic itself is never touched in this scenario; only the CR's
+        own spec.selector changes, exercising the primary Plugin watch (For(&Plugin{})),
+        not the Node watch.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($dynamic_matching_group_value)
+
+    - name: "Step 10: Assert-artifactnode-created-after-cr-selector-change"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_dynamic_name, $node_dynamic_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_dynamic_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 11: Patch-plugin-dynamic-selector-back-to-non-matching"
+      description: Scenario 2. Round-trips the CR-selector-driven change, still without ever touching node_dynamic.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($dynamic_nonmatching_group_value)
+
+    - name: "Step 12: Wait-for-artifactnode-deleted-after-cr-selector-change-back"
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_dynamic_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 13: Assert-plugin-dynamic-no-nodes-assigned-again"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_dynamic_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 14: Cleanup-scenario-2"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_dynamic_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_dynamic_name)
+
+    # --- Scenario 3: multiple CRs of the same kind reacting to one Node event ---
+
+    - name: "Step 15: Create-plugin-fanout-shared"
+      description: |
+        Scenario 3. Selector targets a group value that doesn't exist on any node yet
+        (node_fanout is created later, in Step 17).
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_shared_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($fanout_group_value)
+
+    - name: "Step 16: Create-plugin-fanout-unique"
+      description: |
+        Scenario 3. matchLabels on kubernetes.io/hostname, set by apply-fake-node.yaml to
+        the node's own name, so it's unique per node and can only ever match node_fanout
+        specifically, never plugin_fanout_shared's own matching node(s) by coincidence.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_unique_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    kubernetes.io/hostname: ($node_fanout_name)
+
+    - name: "Step 17: Assert-both-fanout-plugins-no-nodes-assigned"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_shared_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_unique_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 18: Create-fake-node-fanout"
+      description: |
+        Scenario 3. A single Node-create event that both plugin_fanout_shared (matches via
+        chainsaw-node-group) and plugin_fanout_unique (matches via kubernetes.io/hostname,
+        which the template sets to this node's own name) must react to.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_fanout_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($fanout_group_value)
+
+    - name: "Step 18b: Create-falco-pod-on-fanout-node"
+      description: Stub pod so ListMatchingFalcoNodes returns node_fanout, enabling both fanout plugins to create ArtifactNodes.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_fanout_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_fanout_name)
+
+    - name: "Step 19: Assert-both-fanout-plugins-react-to-single-node-event"
+      description: |
+        Scenario 3. If EnqueueAllOfType only enqueued the first Plugin in its List result
+        instead of every item, one of these two assertions would fail depending on list
+        order; asserting BOTH closes that gap regardless of which one would have been
+        starved.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_fanout_shared_name, $node_fanout_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_fanout_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: (join('--', ['plugin', $plugin_fanout_unique_name, $node_fanout_name]))
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_fanout_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_shared_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_fanout_unique_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 20: Cleanup-scenario-3"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_fanout_shared_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_fanout_unique_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_fanout_shared_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_fanout_unique_name]))
+            for:
+              deletion: {}
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_fanout_name)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of every fake Node this test may have created, cluster-scoped,
+        so a mid-test failure must not leave any behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_notin_match_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_notin_excluded_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_dynamic_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_fanout_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

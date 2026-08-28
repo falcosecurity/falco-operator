@@ -1,0 +1,31 @@
+# Assert the exact presence or absence of a file on a node filesystem.
+#
+# Required bindings:
+#   - falco_name:     Value of app.kubernetes.io/name label on the Falco pod.
+#   - namespace:      Namespace of the Falco pod.
+#   - expected_file:  Exact filename to check (no directory prefix),
+#                     e.g. "50-01-rulesfile-basic-all-test-oci.yaml".
+#   - dir:            Directory on the node to check, e.g. "/etc/falco/rules.d".
+#   - should_exist:   "true" to assert the file is present, "false" to assert absence.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-file-on-node
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FALCO_NAME
+            value: ($falco_name)
+          - name: DIR
+            value: ($dir)
+          - name: EXPECTED_FILE
+            value: ($expected_file)
+          - name: SHOULD_EXIST
+            value: ($should_exist)
+        content: |
+          bash ../../common/scripts/assert_file_on_node.sh
+        check:
+          (to_string(json_parse($stdout).status) == 'success'): true

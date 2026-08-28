@@ -1,0 +1,208 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-remove-oci-source
+spec:
+  description: |
+    Validates that nulling out spec.ociArtifact from a Plugin CR that has a working install
+    causes the per-node sidecar to cleanly remove the binary and its config entry, and, since
+    nothing is left installed, reports Programmed=False with reason ProgramFailed.
+
+    This mirrors Rulesfile's OCI-source removal exactly: cleanup runs immediately and the stale
+    file is deleted, and the resulting per-medium *ArtifactProgrammed condition is removed
+    entirely rather than set True (setting it True would claim the artifact was "stored
+    successfully" when it was in fact just removed). With no conditions left to gate on,
+    Programmed goes False with reason ProgramFailed ("no conditions to gate on"), same outcome
+    as a Rulesfile whose last remaining source is removed.
+
+    Per-node sidecar flow when spec.ociArtifact == nil with a stale binary:
+    1. enforcePluginCompatibility: removes DependenciesSatisfied condition (nothing to check).
+    2. ensurePlugin: removes plugin config entry from PluginsConfig, then deletes the .so binary.
+       Removes OCIArtifactProgrammed (nothing stored anymore).
+    3. ensurePluginConfig: rewrites the shared plugins config YAML without this plugin.
+       The file itself is always kept on disk (rewritten down to an explicit "plugins: []" when
+       no plugins remain, never deleted): Falco's own file-watch on this path does not reliably
+       survive the file being removed and later recreated, so RemovePluginConfigByName only ever
+       changes its content. Removes ConfigProgrammed (nothing stored anymore).
+    4. Deferred: computeProgrammed: zero conditions remain → Programmed=False/ProgramFailed.
+
+    Setup: container plugin installed from local OCI registry, Programmed=True, .so on disk.
+    After patching spec.ociArtifact to null:
+    - container.so ABSENT from /usr/share/falco/plugins.
+    - Shared plugins config file still PRESENT, but with no entry for "container" (no other
+      plugins remain, so it's rewritten empty rather than deleted).
+    - OCIArtifactProgrammed, ConfigProgrammed, and DependenciesSatisfied all REMOVED.
+    - Programmed=False, reason ProgramFailed.
+    - installedArtifacts empty.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-remove-oci-source-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-remove-oci-source
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Assert-binary-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 04: Assert-plugin-config-file-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 99-03-plugins-config-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Remove-oci-source"
+      description: Null out spec.ociArtifact, the plugin has no other source, so this removes it entirely.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact: null
+
+    - name: "Step 06: Assert-cleanup-conditions"
+      description: |
+        OCIArtifactProgrammed, ConfigProgrammed, and DependenciesSatisfied are all removed
+        (nothing left to check or gate on). With zero conditions remaining, Programmed goes
+        False with reason ProgramFailed ("no conditions to gate on").
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                (length(conditions[?type == 'ConfigProgrammed'] || `[]`)): 0
+                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                (length(conditions[?type == 'ConfigProgrammed'] || `[]`)): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+
+    - name: "Step 07: Assert-binary-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 08: Assert-plugin-config-file-empty"
+      description: |
+        With no plugins remaining, PluginsConfig.isEmpty() == true, but the shared config file
+        is rewritten empty ("plugins: []"), not deleted: see RemovePluginConfigByName's doc
+        comment for why deleting it would risk Falco never picking up a subsequently re-added
+        plugin's config again.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_plugin_config_entry_absent.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

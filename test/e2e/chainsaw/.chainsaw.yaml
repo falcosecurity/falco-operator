@@ -1,0 +1,25 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Configuration
+metadata:
+  name: falco-operator-e2e
+spec:
+  # Labels every chainsaw-generated per-test namespace for trust-manager's CA Bundle sync (see
+  # chart/falco-operator/values.yaml's mtls.trustLabel): without this, any test that creates a
+  # real Falco pod while the cluster has mtls.enabled=true would get stuck in ContainerCreating
+  # (missing the artifact-server-trust ConfigMap volume). A real cluster's admin applies this
+  # label by hand per-namespace, deliberately; this is the e2e suite automating that one manual
+  # step for itself, not a change to the production admin-approves-trust model.
+  namespaceTemplate:
+    metadata:
+      labels:
+        artifact.falcosecurity.dev/trust: "true"
+  timeouts:
+    apply: 120s
+    assert: 180s
+    cleanup: 120s
+    delete: 120s
+    error: 120s
+    exec: 300s
+  parallel: 4
+  failFast: false
+  fullName: true

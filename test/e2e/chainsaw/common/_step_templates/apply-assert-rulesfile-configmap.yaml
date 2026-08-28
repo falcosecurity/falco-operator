@@ -1,0 +1,44 @@
+# Template for creating and asserting a Rulesfile sourced from a ConfigMap.
+#
+# The caller must create the ConfigMap before invoking this template.
+# The ConfigMap must have a key "rules.yaml" containing valid Falco YAML.
+#
+# Required bindings:
+#   - rulesfile_name:          Name of the Rulesfile CR.
+#   - namespace:               Namespace.
+#   - rulesfile_configmap_name: Name of the ConfigMap to reference.
+#
+# Optional bindings:
+#   - rulesfile_priority: Priority (0-99). Default: 50.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-rulesfile-configmap
+spec:
+  bindings:
+    - name: rulesfile_priority
+      value: 50
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          spec:
+            priority: ($rulesfile_priority)
+            configMapRef:
+              name: ($rulesfile_configmap_name)
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'ConfigMapArtifactProgrammed']):
+              - status: 'True'
+            (conditions[?type == 'Programmed']):
+              - status: 'True'

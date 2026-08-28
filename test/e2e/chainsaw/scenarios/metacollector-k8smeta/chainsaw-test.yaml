@@ -1,0 +1,301 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metacollector-k8smeta
+spec:
+  description: |
+    Full deployment scenario: k8s-metacollector Component + k8smeta Plugin + Falco, wired
+    together using only the operator's own defaults (matches
+    examples/instance_v1alpha1_component_metacollector_k8smeta.yaml):
+    1. Create a Falco DaemonSet.
+    2. Create the metacollector Component with only spec.component.type set; assert
+       Reconciled=True and Available=True (the real upstream k8s-metacollector image must
+       actually become Ready via its own liveness/readiness probes).
+    3. Install the k8smeta Plugin, pointed at the metacollector Service (port 45000) via
+       collectorHostname/collectorPort, with nodeName sourced from ${FALCO_K8S_NODE_NAME}.
+    4. Assert the plugin's entry in the shared config file is structurally sane.
+    5. Assert the k8smeta.so binary is present on the node filesystem.
+    6. Assert Falco's /versions REST API reports k8smeta as loaded - proving it actually
+       initialized against the metacollector's gRPC broker, not just that the binary landed.
+    7. Deploy an "alert-receiver" pod+service we control, wire Falco's http_output at it, and
+       install a rule that only fires when k8smeta has actually resolved pod metadata
+       (condition includes k8smeta.pod.name != ""). This is the real, robust proof of the whole
+       pipeline: loading (step 6) only shows the plugin registered - this shows the plugin is
+       actually receiving live data from k8s-metacollector and enriching real events with it.
+
+    Deliberately does not install the official falco-rules OCI Rulesfile here: this is real
+    Falco with a real syscall source (DaemonSet), so hundreds of loaded real rules would keep
+    matching ambient node activity (kubelet mounts, kube-proxy, etc.) for as long as they stayed
+    loaded, and every one of those alerts would flow through the same http_output sink step 7
+    listens on. That ruleset's own OCI dependency resolution (real engine_version_semver/
+    container requirements against the real Falco image) is already proven independently by
+    rulesfile-basic-oci; this test only needs the one narrow, purpose-built enrichment rule.
+
+  bindings:
+    - name: falco_name
+      value: falco-metacollector-k8smeta-test
+    - name: component_name
+      value: metacollector
+    - name: plugin_name
+      value: k8smeta
+    - name: enrichment_rulesfile_name
+      value: k8smeta-enrichment-check
+    - name: config_name
+      value: falco-http-output
+    - name: receiver_name
+      value: alert-receiver
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: test_name
+      value: metacollector-k8smeta
+
+  steps:
+    - name: Create-alert-receiver
+      description: A minimal HTTP server we control, printing every received POST body to its logs.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/name: ($receiver_name)
+              spec:
+                containers:
+                  - name: alert-receiver
+                    image: docker.io/library/python:3.13-alpine
+                    command: ["python3", "-c"]
+                    args:
+                      - |
+                        import http.server
+
+                        class Handler(http.server.BaseHTTPRequestHandler):
+                            def do_POST(self):
+                                length = int(self.headers.get('Content-Length', 0))
+                                body = self.rfile.read(length)
+                                print(body.decode('utf-8', errors='replace'), flush=True)
+                                self.send_response(200)
+                                self.end_headers()
+
+                            def log_message(self, fmt, *args):
+                                pass
+
+                        http.server.HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+                    ports:
+                      - containerPort: 8080
+                        name: http
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  app.kubernetes.io/name: ($receiver_name)
+                ports:
+                  - port: 8080
+                    targetPort: 8080
+                    name: http
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+              status:
+                phase: Running
+
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Create-metacollector
+      use:
+        template: ../../common/_step_templates/apply-assert-component.yaml
+        with:
+          bindings:
+            - name: component_name
+              value: ($component_name)
+            - name: component_type
+              value: metacollector
+
+    - name: Install-k8smeta-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-k8smeta
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                initConfig:
+                  collectorPort: 45000
+                  collectorHostname: ($component_name)
+                  nodeName: "${FALCO_K8S_NODE_NAME}"
+
+    - name: Assert-k8smeta-config-sane
+      description: Verify the k8smeta plugin's entry in the shared config file is correct.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"collectorPort": 45000, "collectorHostname": "metacollector", "nodeName": "${FALCO_K8S_NODE_NAME}"}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Assert-k8smeta-so-on-filesystem
+      description: Verify the k8smeta.so binary is present on the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Assert-k8smeta-loaded-in-falco
+      description: Verify Falco's /versions REST API reports k8smeta as loaded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Install-k8smeta-enrichment-rule
+      description: |
+        A rule that only fires when k8smeta has actually resolved pod metadata for the
+        process - a real (trivially met) dependency on the k8smeta plugin itself, not just an
+        arbitrary always-true engine version.
+
+        Scoped to this exact test's own trigger pod (k8smeta.pod.name/ns.name), not just any
+        execve with resolved k8smeta metadata: that alone still matches every exec on every pod
+        on the real node this DaemonSet runs on, including unrelated ambient activity (kubelet,
+        kube-proxy, other pods, even other parallel chainsaw tests' own pods) - all of it k8smeta
+        can resolve metadata for, none of it what this test is actually triggering.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($enrichment_rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: k8smeta
+                        version: 0.1.0
+                  - rule: K8smeta enrichment check
+                    desc: |
+                      Fires only when k8smeta has resolved pod metadata for this test's own
+                      trigger pod, proving the plugin is actually receiving live data from
+                      k8s-metacollector (not just any execve anywhere on the node).
+                    condition: (join('', ['evt.type = execve and k8smeta.pod.name = "', $receiver_name, '" and k8smeta.ns.name = "', $namespace, '"']))
+                    output: >
+                      K8smeta enrichment verified
+                      (pod=%k8smeta.pod.name namespace=%k8smeta.ns.name command=%proc.cmdline)
+                    priority: DEBUG
+                    tags: [test, chainsaw, k8smeta]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($enrichment_rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: Wire-http-output
+      use:
+        template: ../../common/_step_templates/apply-assert-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: config_spec
+              value:
+                config:
+                  json_output: true
+                  http_output:
+                    enabled: true
+                    url: (join('', ['http://', $receiver_name, ':8080/']))
+
+    - name: Assert-k8smeta-enrichment-alert-received
+      description: |
+        Deterministically trigger an execve in the alert-receiver pod itself (rather than
+        waiting on ambient cluster activity from unrelated pods) and verify it comes back
+        enriched with that exact pod's own k8smeta fields and delivered via http_output - the
+        actual proof that k8s-metacollector and the plugin are working together, not just that
+        the plugin registered itself with Falco.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: TRIGGER_POD
+                value: ($receiver_name)
+              - name: TRIGGER_CONTAINER
+                value: ($receiver_name)
+              - name: RECEIVER_NAME
+                value: ($receiver_name)
+              - name: EXPECTED_CONTENT
+                value: (join('', ['pod=', $receiver_name, ' namespace=', $namespace]))
+            content: |
+              bash ../../common/scripts/trigger_execve_and_check_http_output.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

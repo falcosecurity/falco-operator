@@ -1,0 +1,9 @@
+# Two real nodes (not the KWOK-simulated ones test/e2e/chainsaw/artifact-operator/artifact-cache-
+# lifecycle adds on top), so the chainsaw suite can exercise per-node artifact-operator behavior
+# such as selectors, caching, and aggregation across more than one actual Node, not just the
+# control-plane.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker

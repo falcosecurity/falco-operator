@@ -1,0 +1,241 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-priority-single
+spec:
+  description: |
+    Validates that changing spec.priority renames the disk file from the old
+    priority-prefix to the new one, and that updated rule content is reflected.
+
+    Setup: Falco (real, enforce mode). Rulesfile with a single inline source at
+    priority=30 (required_engine_version=0.30.0, always met). File on disk:
+    30-03-rulesfile-update-priority-single-test-inline.yaml
+    Rule output contains "marker=prio-single-30".
+
+    After patching spec.priority=70 and updating the rule output to "marker=prio-single-70":
+    - The old file (30-03-...) is deleted from disk.
+    - A new file (70-03-...) appears with the updated content.
+    - DependenciesSatisfied=True and InlineArtifactProgrammed=True remain True.
+
+  bindings:
+    - name: falco_name
+      value: falco-update-priority-single-test
+    - name: rulesfile_name
+      value: rulesfile-update-priority-single-test
+    - name: test_name
+      value: rulesfile-update-priority-single
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile-priority-30"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                priority: 30
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-priority-single rule
+                    desc: Rule for testing priority + content update, single source.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=prio-single-30"
+                    priority: DEBUG
+                    tags: [test, chainsaw, priority]
+
+    - name: "Step 03: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/30-03-rulesfile-update-priority-single-test-inline.yaml
+                    priority: 30
+
+    - name: "Step 04: Assert-prio30-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-03-rulesfile-update-priority-single-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Assert-prio30-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=prio-single-30"
+
+    - name: "Step 06: Update-priority-to-70-and-content"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                priority: 70
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-priority-single rule
+                    desc: Rule for testing priority + content update, single source.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=prio-single-70"
+                    priority: DEBUG
+                    tags: [test, chainsaw, priority]
+
+    - name: "Step 07: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/70-03-rulesfile-update-priority-single-test-inline.yaml
+                    priority: 70
+
+    - name: "Step 08: Assert-old-prio30-file-gone"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 30-03-rulesfile-update-priority-single-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 09: Assert-new-prio70-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 70-03-rulesfile-update-priority-single-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 10: Assert-prio70-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=prio-single-70"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

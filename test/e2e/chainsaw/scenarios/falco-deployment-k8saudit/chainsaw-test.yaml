@@ -1,0 +1,264 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-deployment-k8saudit
+spec:
+  description: |
+    Full deployment scenario: Falco in Deployment mode + the real k8saudit Plugin + the real
+    official k8s_audit_rules.yaml ruleset, triggered with a genuine captured Kubernetes API
+    server audit event rather than requiring a live, audit-webhook-wired cluster for the test
+    itself.
+    1. Deploy an "alert-receiver" pod+service we control.
+    2. Create a Falco Deployment (not DaemonSet).
+    3. Install the real json Plugin (k8s_audit_rules.yaml depends on it for jevt.* fields) and
+       the real k8saudit Plugin (openParams: listens on :9765/k8s-audit inside the Falco pod),
+       both from the local OCI registry.
+    4. Assert both plugins are reported as loaded by Falco's /versions REST API.
+    5. Install the real official k8s_audit_rules.yaml, pushed to the local OCI registry
+       ourselves (falcosecurity doesn't publish it as an OCI artifact, unlike falco-rules) -
+       proves its real required_engine_version/required_plugin_versions resolve against the
+       real Falco image and the plugins installed above.
+    6. Wire Falco's http_output at the alert-receiver.
+    7. POST a real, captured "create configmap with a password key" audit event
+       (sample-configmap-event.json) to the k8saudit plugin's own HTTP listener inside the
+       Falco pod, and assert the official "Create/Modify Configmap With Private Credentials"
+       rule actually fired and was delivered via http_output - proving the whole pipeline
+       (plugin receives real audit data -> real ruleset evaluates it -> alert delivered) works,
+       not just that the artifacts installed.
+
+  bindings:
+    - name: falco_name
+      value: falco-deployment-k8saudit-test
+    - name: json_plugin_name
+      value: json
+    - name: k8saudit_plugin_name
+      value: k8saudit
+    - name: k8saudit_rulesfile_name
+      value: k8s-audit-rules
+    - name: config_name
+      value: falco-http-output
+    - name: receiver_name
+      value: alert-receiver
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: test_name
+      value: falco-deployment-k8saudit
+
+  steps:
+    - name: Create-alert-receiver
+      description: A minimal HTTP server we control, printing every received POST body to its logs.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/name: ($receiver_name)
+              spec:
+                containers:
+                  - name: alert-receiver
+                    image: docker.io/library/python:3.13-alpine
+                    command: ["python3", "-c"]
+                    args:
+                      - |
+                        import http.server
+
+                        class Handler(http.server.BaseHTTPRequestHandler):
+                            def do_POST(self):
+                                length = int(self.headers.get('Content-Length', 0))
+                                body = self.rfile.read(length)
+                                print(body.decode('utf-8', errors='replace'), flush=True)
+                                self.send_response(200)
+                                self.end_headers()
+
+                            def log_message(self, fmt, *args):
+                                pass
+
+                        http.server.HTTPServer(('0.0.0.0', 8080), Handler).serve_forever()
+                    ports:
+                      - containerPort: 8080
+                        name: http
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  app.kubernetes.io/name: ($receiver_name)
+                ports:
+                  - port: 8080
+                    targetPort: 8080
+                    name: http
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($receiver_name)
+                namespace: ($namespace)
+              status:
+                phase: Running
+
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: Deployment
+
+    - name: Install-json-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($json_plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: Install-k8saudit-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($k8saudit_plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-k8saudit
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                openParams: "http://:9765/k8s-audit"
+
+    - name: Assert-json-plugin-loaded-in-falco
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($json_plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Assert-k8saudit-plugin-loaded-in-falco
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($k8saudit_plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Install-k8s-audit-rules
+      description: |
+        The real, unmodified official k8s_audit_rules.yaml (falco-test/rulesfile-k8s-audit-rules
+        in the local OCI registry - falcosecurity doesn't publish it as an OCI artifact, so it's
+        fetched from GitHub and pushed there ourselves, same as rulesfile-official).
+        required_engine_version: 15 (real Falco reports a much higher engine version) and
+        required_plugin_versions: k8saudit>=0.18.0 (installed above, exactly 0.18.0) and
+        json>=0.7.0 (installed above, 0.7.4) are declared in the file's own content and parsed
+        directly from the fetched OCI content - both trivially met.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($k8saudit_rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-k8s-audit-rules
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($k8saudit_rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: Wire-http-output
+      use:
+        template: ../../common/_step_templates/apply-assert-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: config_spec
+              value:
+                config:
+                  json_output: true
+                  http_output:
+                    enabled: true
+                    url: (join('', ['http://', $receiver_name, ':8080/']))
+
+    - name: Trigger-k8saudit-event-and-assert-alert
+      description: |
+        Send a real, captured "create configmap with a password key" audit event to the
+        k8saudit plugin's HTTP listener and verify the official "Create/Modify Configmap With
+        Private Credentials" rule fired and was delivered via http_output.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: SAMPLE_EVENT_FILE
+                value: sample-configmap-event.json
+              - name: RECEIVER_NAME
+                value: ($receiver_name)
+              - name: EXPECTED_CONTENT
+                value: K8s configmap with private credential
+            content: |
+              bash ../../common/scripts/trigger_k8saudit_event_and_check_http_output.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

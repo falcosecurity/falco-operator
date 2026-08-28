@@ -1,0 +1,36 @@
+# Template for creating or updating a ConfigMap whose data key is loaded from a plain file.
+# The ConfigMap scaffolding (name, namespace) lives here; only the content file (and,
+# optionally, the data key) differ per caller: reusable for both initial creation and
+# simulating an update by pointing source_file at a different fixture.
+#
+# Required bindings:
+#   - configmap_name: Name of the ConfigMap to create/update.
+#   - namespace:      Namespace for the ConfigMap.
+#   - source_file:    Path (relative to the calling test's directory) to the file used as
+#                     the ConfigMap's data key content.
+#
+# Optional bindings:
+#   - data_key: ConfigMap data key the file's content is stored under. Default: "rules.yaml".
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-configmap-from-file
+spec:
+  bindings:
+    - name: data_key
+      value: rules.yaml
+  try:
+    - script:
+        env:
+          - name: CONFIGMAP_NAME
+            value: ($configmap_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: SOURCE_FILE
+            value: ($source_file)
+          - name: DATA_KEY
+            value: ($data_key)
+        content: |
+          bash ../../common/scripts/apply_configmap_from_file.sh
+        check:
+          (to_string(json_parse($stdout).status) == 'success'): true

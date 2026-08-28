@@ -1,0 +1,6 @@
+- rule: Chainsaw source-removed-deps CM rule
+  desc: Rule from ConfigMap in source-removed-deps test (no requirements).
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline source=cm"
+  priority: DEBUG
+  tags: [test, chainsaw, source-removed-deps]

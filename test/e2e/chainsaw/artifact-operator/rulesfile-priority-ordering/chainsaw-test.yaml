@@ -1,0 +1,179 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-priority-ordering
+spec:
+  description: |
+    Validates that two Rulesfiles with different priorities produce correctly prefixed
+    filenames in /etc/falco/rules.d and do not collide on disk.
+
+    The filename format is: <priority_padded>-<subpriority_padded>-<name>-<medium>.yaml
+    Inline source sub-priority is 3, so:
+      - priority=10 → 10-03-rulesfile-priority-low-test-inline.yaml
+      - priority=90 → 90-03-rulesfile-priority-high-test-inline.yaml
+
+    Both Rulesfiles reach Programmed=True and both files co-exist without collision.
+
+  bindings:
+    - name: falco_name
+      value: falco-priority-ordering-test
+    - name: rf_low_name
+      value: rulesfile-priority-low-test
+    - name: rf_high_name
+      value: rulesfile-priority-high-test
+    - name: test_name
+      value: rulesfile-priority-ordering
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-low-priority-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rf_low_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                priority: 10
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw priority-low rule
+                    desc: Rule at priority 10 for ordering test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=priority-low"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Create-high-priority-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rf_high_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                priority: 90
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw priority-high rule
+                    desc: Rule at priority 90 for ordering test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=priority-high"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 04: Assert-both-programmed"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rf_low_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rf_high_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 05: Assert-low-priority-file"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 10-03-rulesfile-priority-low-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-high-priority-file"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 90-03-rulesfile-priority-high-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-low-priority-content"
+      description: Verify marker distinguishes content in the low-priority file.
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=priority-low"
+            - name: file_pattern
+              value: "10-03-"
+
+    - name: "Step 08: Assert-high-priority-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=priority-high"
+            - name: file_pattern
+              value: "90-03-"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

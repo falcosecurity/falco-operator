@@ -1,0 +1,197 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-basic-all-sources
+spec:
+  description: |
+    Validates that a Config CR with both inline and ConfigMap sources simultaneously
+    produces two separate files in /etc/falco/config.d and sets all conditions True.
+
+    Files expected:
+    - /etc/falco/config.d/50-03-config-basic-all-sources-test-inline.yaml  (inline)
+    - /etc/falco/config.d/50-02-config-basic-all-sources-test-configmap.yaml  (configmap)
+
+    After deletion both files are removed and the ArtifactNode is GC'd.
+
+  bindings:
+    - name: falco_name
+      value: falco-config-basic-all-sources-test
+    - name: config_name
+      value: config-basic-all-sources-test
+    - name: cm_name
+      value: config-basic-all-sources-cm
+    - name: test_name
+      value: config-basic-all-sources
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-configmap"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: config-a.yaml
+            - name: data_key
+              value: config.yaml
+
+    - name: "Step 03: Create-config-all-sources"
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                config:
+                  json_output: false
+                  log_level: info
+                configMapRef:
+                  name: config-basic-all-sources-cm
+
+    - name: "Step 04: Assert-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (length(installedArtifacts) == `2`): true
+
+    - name: "Step 05: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-config-basic-all-sources-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-configmap-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-basic-all-sources-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Delete-config"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($config_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 08: Assert-inline-file-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-config-basic-all-sources-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 09: Assert-configmap-file-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-basic-all-sources-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

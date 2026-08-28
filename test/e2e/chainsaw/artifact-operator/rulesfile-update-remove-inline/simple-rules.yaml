@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw update-remove-inline configmap rule
+  desc: ConfigMap rule for testing inline source removal.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-stays"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

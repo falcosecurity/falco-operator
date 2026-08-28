@@ -1,0 +1,48 @@
+# Template for creating and asserting a Config CR.
+#
+# Applies the Config CR with a caller-supplied spec and waits for Programmed=True
+# on the Config CR. Per-source conditions (InlineArtifactProgrammed,
+# ConfigMapArtifactProgrammed) are not checked here: test-specific steps should
+# assert those when they matter.
+#
+# Use this template when a test needs a working Config as a prerequisite (not as the
+# thing under test). For tests that test Config behaviour itself, apply the CR inline
+# and assert conditions step by step.
+#
+# Required bindings:
+#   - config_name: Name of the Config CR.
+#   - namespace:   Namespace.
+#
+# Optional bindings:
+#   - config_spec: Full spec object. Default: {} (no sources; Programmed defaults to Unknown).
+#                  Callers that need Programmed=True must pass at least one active source.
+#   - config_priority: Priority (0-99). Default: 50.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-config
+spec:
+  bindings:
+    - name: config_spec
+      value: {}
+    - name: config_priority
+      value: 50
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Config
+          metadata:
+            name: ($config_name)
+            namespace: ($namespace)
+          spec: ($config_spec)
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Config
+          metadata:
+            name: ($config_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'Programmed']):
+              - status: 'True'

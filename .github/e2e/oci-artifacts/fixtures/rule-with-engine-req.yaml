@@ -1,0 +1,7 @@
+- required_engine_version: "0.0.1"
+- rule: Test rule with engine req
+  desc: Rule requiring engine 0.0.1 — also declared in the config layer (dedup test).
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline"
+  priority: DEBUG
+  tags: [test]

@@ -1,0 +1,6 @@
+- rule: Chainsaw update-add-cm-to-inline configmap rule
+  desc: ConfigMap rule added to an existing inline-only Rulesfile.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-added"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

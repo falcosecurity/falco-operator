@@ -1,0 +1,161 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-basic-inline
+spec:
+  description: |
+    Validates the full inline Config lifecycle against a real Falco instance:
+    1. Create a Falco DaemonSet.
+    2. Create a Config CR with an inline config (spec.config).
+    3. Assert InlineArtifactProgrammed=True and Programmed=True on both the
+       Config CR and the ArtifactNode.
+    4. Assert the config file is present at the expected path in /etc/falco/config.d.
+    5. Assert the file content contains the inline field value used as a marker.
+    6. Delete the Config CR.
+    7. Assert the ArtifactNode is garbage-collected.
+    8. Assert the config file is absent from the node filesystem.
+
+    Config has no OCI source and always stamps ObservedGeneration unconditionally
+    (unlike Rulesfile/Plugin which only gate on it in enforce mode). There is no
+    DependenciesSatisfied condition: just the per-source and gateway conditions.
+
+  bindings:
+    - name: falco_name
+      value: falco-config-basic-inline-test
+    - name: config_name
+      value: config-basic-inline-test
+    - name: test_name
+      value: config-basic-inline
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-config-inline"
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                config:
+                  json_output: false
+                  log_level: info
+
+    - name: "Step 03: Assert-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($config_name)
+                  artifact.falcosecurity.dev/kind: config
+              status:
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/config.d/50-03-config-basic-inline-test-inline.yaml
+                    priority: 50
+
+    - name: "Step 04: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-config-basic-inline-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Assert-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: content_pattern
+              value: "log_level: info"
+
+    - name: "Step 06: Delete-config"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($config_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 07: Assert-file-absent-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-config-basic-inline-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

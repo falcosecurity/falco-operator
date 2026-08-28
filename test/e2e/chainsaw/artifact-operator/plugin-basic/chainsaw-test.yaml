@@ -1,0 +1,156 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-basic
+spec:
+  description: |
+    Validates the full plugin lifecycle using the container plugin:
+    1. Create a Falco DaemonSet.
+    2. Create a container Plugin CR with a custom initConfig and wait for it to be
+       installed (Programmed=True); the shared apply-assert-plugin template also
+       validates the ArtifactNode's installedArtifacts metadata (medium, path,
+       contentHash, ConfigProgrammed condition, plugin config path).
+    3. Assert the plugin binary (.so) is present on the node filesystem.
+    4. Assert the shared plugin config file is structurally correct: container appears
+       in load_plugins exactly once, and its plugins: entry's init_config matches
+       what was configured.
+    5. Assert Falco's /versions REST API reports the container plugin as loaded.
+    6. Delete the Plugin CR.
+    7. Assert the ArtifactNode is garbage-collected.
+    8. Assert the .so is absent from the node filesystem.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-basic-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-basic
+
+  steps:
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Install-container-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container
+                initConfig:
+                  label_max_len: 100
+                  with_size: false
+
+    - name: Assert-so-on-filesystem
+      description: Verify the container.so is present on the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Assert-config-on-filesystem
+      description: |
+        Verify the shared plugins-config file is structurally correct: container
+        appears in load_plugins exactly once, and its plugins: entry's init_config
+        matches what was configured.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len": 100, "with_size": false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Assert-plugin-loaded-in-falco
+      description: Verify Falco's /versions REST API reports the container plugin as loaded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Delete-plugin
+      description: Delete the Plugin CR and wait for ArtifactNode GC.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: Assert-so-absent-from-filesystem
+      description: Verify the container.so has been removed from the node.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

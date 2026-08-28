@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: json
+      version: 999.0.0
+- rule: Test rule requiring json plugin (unmet)
+  desc: Rule requiring json>=999.0.0 in YAML and OCI config layer — never met.
+  condition: "evt.type = execve"
+  output: "%evt.plugininfo"
+  priority: DEBUG
+  tags: [test]

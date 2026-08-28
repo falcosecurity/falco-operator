@@ -1,0 +1,36 @@
+# Assert that specific content is present in a file on the Falco node filesystem.
+# Wraps check_content_on_node.sh, which greps recursively under DIR for CONTENT_PATTERN.
+#
+# Required bindings:
+#   - falco_name:      app.kubernetes.io/name label on the Falco pod.
+#   - namespace:       Namespace of the Falco pod.
+#   - dir:             Directory to search (e.g. /etc/falco/rules.d).
+#   - content_pattern: Substring to grep for within file contents.
+#
+# Optional bindings:
+#   - file_pattern: Further filter matches by filename substring. Default: "".
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-content-on-node
+spec:
+  bindings:
+    - name: file_pattern
+      value: ""
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FALCO_NAME
+            value: ($falco_name)
+          - name: DIR
+            value: ($dir)
+          - name: CONTENT_PATTERN
+            value: ($content_pattern)
+          - name: FILE_PATTERN
+            value: ($file_pattern)
+        content: |
+          bash ../../common/scripts/check_content_on_node.sh
+        check:
+          (to_string(json_parse($stdout).status) == 'success'): true

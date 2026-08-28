@@ -1,0 +1,88 @@
+{
+  "kind": "EventList",
+  "apiVersion": "audit.k8s.io/v1",
+  "metadata": {},
+  "items": [
+    {
+      "level": "RequestResponse",
+      "auditID": "8874cd2a-6762-4571-9c92-c74aa501e35f",
+      "stage": "ResponseComplete",
+      "requestURI": "/api/v1/namespaces/default/configmaps?fieldManager=kubectl-create&fieldValidation=Strict",
+      "verb": "create",
+      "user": {
+        "username": "minikube-user",
+        "groups": [
+          "system:masters",
+          "system:authenticated"
+        ],
+        "extra": {
+          "authentication.kubernetes.io/credential-id": [
+            "X509SHA256=b8845703ca5fec0c84653a031ce86294965192a4dfd4d9c2498c4e741b5547b3"
+          ]
+        }
+      },
+      "sourceIPs": [
+        "127.0.0.1"
+      ],
+      "userAgent": "kubectl/v1.36.2 (linux/amd64) kubernetes/24e2b02",
+      "objectRef": {
+        "resource": "configmaps",
+        "namespace": "default",
+        "name": "myconfigmap",
+        "apiVersion": "v1"
+      },
+      "responseStatus": {
+        "metadata": {},
+        "code": 201
+      },
+      "requestObject": {
+        "kind": "ConfigMap",
+        "apiVersion": "v1",
+        "metadata": {
+          "name": "myconfigmap"
+        },
+        "data": {
+          "password": "123456",
+          "username": "admin"
+        }
+      },
+      "responseObject": {
+        "kind": "ConfigMap",
+        "apiVersion": "v1",
+        "metadata": {
+          "name": "myconfigmap",
+          "namespace": "default",
+          "uid": "8055a267-09f9-4a22-9b59-c05e00a27ccd",
+          "resourceVersion": "812379",
+          "creationTimestamp": "2026-07-29T18:55:48Z",
+          "managedFields": [
+            {
+              "manager": "kubectl-create",
+              "operation": "Update",
+              "apiVersion": "v1",
+              "time": "2026-07-29T18:55:48Z",
+              "fieldsType": "FieldsV1",
+              "fieldsV1": {
+                "f:data": {
+                  ".": {},
+                  "f:password": {},
+                  "f:username": {}
+                }
+              }
+            }
+          ]
+        },
+        "data": {
+          "password": "123456",
+          "username": "admin"
+        }
+      },
+      "requestReceivedTimestamp": "2026-07-29T18:55:48.747994Z",
+      "stageTimestamp": "2026-07-29T18:55:48.751411Z",
+      "annotations": {
+        "authorization.k8s.io/decision": "allow",
+        "authorization.k8s.io/reason": ""
+      }
+    }
+  ]
+}

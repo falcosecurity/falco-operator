@@ -1,0 +1,265 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-basic-all
+spec:
+  description: |
+    Validates the full Rulesfile lifecycle with all three sources combined
+    (inline rules, OCI artifact, ConfigMap):
+    1.  Create a Falco DaemonSet.
+    2.  Install the container Plugin to satisfy the falco-rules OCI dependency.
+    3.  Create a ConfigMap with simple rules.
+    4.  Create a Rulesfile combining inline rules, falco-rules OCI, and ConfigMap.
+    5.  Assert all 5 conditions True on both the Rulesfile and ArtifactNode.
+    6.  Assert the OCI rules file is present on the node filesystem (exact filename).
+    7.  Assert the ConfigMap rules file is present on the node filesystem (exact filename).
+    8.  Assert the inline rules file is present on the node filesystem (exact filename).
+    9.  Delete the Rulesfile and wait for ArtifactNode GC.
+    10. Assert the OCI rules file is absent from the node filesystem.
+    11. Assert the ConfigMap rules file is absent from the node filesystem.
+    12. Assert the inline rules file is absent from the node filesystem.
+
+  bindings:
+    - name: falco_name
+      value: falco-rulesfile-basic-all-test
+    - name: rulesfile_name
+      value: rulesfile-basic-all-test
+    - name: plugin_name
+      value: container
+    - name: rules_cm_name
+      value: rulesfile-basic-all-rules-cm
+    - name: test_name
+      value: rulesfile-basic-all
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-container-plugin"
+      description: Install the container plugin to satisfy the falco-rules OCI dep.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Create-rules-configmap"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules.yaml
+
+    - name: "Step 04: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw basic all-sources inline rule
+                    desc: Minimal inline rule for the chainsaw rulesfile-basic-all test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline"
+                    priority: DEBUG
+                    tags: [test, chainsaw]
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+                configMapRef:
+                  name: rulesfile-basic-all-rules-cm
+
+    - name: "Step 05: Assert-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+
+    - name: "Step 06: Assert-oci-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-basic-all-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-configmap-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-basic-all-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 08: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-basic-all-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 09: Delete-rulesfile"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 10: Assert-oci-file-absent-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-basic-all-test-oci.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 11: Assert-configmap-file-absent-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-basic-all-test-configmap.yaml
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 12: Assert-inline-file-absent-from-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-basic-all-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

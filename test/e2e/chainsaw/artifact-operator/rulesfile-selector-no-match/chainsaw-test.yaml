@@ -1,0 +1,99 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-selector-no-match
+spec:
+  description: |
+    Validates that a Rulesfile with a spec.selector that matches no cluster nodes
+    results in Programmed=Unknown/NoNodesAssigned on the parent CR and no ArtifactNodes
+    created.
+
+    The instance operator evaluates the selector against cluster nodes. When no nodes
+    match, it creates zero ArtifactNodes. The aggregate function then sets
+    Programmed=Unknown with reason NoNodesAssigned directly on the Rulesfile.
+
+    No per-node sidecar runs (there are no ArtifactNodes to reconcile), so no other
+    conditions (DependenciesSatisfied, OCIArtifactProgrammed, etc.) are ever set.
+
+    Setup: Falco (real). Inline Rulesfile with matchLabels specifying a label
+    (chainsaw-selector-no-match: "true") that no cluster node carries.
+
+  bindings:
+    - name: falco_name
+      value: falco-selector-no-match-rf-test
+    - name: rulesfile_name
+      value: rulesfile-selector-no-match-test
+    - name: test_name
+      value: rulesfile-selector-no-match
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile-with-non-matching-selector"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                selector:
+                  matchLabels:
+                    chainsaw-selector-no-match: "true"
+                inlineRules:
+                  - rule: Chainsaw selector-no-match rule
+                    desc: Rule used to verify selector no-match scenario.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=selector-no-match"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Assert-no-nodes-assigned"
+      description: |
+        The instance operator creates zero ArtifactNodes (no nodes match the selector).
+        The aggregate function sets Programmed=Unknown/NoNodesAssigned on the Rulesfile.
+        No ArtifactNode should exist with this parent.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

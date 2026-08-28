@@ -1,0 +1,6 @@
+{
+    "falco_version":"0.44.1",
+    "engine_version_semver":"0.30.0",
+    "plugin_api_version":"2.99.0",
+    "plugin_versions":{}
+}

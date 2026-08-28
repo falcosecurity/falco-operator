@@ -1,0 +1,184 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-update-cm-ref-swap
+spec:
+  description: |
+    Validates that swapping configMapRef.name to a different ConfigMap causes the
+    disk file to be replaced with the new ConfigMap's content while conditions remain True.
+
+    Setup: Falco (real). Two ConfigMaps: CM-A (marker: config-cm-ref-a) and
+    CM-B (marker: config-cm-ref-b). Config initially references CM-A.
+
+    After patching configMapRef.name to CM-B:
+    - ResolvedRefs=True and ConfigMapArtifactProgrammed=True remain True.
+    - The disk file at the SAME path now contains "marker: config-cm-ref-b".
+
+  bindings:
+    - name: falco_name
+      value: falco-config-update-cm-ref-swap-test
+    - name: config_name
+      value: config-update-cm-ref-swap-test
+    - name: cm_a_name
+      value: config-update-cm-ref-swap-cm-a
+    - name: cm_b_name
+      value: config-update-cm-ref-swap-cm-b
+    - name: test_name
+      value: config-update-cm-ref-swap
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-configmap-A"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_a_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: config-a.yaml
+            - name: data_key
+              value: config.yaml
+
+    - name: "Step 03: Create-configmap-B"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_b_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: config-b.yaml
+            - name: data_key
+              value: config.yaml
+
+    - name: "Step 04: Create-config-pointing-to-A"
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                configMapRef:
+                  name: config-update-cm-ref-swap-cm-a
+
+    - name: "Step 05: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Assert-cm-a-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: content_pattern
+              value: "marker: config-cm-ref-a"
+
+    - name: "Step 07: Swap-configMapRef-to-B"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef:
+                  name: config-update-cm-ref-swap-cm-b
+
+    - name: "Step 08: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 09: Assert-file-still-present"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-02-config-update-cm-ref-swap-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 10: Assert-cm-b-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: content_pattern
+              value: "marker: config-cm-ref-b"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

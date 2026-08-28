@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: json
+      version: "0.7.0"
+- rule: Chainsaw oci-all-sources CM rule
+  desc: ConfigMap rule declaring a json plugin requirement.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-json-req"
+  priority: DEBUG
+  tags: [test, chainsaw, oci]

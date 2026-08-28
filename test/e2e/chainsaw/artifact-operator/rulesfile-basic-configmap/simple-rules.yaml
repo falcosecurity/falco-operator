@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw basic configmap rule
+  desc: Minimal rule for the chainsaw rulesfile-basic-configmap test.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline"
+  priority: DEBUG
+  tags: [test, chainsaw]

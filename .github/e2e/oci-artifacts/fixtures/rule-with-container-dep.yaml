@@ -1,0 +1,9 @@
+- required_plugin_versions:
+    - name: container
+      version: 0.1.0
+- rule: Test rule requiring container plugin
+  desc: Rule using container plugin, requires container>=0.1.0 in YAML and OCI config layer.
+  condition: "evt.type = execve"
+  output: "container=%container.name"
+  priority: DEBUG
+  tags: [test]

@@ -1,0 +1,126 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-oci-auth-secret-missing
+spec:
+  description: |
+    Validates that referencing a nonexistent OCI auth secret in a Plugin results in
+    Programmed=False/OCIArtifactProgramFailed.
+
+    The instance operator's FetchConfig calls fetchOCIAuthSecret proactively before making
+    any OCI request. When the referenced Secret does not exist, the GET fails immediately
+    and the instance operator sets Programmed=False/OCIArtifactProgramFailed on the parent
+    Plugin CR. ObservedGeneration is NOT advanced, so the per-node sidecar is deferred
+    and never runs. No .so binary is written to disk.
+
+    This test uses the local plain-HTTP registry (which requires no authentication) combined
+    with a non-existent secretRef to exercise the auth-secret resolution failure path in the
+    instance operator without needing a real registry auth challenge.
+
+    Setup: Plugin with OCI source from local registry + auth.secretRef.name pointing to
+    a Secret that does not exist.
+
+    Expected outcome:
+    - Programmed=False, reason=OCIArtifactProgramFailed on the Plugin.
+    - No ArtifactNode created.
+    - No .so binary written to disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-auth-secret-missing-plugin-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-oci-auth-secret-missing
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-plugin-with-missing-auth-secret"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                    auth:
+                      secretRef:
+                        name: plugin-oci-auth-secret-does-not-exist
+
+    - name: "Step 03: Assert-programmed-false"
+      description: |
+        fetchOCIAuthSecret fails (Secret not found) → FetchConfig returns error →
+        fetchAndCacheArtifactMeta fails → Programmed=False/OCIArtifactProgramFailed.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: OCIArtifactProgramFailed
+
+    - name: "Step 04: Assert-no-artifact-node"
+      description: ObservedGeneration not stamped → per-node sidecar deferred → no ArtifactNode created.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+
+    - name: "Step 05: Assert-no-binary-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

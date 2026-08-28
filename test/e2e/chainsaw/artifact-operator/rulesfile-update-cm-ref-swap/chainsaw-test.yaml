@@ -1,0 +1,234 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-cm-ref-swap
+spec:
+  description: |
+    Validates that changing configMapRef.name to point at a different ConfigMap
+    causes the disk file to be replaced with the new ConfigMap's content.
+
+    Setup: Falco (real, enforce mode). Two ConfigMaps pre-created: CM-A
+    (marker=cm-ref-a) and CM-B (marker=cm-ref-b). Rulesfile initially references CM-A.
+
+    After patching configMapRef.name to CM-B:
+    - DependenciesSatisfied=True and ConfigMapArtifactProgrammed=True remain True.
+    - The disk file (same path) now contains "marker=cm-ref-b".
+
+  bindings:
+    - name: falco_name
+      value: falco-update-cm-ref-swap-test
+    - name: rulesfile_name
+      value: rulesfile-update-cm-ref-swap-test
+    - name: cm_a_name
+      value: rulesfile-update-cm-ref-swap-cm-a
+    - name: cm_b_name
+      value: rulesfile-update-cm-ref-swap-cm-b
+    - name: test_name
+      value: rulesfile-update-cm-ref-swap
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-configmap-A"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_a_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: rules-a.yaml
+
+    - name: "Step 03: Create-configmap-B"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($cm_b_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: rules-b.yaml
+
+    - name: "Step 04: Create-rulesfile-pointing-to-A"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-update-cm-ref-swap-cm-a
+
+    - name: "Step 05: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-cm-ref-swap-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 06: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-cm-ref-swap-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-cm-a-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-ref-a"
+
+    - name: "Step 08: Swap-configMapRef-to-B"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                configMapRef:
+                  name: rulesfile-update-cm-ref-swap-cm-b
+
+    - name: "Step 09: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-cm-ref-swap-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 10: Assert-file-still-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-cm-ref-swap-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 11: Assert-cm-b-content-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-ref-b"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

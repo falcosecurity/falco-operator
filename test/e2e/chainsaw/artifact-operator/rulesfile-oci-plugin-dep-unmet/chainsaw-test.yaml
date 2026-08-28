@@ -1,0 +1,164 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-plugin-dep-unmet
+spec:
+  description: |
+    Validates that a Rulesfile backed by a local OCI artifact whose config layer declares
+    a dependency on json>=999.0.0 is blocked in enforce mode, even though the json plugin
+    is actually installed and loaded in Falco (the installed version is far below 999.0.0).
+
+    The OCI artifact (falco-test/rulesfile-plugin-dep-unmet) was pushed with:
+      falcoctl registry push --depends-on json:999.0.0
+
+    The json plugin is installed from the local OCI registry and Falco is verified to report
+    it in /versions, so the operator has real plugin version data: the requirement is genuinely
+    unmet because the installed version will never reach 999.0.0.
+
+    Expected outcome:
+    - DependenciesSatisfied=False, reason=DependenciesNotSatisfied.
+    - Programmed=False (enforce mode gates installation on DependenciesSatisfied).
+    - OCIArtifactProgrammed=False (explicitly set on skip so the aggregator shows the
+      correct blocked state: without it an absent condition on this node could let a
+      True from another node win unopposed in AggregateConditions).
+    - No file written to the node filesystem.
+    - installedArtifacts is empty (only the json plugin ArtifactNode exists, not the rulesfile).
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-plugin-dep-unmet-test
+    - name: rulesfile_name
+      value: rulesfile-oci-plugin-dep-unmet-test
+    - name: test_name
+      value: rulesfile-oci-plugin-dep-unmet
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Install-json-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: json
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Verify-json-loaded-in-falco"
+      description: |
+        Wait until Falco's /versions reports the json plugin as loaded. This confirms the
+        operator has real plugin version data before evaluating the rulesfile dependency.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: json
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 04: Create-rulesfile-oci-local"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-plugin-dep-unmet
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 05: Assert-blocked-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+
+    - name: "Step 06: Assert-no-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-oci-plugin-dep-unmet-test-oci.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

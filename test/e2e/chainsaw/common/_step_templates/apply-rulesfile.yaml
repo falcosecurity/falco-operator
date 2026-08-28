@@ -1,0 +1,65 @@
+# Creates a Rulesfile CR from a caller-supplied spec.
+# All RulesfileSpec fields are optional (omitempty pointers), so callers set only what they need.
+# This template only applies the resource. Add an assert step in the test for condition checks,
+# since expected conditions vary by test scenario.
+#
+# Required bindings:
+#   - rulesfile_name: Name of the Rulesfile CR.
+#   - namespace:      Namespace.
+#
+# Optional bindings:
+#   - rulesfile_spec: Full spec object. Default: {} (no sources, priority defaults to 50 via CRD).
+#
+# Examples:
+#
+#   Inline rules with an unmet plugin dep:
+#     - name: rulesfile_spec
+#       value:
+#         inlineRules:
+#           - required_plugin_versions:
+#               - name: json
+#                 version: 0.7.0
+#           - rule: My rule
+#             condition: "evt.type = execve"
+#             output: "cmd=%proc.cmdline"
+#             priority: DEBUG
+#
+#   OCI artifact:
+#     - name: rulesfile_spec
+#       value:
+#         ociArtifact:
+#           image:
+#             repository: falcosecurity/rules/falco-rules
+#             tag: latest
+#           registry:
+#             name: ghcr.io
+#
+#   ConfigMap:
+#     - name: rulesfile_spec
+#       value:
+#         configMapRef:
+#           name: my-rules-configmap
+#
+#   Multiple sources + custom priority:
+#     - name: rulesfile_spec
+#       value:
+#         priority: 80
+#         inlineRules: [...]
+#         ociArtifact: {...}
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-rulesfile
+spec:
+  bindings:
+    - name: rulesfile_spec
+      value: {}
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          spec: ($rulesfile_spec)

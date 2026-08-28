@@ -1,0 +1,307 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-rulesfile-dep-survives-pod-restart
+spec:
+  description: |
+    Regression test for the artifact-operator sidecar's warm sync: the per-node
+    nodeartifacts.Manager's dependency registry (which blocks a Plugin's on-disk
+    config from being removed while a Rulesfile on that node still depends on
+    it) must be re-established from durable ArtifactNode status immediately
+    after a sidecar restart, before the Plugin/Rulesfile controllers process a
+    single event, not just organically as new reconciles happen to occur.
+
+    This is exactly "Scenario B" of plugin-rulesfile-dep-finalizer-scenarios
+    (install plugin, satisfy the Rulesfile's dependency on it, attempt deletion,
+    confirm it's blocked), with a Falco/artifact-operator pod restart inserted
+    between "dependency satisfied" and "attempt deletion". If the sidecar's
+    warm sync were skipped, broken, or lost its race against the first
+    reconcile after restart, the dependency registry would come back empty and
+    this deletion would incorrectly succeed instead of being blocked.
+
+  bindings:
+    - name: falco_name
+      value: falco-dep-survives-pod-restart-test
+    - name: rulesfile_name
+      value: rulesfile-dep-survives-pod-restart-test
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: plugin-rulesfile-dep-survives-pod-restart
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: |
+        Real Falco in enforce mode. maxSurge:1/maxUnavailable:0 so Step 06's
+        restart never leaves a node without a Running Falco pod: see
+        apply-assert-falco.yaml's update_strategy binding comment for why that
+        matters here specifically.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: update_strategy
+              value:
+                type: RollingUpdate
+                rollingUpdate:
+                  maxSurge: 1
+                  maxUnavailable: 0
+
+    - name: "Step 02: Install-plugin"
+      description: |
+        Install the container plugin from the local OCI registry and wait for
+        Programmed=True on both the Plugin and the ArtifactNode.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Wait-plugin-loaded-in-falco"
+      description: Poll Falco /versions until container appears in plugin_versions.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 04: Create-rulesfile"
+      description: |
+        OCI rulesfile (falco-test/rulesfile-official) that declares a container
+        plugin dependency, created after the plugin is already loaded.
+        Note: ($oci_registry) must appear directly in the resource spec, not inside a
+        binding value object: chainsaw does not recursively expand ($expr) strings
+        embedded within complex binding values.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 05: Assert-rulesfile-programmed"
+      description: With the container plugin already loaded, the dependency is met immediately.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Rollout-restart-falco"
+      description: |
+        Force the exact restart window this test exists to cover (a fresh
+        artifact-operator sidecar process taking over) without a plain
+        `kubectl delete pod`. A raw delete always creates a real window where
+        the node has zero Running Falco pods; the instance operator can't
+        tell "restarting" from "gone for good" during that window, so it
+        deliberately clears the node's per-node artifact state (ArtifactNode,
+        including the finalizer this test is about) rather than leaving it to
+        rot. That's correct behavior, not a bug, but it means a plain pod
+        delete destroys the very durable state this test wants warm sync to
+        recover from, and confirms nothing about warm sync at all.
+
+        `kubectl rollout restart` instead triggers a genuine DaemonSet
+        rolling update: with Step 01's maxSurge:1/maxUnavailable:0, the
+        replacement pod on each node comes up and is Ready before the old one
+        is torn down, so the node is never observed without a Running Falco
+        pod, the durable ArtifactNode is never cleared, and the new sidecar's
+        warm sync has real state to recover.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: DAEMONSET_NAME
+                value: ($falco_name)
+            content: |
+              bash ../../common/scripts/rollout_restart_daemonset.sh
+
+    - name: "Step 07: Wait-artifact-operator-sidecar-ready"
+      description: |
+        Wait for the replacement Pod's artifact-operator container specifically
+        to report ready, rather than the whole Pod's aggregate Ready condition.
+        This only confirms the new sidecar process is up, nothing more: its
+        /readyz is wired to a plain, unconditional healthz.Ping (cmd/artifact/
+        main.go), served by an HTTP-server runnable that controller-runtime
+        starts before caches sync or Warmup even begins, so it is not gated on
+        warm sync completing. The actual guarantee this test relies on is that
+        controllers (which is what processes Step 08's delete) don't start
+        until after Warmup returns (controller-runtime's own Caches -> Warmup
+        -> Controllers startup ordering), not that /readyz reflects it. Step 09's
+        10s hold-and-reassert is what catches a warm sync that raced and lost;
+        this step just avoids hammering Step 08 against a pod that isn't even
+        listening yet.
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/instance: ($falco_name)
+              status:
+                (containerStatuses[?name == 'artifact-operator'].ready): [true]
+
+    - name: "Step 08: Delete-plugin-blocked"
+      description: |
+        Request Plugin deletion without waiting. The Rulesfile still depends on
+        it, so the (just-restarted) per-node artifact operator must refuse to
+        remove the plugin config, proving its dependency registry was
+        correctly warm-synced immediately after the restart, not left empty.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_plugin_deletion_blocked.sh
+
+    - name: "Step 09: Assert-deletion-blocked-condition-surfaced"
+      description: |
+        The instance aggregator must have propagated the per-node block onto
+        the parent Plugin: DeletionBlocked=True with reason
+        PluginConfigStillRequired. A 10s hold + re-assert guards against a
+        flapping or transiently-correct condition.
+
+        This is the assertion that would fail if the fix regressed: if the
+        post-restart sidecar's dependency registry came back empty, this
+        Plugin would already be gone by now instead of blocked.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+
+    - name: "Step 10: Delete-rulesfile"
+      description: |
+        Delete the Rulesfile. Its removal drops the structural dependency, so
+        the per-node artifact operator can now remove the plugin config and
+        release its own ArtifactNode finalizer.
+        kubectl --wait=false fires the delete without blocking: the ArtifactNode
+        wait below is the actual completion signal, avoiding chainsaw's implicit
+        object-gone wait which could time out if Rulesfile cleanup is slow.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+            content: |
+              kubectl delete rulesfiles.artifact.falcosecurity.dev \
+                "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 11: Wait-plugin-node-object-deleted"
+      description: |
+        Isolates per-node cleanup from the final parent deletion below. If THIS
+        step is the one that stalls, the artifact-operator sidecar on the node
+        isn't removing its ArtifactNode finalizer: check that container's
+        logs, not the instance-operator's.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 12: Wait-plugin-deleted"
+      description: |
+        With the last ArtifactNode already gone (Step 11), node-objects-in-use
+        must already be clear or clear on the very next reconcile; this wait
+        should resolve almost immediately.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($plugin_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

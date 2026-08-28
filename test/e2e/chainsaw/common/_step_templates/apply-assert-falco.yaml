@@ -1,0 +1,93 @@
+# Template for creating and asserting a Falco instance.
+#
+# The operator creates a DaemonSet (default) or Deployment depending on spec.type.
+# This template waits for Reconciled=True on the Falco CR (DaemonSet/Deployment created).
+# Available=True is NOT asserted here: mock Falco images never pass readiness in tests,
+# so the DaemonSet stays at 0 available replicas. Sidecar readiness is covered implicitly
+# by the subsequent artifact assertions (Programmed=True + file on disk).
+#
+# Required bindings:
+#   - falco_name: Name of the Falco CR to create.
+#   - namespace:  Namespace where the Falco instance will run.
+#
+# Required env vars (no fallback: the suite fails loudly if these aren't set, rather than
+# silently defaulting to some particular person's image):
+#   - CHAINSAW_FALCO_IMAGE
+#   - CHAINSAW_ARTIFACT_OPERATOR_IMAGE
+#
+# Optional bindings:
+#   - falco_type:              "DaemonSet" or "Deployment". Default: "DaemonSet".
+#   - falco_version:           Falco version to report in status. Default: "0.44.1".
+#   - falco_image:             Falco container image. Default: $CHAINSAW_FALCO_IMAGE env var.
+#   - artifact_operator_image: artifact-operator sidecar image. Default: $CHAINSAW_ARTIFACT_OPERATOR_IMAGE env var.
+#   - enforce_requirements:    Full --enforce-requirements flag. Default: "--enforce-requirements=true".
+#   - update_strategy:         DaemonSet updateStrategy override (appsv1.DaemonSetUpdateStrategy
+#                              shape). Default: {type: RollingUpdate}, matching the operator's own
+#                              default (internal/pkg/resources/falco.go's FalcoDefaults) exactly,
+#                              so this default is a no-op for every other test using this
+#                              template. Set maxSurge:1/maxUnavailable:0 for a test that needs to
+#                              restart Falco without a window where a node has zero Running Falco
+#                              pods; see plugin-rulesfile-dep-survives-pod-restart, which relies
+#                              on this: the instance operator deliberately clears a node's
+#                              per-node artifact state whenever it can't see a Running Falco pod
+#                              there (it can't tell "restarting" from "gone for good", so it
+#                              doesn't try), so any test that wants durable per-node state to
+#                              survive a restart must avoid ever creating that window.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-falco
+spec:
+  bindings:
+    - name: falco_type
+      value: DaemonSet
+    - name: falco_version
+      value: "0.44.1"
+    - name: falco_image
+      value: (env('CHAINSAW_FALCO_IMAGE'))
+    - name: artifact_operator_image
+      value: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
+    - name: enforce_requirements
+      value: "--enforce-requirements=true"
+    - name: update_strategy
+      value:
+        type: RollingUpdate
+  try:
+    - apply:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          spec:
+            version: ($falco_version)
+            type: ($falco_type)
+            updateStrategy: ($update_strategy)
+            podTemplateSpec:
+              spec:
+                shareProcessNamespace: true
+                containers:
+                  - name: falco
+                    image: ($falco_image)
+                    tty: true
+                  - name: artifact-operator
+                    image: ($artifact_operator_image)
+                    imagePullPolicy: Never
+                    args:
+                      - ($enforce_requirements)
+                  - name: netshoot
+                    image: nicolaka/netshoot
+                    command: ["sleep", "infinity"]
+                    stdin: true
+                    tty: true
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          status:
+            ~.(conditions):
+              status: 'True'

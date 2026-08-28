@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw update-cm-ref-missing rule A
+  desc: Rule from ConfigMap A for testing ref-to-missing swap.
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-ref-missing-a"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

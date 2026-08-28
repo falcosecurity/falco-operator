@@ -1,0 +1,49 @@
+# Template for creating and asserting a Rulesfile from an OCI artifact.
+#
+# Required bindings:
+#   - rulesfile_name:         Name of the Rulesfile CR.
+#   - namespace:              Namespace.
+#   - rulesfile_oci_repo:     OCI repository (e.g., "falcosecurity/rules/falco-rules").
+#   - rulesfile_oci_tag:      OCI tag (e.g., "latest").
+#   - rulesfile_oci_registry: OCI registry hostname (e.g., "ghcr.io").
+#
+# Optional bindings:
+#   - rulesfile_priority: Priority (0-99). Default: 50.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-rulesfile-oci
+spec:
+  bindings:
+    - name: rulesfile_priority
+      value: 50
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          spec:
+            priority: ($rulesfile_priority)
+            ociArtifact:
+              image:
+                repository: ($rulesfile_oci_repo)
+                tag: ($rulesfile_oci_tag)
+              registry:
+                name: ($rulesfile_oci_registry)
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Rulesfile
+          metadata:
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'OCIArtifactProgrammed']):
+              - status: 'True'
+            (conditions[?type == 'DependenciesSatisfied']):
+              - status: 'True'
+            (conditions[?type == 'Programmed']):
+              - status: 'True'

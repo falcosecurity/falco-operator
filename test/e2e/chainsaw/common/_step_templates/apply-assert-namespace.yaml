@@ -1,0 +1,24 @@
+# Template for creating and asserting a namespace.
+#
+# Required bindings:
+#   - namespace_name: Name of the namespace to create.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-namespace
+spec:
+  try:
+    - apply:
+        resource:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ($namespace_name)
+    - assert:
+        resource:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: ($namespace_name)
+          status:
+            phase: Active

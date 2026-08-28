@@ -1,0 +1,6 @@
+- rule: Chainsaw basic all-sources configmap rule
+  desc: Minimal rule for the chainsaw rulesfile-basic-all test (configmap source).
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline"
+  priority: DEBUG
+  tags: [test, chainsaw]

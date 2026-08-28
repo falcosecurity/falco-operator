@@ -1,0 +1,7 @@
+- required_engine_version: "0.30.0"
+- rule: Chainsaw update-cm-data rule
+  desc: Rule for testing ConfigMap data updates (v1).
+  condition: "evt.type = execve"
+  output: "process=%proc.cmdline marker=cm-v1"
+  priority: DEBUG
+  tags: [test, chainsaw, update]

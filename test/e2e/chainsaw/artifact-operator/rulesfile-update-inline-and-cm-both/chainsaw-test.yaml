@@ -1,0 +1,336 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-update-inline-and-cm-both
+spec:
+  description: |
+    Validates that updating both inline rules and ConfigMap data in the same
+    reconcile cycle causes both disk files to be overwritten with new content.
+
+    Setup: Falco (real, enforce mode). Rulesfile with inline source
+    (required_engine_version=0.30.0, always met; marker=inline-both-v1) and ConfigMap
+    source (marker=cm-both-v1) at default
+    priority=50. Files on disk:
+      50-03-rulesfile-update-inline-and-cm-both-test-inline.yaml   (marker=inline-both-v1)
+      50-02-rulesfile-update-inline-and-cm-both-test-configmap.yaml (marker=cm-both-v1)
+
+    After patching inlineRules to output "marker=inline-both-v2" and updating
+    the ConfigMap data to "marker=cm-both-v2":
+    - Both files keep the same names (priority unchanged).
+    - The inline disk file now contains "marker=inline-both-v2".
+    - The ConfigMap disk file now contains "marker=cm-both-v2".
+    - All conditions remain True.
+
+  bindings:
+    - name: falco_name
+      value: falco-update-inline-and-cm-both-test
+    - name: rulesfile_name
+      value: rulesfile-update-inline-and-cm-both-test
+    - name: rules_cm_name
+      value: rulesfile-update-inline-and-cm-both-rules-cm
+    - name: test_name
+      value: rulesfile-update-inline-and-cm-both
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rules-configmap-v1"
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($rules_cm_name)
+            - name: namespace
+              value: ($namespace)
+            - name: source_file
+              value: simple-rules-v1.yaml
+
+    - name: "Step 03: Create-rulesfile-inline-and-cm"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                configMapRef:
+                  name: rulesfile-update-inline-and-cm-both-rules-cm
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-inline-and-cm-both inline rule
+                    desc: Inline rule for testing simultaneous inline + CM content update.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-both-v1"
+                    priority: DEBUG
+                    tags: [test, chainsaw, update]
+
+    - name: "Step 04: Assert-initial-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-and-cm-both-test-inline.yaml
+                    priority: 50
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-inline-and-cm-both-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 05: Assert-inline-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-update-inline-and-cm-both-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Assert-cm-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-inline-and-cm-both-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Assert-initial-inline-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=inline-both-v1"
+
+    - name: "Step 08: Assert-initial-cm-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-both-v1"
+
+    - name: "Step 09: Update-both-inline-and-cm-content"
+      description: |
+        Patch inlineRules content to v2 and apply updated ConfigMap data to v2
+        in the same step, triggering a single reconcile cycle that updates both files.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw update-inline-and-cm-both inline rule
+                    desc: Inline rule for testing simultaneous inline + CM content update.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=inline-both-v2"
+                    priority: DEBUG
+                    tags: [test, chainsaw, update]
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($rules_cm_name)
+                namespace: ($namespace)
+              data:
+                rules.yaml: |
+                  - rule: Chainsaw update-inline-and-cm-both CM rule v2
+                    desc: ConfigMap rule for testing simultaneous inline + CM content update.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=cm-both-v2"
+                    priority: DEBUG
+                    tags: [test, chainsaw, update]
+
+    - name: "Step 10: Assert-updated-conditions"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-and-cm-both-test-inline.yaml
+                    priority: 50
+                (installedArtifacts[?medium == 'configmap']):
+                  - path: /etc/falco/rules.d/50-02-rulesfile-update-inline-and-cm-both-test-configmap.yaml
+                    priority: 50
+
+    - name: "Step 11: Assert-inline-file-still-on-filesystem"
+      description: Files have same names (priority unchanged); confirm they still exist.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-update-inline-and-cm-both-test-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 12: Assert-cm-file-still-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-02-rulesfile-update-inline-and-cm-both-test-configmap.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 13: Assert-updated-inline-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=inline-both-v2"
+
+    - name: "Step 14: Assert-updated-cm-content"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: "marker=cm-both-v2"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,442 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-cache-lifecycle
+spec:
+  description: |
+    Exercises the instance operator's shared artifact cache (internal/pkg/artifactcache) for
+    both Plugin and Rulesfile, directly through the artifact HTTP server's endpoint, no Falco
+    pod involved: the instance controller pre-fetches OCI blobs into the shared cache purely
+    from matching real cluster Nodes, independent of any per-node sidecar.
+
+    Checked via check_artifact_cache_status.sh, curling straight from the test runner's own
+    host rather than through an in-cluster probe pod, since the instance-operator's image has
+    no shell to exec into and its Service is not guaranteed to have live endpoints (it might be
+    running outside the cluster during local development, e.g. via `make
+    telepresence.connect`). By default the script port-forwards directly to the real
+    instance-operator pod; export ARTIFACT_SERVER_URL (e.g. "http://localhost:8082") before
+    running chainsaw to point it at an already-reachable server instead and skip that
+    entirely: chainsaw script steps inherit the invoking shell's environment.
+
+    For both Plugin and Rulesfile:
+    1. Create two CRs referencing the exact same OCI ref+tag, so both index entries end up
+       pointing at the same underlying content-addressed blob.
+    2. Assert both artifact-server endpoints return 200 (both cached).
+    3. Delete the first CR, wait for its ArtifactNode to be garbage-collected.
+    4. Assert the first endpoint now returns 503 (its own index entry evicted).
+    5. Assert the second endpoint STILL returns 200 (the shared blob must survive: the second
+       CR still references it: proves refcounted eviction, not blanket eviction).
+    6. Delete the second CR, wait for its ArtifactNode to be garbage-collected.
+    7. Assert the second endpoint now returns 503 too (blob fully unreferenced).
+
+    Rulesfile's falco-rules:latest normally declares a "container" plugin dependency, which is
+    irrelevant here: the instance controller caches the OCI blob unconditionally on
+    OCIArtifact being set, independent of dependency satisfaction (that gating only affects
+    the per-node sidecar's decision to write the file, which never runs in this test).
+
+    Also adds a KWOK-simulated arm64 Node (requires KWOK pre-installed on the cluster, see
+    kwok.sigs.k8s.io) to prove blobs are cached independently per (os, arch): plugin_a/plugin_b
+    have no selector, so they match every Node, including the fake one, and
+    fetchAndCacheBlobs derives platform pairs purely from Node labels; Ready status/taints
+    are never consulted, so a KWOK fake node (labels-only, no real kubelet) is sufficient. The
+    fake node's own kwok.x-k8s.io/node=fake:NoSchedule taint keeps every other test's real
+    Falco pods off it, since none of them tolerate it.
+
+  bindings:
+    - name: plugin_a_name
+      value: cache-lifecycle-plugin-a
+    - name: plugin_b_name
+      value: cache-lifecycle-plugin-b
+    - name: rulesfile_a_name
+      value: cache-lifecycle-rulesfile-a
+    - name: rulesfile_b_name
+      value: cache-lifecycle-rulesfile-b
+    - name: test_name
+      value: artifact-cache-lifecycle
+    - name: fake_node_name
+      value: (join('-', ['kwok-arm64', $namespace]))
+
+  steps:
+    - name: Install-plugin-a
+      description: First Plugin CR referencing an OCI ref. No selector, so it matches every node.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_a_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Install-plugin-b
+      description: |
+        Second Plugin CR referencing the exact same OCI ref+tag as plugin-a, under a different
+        CR name; both end up indexed independently but sharing one underlying blob.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_b_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Install-rulesfile-a
+      description: First Rulesfile CR referencing an OCI ref. No selector, so it matches every node.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_a_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Install-rulesfile-b
+      description: |
+        Second Rulesfile CR referencing the exact same OCI ref+tag as rulesfile-a, under a
+        different CR name; both end up indexed independently but sharing one underlying blob.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_b_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Create-fake-arm64-node
+      description: |
+        KWOK-simulated Node labeled kubernetes.io/arch=arm64. plugin_a/plugin_b have no
+        selector, so they now also match this Node, and the instance controller will fetch
+        and cache an additional (linux, arm64) blob for each.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($fake_node_name)
+            - name: node_arch
+              value: arm64
+
+    - name: Assert-plugins-cached
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_a_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_b_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_a_name)
+              - name: NODE_OS
+                value: linux
+              - name: NODE_ARCH
+                value: arm64
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: Assert-rulesfiles-cached
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_a_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_b_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: Delete-plugin-a-and-rulesfile-a
+      description: Delete the first Plugin and Rulesfile CR, wait for their ArtifactNodes to be garbage-collected.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_a_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_a_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_a_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_a_name]))
+            for:
+              deletion: {}
+
+    - name: Assert-a-evicted-b-still-cached
+      description: |
+        The "a" CRs' own cache entries must be gone; the "b" CRs' shared blobs must survive
+        since "b" still references them: proves refcounted eviction, not blanket eviction.
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_a_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_b_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_a_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_b_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_a_name)
+              - name: NODE_OS
+                value: linux
+              - name: NODE_ARCH
+                value: arm64
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_b_name)
+              - name: NODE_OS
+                value: linux
+              - name: NODE_ARCH
+                value: arm64
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: Delete-plugin-b-and-rulesfile-b
+      description: Delete the second Plugin and Rulesfile CR, wait for their ArtifactNodes to be garbage-collected.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_b_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_b_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_b_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_b_name]))
+            for:
+              deletion: {}
+
+    - name: Assert-b-evicted
+      description: Now unreferenced by anything, the shared blobs' last index entries must be gone too.
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_b_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_b_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: plugins
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($plugin_b_name)
+              - name: NODE_OS
+                value: linux
+              - name: NODE_ARCH
+                value: arm64
+              - name: EXPECTED_STATUS
+                value: "503"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: Delete-fake-arm64-node
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($fake_node_name)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not
+        leave it behind for the next run (chainsaw's automatic cleanup only covers the
+        per-test namespace).
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($fake_node_name)

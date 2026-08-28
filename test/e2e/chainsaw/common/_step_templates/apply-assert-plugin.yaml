@@ -1,0 +1,79 @@
+# Template for creating and asserting a Plugin from an OCI artifact.
+#
+# The instance operator fetches the OCI config layer, creates PluginNode objects for each
+# matching node, and the artifact sidecar installs the plugin binary to disk. This template
+# waits for the Programmed aggregate condition to reach True on the parent Plugin CR, and
+# validates the resulting ArtifactNode's installedArtifacts metadata: a regression here is
+# worth catching in every test that installs a plugin, even ones only using it as a dependency.
+#
+# Required bindings:
+#   - plugin_name:        Name of the Plugin CR to create.
+#   - namespace:          Namespace for the Plugin.
+#   - plugin_oci_repo:    OCI image repository (e.g., "falcosecurity/plugins/plugin/json").
+#   - plugin_oci_tag:     OCI image tag (e.g., "latest").
+#   - plugin_oci_registry: OCI registry hostname (e.g., "ghcr.io").
+#
+# Optional bindings:
+#   - plugin_config:     Plugin spec.config object (name, initConfig, openParams, libraryPath).
+#                         Default: {} (no overrides: falls back to the plugin's own defaults).
+#   - plugin_plain_http: Set to true for plain-HTTP registries (e.g., local test registry).
+#                         Default: false.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: apply-assert-plugin
+spec:
+  bindings:
+    - name: plugin_config
+      value: {}
+    - name: plugin_plain_http
+      value: false
+  try:
+    - apply:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Plugin
+          metadata:
+            name: ($plugin_name)
+            namespace: ($namespace)
+          spec:
+            ociArtifact:
+              image:
+                repository: ($plugin_oci_repo)
+                tag: ($plugin_oci_tag)
+              registry:
+                name: ($plugin_oci_registry)
+                plainHTTP: ($plugin_plain_http)
+            config: ($plugin_config)
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: Plugin
+          metadata:
+            name: ($plugin_name)
+            namespace: ($namespace)
+          status:
+            (conditions[?type == 'Programmed']):
+              - status: 'True'
+    - assert:
+        resource:
+          apiVersion: artifact.falcosecurity.dev/v1alpha1
+          kind: ArtifactNode
+          metadata:
+            namespace: ($namespace)
+            labels:
+              artifact.falcosecurity.dev/parent: ($plugin_name)
+              artifact.falcosecurity.dev/kind: plugin
+          status:
+            (installedArtifacts[0].medium): oci
+            # installedArtifacts[0].path is null until the per-node sidecar's status patch
+            # lands (a real race, not a bug: Programmed=True above and installedArtifacts
+            # arrive in separate reconciles/patches). contains(null, ...) is a hard JMESPath
+            # type error, not a mismatch; chainsaw does not retry those the way it retries
+            # an ordinary "doesn't match yet" comparison, so it fails on the very first
+            # evaluation instead of polling. The `|| ''` fallback keeps this an ordinary
+            # (retryable) false rather than an error while the field is still empty.
+            (contains(installedArtifacts[0].path || '', $plugin_name)): true
+            (contains(installedArtifacts[0].config.path || '', 'plugins-config')): true
+            (conditions[?type == 'ConfigProgrammed']):
+              - status: 'True'

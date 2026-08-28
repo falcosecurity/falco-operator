@@ -1,0 +1,225 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-update-rejected
+spec:
+  description: |
+    Validates that when a previously-installed plugin's compatibility check fails in enforce
+    mode, the working install is never removed; the update is rejected with
+    DependenciesNotSatisfiedUpdateRejected, and Programmed remains True because the old
+    install is still intact.
+
+    Steps:
+    1. Start with Falco mock-reporting plugin_api_version=3.10.0 (satisfied). The container
+       plugin installs normally and reaches Programmed=True.
+    2. Update the mock /versions to report plugin_api_version=2.99.0 (major-version
+       mismatch: update would be incompatible).
+    3. Assert DependenciesSatisfied=False with reason DependenciesNotSatisfiedUpdateRejected,
+       but Programmed remains True (the old .so is still on disk and Falco is still running it).
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-update-rejected-test
+    - name: plugin_name
+      value: container
+    - name: mock_configmap_name
+      value: mock-falco-versions-update-rejected
+    - name: test_name
+      value: plugin-update-rejected
+
+  steps:
+    - name: Create-mock-versions-configmap
+      description: Create ConfigMap with mocked /versions reporting plugin_api_version=3.10.0 (satisfied).
+      use:
+        template: ../../common/_step_templates/apply-configmap-from-file.yaml
+        with:
+          bindings:
+            - name: configmap_name
+              value: ($mock_configmap_name)
+            - name: data_key
+              value: versions
+            - name: source_file
+              value: mock-versions-satisfied.json
+
+    - name: Create-falco
+      description: |
+        Create a Falco DaemonSet in enforce mode (--enforce-requirements=true, the default)
+        with a mock /versions server initially reporting plugin_api_version=3.10.0.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco-mock-versions.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: mock_configmap_name
+              value: ($mock_configmap_name)
+
+    - name: Create-container-plugin
+      description: Create the container Plugin CR (no custom config needed for this test).
+      use:
+        template: ../../common/_step_templates/apply-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: Assert-initial-install-successful
+      description: |
+        With plugin_api_version=3.10.0 the requirement is met. The plugin must install
+        successfully: DependenciesSatisfied=True and Programmed=True.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+
+    - name: Assert-so-on-filesystem-initial
+      description: Confirm the .so reached the node filesystem on the initial install.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: Downgrade-mock-versions-to-incompatible
+      description: |
+        Overwrite the mock /versions directly (exec into the writable emptyDir) to report
+        plugin_api_version=2.99.0, a major-version mismatch that would block a fresh
+        install. The VersionsWatcher detects the change and re-triggers the reconcile.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: mock-falco-versions
+              - name: REMOTE_PATH
+                value: /mock/versions
+              - name: LOCAL_FILE
+                value: mock-versions-unsatisfied.json
+            content: |
+              bash ../../common/scripts/write_file_on_node.sh
+
+    - name: Assert-update-rejected-but-still-programmed
+      description: |
+        The incompatible update must be rejected: DependenciesSatisfied=False with reason
+        DependenciesNotSatisfiedUpdateRejected. Programmed remains True because the previously
+        installed .so is still intact and Falco is still running it.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($plugin_name)
+                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+
+    - name: Assert-so-still-on-filesystem
+      description: |
+        The previously installed .so must still be present: a blocked update must never
+        remove a working install.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

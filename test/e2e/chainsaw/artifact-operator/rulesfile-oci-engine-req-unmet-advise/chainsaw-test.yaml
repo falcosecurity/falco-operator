@@ -1,0 +1,127 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-engine-req-unmet-advise
+spec:
+  description: |
+    Validates that a Rulesfile backed by a local OCI artifact whose config layer declares
+    required engine_version_semver=999.0.0 is installed anyway in advise mode, even though
+    no real Falco instance can satisfy an impossibly high requirement.
+
+    The OCI artifact (falco-test/rulesfile-engine-req-unmet) was pushed with:
+      falcoctl registry push --requires engine_version_semver:999.0.0
+
+    Expected outcome:
+    - DependenciesSatisfied=False, reason=DependenciesNotSatisfiedInstalledAnyway.
+    - OCIArtifactProgrammed=True (advise mode proceeds despite unmet req).
+    - Programmed=True (advise mode skips DependenciesSatisfied when computing Programmed).
+    - OCI file written to the node filesystem.
+    - installedArtifacts has one entry for oci medium.
+
+  bindings:
+    - name: falco_name
+      value: falco-oci-engine-req-unmet-advise-test
+    - name: rulesfile_name
+      value: rulesfile-oci-engine-req-unmet-advise-test
+    - name: test_name
+      value: rulesfile-oci-engine-req-unmet-advise
+
+  steps:
+    - name: "Step 01: Create-falco-advise-mode"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: enforce_requirements
+              value: "--enforce-requirements=false"
+
+    - name: "Step 02: Create-rulesfile-oci-local"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-unmet
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Assert-installed-despite-unmet-req"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (length(installedArtifacts || `[]`)): 1
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'oci']):
+                  - path: /etc/falco/rules.d/50-01-rulesfile-oci-engine-req-unmet-advise-test-oci.yaml
+                    priority: 50
+
+    - name: "Step 04: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-01-rulesfile-oci-engine-req-unmet-advise-test-oci.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
