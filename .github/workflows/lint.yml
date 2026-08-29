@@ -37,6 +37,12 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build deadcode tool
+        # Forces the "go: downloading ..." module-fetch noise (written to stderr on a cold
+        # module cache) to happen here, so the check below only captures deadcode's own
+        # findings and can't mistake download logging for dead code.
+        run: go build -o /dev/null golang.org/x/tools/cmd/deadcode
+
       - name: Run deadcode
         run: |
           if ! output=$(go tool deadcode ./cmd/... 2>&1); then
