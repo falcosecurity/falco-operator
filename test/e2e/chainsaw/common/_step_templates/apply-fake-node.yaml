@@ -27,6 +27,11 @@
 # JMESPath function rejects an empty-object argument at the type check (`invalid type for:
 # map[], expected: []functions.JpType{"object"}`), so a variadic "merge caller-supplied labels
 # over fixed ones" design isn't safe to default to {}.
+#
+# The status block below is documentation-of-intent, not a real effect: Node has a status
+# subresource, so the API server strips .status from this write. KWOK's own controller
+# PATCHes /status asynchronously once it sees the kwok.x-k8s.io/node=fake annotation. The
+# wait below blocks on that, so callers pinning a pod here right after aren't racing it.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: StepTemplate
 metadata:
@@ -73,3 +78,12 @@ spec:
               kubeProxyVersion: fake
               operatingSystem: ($node_os)
             phase: Running
+    - wait:
+        apiVersion: v1
+        kind: Node
+        name: ($node_name)
+        timeout: 30s
+        for:
+          condition:
+            name: Ready
+            value: "true"

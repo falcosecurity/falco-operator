@@ -205,7 +205,25 @@ spec:
                 namespace: ($namespace)
 
     - name: "Step 05: Cleanup-scenario-1"
+      description: |
+        Deletes the pods pinned to node_notin_match/node_notin_excluded before the Nodes
+        themselves: a Node delete doesn't cascade-delete pods bound to it (no ownerRef), so
+        skipping this would leave two orphaned pods (referencing a now-gone Node) for
+        PodGC to notice and reap asynchronously - unnecessary API churn right before Step 06
+        creates a new fake Node and immediately needs KWOK's attention for it.
       try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_notin_match_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_notin_excluded_name)
+              namespace: ($namespace)
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -384,6 +402,12 @@ spec:
       try:
         - delete:
             ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_dynamic_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: Plugin
               name: ($plugin_dynamic_name)
@@ -549,6 +573,12 @@ spec:
 
     - name: "Step 20: Cleanup-scenario-3"
       try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_fanout_name)
+              namespace: ($namespace)
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1

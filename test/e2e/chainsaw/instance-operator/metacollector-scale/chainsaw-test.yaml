@@ -1,0 +1,106 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metacollector-scale
+spec:
+  description: |
+    Component replica scaling: created with replicas=2, then scaled down to 1. Distinct from
+    metacollector-lifecycle, which only ever runs a single replica and never touches
+    spec.replicas.
+
+  bindings:
+    - name: component_name
+      value: metacollector-scale-test
+    - name: test_name
+      value: metacollector-scale
+
+  steps:
+    - name: Create-component-with-two-replicas
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                component:
+                  type: metacollector
+                replicas: 2
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              status:
+                availableReplicas: 2
+                readyReplicas: 2
+
+    - name: Assert-component-status-with-two-replicas
+      use:
+        template: ../../common/_step_templates/assert-component-status.yaml
+        with:
+          bindings:
+            - name: component_name
+              value: ($component_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_replicas
+              value: 2
+            # Must track internal/pkg/image/const.go's MetacollectorTag.
+            - name: expected_version
+              value: "0.1.2"
+
+    - name: Scale-down-to-one-replica
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 1
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 1
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+
+    - name: Assert-component-status-after-scale-down
+      use:
+        template: ../../common/_step_templates/assert-component-status.yaml
+        with:
+          bindings:
+            - name: component_name
+              value: ($component_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_replicas
+              value: 1
+            - name: expected_version
+              value: "0.1.2"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

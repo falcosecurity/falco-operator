@@ -1,0 +1,40 @@
+# Asserts a Falco CR's status in detail: resourceType, version, and the
+# Reconciled/Available condition statuses individually.
+#
+# apply-assert-falco.yaml only waits for every condition to reach 'True' generically. Use
+# this instead for tests checking the Falco controller's own resource-management behavior.
+#
+# Required bindings:
+#   - falco_name:            Name of the Falco CR.
+#   - namespace:              Namespace of the Falco CR.
+#   - expected_resource_type: "DaemonSet" or "Deployment".
+#   - expected_version:       Expected status.version value.
+#
+# Optional bindings:
+#   - expected_reconciled: Expected Reconciled condition status. Default: "True".
+#   - expected_available:  Expected Available condition status. Default: "True".
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-falco-status
+spec:
+  bindings:
+    - name: expected_reconciled
+      value: "True"
+    - name: expected_available
+      value: "True"
+  try:
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          status:
+            resourceType: ($expected_resource_type)
+            version: ($expected_version)
+            (conditions[?type == 'Reconciled']):
+              - status: ($expected_reconciled)
+            (conditions[?type == 'Available']):
+              - status: ($expected_available)

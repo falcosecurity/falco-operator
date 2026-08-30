@@ -1,0 +1,152 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-podtemplate
+spec:
+  description: |
+    Custom spec.podTemplateSpec fields (pod labels, tolerations, per-container resource
+    limits) applied on top of an already-running Falco are picked up by the DaemonSet's
+    rollout, and don't clobber the operator's own artifact-operator sidecar: every
+    reconcile, generateApplyConfiguration.go merges the user's podTemplateSpec overlay onto
+    resources.FalcoDefaults's base template (instance.MergeApplyConfiguration, a
+    structured-merge-diff typed merge against the real apps/v1 DaemonSet/Deployment schema,
+    which merges spec.template.spec.containers by name). Since artifact-operator lives in
+    the base template, it survives a user overlay that only mentions "falco" by name.
+    This is NOT a general property of the Falco CR's own podTemplateSpec field, though:
+    that field has no list-map merge key of its own, so patching spec.podTemplateSpec.spec
+    .containers replaces the CR's own array wholesale. A container that exists only because
+    a *previous* user overlay added it - not because it's in FalcoDefaults - will disappear
+    the moment a later patch's containers list omits it.
+
+  bindings:
+    - name: falco_name
+      value: falco-podtemplate-test
+    - name: test_name
+      value: falco-podtemplate
+
+  steps:
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Wait-for-falco-pod-ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Patch-custom-podtemplate-fields
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                  spec:
+                    tolerations:
+                      - key: test-toleration
+                        operator: Exists
+                        effect: NoSchedule
+                    containers:
+                      - name: falco
+                        resources:
+                          limits:
+                            cpu: 500m
+                            memory: 1Gi
+
+    - name: Assert-daemonset-rolled-out
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                (updatedNumberScheduled == desiredNumberScheduled): true
+                (numberReady == desiredNumberScheduled): true
+
+    - name: Assert-pod-has-custom-label-and-toleration
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/instance: ($falco_name)
+                  custom-label: test-value
+              spec:
+                (tolerations[?key == 'test-toleration']):
+                  - operator: Exists
+                    effect: NoSchedule
+              status:
+                phase: Running
+
+    - name: Assert-base-default-sidecar-survives-user-overlay
+      description: |
+        artifact-operator comes from resources.FalcoDefaults, unconditionally merged back in
+        every reconcile - it must survive even though the patch's own containers list only
+        mentions "falco".
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - resources:
+                          limits:
+                            cpu: 500m
+                            memory: 1Gi
+                    (containers[?name == 'artifact-operator']):
+                      - name: artifact-operator
+
+    - name: Assert-user-only-sidecar-does-not-survive-overlay-replace
+      description: |
+        netshoot only ever existed because apply-assert-falco.yaml's own user overlay added
+        it, not because it's part of FalcoDefaults. The patch's containers list didn't
+        mention it, and the Falco CR's own podTemplateSpec.spec.containers field has no
+        list-map merge key (unlike the real DaemonSet this generates), so the patch replaced
+        that field's array wholesale and netshoot is gone from the rolled-out DaemonSet.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'netshoot']): []
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

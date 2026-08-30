@@ -1,0 +1,159 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falcosidekick-lifecycle
+spec:
+  description: |
+    Component controller resource-management lifecycle for the falcosidekick type. Unlike
+    metacollector-lifecycle, falcosidekick's RBAC is namespace-scoped (Role/RoleBinding, not
+    ClusterRole/ClusterRoleBinding): FalcosidekickDefaults only sets RoleRules, and the
+    Component controller only creates cluster-scoped RBAC when ClusterRoleRules is non-empty
+    (see controllers/instance/component/controller.go). Runs with 2 replicas throughout, so
+    this also covers a non-default replica count the metacollector tests don't touch.
+
+  bindings:
+    - name: component_name
+      value: falcosidekick-lifecycle-test
+    - name: test_name
+      value: falcosidekick-lifecycle
+
+  steps:
+    - name: Create-component
+      use:
+        template: ../../common/_step_templates/apply-assert-component.yaml
+        with:
+          bindings:
+            - name: component_type
+              value: falcosidekick
+
+    - name: Scale-to-two-replicas
+      description: apply-assert-component.yaml doesn't set replicas; do it as a follow-up patch.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 2
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              status:
+                availableReplicas: 2
+                readyReplicas: 2
+
+    - name: Assert-component-status
+      use:
+        template: ../../common/_step_templates/assert-component-status.yaml
+        with:
+          bindings:
+            - name: component_name
+              value: ($component_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_replicas
+              value: 2
+            # Must track internal/pkg/image/const.go's FalcosidekickTag.
+            - name: expected_version
+              value: "2.32.0"
+
+    - name: Assert-sub-resources-exist
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                ports:
+                  - port: 2801
+
+    - name: Delete-component
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              name: ($component_name)
+              namespace: ($namespace)
+
+    - name: Assert-namespaced-resources-gone
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: Service
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

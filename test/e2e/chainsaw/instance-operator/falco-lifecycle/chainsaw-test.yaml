@@ -1,0 +1,210 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-lifecycle
+spec:
+  description: |
+    Falco controller resource-management lifecycle, distinct from the artifact-operator
+    suite (which only ever exercises Plugin/Rulesfile/Config against an already-existing
+    Falco and never touches the Falco CR's own reconciliation):
+    1. Create as DaemonSet; assert the DaemonSet, and the Falco CR's resourceType/version/
+       conditions, are all correct.
+    2. Re-apply the identical spec; assert the reconcile is a no-op (no pod restart), proving
+       ensureDeployment/ensureDaemonSet compares before writing rather than always updating.
+    3. Patch spec.type to Deployment; assert the DaemonSet is torn down, a Deployment takes
+       its place and becomes ready, and the Falco CR reflects the new resourceType.
+    4. Delete the Falco CR; assert every owned namespaced (Deployment, ServiceAccount, Role,
+       RoleBinding) and cluster-scoped (ClusterRole, ClusterRoleBinding) resource is gone.
+
+  bindings:
+    - name: falco_name
+      value: falco-lifecycle-test
+    - name: test_name
+      value: falco-lifecycle
+
+  steps:
+    - name: Create-falco-as-daemonset
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Wait-for-falco-pod-ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Assert-daemonset-ready
+      description: |
+        The DaemonSet itself, not just the Falco CR's conditions, is up. Compares
+        numberReady/desiredNumberScheduled against each other rather than a hardcoded count.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                (desiredNumberScheduled >= `1`): true
+                (numberReady == desiredNumberScheduled): true
+
+    - name: Assert-falco-status-as-daemonset
+      use:
+        template: ../../common/_step_templates/assert-falco-status.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_resource_type
+              value: DaemonSet
+            - name: expected_version
+              value: "0.44.1"
+
+    - name: Reapply-identical-falco-spec
+      description: Re-applying the same spec must be a no-op reconcile, not a pod restart.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Assert-no-pod-restart-after-reapply
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              bash ../../common/scripts/check_no_pod_restarts.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: Switch-falco-type-to-deployment
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                type: Deployment
+                replicas: 1
+
+    - name: Assert-daemonset-torn-down
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: Assert-deployment-ready
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+
+    - name: Assert-falco-status-as-deployment
+      use:
+        template: ../../common/_step_templates/assert-falco-status.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_resource_type
+              value: Deployment
+            - name: expected_version
+              value: "0.44.1"
+
+    - name: Delete-falco
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+    - name: Assert-namespaced-resources-gone
+      try:
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: Role
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: RoleBinding
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: Assert-cluster-scoped-resources-gone
+      description: |
+        ClusterRole/ClusterRoleBinding names are "<falco_name>--<namespace>"
+        (resources.GenerateUniqueName), since they're cluster-scoped and must stay unique
+        across every Falco instance in every namespace.
+      try:
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRole
+              metadata:
+                name: (join('--', [$falco_name, $namespace]))
+        - error:
+            resource:
+              apiVersion: rbac.authorization.k8s.io/v1
+              kind: ClusterRoleBinding
+              metadata:
+                name: (join('--', [$falco_name, $namespace]))
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
