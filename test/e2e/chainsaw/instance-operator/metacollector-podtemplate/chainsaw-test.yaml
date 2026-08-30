@@ -1,0 +1,116 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: metacollector-podtemplate
+spec:
+  description: |
+    Component-level customization beyond the plain type/replicas path: custom pod labels
+    and annotations via podTemplateSpec, and a Deployment strategy override.
+
+  bindings:
+    - name: component_name
+      value: metacollector-podtemplate-test
+    - name: test_name
+      value: metacollector-podtemplate
+
+  steps:
+    - name: Create-component-with-custom-pod-labels
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                component:
+                  type: metacollector
+                replicas: 1
+                podTemplateSpec:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                    annotations:
+                      custom-annotation: test-annotation
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+
+    - name: Assert-pod-template-has-custom-label-and-annotation
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                    annotations:
+                      custom-annotation: test-annotation
+
+    - name: Assert-component-status
+      use:
+        template: ../../common/_step_templates/assert-component-status.yaml
+        with:
+          bindings:
+            - name: component_name
+              value: ($component_name)
+            - name: namespace
+              value: ($namespace)
+            - name: expected_replicas
+              value: 1
+            # Must track internal/pkg/image/const.go's MetacollectorTag.
+            - name: expected_version
+              value: "0.1.2"
+
+    - name: Patch-deployment-strategy-to-recreate
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                strategy:
+                  type: Recreate
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                strategy:
+                  type: Recreate
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,173 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-version
+spec:
+  description: |
+    Falco version resolution: spec.version drives the resolved image tag
+    (docker.io/falcosecurity/falco:<version>), and an explicit podTemplateSpec image
+    override takes precedence over spec.version once set.
+
+    Deliberately does NOT go through apply-assert-falco.yaml: that template pins the falco
+    container's image to $CHAINSAW_FALCO_IMAGE via its own podTemplateSpec override, which
+    would make spec.version cosmetic and defeat the point of this test. Uses real published
+    Falco images from docker.io instead of the CI-pinned version.
+
+    Uses type: Deployment (engine.kind: nodriver, see deploymentFalcoConfig in
+    internal/pkg/resources/falco.go), not DaemonSet, and deliberately never waits for the
+    pod to become Ready or asserts the Available condition: this test is only about the
+    Falco *controller's* image-tag resolution, a synchronous, pod-health-independent
+    concern. DaemonSet mode needs the real eBPF probe (engine.kind: modern_ebpf) to
+    actually load, which ties pod health to the CI kernel's compatibility with whatever
+    specific old Falco version happens to be pinned here - a real failure hit in practice
+    (0.40.0's modern_ebpf probe failed scap_init against a CI kernel, unrelated to anything
+    this test is meant to verify). Asserting only the resolved image field and the
+    Reconciled condition (which internal/pkg/resources' generation confirms goes True
+    independent of whether the container the DaemonSet/Deployment describes ever actually
+    starts) keeps this test's outcome fully decoupled from Falco's runtime behavior.
+
+  bindings:
+    - name: falco_name
+      value: falco-version-test
+    - name: test_name
+      value: falco-version
+    - name: initial_version
+      value: "0.40.0"
+    - name: upgraded_version
+      value: "0.43.0"
+    - name: initial_image
+      value: docker.io/falcosecurity/falco:0.40.0
+    - name: upgraded_image
+      value: docker.io/falcosecurity/falco:0.43.0
+
+  steps:
+    - name: Create-falco-with-initial-version
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                type: Deployment
+                replicas: 1
+                version: ($initial_version)
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    # JMESPath filter, not a direct array assert: chainsaw does strict
+                    # element-count matching and the Deployment has multiple containers
+                    # (falco + artifact-operator sidecar).
+                    (containers[?name == 'falco']):
+                      - image: ($initial_image)
+
+    - name: Assert-falco-status-matches-initial-version
+      try:
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                resourceType: Deployment
+                version: ($initial_version)
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+
+    - name: Patch-falco-version-to-upgraded-version
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                version: ($upgraded_version)
+
+    - name: Assert-deployment-image-updated
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($upgraded_image)
+
+    - name: Assert-falco-status-matches-upgraded-version
+      try:
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                resourceType: Deployment
+                version: ($upgraded_version)
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+
+    - name: Patch-image-override-via-podtemplatespec
+      description: An explicit image override must win over spec.version's resolved tag.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: ($initial_image)
+
+    - name: Assert-deployment-image-overridden
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($initial_image)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

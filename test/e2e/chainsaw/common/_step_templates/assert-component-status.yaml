@@ -1,0 +1,43 @@
+# Asserts a Component CR's status in detail: resourceType, version, replica counts, and
+# the Reconciled/Available condition statuses individually.
+#
+# apply-assert-component.yaml only waits for every condition to reach 'True' generically.
+# Use this instead for tests checking the Component controller's own resource-management
+# behavior.
+#
+# Required bindings:
+#   - component_name:     Name of the Component CR.
+#   - namespace:           Namespace of the Component CR.
+#   - expected_replicas:   Expected desiredReplicas and availableReplicas count.
+#   - expected_version:    Expected status.version value.
+#
+# Optional bindings:
+#   - expected_reconciled: Expected Reconciled condition status. Default: "True".
+#   - expected_available:  Expected Available condition status. Default: "True".
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: assert-component-status
+spec:
+  bindings:
+    - name: expected_reconciled
+      value: "True"
+    - name: expected_available
+      value: "True"
+  try:
+    - assert:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Component
+          metadata:
+            name: ($component_name)
+            namespace: ($namespace)
+          status:
+            resourceType: Deployment
+            version: ($expected_version)
+            desiredReplicas: ($expected_replicas)
+            availableReplicas: ($expected_replicas)
+            (conditions[?type == 'Reconciled']):
+              - status: ($expected_reconciled)
+            (conditions[?type == 'Available']):
+              - status: ($expected_available)

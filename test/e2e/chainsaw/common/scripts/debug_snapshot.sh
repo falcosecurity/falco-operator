@@ -62,6 +62,12 @@ capture deployments kubectl get deployments -n "$NAMESPACE" -o yaml
 capture controllerrevisions kubectl get controllerrevisions -n "$NAMESPACE" -o yaml
 capture pods kubectl get pods -n "$NAMESPACE" -o wide
 capture pods-describe kubectl describe pods -n "$NAMESPACE"
+# Cluster-scoped, covers real and KWOK-simulated fake nodes. Tells us whether KWOK ever
+# finished staging a fake Node (see apply-fake-node.yaml).
+capture nodes kubectl get nodes -o wide
+capture nodes-describe kubectl describe nodes
+# KWOK's own controller log. Absent if KWOK isn't installed for this test category.
+capture kwok-controller-logs kubectl logs -n kube-system -l app=kwok-controller --tail=200
 capture operator-pods kubectl get pods -n "$OPERATOR_NAMESPACE" -o wide
 # The instance-operator ("manager" container) is the single Deployment in
 # OPERATOR_NAMESPACE; control-plane=falco-operator is a hardcoded pod-template

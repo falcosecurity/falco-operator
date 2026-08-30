@@ -1,0 +1,203 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: validation
+spec:
+  description: |
+    CRD-level admission validation (CEL rules and kubebuilder markers on the API types
+    themselves), distinct from every other test in this suite, which only ever exercises
+    valid specs and controller-level (not admission-level) behavior. Cross-cutting across
+    both artifact.falcosecurity.dev (Config, Rulesfile, Plugin) and
+    instance.falcosecurity.dev (Falco, Component), so it doesn't belong under either the
+    artifact-operator or instance-operator category on its own.
+    Each case creates a deliberately invalid resource and asserts the API server itself
+    rejects it (chainsaw's $error), never reaching a controller.
+
+  bindings:
+    - name: test_name
+      value: validation
+
+  steps:
+    - name: Reject-invalid-falco-type
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: invalid-type
+                namespace: ($namespace)
+              spec:
+                type: StatefulSet
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-falco-replicas-zero
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: invalid-replicas
+                namespace: ($namespace)
+              spec:
+                type: Deployment
+                replicas: 0
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-config-priority-over-99
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-high
+                namespace: ($namespace)
+              spec:
+                priority: 100
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-config-priority-below-0
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: invalid-priority-low
+                namespace: ($namespace)
+              spec:
+                priority: -1
+                config: "test: true"
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-rulesfile-ociartifact-without-image-repository
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: invalid-oci-no-repo
+                namespace: ($namespace)
+              spec:
+                priority: 50
+                ociArtifact:
+                  image: {}
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-plugin-ociartifact-without-image
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: invalid-oci-no-image
+                namespace: ($namespace)
+              spec:
+                ociArtifact: {}
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-rulesfile-plainhttp-and-tls-both-set
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: invalid-oci-plainhttp-tls
+                namespace: ($namespace)
+              spec:
+                priority: 50
+                ociArtifact:
+                  image:
+                    repository: falcosecurity/rules/falco-rules
+                  registry:
+                    plainHTTP: true
+                    tls:
+                      insecureSkipVerify: true
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-plugin-plainhttp-and-tls-both-set
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: invalid-plugin-plainhttp-tls
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falcosecurity/plugins/plugin/json
+                  registry:
+                    plainHTTP: true
+                    tls:
+                      insecureSkipVerify: true
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-invalid-component-type
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: invalid-type
+                namespace: ($namespace)
+              spec:
+                component:
+                  type: invalid
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-component-replicas-zero
+      try:
+        - create:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: invalid-replicas
+                namespace: ($namespace)
+              spec:
+                component:
+                  type: metacollector
+                replicas: 0
+            expect:
+              - check:
+                  ($error != null): true
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../common/scripts/debug_snapshot.sh

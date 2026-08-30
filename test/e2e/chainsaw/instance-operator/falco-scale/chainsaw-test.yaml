@@ -1,0 +1,83 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-scale
+spec:
+  description: |
+    Falco Deployment replica scaling: spec.replicas is propagated to the underlying
+    Deployment and the controller reconciles it back up after a scale-up. Distinct from
+    falco-lifecycle, which only ever runs a single replica and never touches spec.replicas.
+
+  bindings:
+    - name: falco_name
+      value: falco-scale-test
+    - name: test_name
+      value: falco-scale
+
+  steps:
+    - name: Create-falco-as-deployment
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: Deployment
+
+    - name: Wait-for-falco-pod-ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Assert-deployment-single-replica
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 1
+              status:
+                availableReplicas: 1
+                readyReplicas: 1
+
+    - name: Scale-deployment-to-two-replicas
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 2
+
+    - name: Assert-deployment-scaled-up
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 2
+              status:
+                availableReplicas: 2
+                readyReplicas: 2
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

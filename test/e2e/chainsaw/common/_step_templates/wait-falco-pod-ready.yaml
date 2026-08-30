@@ -1,0 +1,28 @@
+# Waits until every pod in the test namespace reports Ready.
+#
+# Unlike apply-assert-falco.yaml's assert, which only waits on the Falco CR's own
+# conditions, this waits on the actual pod - for tests that need it (e.g. asserting
+# numberReady, or checking pod restarts). One Falco instance per namespace, so no
+# selector needed.
+#
+# Runs wait_pods_ready.sh instead of chainsaw's native `wait:` (kubectl wait --all): that
+# snapshots the pod list once and fails hard with NotFound if a pod it saw gets deleted
+# before it's checked - exactly what happens right after a Falco type switch, when the old
+# pods are still terminating as the new ones come up.
+#
+# Required bindings:
+#   - namespace: Namespace to wait in.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: wait-falco-pod-ready
+spec:
+  try:
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+        content: |
+          bash ../../common/scripts/wait_pods_ready.sh
+        check:
+          (to_string(json_parse($stdout).status) == 'success'): true
