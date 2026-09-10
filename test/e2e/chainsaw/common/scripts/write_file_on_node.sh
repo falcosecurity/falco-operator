@@ -27,6 +27,14 @@ LOCAL_FILE="${LOCAL_FILE}"
 MAX_RETRIES="${MAX_RETRIES:-200}"
 RETRY_DELAY="${RETRY_DELAY:-1}"
 
+# An exec can exit successfully even if its stdin arrived empty or incomplete.
+# Compare the received bytes before replacing the file served by the mock.
+if command -v sha256sum >/dev/null 2>&1; then
+  EXPECTED_HASH=$(sha256sum <"$LOCAL_FILE" | awk '{print $1}')
+else
+  EXPECTED_HASH=$(shasum -a 256 <"$LOCAL_FILE" | awk '{print $1}')
+fi
+
 LAST_ERROR="no attempts made"
 PODS=""
 
@@ -49,7 +57,20 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
   WRITTEN_PODS=""
   for POD in $PODS; do
     if ! OUTPUT=$(kubectl exec -i -n "$NAMESPACE" "$POD" -c "$CONTAINER" -- \
-        sh -c "cat > \"$REMOTE_PATH\"" <"$LOCAL_FILE" 2>&1); then
+        sh -ec '
+          target=$1
+          expected=$2
+          tmp=$(mktemp "${target}.XXXXXX")
+          trap '\''rm -f "$tmp"'\'' EXIT
+          cat > "$tmp"
+          actual=$(sha256sum < "$tmp")
+          if [ "${actual%% *}" != "$expected" ]; then
+            echo "received content does not match local file" >&2
+            exit 1
+          fi
+          chmod 644 "$tmp"
+          mv -f "$tmp" "$target"
+        ' sh "$REMOTE_PATH" "$EXPECTED_HASH" <"$LOCAL_FILE" 2>&1); then
       LAST_ERROR="kubectl exec failed on pod $POD: $OUTPUT"
       ATTEMPT_FAILED=1
       break
