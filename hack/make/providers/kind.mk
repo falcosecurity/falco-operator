@@ -7,7 +7,7 @@ CLUSTER_TOOL_DEP := kind
 
 .PHONY: cluster.create
 cluster.create: $(CLUSTER_TOOL_DEP)
-	@$(KIND) get clusters 2>/dev/null | grep -qx '$(CLUSTER_NAME)' || $(KIND) create cluster --name $(CLUSTER_NAME)
+	@$(KIND) get clusters 2>/dev/null | grep -qx '$(CLUSTER_NAME)' || $(KIND) create cluster --name $(CLUSTER_NAME) --image $(KIND_NODE_IMAGE)
 
 .PHONY: cluster.delete
 cluster.delete: $(CLUSTER_TOOL_DEP)
