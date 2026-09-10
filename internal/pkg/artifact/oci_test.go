@@ -180,7 +180,7 @@ func TestFetchContent(t *testing.T) {
 				WithOCIPuller(mockPuller),
 			)
 
-			got, err := manager.FetchContent(context.Background(), tt.ociArtifact)
+			got, err := manager.FetchContent(context.Background(), tt.ociArtifact, testDigest)
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)

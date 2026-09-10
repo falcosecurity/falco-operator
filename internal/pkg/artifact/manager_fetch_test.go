@@ -115,7 +115,8 @@ func TestManager_FetchContent(t *testing.T) {
 
 			content, err := manager.FetchContent(context.Background(), &commonv1alpha1.OCIArtifact{
 				Image: commonv1alpha1.ImageSpec{Repository: "example.com/myrules", Tag: "latest"},
-			})
+			}, testDigest)
+			assert.Equal(t, []string{"ghcr.io/example.com/myrules@" + testDigest}, mockPuller.FetchContentCalls)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -124,6 +125,24 @@ func TestManager_FetchContent(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantContent, content)
 			require.Len(t, mockPuller.FetchContentCalls, 1)
+		})
+	}
+}
+
+func TestManager_FetchContent_RejectsInvalidDigest(t *testing.T) {
+	for _, digest := range []string{"", "latest", "sha256:short"} {
+		t.Run(digest, func(t *testing.T) {
+			mockPuller := &pullerfake.MockOCIPuller{}
+			manager := NewManagerWithOptions(
+				fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(),
+				"test-namespace", WithOCIPuller(mockPuller),
+			)
+			content, err := manager.FetchContent(context.Background(), &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "test/rules", Tag: "latest"},
+			}, digest)
+			require.ErrorContains(t, err, "pin OCI reference")
+			assert.Nil(t, content)
+			assert.Empty(t, mockPuller.FetchContentCalls)
 		})
 	}
 }

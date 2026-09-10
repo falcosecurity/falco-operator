@@ -118,6 +118,46 @@ func TestResolveReference(t *testing.T) {
 	}
 }
 
+func TestPinReferenceToDigest(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{
+			name: "replaces a tag",
+			ref:  "ghcr.io/test/plugin:latest",
+			want: "ghcr.io/test/plugin@" + testDigest,
+		},
+		{
+			name: "preserves a custom registry port",
+			ref:  "localhost:5000/test/plugin:v1",
+			want: "localhost:5000/test/plugin@" + testDigest,
+		},
+		{
+			name: "accepts an already pinned reference",
+			ref:  "ghcr.io/test/plugin@" + testDigest,
+			want: "ghcr.io/test/plugin@" + testDigest,
+		},
+		{
+			name: "rejects an invalid reference",
+			ref:  "https://ghcr.io/test/plugin:latest",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := pinReferenceToDigest(tt.ref, testDigest)
+			if tt.want == "" {
+				require.Error(t, err)
+				assert.Empty(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestResolveRegistryOptions(t *testing.T) {
 	tests := []struct {
 		name          string

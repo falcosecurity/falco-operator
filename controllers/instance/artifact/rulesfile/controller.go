@@ -387,7 +387,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 		// unadvanced, rather than persisting an incomplete ArtifactMeta that could let a per-node
 		// operator install the rulesfile without its real plugin dependencies enforced.
 		logger.Info("Fetching rulesfile ArtifactMeta from OCI content layer", "ref", ref)
-		content, contentErr := am.FetchContent(ctx, rulesfile.Spec.OCIArtifact)
+		content, contentErr := am.FetchContent(ctx, rulesfile.Spec.OCIArtifact, digest)
 		if contentErr != nil {
 			logger.Error(contentErr, "Unable to fetch rulesfile OCI content; ArtifactMeta will remain stale", "ref", ref)
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactProgramFailed,

@@ -96,8 +96,9 @@ func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.
 	return am.ociPuller.FetchConfig(ctx, ref, creds, ResolveRegistryOptions(ociArtifact))
 }
 
-// FetchContent downloads the artifact content layer for ociArtifact and returns the extracted file bytes.
-func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) ([]byte, error) {
+// FetchContent downloads the artifact content layer at the root digest returned by
+// FetchConfig and returns the extracted file bytes.
+func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact, digest string) ([]byte, error) {
 	secretRef := authSecretRef(ociArtifact)
 	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
 	if err != nil {
@@ -107,7 +108,10 @@ func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1
 	if err != nil {
 		return nil, fmt.Errorf("derive credentials: %w", err)
 	}
-	ref := ResolveReference(ociArtifact)
+	ref, err := pinReferenceToDigest(ResolveReference(ociArtifact), digest)
+	if err != nil {
+		return nil, fmt.Errorf("pin OCI reference: %w", err)
+	}
 	return am.ociPuller.FetchContent(ctx, ref, creds, ResolveRegistryOptions(ociArtifact))
 }
 
@@ -146,7 +150,6 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 			return "", fmt.Errorf("resolve digest for %q: %w", ref, err)
 		}
 	}
-
 	blobPath := artifactcache.BlobPath(cache.Dir(), string(artifactType), ref, digest, goos, goarch)
 
 	if cache.BlobExists(blobPath) {
@@ -154,20 +157,29 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 		return blobPath, nil
 	}
 
+	pinnedRef, err := pinReferenceToDigest(ref, digest)
+	if err != nil {
+		return "", fmt.Errorf("pin OCI reference %q to %q: %w", ref, digest, err)
+	}
+
 	pullGOOS, pullGOARCH := goos, goarch
 	if pullGOOS == "" || pullGOARCH == "" {
 		pullGOOS, pullGOARCH = runtime.GOOS, runtime.GOARCH
 	}
 
-	logger.Info("Pulling OCI blob", "ref", ref, "os", pullGOOS, "arch", pullGOARCH)
+	logger.Info("Pulling OCI blob", "ref", pinnedRef, "os", pullGOOS, "arch", pullGOARCH)
 
 	var buf bytes.Buffer
-	res, err := am.ociPuller.Pull(ctx, ref, pullGOOS, pullGOARCH, creds, opts, &buf)
+	res, err := am.ociPuller.Pull(ctx, pinnedRef, pullGOOS, pullGOARCH, creds, opts, &buf)
 	if err != nil {
-		return "", fmt.Errorf("pull %q (%s/%s): %w", ref, pullGOOS, pullGOARCH, err)
+		return "", fmt.Errorf("pull %q (%s/%s): %w", pinnedRef, pullGOOS, pullGOARCH, err)
 	}
 	if res == nil {
 		return "", fmt.Errorf("puller returned nil result for %q", ref)
+	}
+	// Compare the root digest, not the selected platform manifest's digest.
+	if res.RootDigest != digest {
+		return "", fmt.Errorf("pulled OCI root digest %q does not match expected digest %q", res.RootDigest, digest)
 	}
 	if !isExpectedOCIArtifactType(artifactType, res.Type) {
 		return "", fmt.Errorf("pulled OCI artifact type %q does not match expected %q", res.Type, artifactType)
