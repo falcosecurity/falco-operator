@@ -19,6 +19,8 @@ package artifact
 import (
 	"strings"
 
+	"oras.land/oras-go/v2/registry"
+
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
@@ -45,6 +47,20 @@ func ResolveReference(artifact *commonv1alpha1.OCIArtifact) string {
 	}
 
 	return ref
+}
+
+// pinReferenceToDigest replaces a tag with the resolved root digest so later
+// downloads cannot follow a tag that has moved to a different artifact revision.
+func pinReferenceToDigest(ref, digest string) (string, error) {
+	pinned, err := registry.ParseReference(ref)
+	if err != nil {
+		return "", err
+	}
+	pinned.Reference = digest
+	if err := pinned.ValidateReferenceAsDigest(); err != nil {
+		return "", err
+	}
+	return pinned.String(), nil
 }
 
 // ResolveRegistryHost returns the registry hostname used for an OCIArtifact.

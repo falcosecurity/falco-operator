@@ -793,17 +793,19 @@ func TestFetchAndCacheArtifactMeta_OCICacheMiss(t *testing.T) {
 		ConfigResult: &puller.ArtifactConfig{
 			Requirements: []puller.ArtifactRequirement{{Name: "engine_version", Version: "0.36.0"}},
 		},
-		ConfigDigest:  "sha256:new",
+		ConfigDigest:  testRulesfileDigest,
 		ContentResult: nil, // no content
 	}
 	rf := newTestRulesfile(withRulesfileOCI())
+	rf.Spec.OCIArtifact.Image.Repository = "test/rulesfile"
 	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
 
 	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
 	require.NoError(t, err)
 	assert.Len(t, mockPuller.FetchConfigCalls, 1)
+	assert.Equal(t, []string{"ghcr.io/test/rulesfile@" + testRulesfileDigest}, mockPuller.FetchContentCalls)
 	require.NotNil(t, rf.Status.ArtifactMeta)
-	assert.Equal(t, "sha256:new", rf.Status.ArtifactMeta.Digest)
+	assert.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest)
 	require.Len(t, rf.Status.ArtifactMeta.Requirements, 1)
 }
 
@@ -827,7 +829,7 @@ func TestFetchAndCacheArtifactMeta_OCIContentFetchError(t *testing.T) {
 	// required_plugin_versions, so a content fetch error is fatal and metadata is not persisted.
 	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult:    &puller.ArtifactConfig{},
-		ConfigDigest:    "sha256:ok",
+		ConfigDigest:    testRulesfileDigest,
 		FetchContentErr: fmt.Errorf("content layer missing"),
 	}
 	rf := newTestRulesfile(withRulesfileOCI())
@@ -846,7 +848,7 @@ func TestFetchAndCacheArtifactMeta_OCIWithContentRequirements(t *testing.T) {
 	yamlContent := []byte(`- required_engine_version: 22`)
 	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult:  &puller.ArtifactConfig{},
-		ConfigDigest:  "sha256:content",
+		ConfigDigest:  testRulesfileDigest,
 		ContentResult: yamlContent,
 	}
 	rf := newTestRulesfile(withRulesfileOCI())
@@ -1415,7 +1417,7 @@ func TestFetchAndCacheArtifactMeta_OCIWithDependencies(t *testing.T) {
 				},
 			},
 		},
-		ConfigDigest:  "sha256:deps",
+		ConfigDigest:  testRulesfileDigest,
 		ContentResult: nil,
 	}
 	rf := newTestRulesfile(withRulesfileOCI())
