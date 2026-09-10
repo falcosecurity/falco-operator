@@ -9,6 +9,11 @@ on:
 env:
   IMG_INSTANCE: falco-operator:e2e
   IMG_ARTIFACT: artifact-operator:e2e
+  # renovate: datasource=github-releases depName=kubernetes-sigs/kind
+  KIND_VERSION: v0.32.0
+  # renovate: datasource=github-releases depName=kubernetes/kubernetes
+  KUBECTL_VERSION: v1.36.4
+  KIND_NODE_IMAGE: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 
 jobs:
   # Builds both operator binaries once; downstream jobs just `docker build` from them.
@@ -83,8 +88,6 @@ jobs:
     env:
       # renovate: datasource=github-releases depName=helm/helm
       HELM_VERSION: v3.20.2
-      # renovate: datasource=github-releases depName=kubernetes-sigs/kind
-      KIND_VERSION: v0.32.0
       # renovate: datasource=github-releases depName=kyverno/chainsaw
       CHAINSAW_VERSION: v0.2.15
       # renovate: datasource=github-releases depName=falcosecurity/falcoctl
@@ -146,6 +149,8 @@ jobs:
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: ${{ env.KIND_VERSION }}
+          kubectl_version: ${{ env.KUBECTL_VERSION }}
+          node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: kind
           config: .github/e2e/kind-config.yaml
 
@@ -235,7 +240,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       HELM_VERSION: v3.20.2
-      KIND_VERSION: v0.32.0
       CHAINSAW_VERSION: v0.2.15
       NAMESPACE: falco-operator
     steps:
@@ -274,6 +278,8 @@ jobs:
         uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
         with:
           version: ${{ env.KIND_VERSION }}
+          kubectl_version: ${{ env.KUBECTL_VERSION }}
+          node_image: ${{ env.KIND_NODE_IMAGE }}
           cluster_name: kind
           config: .github/e2e/kind-config.yaml
 

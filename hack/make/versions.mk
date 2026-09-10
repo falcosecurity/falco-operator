@@ -19,9 +19,11 @@
 # renovate: datasource=github-releases depName=helm/helm
 HELM_VERSION ?= v3.20.2
 # renovate: datasource=github-releases depName=kubernetes/kubernetes
-KUBECTL_VERSION ?= v1.31.0
+KUBECTL_VERSION ?= v1.36.4
 # renovate: datasource=github-releases depName=kubernetes-sigs/kind
 KIND_VERSION ?= v0.32.0
+# Keep the node image aligned with the Chainsaw clusters and KUBECTL_VERSION.
+KIND_NODE_IMAGE ?= kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
 # renovate: datasource=github-releases depName=kyverno/chainsaw
 CHAINSAW_VERSION ?= v0.2.15
 # renovate: datasource=github-releases depName=telepresenceio/telepresence
