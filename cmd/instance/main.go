@@ -127,6 +127,7 @@ func main() {
 	var artifactCABundleConfigMapName string
 	var artifactClientCertDuration, artifactClientCertRenewBefore time.Duration
 	var artifactOperatorImage string
+	var artifactOperatorEnforceRequirements bool
 	var artifactServerMaxConcurrentRequests int
 	flag.StringVar(&artifactServeAddr, "artifact-serve-addr", ":8082",
 		"Address the artifact HTTP server binds to. Per-node artifact-operators download OCI artifacts from this server.")
@@ -170,6 +171,9 @@ func main() {
 			"baked in at build time (version.ArtifactOperatorImage, via -ldflags) to match the release pair; "+
 			"set this (or the ARTIFACT_OPERATOR_IMAGE env var) to repoint an already-built binary at a "+
 			"different image, e.g. a private registry mirror or a local dev build, without rebuilding.")
+	flag.BoolVar(&artifactOperatorEnforceRequirements, "enforce-requirements", true,
+		"Whether the artifact-operator sidecar enforces artifact compatibility requirements. "+
+			"Set to false to install artifacts regardless of Falco version or plugin dependency constraints.")
 	flag.IntVar(&artifactServerMaxConcurrentRequests, "artifact-server-max-concurrent-requests", 0,
 		"Maximum number of concurrent artifact blob transfers the server handles simultaneously. "+
 			"Excess requests receive 503 with a jittered Retry-After so retries spread out. "+
@@ -189,6 +193,7 @@ func main() {
 	// Reassigning version.ArtifactOperatorImage above has no effect on FalcoDefaults, which was
 	// already initialized from it at package-init time; this call applies the override directly.
 	resources.SetArtifactOperatorImage(version.ArtifactOperatorImage)
+	resources.SetArtifactOperatorEnforceRequirements(artifactOperatorEnforceRequirements)
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 
