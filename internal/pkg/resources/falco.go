@@ -307,6 +307,20 @@ func SetArtifactOperatorImage(img string) {
 	FalcoDefaults.SidecarContainers[0].Image = img
 }
 
+// SetArtifactOperatorEnforceRequirements propagates the --enforce-requirements flag to every
+// artifact-operator sidecar by injecting ENFORCE_REQUIREMENTS into its environment.
+// Call this once during falco-operator startup.
+func SetArtifactOperatorEnforceRequirements(enforce bool) {
+	if enforce {
+		return
+	}
+	sidecar := &FalcoDefaults.SidecarContainers[0]
+	sidecar.Env = append(sidecar.Env, corev1.EnvVar{
+		Name:  "ENFORCE_REQUIREMENTS",
+		Value: "false",
+	})
+}
+
 // artifactClientCertsMountPath is the mount path for the client cert Secret in the
 // artifact-operator sidecar. cmd/artifact/main.go reads this same path via
 // ARTIFACT_CLIENT_CERT_PATH and ARTIFACT_SERVER_CA_FILE.
