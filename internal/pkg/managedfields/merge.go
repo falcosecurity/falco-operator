@@ -18,21 +18,27 @@ package managedfields
 
 import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/structured-merge-diff/v6/typed"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
-// Compare calculates the difference between the current (extracted) and desired objects.
-// Returns a typed.Comparison that contains Added, Modified, and Removed field sets.
-func Compare(current, desired *unstructured.Unstructured) (*typed.Comparison, error) {
-	currentTyped, err := toTyped(current)
+// Merge combines built-in Kubernetes objects using the schema bundled with client-go.
+// Both objects must have the same GroupVersionKind set. Overrides take precedence
+// according to the schema's map and list semantics; neither input is modified.
+func Merge(base, overrides runtime.Object) (*unstructured.Unstructured, error) {
+	baseTyped, err := toTyped(base)
 	if err != nil {
 		return nil, err
 	}
 
-	desiredTyped, err := toTyped(desired)
+	overridesTyped, err := toTyped(overrides)
 	if err != nil {
 		return nil, err
 	}
 
-	return currentTyped.Compare(desiredTyped)
+	merged, err := baseTyped.Merge(overridesTyped)
+	if err != nil {
+		return nil, err
+	}
+
+	return &unstructured.Unstructured{Object: merged.AsValue().Unstructured().(map[string]any)}, nil
 }

@@ -17,22 +17,16 @@
 package managedfields
 
 import (
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/applyconfigurations"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/structured-merge-diff/v6/typed"
 )
 
-// Compare calculates the difference between the current (extracted) and desired objects.
-// Returns a typed.Comparison that contains Added, Modified, and Removed field sets.
-func Compare(current, desired *unstructured.Unstructured) (*typed.Comparison, error) {
-	currentTyped, err := toTyped(current)
-	if err != nil {
-		return nil, err
-	}
+var typeConverter = applyconfigurations.NewTypeConverter(clientgoscheme.Scheme)
 
-	desiredTyped, err := toTyped(desired)
-	if err != nil {
-		return nil, err
-	}
-
-	return currentTyped.Compare(desiredTyped)
+// toTyped converts a Kubernetes object using the schema bundled with client-go.
+// The object must have its GroupVersionKind set.
+func toTyped(obj runtime.Object) (*typed.TypedValue, error) {
+	return typeConverter.ObjectToTyped(obj)
 }

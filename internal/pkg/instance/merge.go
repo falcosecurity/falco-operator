@@ -22,45 +22,32 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/managedfields"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
-	"github.com/falcosecurity/falco-operator/internal/pkg/scheme"
 )
 
-// MergeApplyConfiguration merges a base structured resource with user-defined
-// overrides using structured merge diff, and returns the result as unstructured.
+// MergeApplyConfiguration merges a base workload with user-defined overrides
+// and normalizes its update strategy, returning the result as unstructured.
 // The kind parameter must be an apps/v1 resource kind (e.g., "Deployment", "DaemonSet").
 func MergeApplyConfiguration(kind string, baseResource runtime.Object, userOverrides *unstructured.Unstructured) (*unstructured.Unstructured, error) {
-	schemaType := "io.k8s.api.apps.v1." + kind
-	parser := scheme.Parser()
+	gvk := appsv1.SchemeGroupVersion.WithKind(kind)
+	// Partial overrides and base objects may omit their type metadata. Set it on
+	// copies so schema lookup does not mutate the caller's objects.
+	base := baseResource
+	if base.GetObjectKind().GroupVersionKind() != gvk {
+		base = base.DeepCopyObject()
+		base.GetObjectKind().SetGroupVersionKind(gvk)
+	}
+	user := userOverrides.DeepCopy()
+	user.SetGroupVersionKind(gvk)
 
-	baseTyped, err := parser.Type(schemaType).FromStructured(baseResource)
+	result, err := managedfields.Merge(base, user)
 	if err != nil {
 		return nil, err
 	}
 
-	userTyped, err := parser.Type(schemaType).FromUnstructured(userOverrides.Object)
-	if err != nil {
-		return nil, err
-	}
-
-	desiredTyped, err := baseTyped.Merge(userTyped)
-	if err != nil {
-		return nil, err
-	}
-
-	mergedUnstructured := (desiredTyped.AsValue().Unstructured()).(map[string]any)
-
-	result := &unstructured.Unstructured{
-		Object: mergedUnstructured,
-	}
-
-	result.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   appsv1.GroupName,
-		Version: appsv1.SchemeGroupVersion.Version,
-		Kind:    kind,
-	})
+	result.SetGroupVersionKind(gvk)
 
 	if err := enforceStrategyConstraints(result); err != nil {
 		return nil, fmt.Errorf("enforcing strategy constraints: %w", err)
