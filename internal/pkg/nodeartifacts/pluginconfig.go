@@ -94,6 +94,12 @@ type pluginsConfig struct {
 	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
 }
 
+// clone isolates slice mutations while a proposed configuration is being written.
+// Entries' nested init configs are only read, never modified by addConfig/removeByName.
+func (pc *pluginsConfig) clone() *pluginsConfig {
+	return &pluginsConfig{Configs: slices.Clone(pc.Configs), LoadPlugins: slices.Clone(pc.LoadPlugins)}
+}
+
 func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Plugin) {
 	config := pluginConfig{
 		LibraryPath: artifact.ArtifactPath(
@@ -185,10 +191,10 @@ func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.
 	if err != nil {
 		return action, file, err
 	}
-	// Best-effort: try to learn Falco's confirmed version sooner than the next periodic poll. A
-	// fetch that's too early (Falco hasn't reloaded yet) is harmless; the periodic sink path
-	// (see compat.VersionsWatcher.SetSink, wired in cmd/artifact/main.go) backstops this
-	// regardless, so a failure or stale read here is never fatal. Must run after, never inside,
+	// Best-effort: try to learn Falco's loaded versions sooner than the next periodic poll.
+	// The response may still describe the runtime before this write; the periodic sink path
+	// (see compat.VersionsWatcher.SetSink, wired in cmd/artifact/main.go) refreshes it later.
+	// Must run after, never inside,
 	// the locked section above: sync.Mutex isn't reentrant, and RefreshFalcoVersions locks too.
 	if _, refreshErr := m.RefreshFalcoVersions(ctx); refreshErr != nil {
 		log.FromContext(ctx).V(1).Info("post-install Falco versions refresh failed; will retry on next periodic poll", "err", refreshErr)
@@ -202,20 +208,29 @@ func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1a
 	defer m.mu.Unlock()
 
 	configName := ResolveConfigName(plugin)
-	if oldName, ok := m.crToConfigName[plugin.Name]; ok && oldName != configName {
+	oldName, hadConfig := m.crToConfigName[plugin.Name]
+	rename := hadConfig && oldName != configName
+	if rename {
 		if blockedBy := m.blockedByOthers(oldName); len(blockedBy) > 0 {
 			return artifact.StoreActionNone, nil, &BlockedError{Name: oldName, BlockedBy: blockedBy}
 		}
-		m.pluginsConfig.removeByName(oldName)
-		delete(m.provides, oldName)
 	}
-	m.crToConfigName[plugin.Name] = configName
+	updated := m.pluginsConfig.clone()
+	if rename {
+		updated.removeByName(oldName)
+	}
+	updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
 
-	m.pluginsConfig.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
-
-	action, file, err := m.writePluginsConfig(ctx, current, fetcher)
+	action, file, err := m.writePluginsConfig(ctx, current, fetcher, updated)
 	if err != nil {
 		return artifact.StoreActionNone, nil, err
+	}
+	// Publish only a successfully written configuration, including its dependency state.
+	m.pluginsConfig = updated
+	m.crToConfigName[plugin.Name] = configName
+	if rename {
+		m.provides[oldName] = provided{Key: PluginConfigKey, Removed: true}
+		m.notifySubscribers()
 	}
 	version := m.provides[configName].Version
 	m.provides[configName] = provided{Key: PluginConfigKey, Version: version}
@@ -249,25 +264,34 @@ func (m *Manager) RemovePluginConfigByName(ctx context.Context, fetcher artifact
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if blockedBy := m.blockedByOthers(configName); len(blockedBy) > 0 {
-		return &BlockedError{Name: configName, BlockedBy: blockedBy}
+	wasRemoved := m.provides[configName].Removed
+	if !wasRemoved {
+		if blockedBy := m.blockedByOthers(configName); len(blockedBy) > 0 {
+			return &BlockedError{Name: configName, BlockedBy: blockedBy}
+		}
 	}
 
-	m.pluginsConfig.removeByName(configName)
+	updated := m.pluginsConfig.clone()
+	updated.removeByName(configName)
 
-	if _, _, err := m.writePluginsConfig(ctx, nil, fetcher); err != nil {
+	if _, _, err := m.writePluginsConfig(ctx, nil, fetcher, updated); err != nil {
 		return err
 	}
 
-	delete(m.provides, configName)
+	m.pluginsConfig = updated
+	m.provides[configName] = provided{Key: PluginConfigKey, Removed: true}
 	delete(m.crToConfigName, pluginCRName)
+	if !wasRemoved {
+		m.notifySubscribers()
+	}
 	return nil
 }
 
 // writePluginsConfig serializes the current in-memory aggregate and stores it, skipping the
 // write when current's content hash already matches what's on disk. Caller must hold m.mu.
-func (m *Manager) writePluginsConfig(ctx context.Context, current *artifact.File, fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
-	pluginConfigString, err := m.pluginsConfig.toString()
+func (m *Manager) writePluginsConfig(ctx context.Context, current *artifact.File, fetcher artifact.ArtifactFetcher,
+	config *pluginsConfig) (artifact.StoreAction, *artifact.File, error) {
+	pluginConfigString, err := config.toString()
 	if err != nil {
 		return artifact.StoreActionNone, nil, fmt.Errorf("convert plugin config to string: %w", err)
 	}

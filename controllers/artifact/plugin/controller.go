@@ -229,7 +229,8 @@ func (r *PluginReconciler) getParentPlugin(ctx context.Context, nodeObj *artifac
 }
 
 // handleDeletion cleans up local filesystem resources and the plugin config entry,
-// then removes the finalizer from the PluginNode.
+// then removes the finalizer from the PluginNode. A true result stops normal reconciliation,
+// including when cleanup is still blocked by a dependent Rulesfile.
 func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifactv1alpha1.ArtifactNode) (bool, error) {
 	if nodeObj.DeletionTimestamp.IsZero() {
 		return false, nil
@@ -277,8 +278,9 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 				))
 				if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager); patchErr != nil {
 					logger.Error(patchErr, "unable to patch PluginNode status with DeletionBlocked condition")
+					return true, patchErr
 				}
-				return false, nil
+				return true, nil
 			}
 			logger.Error(err, "unable to remove plugin config on deletion")
 			return false, err

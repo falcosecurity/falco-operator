@@ -302,6 +302,52 @@ func TestManager_CheckDependency_NoneSatisfied(t *testing.T) {
 	assert.Empty(t, provided)
 }
 
+func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
+	ctx := t.Context()
+	versions := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"})
+	m := newTestManagerWithFetcher(versions)
+	fetcher := &artifact.Fetcher{}
+	primary := nodeartifacts.Requirement{Name: "json", Version: "0.7.0"}
+	alternatives := []nodeartifacts.Requirement{{Name: "container", Version: "0.7.0"}}
+	check := func(wantMatch string, wantSatisfied bool) {
+		t.Helper()
+		matched, _, satisfied, err := m.CheckDependency(primary, alternatives)
+		require.NoError(t, err)
+		assert.Equal(t, wantMatch, matched)
+		assert.Equal(t, wantSatisfied, satisfied)
+	}
+
+	// A genuinely absent primary allows fallback. A configured primary may already
+	// have loaded since the last poll, so its unknown version must not allow fallback.
+	m.OnFalcoVersionsObserved(versions.Result)
+	check("container", true)
+	_, _, err := m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	check("json", false)
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
+		"json": "0.7.4", "container": "0.7.1",
+	}).Result)
+	check("json", true)
+	primary.Version = "0.99.0"
+	check("json", false)
+
+	// A successful snapshot during reload can omit a still-configured primary.
+	// It does not make the alternative safe for rules that the primary will reject.
+	m.OnFalcoVersionsObserved(versions.Result)
+	check("json", false)
+	require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "json", "json"))
+	check("container", true)
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	check("json", false)
+
+	// The same rule applies to an earlier alternative awaiting observation.
+	_, _, satisfied, err := m.CheckDependency(nodeartifacts.Requirement{Name: "absent", Version: "1.0.0"},
+		[]nodeartifacts.Requirement{primary, alternatives[0]})
+	require.NoError(t, err)
+	assert.False(t, satisfied)
+}
+
 func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
 	primary := nodeartifacts.Requirement{Name: "primary", Version: "1.2.0"}
 	alternatives := []nodeartifacts.Requirement{
@@ -329,7 +375,6 @@ func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newTestManager()
-			m.SyncProvides(nodeartifacts.PluginConfigKey, primary.Name)
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.versions).Result)
 			matched, _, satisfied, err := m.CheckDependency(primary, alternatives)
 			if tt.wantErr {
@@ -365,7 +410,7 @@ func TestManager_RemovePluginConfigByName_ChecksRemainingVersions(t *testing.T) 
 		{name: "alternative invalid version", versions: map[string]string{"z-first": "invalid"}, wantBlocked: true},
 		{name: "compatible alternative", versions: map[string]string{"z-first": "1.3.0"}},
 		{name: "first alternative is decisive", versions: map[string]string{"z-first": "1.1.0", "a-second": "2.0.0"}, wantBlocked: true},
-		{name: "later alternative when first unobserved", versions: map[string]string{"a-second": "2.0.0"}},
+		{name: "configured earlier alternative awaiting observation", versions: map[string]string{"a-second": "2.0.0"}, wantBlocked: true},
 		{name: "remove unused alternative", remove: "z-first"},
 		{name: "remove unrelated plugin", remove: "unrelated"},
 	}
@@ -466,6 +511,67 @@ func TestManager_CheckDependency_ValidatesAllCandidates(t *testing.T) {
 	}
 }
 
+func TestManager_RemovePluginConfigByName_StaleObservationCannotRestoreRemovedProvider(t *testing.T) {
+	ctx := t.Context()
+	falco := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"json": "0.7.4", "container": "0.7.1"})
+	m := newTestManagerWithFetcher(falco)
+	fetcher := &artifact.Fetcher{}
+	for _, name := range []string{"json", "container"} {
+		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), nil, fetcher)
+		require.NoError(t, err)
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"}
+	m.Sync(key, []nodeartifacts.RequirementGroup{{{Name: "json", Version: "0.7.0"}, {Name: "container", Version: "0.7.0"}}})
+	require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "json", "json"))
+	// Falco has not reloaded yet, so the next successful poll still reports both plugins.
+	m.OnFalcoVersionsObserved(falco.Result)
+	_, found, _, err := m.CheckRequirement("json", "0.7.0")
+	require.NoError(t, err)
+	assert.False(t, found, "an observation must not undo our removal")
+	var blocked *nodeartifacts.BlockedError
+	require.ErrorAs(t, m.RemovePluginConfigByName(ctx, fetcher, "container", "container"), &blocked)
+	assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+	// Even a delayed old response after an observed unload cannot restore the name.
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(falco.Result)
+	require.ErrorAs(t, m.RemovePluginConfigByName(ctx, fetcher, "container", "container"), &blocked)
+	// An explicit re-add, unlike a poll, makes json eligible again once observed.
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "container", "container"))
+}
+
+func TestManager_RemovePluginConfigByName_ObservedExternalAlternativeStillWorks(t *testing.T) {
+	m := newTestManagerWithFetcher(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
+		"json": "0.7.4", "container": "0.7.1",
+	}))
+	fetcher := &artifact.Fetcher{}
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	m.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"},
+		[]nodeartifacts.RequirementGroup{{{Name: "json", Version: "0.7.0"}, {Name: "container", Version: "0.7.0"}}})
+	// container was loaded outside our shared config; it has not been explicitly removed.
+	require.NoError(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"))
+}
+
+func TestManager_RemovePluginConfigByName_RetryAfterConfigRemoval(t *testing.T) {
+	m := newTestManager()
+	fetcher := &artifact.Fetcher{}
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	require.NoError(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"))
+	// A newly registered dependency cannot block retrying the remaining binary/finalizer
+	// cleanup: this config was already removed successfully in an earlier reconcile.
+	m.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "new-rules"},
+		[]nodeartifacts.RequirementGroup{{{Name: "json", Version: "0.7.0"}}})
+	require.NoError(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"))
+	_, _, err = m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	require.NoError(t, err)
+	var blocked *nodeartifacts.BlockedError
+	require.ErrorAs(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"), &blocked,
+		"an explicit re-add must restore normal deletion checks")
+}
+
 func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
@@ -564,6 +670,66 @@ func TestManager_OnFalcoVersionsObserved_NotifiesOnVersionBump(t *testing.T) {
 	}
 }
 
+func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name, capability string
+		configured       bool
+	}{
+		{"configured plugin", "container", true},
+		{"observed-only plugin", "container", false},
+		{"Falco capability", "engine_version_semver", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager()
+			if tc.configured {
+				m.SyncProvides(nodeartifacts.PluginConfigKey, tc.capability)
+			}
+			loaded := compatfake.NewMockVersionsFetcher(map[string]string{tc.capability: "1.0.0", "other": "1.0.0"}).Result
+			missing := compatfake.NewMockVersionsFetcher(map[string]string{"other": "1.0.0"}).Result
+			m.OnFalcoVersionsObserved(loaded)
+			chA, chB := m.Events(), m.Events()
+			_, found, satisfied, err := m.CheckRequirement(tc.capability, "1.0.0")
+			require.NoError(t, err)
+			require.True(t, found && satisfied)
+
+			m.OnFalcoVersionsObserved(missing)
+			version, found, satisfied, err := m.CheckRequirement(tc.capability, "1.0.0")
+			require.NoError(t, err)
+			assert.Empty(t, version)
+			assert.False(t, found, "a version absent from the latest successful observation is no longer confirmed")
+			assert.False(t, satisfied)
+			_, found, satisfied, err = m.CheckRequirement("other", "1.0.0")
+			require.NoError(t, err)
+			assert.True(t, found && satisfied, "unchanged capabilities must remain available")
+			require.Len(t, chA, 1, "disappearance must notify every subscriber")
+			require.Len(t, chB, 1)
+			<-chA
+			<-chB
+
+			m.OnFalcoVersionsObserved(missing)
+			assert.Empty(t, chA, "a repeated missing observation must not cause a reconcile loop")
+			assert.Empty(t, chB)
+			m.OnFalcoVersionsObserved(loaded)
+			_, found, satisfied, err = m.CheckRequirement(tc.capability, "1.0.0")
+			require.NoError(t, err)
+			assert.True(t, found && satisfied)
+			require.Len(t, chA, 1, "reappearance at the same version must notify subscribers")
+			require.Len(t, chB, 1)
+			<-chA
+			<-chB
+
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
+			for _, name := range []string{tc.capability, "other"} {
+				_, found, satisfied, err = m.CheckRequirement(name, "1.0.0")
+				require.NoError(t, err)
+				assert.False(t, found || satisfied, "a successful empty snapshot must invalidate every confirmed version")
+			}
+			assert.Len(t, chA, 1, "one snapshot emits one notification, even when multiple versions disappear")
+			assert.Len(t, chB, 1)
+		})
+	}
+}
+
 func TestManager_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
 	m := newTestManager()
 	chA := m.Events()
@@ -599,11 +765,30 @@ func TestManager_RefreshFalcoVersions_MergesFetchedSnapshot(t *testing.T) {
 }
 
 func TestManager_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
-	m := newTestManagerWithFetcher(&compatfake.MockVersionsFetcher{FetchErr: assert.AnError})
-
+	fetcher := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"})
+	m := newTestManagerWithFetcher(fetcher)
 	_, err := m.RefreshFalcoVersions(context.Background())
+	require.NoError(t, err)
+	ch := m.Events()
+	fetcher.FetchErr = assert.AnError
+
+	_, err = m.RefreshFalcoVersions(context.Background())
 
 	require.Error(t, err)
+	version, found, satisfied, err := m.CheckRequirement("container", "0.7.1")
+	require.NoError(t, err)
+	assert.Equal(t, "0.7.1", version)
+	assert.True(t, found && satisfied, "a failed fetch must preserve the last successful observation")
+	assert.Empty(t, ch)
+
+	fetcher.FetchErr = nil
+	fetcher.Result = compatfake.NewMockVersionsFetcherWithPlugins(nil).Result
+	_, err = m.RefreshFalcoVersions(context.Background())
+	require.NoError(t, err)
+	_, found, satisfied, err = m.CheckRequirement("container", "0.7.1")
+	require.NoError(t, err)
+	assert.False(t, found || satisfied, "a subsequent successful empty response must invalidate the old version")
+	assert.Len(t, ch, 1)
 }
 
 // TestManager_AddPluginConfig_ConcurrentWithCheckRequirement runs AddPluginConfig and
