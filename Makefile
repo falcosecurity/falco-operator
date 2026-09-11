@@ -117,11 +117,12 @@ registry.setup: kubectl falcoctl ## Deploy the local OCI registry and push test 
 # built by this repo, so there's no local dev equivalent to point at.
 CHAINSAW_FALCO_IMAGE ?= docker.io/falcosecurity/falco:$(FALCO_VERSION)
 CHAINSAW_ARTIFACT_OPERATOR_IMAGE ?= $(IMG_ARTIFACT)
+CHAINSAW_ARGS ?=
 
 .PHONY: test.chainsaw
 test.chainsaw: chainsaw ## Run chainsaw e2e tests. Requires a running cluster with falco-operator deployed and KWOK installed (see `make kwok.install`).
 	CHAINSAW_FALCO_IMAGE=$(CHAINSAW_FALCO_IMAGE) CHAINSAW_ARTIFACT_OPERATOR_IMAGE=$(CHAINSAW_ARTIFACT_OPERATOR_IMAGE) \
-		$(CHAINSAW) test ./test/e2e/chainsaw/ --quiet --config ./test/e2e/chainsaw/.chainsaw.yaml --repeat-count 1
+		$(CHAINSAW) test ./test/e2e/chainsaw/ --quiet --config ./test/e2e/chainsaw/.chainsaw.yaml --repeat-count 1 $(CHAINSAW_ARGS)
 
 .PHONY: lint
 lint: ## Run golangci-lint linter
