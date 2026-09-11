@@ -19,6 +19,9 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"oras.land/oras-go/v2/registry/remote/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -42,6 +46,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
@@ -753,6 +758,48 @@ func TestFetchAndCacheArtifactMeta_CacheHitIgnoresDigest(t *testing.T) {
 	assert.Equal(t, "sha256:old", plugin.Status.ArtifactMeta.Digest, "stale digest must not be updated on cache hit")
 }
 
+func TestFetchAndCacheArtifactMeta_ResolutionPolicy(t *testing.T) {
+	const nextDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	for _, tc := range []struct {
+		name    string
+		change  func(*artifactv1alpha1.Plugin)
+		resolve bool
+	}{
+		{"tag moves without a spec change", func(_ *artifactv1alpha1.Plugin) {}, false},
+		{"plugin configuration changes", func(p *artifactv1alpha1.Plugin) {
+			p.Spec.Config = &artifactv1alpha1.PluginConfig{OpenParams: "new params"}
+		}, false},
+		{"selector changes", withPluginSelector(), false},
+		{"tag changes", func(p *artifactv1alpha1.Plugin) { p.Spec.OCIArtifact.Image.Tag = "v2" }, true},
+		{"repository changes", func(p *artifactv1alpha1.Plugin) { p.Spec.OCIArtifact.Image.Repository = "test/replacement" }, true},
+		{"digest is explicitly pinned", func(p *artifactv1alpha1.Plugin) { p.Spec.OCIArtifact.Image.Tag = nextDigest }, true},
+		{"CR is recreated", func(p *artifactv1alpha1.Plugin) {
+			p.UID = "replacement"
+			p.Status = artifactv1alpha1.PluginStatus{}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			plugin := newTestPlugin(withPluginOCI())
+			mockPuller := &pullerfake.MockOCIPuller{ConfigResult: &puller.ArtifactConfig{}, ConfigDigest: testPluginDigest}
+			r, _ := newTestReconcilerWithPuller(t, mockPuller, plugin)
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, plugin))
+			previous := plugin.Status.ArtifactMeta.DeepCopy()
+			firstRef := artifact.ResolveReference(plugin.Spec.OCIArtifact)
+			mockPuller.ConfigDigest = nextDigest
+			tc.change(plugin)
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, plugin))
+			if tc.resolve {
+				require.Equal(t, nextDigest, plugin.Status.ArtifactMeta.Digest)
+				require.Equal(t, []string{firstRef, artifact.ResolveReference(plugin.Spec.OCIArtifact)}, mockPuller.FetchConfigCalls)
+			} else {
+				require.Equal(t, previous, plugin.Status.ArtifactMeta)
+				require.Equal(t, []string{firstRef}, mockPuller.FetchConfigCalls, "unchanged OCI metadata must be reused without fetching")
+			}
+		})
+	}
+}
+
 func TestFetchAndCacheArtifactMeta_NoCacheNoStatus(t *testing.T) {
 	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult: &puller.ArtifactConfig{},
@@ -1141,6 +1188,119 @@ func TestFetchAndCacheBinaries_MultiplePlatforms(t *testing.T) {
 
 	require.NoError(t, r.fetchAndCacheBlobs(context.Background(), plugin, []corev1.Node{*node1, *node2}))
 	assert.Len(t, mockPuller.PullCalls, 2)
+}
+
+// Each platform has distinct bytes so a cross-architecture cache mix-up is observable.
+type platformPluginPuller struct {
+	*pullerfake.MockOCIPuller
+	layers map[string][]byte
+}
+
+func (p *platformPluginPuller) Pull(
+	ctx context.Context, ref, goos, goarch string, creds auth.CredentialFunc, opts *puller.RegistryOptions, dst io.Writer,
+) (*puller.RegistryResult, error) {
+	p.LayerContent = p.layers[goarch]
+	return p.MockOCIPuller.Pull(ctx, ref, goos, goarch, creds, opts, dst)
+}
+
+func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
+	const amd64Arch, arm64Arch = "amd64", "arm64"
+	const emptyCache = "empty after restart"
+	ctx := context.Background()
+	plugin := newTestPlugin(withPluginOCI())
+	plugin.Spec.OCIArtifact.Image.Repository = "test/plugin"
+	plugin.Generation = 1
+	node := newTestNode(testutil.TestNodeName, map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: amd64Arch})
+	mockPuller := &platformPluginPuller{
+		MockOCIPuller: &pullerfake.MockOCIPuller{
+			ConfigResult: &puller.ArtifactConfig{}, ConfigDigest: testPluginDigest,
+			Result: &puller.RegistryResult{RootDigest: testPluginDigest, Type: puller.Plugin},
+		},
+		layers: make(map[string][]byte),
+	}
+	for _, arch := range []string{amd64Arch, arm64Arch} {
+		layer, err := pullerfake.MakeTarGz("plugin.so", []byte("revision A for "+arch))
+		require.NoError(t, err)
+		mockPuller.layers[arch] = layer
+	}
+	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, t.TempDir(), plugin, node, newTestFalco(), newRunningFalcoPod())
+	_, err := r.Reconcile(ctx, testutil.Request(plugin.Name))
+	require.NoError(t, err)
+	require.Len(t, mockPuller.FetchConfigCalls, 1)
+	require.Len(t, mockPuller.PullCalls, 1)
+
+	// Any accidental new tag resolution now yields B, even though the CR still desires A.
+	mockPuller.ConfigDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	mockPuller.ResolveDigestResult = mockPuller.ConfigDigest
+	for _, arch := range []string{amd64Arch, arm64Arch} {
+		t.Run("new node "+arch, func(t *testing.T) {
+			added := newTestNode("new-"+arch, map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: arch})
+			require.NoError(t, r.Create(ctx, added))
+			pod := newRunningFalcoPod()
+			pod.Name = "falco-" + arch
+			pod.Spec.NodeName = added.Name
+			require.NoError(t, r.Create(ctx, pod))
+			if arch == arm64Arch {
+				mockPuller.PullErr = fmt.Errorf("platform unavailable")
+				_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
+				require.ErrorContains(t, reconcileErr, "platform unavailable")
+				_, ok := r.cache.Lookup("plugin", plugin.Namespace, plugin.Name, "linux-"+arm64Arch)
+				require.False(t, ok, "a failed pull must not publish a cache entry")
+				mockPuller.PullErr = nil
+			}
+			_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
+			require.NoError(t, reconcileErr)
+			child := &artifactv1alpha1.ArtifactNode{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{
+				Namespace: plugin.Namespace,
+				Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, plugin.Name, added.Name),
+			}, child))
+			require.Equal(t, added.Name, child.Spec.NodeName)
+			if arch == amd64Arch {
+				require.Len(t, mockPuller.PullCalls, 1, "a new node of a cached architecture needs no new registry pull")
+			}
+		})
+	}
+
+	for _, state := range []string{"warm", "reloaded", emptyCache} {
+		t.Run(state, func(t *testing.T) {
+			if state != "warm" {
+				cacheDir := r.cache.Dir()
+				if state == emptyCache {
+					cacheDir = t.TempDir()
+				}
+				r.cache = artifactcache.NewCache(cacheDir)
+				require.NoError(t, r.cache.Load())
+			}
+			pullsBefore := len(mockPuller.PullCalls)
+			_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
+			require.NoError(t, reconcileErr)
+			wantPulls := pullsBefore
+			if state == emptyCache {
+				wantPulls += 2
+			}
+			require.Len(t, mockPuller.PullCalls, wantPulls)
+			got := &artifactv1alpha1.Plugin{}
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(plugin), got))
+			require.Equal(t, testPluginDigest, got.Status.ArtifactMeta.Digest)
+			require.Equal(t, got.Generation, got.Status.ObservedGeneration)
+			require.Len(t, mockPuller.FetchConfigCalls, 1)
+			require.Empty(t, mockPuller.ResolveDigestCalls)
+			for _, call := range mockPuller.PullCalls {
+				require.Equal(t, "ghcr.io/test/plugin@"+testPluginDigest, call.Ref)
+				require.Equal(t, "linux", call.OS)
+			}
+			for _, arch := range []string{amd64Arch, arm64Arch} {
+				request := httptest.NewRequestWithContext(ctx, http.MethodGet,
+					"/v1/artifacts/plugins/"+plugin.Namespace+"/"+plugin.Name+"?os=linux&arch="+arch+"&digest="+testPluginDigest, http.NoBody)
+				response := httptest.NewRecorder()
+				artifactserver.New(r.cache).Handler().ServeHTTP(response, request)
+				require.Equal(t, http.StatusOK, response.Code)
+				require.Equal(t, "revision A for "+arch, response.Body.String())
+				require.Equal(t, testPluginDigest, response.Header().Get(artifact.ArtifactDigestHeader))
+			}
+		})
+	}
 }
 
 func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {

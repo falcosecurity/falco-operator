@@ -32,23 +32,62 @@ import (
 
 func TestManager_FetchConfig(t *testing.T) {
 	const testNamespace = "test-namespace"
+	const tagRef = "ghcr.io/example.com/myplugin:latest"
+	const pinnedRef = "ghcr.io/example.com/myplugin@" + testDigest
 
 	tests := []struct {
 		name         string
+		knownDigest  string
 		configResult *puller.ArtifactConfig
 		configDigest string
 		fetchErr     error
-		wantErr      bool
+		wantRef      string
+		wantErr      string
 	}{
 		{
 			name:         "fetches config successfully",
 			configResult: &puller.ArtifactConfig{Name: "myplugin", Version: "1.0.0"},
-			configDigest: "sha256:abc",
+			configDigest: testDigest,
+			wantRef:      tagRef,
 		},
 		{
 			name:     "puller error propagates",
 			fetchErr: fmt.Errorf("registry unreachable"),
-			wantErr:  true,
+			wantRef:  tagRef,
+			wantErr:  "registry unreachable",
+		},
+		{
+			name:         "reads the known digest instead of the mutable tag",
+			knownDigest:  testDigest,
+			configResult: &puller.ArtifactConfig{Name: "myplugin", Version: "1.0.0"},
+			configDigest: testDigest,
+			wantRef:      pinnedRef,
+		},
+		{
+			name:         "rejects a different root digest",
+			knownDigest:  testDigest,
+			configResult: &puller.ArtifactConfig{Name: "wrong-revision"},
+			configDigest: testOtherDigest,
+			wantRef:      pinnedRef,
+			wantErr:      "does not match expected digest",
+		},
+		{
+			name:        "rejects a missing root digest",
+			knownDigest: testDigest,
+			wantRef:     pinnedRef,
+			wantErr:     "does not match expected digest",
+		},
+		{
+			name:        "rejects an invalid known digest before fetching",
+			knownDigest: "sha256:short",
+			wantErr:     "pin OCI reference",
+		},
+		{
+			name:        "does not fall back to the tag when the pinned revision is unavailable",
+			knownDigest: testDigest,
+			fetchErr:    fmt.Errorf("manifest unavailable"),
+			wantRef:     pinnedRef,
+			wantErr:     "manifest unavailable",
 		},
 	}
 
@@ -64,12 +103,22 @@ func TestManager_FetchConfig(t *testing.T) {
 			}
 			manager := NewManagerWithOptions(fakeClient, testNamespace, WithOCIPuller(mockPuller))
 
-			cfg, digest, err := manager.FetchConfig(context.Background(), &commonv1alpha1.OCIArtifact{
+			ociArtifact := &commonv1alpha1.OCIArtifact{
 				Image: commonv1alpha1.ImageSpec{Repository: "example.com/myplugin", Tag: "latest"},
-			})
+			}
+			original := ociArtifact.DeepCopy()
+			cfg, digest, err := manager.FetchConfig(context.Background(), ociArtifact, tt.knownDigest)
+			assert.Equal(t, original, ociArtifact)
+			if tt.wantRef == "" {
+				assert.Empty(t, mockPuller.FetchConfigCalls)
+			} else {
+				assert.Equal(t, []string{tt.wantRef}, mockPuller.FetchConfigCalls)
+			}
 
-			if tt.wantErr {
-				require.Error(t, err)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Nil(t, cfg)
+				assert.Empty(t, digest)
 				return
 			}
 			require.NoError(t, err)

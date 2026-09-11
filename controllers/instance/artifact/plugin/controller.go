@@ -290,7 +290,7 @@ func (r *PluginAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Conte
 
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
 	logger.Info("Fetching plugin ArtifactMeta from OCI config layer", "ref", ref)
-	fetched, digest, fetchErr := am.FetchConfig(ctx, plugin.Spec.OCIArtifact)
+	fetched, digest, fetchErr := am.FetchConfig(ctx, plugin.Spec.OCIArtifact, "")
 	if fetchErr != nil {
 		logger.Error(fetchErr, "Unable to fetch plugin OCI config; ArtifactMeta will remain stale", "ref", ref)
 		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactProgramFailed,

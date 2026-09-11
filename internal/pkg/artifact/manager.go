@@ -82,7 +82,9 @@ func NewManagerWithOptions(cl client.Client, namespace string, opts ...ManagerOp
 
 // FetchConfig fetches the OCI artifact config layer for ociArtifact without downloading the binary.
 // It returns the parsed ArtifactConfig (which contains plugin requirements) and the root manifest digest.
-func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) (*puller.ArtifactConfig, string, error) {
+// Pass knownDigest to read an already resolved revision; an empty value resolves the spec's
+// reference. Like EnsureBlob, a pinned fetch must return the requested root digest.
+func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact, knownDigest string) (*puller.ArtifactConfig, string, error) {
 	secretRef := authSecretRef(ociArtifact)
 	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
 	if err != nil {
@@ -93,7 +95,20 @@ func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.
 		return nil, "", fmt.Errorf("derive credentials: %w", err)
 	}
 	ref := ResolveReference(ociArtifact)
-	return am.ociPuller.FetchConfig(ctx, ref, creds, ResolveRegistryOptions(ociArtifact))
+	if knownDigest != "" {
+		ref, err = pinReferenceToDigest(ref, knownDigest)
+		if err != nil {
+			return nil, "", fmt.Errorf("pin OCI reference: %w", err)
+		}
+	}
+	config, digest, err := am.ociPuller.FetchConfig(ctx, ref, creds, ResolveRegistryOptions(ociArtifact))
+	if err != nil {
+		return nil, "", err
+	}
+	if knownDigest != "" && digest != knownDigest {
+		return nil, "", fmt.Errorf("fetched OCI root digest %q does not match expected digest %q", digest, knownDigest)
+	}
+	return config, digest, nil
 }
 
 // FetchContent downloads the artifact content layer at the root digest returned by
