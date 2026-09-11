@@ -14,6 +14,6 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package managedfields provides utilities for extracting and comparing
-// Kubernetes objects based on their managed fields for Server-Side Apply.
+// Package managedfields provides schema-aware merging and comparison of Kubernetes
+// objects, and extraction of fields owned by a Server-Side Apply field manager.
 package managedfields

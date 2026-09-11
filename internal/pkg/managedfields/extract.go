@@ -25,19 +25,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/structured-merge-diff/v6/fieldpath"
-	"sigs.k8s.io/structured-merge-diff/v6/typed"
 )
 
 // ExtractAsUnstructured extracts the managed fields for a given field manager from a runtime.Object,
 // returning an unstructured.Unstructured containing only the fields managed by that manager.
 // Returns nil if no managed fields entry is found, or an error if extraction fails.
 func ExtractAsUnstructured(obj runtime.Object, fieldManager string) (*unstructured.Unstructured, error) {
-	objectType, err := GetObjectType(obj)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object type for managed fields extraction: %w", err)
-	}
-
-	typedObj, err := toTyped(obj, objectType)
+	typedObj, err := toTyped(obj)
 	if err != nil {
 		return nil, fmt.Errorf("error converting obj to typed: %w", err)
 	}
@@ -95,14 +89,4 @@ func findManagedFields(accessor metav1.Object, fieldManager string) (metav1.Mana
 		}
 	}
 	return metav1.ManagedFieldsEntry{}, false
-}
-
-// toTyped converts a runtime.Object to a *typed.TypedValue using the provided ParseableType.
-func toTyped(obj runtime.Object, objectType typed.ParseableType) (*typed.TypedValue, error) {
-	switch o := obj.(type) {
-	case *unstructured.Unstructured:
-		return objectType.FromUnstructured(o.Object)
-	default:
-		return objectType.FromStructured(o)
-	}
 }
