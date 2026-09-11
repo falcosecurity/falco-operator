@@ -33,6 +33,27 @@ func saveSidecarEnv(t *testing.T) {
 	})
 }
 
+func TestFalcoDefaults_ShareProcessNamespace(t *testing.T) {
+	if assert.NotNil(t, FalcoDefaults.ShareProcessNamespace, "ShareProcessNamespace must be set") {
+		assert.True(t, *FalcoDefaults.ShareProcessNamespace,
+			"ShareProcessNamespace must be true so the sidecar can find Falco's PID via /proc")
+	}
+}
+
+func TestFalcoDefaults_SidecarRunsAsRoot(t *testing.T) {
+	containers := FalcoDefaults.SidecarContainers
+	assert.NotEmpty(t, containers, "at least one sidecar container must be defined")
+
+	sidecar := containers[0]
+	if assert.NotNil(t, sidecar.SecurityContext, "sidecar SecurityContext must be set") {
+		if assert.NotNil(t, sidecar.SecurityContext.RunAsUser,
+			"sidecar RunAsUser must be set to 0 so SIGHUP to root-owned Falco is permitted") {
+			assert.Equal(t, int64(0), *sidecar.SecurityContext.RunAsUser,
+				"sidecar must run as UID 0; non-root→root kill(2) is blocked on K8s 1.27+ with SeccompDefault")
+		}
+	}
+}
+
 func TestSetArtifactOperatorEnforceRequirements(t *testing.T) {
 	t.Run("true is a no-op", func(t *testing.T) {
 		saveSidecarEnv(t)

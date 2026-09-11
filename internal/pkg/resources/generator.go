@@ -55,6 +55,7 @@ func generateDeployment(meta *metav1.ObjectMeta, defs *InstanceDefaults) *appsv1
 		WithTolerations(defs.Tolerations).
 		WithServiceAccount(meta.Name).
 		WithPodSecurityContext(defs.PodSecurityContext).
+		WithShareProcessNamespace(defs.ShareProcessNamespace).
 		WithVolumes(forgeVolumes(meta.Name, defs)).
 		AddContainer(forgeMainContainer(defs)).
 		WithStrategy(forgeDeploymentStrategy(defs.DeploymentStrategy))
@@ -75,6 +76,7 @@ func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults) *appsv1.
 		WithTolerations(defs.Tolerations).
 		WithServiceAccount(meta.Name).
 		WithPodSecurityContext(defs.PodSecurityContext).
+		WithShareProcessNamespace(defs.ShareProcessNamespace).
 		WithVolumes(forgeVolumes(meta.Name, defs)).
 		AddContainer(forgeMainContainer(defs)).
 		WithUpdateStrategy(forgeDaemonSetUpdateStrategy(defs.DaemonSetUpdateStrategy))

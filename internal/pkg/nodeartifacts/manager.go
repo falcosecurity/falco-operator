@@ -16,9 +16,9 @@
 
 // Package nodeartifacts coordinates on-disk writes across the artifact-operator sidecar's
 // three per-node reconcilers (Plugin, Rulesfile, Config), which write into the same Falco
-// config directories. Falco watches those directories and reloads on any change; this package
-// controls what combination of files can be on disk, not when Falco reloads. See
-// docs/superpowers/specs/2026-07-23-node-artifact-manager-design.md for the full design.
+// config directories. This package controls what combination of files can be on disk; Falco
+// reloads are triggered explicitly by ReloadCoordinator (reloadcoordinator.go) after writes
+// settle, not by Falco's own file-watch.
 package nodeartifacts
 
 import (
@@ -102,19 +102,14 @@ type provided struct {
 // CR-name-to-config-name rename tracking for Plugin CRs (see pluginconfig.go). The zero value
 // is not usable; construct with NewManager.
 type Manager struct {
-	mu           sync.Mutex
-	store        artifact.ArtifactStore
-	falcoFetcher compat.VersionsFetcher
-	provides     map[string]provided
-	requires     map[Key][]RequirementGroup
-	// lastFalcoPluginVersions is the plugin subset of the most recent successful
-	// OnFalcoVersionsObserved call; nil until the first observation, distinguishing
-	// "never observed" from "observed and Falco reports zero plugins loaded". Read by
-	// PluginLoadMismatch to detect a desired-vs-actual plugin load discrepancy.
-	lastFalcoPluginVersions map[string]string
-	pluginsConfig           *pluginsConfig
-	crToConfigName          map[string]string
-	subscribers             []chan event.GenericEvent
+	mu             sync.Mutex
+	store          artifact.ArtifactStore
+	falcoFetcher   compat.VersionsFetcher
+	provides       map[string]provided
+	requires       map[Key][]RequirementGroup
+	pluginsConfig  *pluginsConfig
+	crToConfigName map[string]string
+	subscribers    []chan event.GenericEvent
 }
 
 // NewManager returns a Manager wrapping store. store performs the actual file I/O; falcoFetcher
@@ -305,7 +300,6 @@ func (m *Manager) notifySubscribers() {
 func (m *Manager) OnFalcoVersionsObserved(v *compat.Versions) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.lastFalcoPluginVersions = v.PluginVersions()
 	observed := v.All()
 	changed := false
 	for name, existing := range m.provides {
@@ -343,43 +337,9 @@ func (m *Manager) OnFalcoVersionsObserved(v *compat.Versions) {
 	}
 }
 
-// PluginLoadMismatch reports whether the set of plugin names Falco currently reports loaded
-// differs from the set this node currently intends loaded (pluginsConfig.LoadPlugins), in
-// either direction: a plugin this node configured but Falco never picked up, or a plugin this
-// node removed that Falco never dropped. Returns false if Falco hasn't been successfully
-// observed yet (lastFalcoPluginVersions is nil); unknown is not treated as mismatched. Used by
-// PluginConfigRetrier to decide when a forced rewrite is warranted.
-func (m *Manager) PluginLoadMismatch() bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.lastFalcoPluginVersions == nil {
-		return false
-	}
-	if len(m.pluginsConfig.LoadPlugins) != len(m.lastFalcoPluginVersions) {
-		return true
-	}
-	for _, name := range m.pluginsConfig.LoadPlugins {
-		if _, ok := m.lastFalcoPluginVersions[name]; !ok {
-			return true
-		}
-	}
-	return false
-}
-
-// ForceRewritePluginConfig unconditionally rewrites the shared plugins-config file, bypassing
-// writePluginsConfig's content-hash dedup (passing current=nil skips it). Uses the same atomic
-// rename-into-place write Store performs for every other update (see RemovePluginConfigByName's
-// doc comment). Used by PluginConfigRetrier to nudge Falco into retrying a reload it may have
-// missed during its own restart cycle.
-func (m *Manager) ForceRewritePluginConfig(ctx context.Context, fetcher artifact.ArtifactFetcher) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, _, err := m.writePluginsConfig(ctx, nil, fetcher, m.pluginsConfig)
-	return err
-}
-
-// blockedByOthers reports which registered dependencies would remain unsatisfied after name
-// stops being provided. Only groups mentioning name are affected. Caller must hold m.mu.
+// blockedByOthers reports which currently-registered RequirementGroups would lose their only
+// satisfier if name stopped being provided. An empty result means it's safe to stop providing
+// name. Caller must hold m.mu.
 func (m *Manager) blockedByOthers(name string) []Key {
 	var blockedBy []Key
 	for key, groups := range m.requires {

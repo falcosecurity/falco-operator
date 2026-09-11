@@ -179,12 +179,6 @@ func (pc *pluginsConfig) toString() (string, error) {
 // current is the caller's previously-tracked config file (nil if none), matching
 // ArtifactStore.Store's convention; passed through so an unchanged write can be skipped.
 // fetcher prepares the serialized aggregate into a FetchResult (content hash, perm).
-//
-// Falco reloads via a full process restart on SIGHUP, so a write landing during a restart's
-// teardown/re-init window can be missed entirely. PluginConfigRetrier (pluginconfigretrier.go)
-// is the backstop for this: it periodically compares what this node intends loaded against what
-// Falco actually reports (Manager.PluginLoadMismatch) and forces a fresh write
-// (Manager.ForceRewritePluginConfig) if a mismatch persists past a grace period.
 func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin,
 	current *artifact.File, fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
 	action, file, err := m.addPluginConfigLocked(ctx, plugin, current, fetcher)

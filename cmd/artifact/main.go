@@ -301,6 +301,22 @@ func main() {
 	// the manager's cache syncs and before any reconciler starts; it uses the manager's own
 	// cache-backed client (mgr.GetClient()) to avoid a fleet-wide direct-apiserver request storm
 	// when every node's sidecar restarts at once.
+	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL)
+	if err := mgr.Add(reloadCoordinator); err != nil {
+		setupLog.Error(err, "unable to add reload coordinator to manager")
+		os.Exit(1)
+	}
+
+	dirWatcher, err := nodeartifacts.NewDirWatcher(artifact.DefaultArtifactDirs(), falcoBaseURL, reloadCoordinator.NotifyWrite)
+	if err != nil {
+		setupLog.Error(err, "unable to create Falco dir watcher")
+		os.Exit(1)
+	}
+	if err := mgr.Add(dirWatcher); err != nil {
+		setupLog.Error(err, "unable to add Falco dir watcher to manager")
+		os.Exit(1)
+	}
+
 	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
 	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
 	if err := mgr.Add(nodeartifacts.NewWarmSyncRunnable(mgr.GetClient(), nodeManager, namespace, nodeName)); err != nil {
@@ -324,19 +340,6 @@ func main() {
 	versionsWatcher.SetSink(nodeManager.OnFalcoVersionsObserved)
 	if err := mgr.Add(versionsWatcher); err != nil {
 		setupLog.Error(err, "unable to add Falco versions watcher to manager")
-		os.Exit(1)
-	}
-
-	// Backstop for a write to the shared plugins-config file landing during one of Falco's
-	// SIGHUP-triggered restarts and never being picked up; see PluginConfigRetrier's doc comment.
-	// FetchInline, the only ArtifactFetcher method this path uses, needs no server URL, HTTP
-	// client, or K8s client, so a bare &artifact.Fetcher{} suffices.
-	pluginConfigRetrier := nodeartifacts.NewPluginConfigRetrier(
-		nodeManager, &artifact.Fetcher{},
-		nodeartifacts.DefaultPluginConfigRetryInterval, nodeartifacts.DefaultPluginConfigMismatchGracePeriod,
-	)
-	if err := mgr.Add(pluginConfigRetrier); err != nil {
-		setupLog.Error(err, "unable to add plugin config retrier to manager")
 		os.Exit(1)
 	}
 
