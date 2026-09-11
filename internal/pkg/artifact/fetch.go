@@ -25,10 +25,12 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"runtime"
 	"strconv"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -40,8 +42,8 @@ import (
 // no server-advertised Retry-After (a transport error, or a 503 with no header).
 const DefaultRetryDelay = 10 * time.Second
 
-// RetryableError wraps a transient FetchOCI failure (a transport error, or the artifact
-// server's 503 "not cached yet" signal), so the caller can requeue via
+// RetryableError wraps a transient FetchOCI failure (transport, availability, or a revision
+// that is not ready yet), so the caller can requeue via
 // ctrl.Result{RequeueAfter: ...}.
 type RetryableError struct {
 	Err error
@@ -80,8 +82,9 @@ type FetchResult struct {
 
 // OCIFetcher downloads a pre-extracted artifact binary from the central artifact server.
 // The sidecar never touches the OCI registry directly; the server handles that.
+// Only content belonging to expectedDigest may be returned successfully.
 type OCIFetcher interface {
-	FetchOCI(ctx context.Context, namespace, name string, artifactType Type) (FetchResult, error)
+	FetchOCI(ctx context.Context, namespace, name string, artifactType Type, expectedDigest string) (FetchResult, error)
 }
 
 // ConfigMapFetcher retrieves artifact content from a Kubernetes ConfigMap.
@@ -106,6 +109,10 @@ type ArtifactFetcher interface {
 // requesting node to the artifact server.
 const NodeNameHeader = "X-Node-Name"
 
+// ArtifactDigestHeader identifies the OCI root manifest or index served by the artifact
+// server. It is not the hash of the extracted file (FetchResult.ContentHash).
+const ArtifactDigestHeader = "X-Artifact-Digest"
+
 // Fetcher implements ArtifactFetcher.
 // OCI: HTTP GET to the central artifact server (no puller, no registry auth).
 // ConfigMap: K8s API call.
@@ -122,16 +129,19 @@ type Fetcher struct {
 
 // FetchOCI streams the pre-extracted artifact binary for (namespace, name, type) from the
 // central artifact server, computes a SHA-256 content hash, and returns a FetchResult. It makes
-// exactly one attempt. A transient failure (a transport error, or a 503 meaning the artifact
-// isn't cached yet) is returned as a *RetryableError for the caller to requeue via
+// exactly one attempt, requiring the server to confirm expectedDigest. Missing metadata or
+// an unconfirmed revision is deferred without accepting the response content.
+// A transient failure is returned as a *RetryableError for the caller to requeue via
 // ctrl.Result{RequeueAfter: ...} (see RequeueDelay); a permanent failure (a non-503 error
 // status, or a request-build/body-read failure) is returned as a plain error.
-func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifactType Type) (FetchResult, error) {
+func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifactType Type, expectedDigest string) (FetchResult, error) {
 	var rawURL string
+	query := url.Values{"digest": {expectedDigest}}
 	switch artifactType {
 	case TypePlugin:
-		rawURL = fmt.Sprintf("%s/v1/artifacts/plugins/%s/%s?os=%s&arch=%s",
-			f.ServerURL, namespace, name, runtime.GOOS, runtime.GOARCH)
+		rawURL = fmt.Sprintf("%s/v1/artifacts/plugins/%s/%s", f.ServerURL, namespace, name)
+		query.Set("os", runtime.GOOS)
+		query.Set("arch", runtime.GOARCH)
 	case TypeRulesfile:
 		rawURL = fmt.Sprintf("%s/v1/artifacts/rulesfiles/%s/%s",
 			f.ServerURL, namespace, name)
@@ -139,7 +149,15 @@ func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifact
 		return FetchResult{}, fmt.Errorf("artifact server does not support type %q", artifactType)
 	}
 
-	result, retryAfter, retryable, err := f.fetchOCIOnce(ctx, rawURL, namespace, name)
+	if expectedDigest == "" {
+		return FetchResult{}, &RetryableError{Err: fmt.Errorf("OCI digest for %s/%s is not yet resolved", namespace, name)}
+	}
+	if err := digest.Digest(expectedDigest).Validate(); err != nil {
+		return FetchResult{}, fmt.Errorf("invalid expected OCI digest for %s/%s: %w", namespace, name, err)
+	}
+	rawURL += "?" + query.Encode()
+
+	result, retryAfter, retryable, err := f.fetchOCIOnce(ctx, rawURL, namespace, name, expectedDigest)
 	if err != nil && retryable {
 		return FetchResult{}, &RetryableError{Err: err, RetryAfter: retryAfter}
 	}
@@ -148,10 +166,10 @@ func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifact
 
 // fetchOCIOnce performs a single HTTP GET to the artifact server. retryAfter is the parsed
 // Retry-After header value (meaningful only when retryable is true); retryable reports
-// whether FetchOCI's caller should retry; true for a transient transport error or a 503
-// (the artifact server's "not cached yet" signal), false for anything else (a permanent
-// client error, or a failure building the request or reading the response body).
-func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name string) (result FetchResult, retryAfter time.Duration, retryable bool, err error) {
+// whether FetchOCI's caller should retry; true for a transient transport error, a 503,
+// or a response that does not confirm the requested revision; false for a permanent
+// client error, or a failure building the request or reading the response body.
+func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name, expectedDigest string) (result FetchResult, retryAfter time.Duration, retryable bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, http.NoBody)
 	if err != nil {
 		return FetchResult{}, 0, false, fmt.Errorf("build artifact server request: %w", err)
@@ -175,6 +193,10 @@ func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name stri
 			}
 		}
 		return FetchResult{}, ra, retryable, fmt.Errorf("artifact server returned %d for %s/%s", resp.StatusCode, namespace, name)
+	}
+
+	if got := resp.Header.Get(ArtifactDigestHeader); got != expectedDigest {
+		return FetchResult{}, 0, true, fmt.Errorf("artifact server did not confirm OCI digest for %s/%s: expected %s, got %q", namespace, name, expectedDigest, got)
 	}
 
 	perm := fs.FileMode(0o755)

@@ -22,10 +22,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +44,8 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
@@ -67,7 +71,7 @@ func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
 	f.ociCallCount++
 	if f.ociErr != nil {
 		return artifact.FetchResult{}, f.ociErr
@@ -1913,4 +1917,84 @@ func TestReconcile_RegistersDependenciesWithNodeArtifactManager(t *testing.T) {
 	blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err)
 	require.True(t, ok)
 	assert.Equal(t, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: testRulesfileName}, blocked.BlockedBy[0])
+}
+
+func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
+	for _, alreadyInstalled := range []bool{false, true} {
+		name := "first installation"
+		if alreadyInstalled {
+			name = "update preserves installed revision"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			cache := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, cache.Load())
+			goos, goarch, platform := "", "", ""
+			oldDigest := digest.FromString("old OCI manifest").String()
+			newDigest := digest.FromString("new OCI manifest").String()
+			oldPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", "artifact:old", oldDigest, goos, goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", "artifact:new", newDigest, goos, goarch)
+			require.NoError(t, cache.Store(oldPath, []byte("old artifact bytes"), 0o755))
+			require.NoError(t, cache.Set("rulesfile", "default", "artifact", platform, oldPath))
+
+			srv := httptest.NewServer(artifactserver.New(cache).Handler())
+			defer srv.Close()
+			fs := fsfake.NewMockFileSystem()
+			reconciler := &RulesfileReconciler{
+				recorder: events.NewFakeRecorder(20),
+				fetcher:  &artifact.Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()},
+				store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
+			}
+			parent := &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: "artifact", Namespace: "default", Generation: 1},
+				Spec: artifactv1alpha1.RulesfileSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
+					Image: commonv1alpha1.ImageSpec{Repository: "artifact", Tag: "old"},
+				}},
+				Status: artifactv1alpha1.RulesfileStatus{
+					ObservedGeneration: 1,
+					ArtifactMeta:       &commonv1alpha1.ArtifactMeta{SpecHash: "spec-old", Digest: oldDigest},
+				},
+			}
+			node := &artifactv1alpha1.ArtifactNode{}
+			if alreadyInstalled {
+				require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, node))
+			}
+			previous := node.DeepCopy().Status.InstalledArtifacts
+
+			// The parent metadata is published before the aggregator replaces the cache entry.
+			parent.Generation = 2
+			parent.Spec.OCIArtifact.Image.Tag = "new"
+			parent.Status.ObservedGeneration = 2
+			parent.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{SpecHash: "spec-new", Digest: newDigest}
+
+			err := reconciler.ensureOCIRulesfile(ctx, parent, node)
+			var retryErr *artifact.RetryableError
+			require.ErrorAs(t, err, &retryErr, "an old cached revision must not be accepted as the new spec")
+			require.Equal(t, previous, node.Status.InstalledArtifacts)
+			if alreadyInstalled {
+				require.Equal(t, []byte("old artifact bytes"), fs.Files[previous[0].Path])
+			} else {
+				require.Empty(t, fs.Files)
+			}
+			condition := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			require.NotNil(t, condition)
+			require.Equal(t, metav1.ConditionFalse, condition.Status)
+
+			// Once the expected digest is available, the retry installs it and records its spec.
+			require.NoError(t, cache.Store(newPath, []byte("new artifact bytes"), 0o755))
+			require.NoError(t, cache.Set("rulesfile", "default", "artifact", platform, newPath))
+			require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, node))
+			require.Len(t, node.Status.InstalledArtifacts, 1)
+			installed := node.Status.InstalledArtifacts[0]
+			require.Equal(t, "spec-new", installed.SpecHash)
+			require.Equal(t, []byte("new artifact bytes"), fs.Files[installed.Path])
+			condition = apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			require.Equal(t, metav1.ConditionTrue, condition.Status)
+			require.Equal(t, int64(2), condition.ObservedGeneration)
+
+			// A verified, installed revision remains usable without another download.
+			srv.Close()
+			require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, node))
+		})
+	}
 }

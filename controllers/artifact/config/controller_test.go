@@ -63,7 +63,7 @@ func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
 	if f.ociErr != nil {
 		return artifact.FetchResult{}, f.ociErr
 	}

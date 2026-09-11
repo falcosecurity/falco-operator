@@ -608,3 +608,67 @@ func TestServer_Start_ClientCAsWithoutTLS_ReturnsConfigError(t *testing.T) {
 	require.Error(t, startErr)
 	assert.Contains(t, startErr.Error(), "client CAs configured without a TLS certificate watcher")
 }
+
+func TestServer_ServeRequestedDigest(t *testing.T) {
+	const amd64Arch = "amd64"
+	const arm64Arch = "arm64"
+	const expectedDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	const otherDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	for _, variant := range []struct{ artifactType, goos, goarch, platform, path string }{
+		{"plugin", "linux", amd64Arch, "linux-amd64", "/v1/artifacts/plugins/ns/name?os=linux&arch=amd64"},
+		{"plugin", "linux", arm64Arch, "linux-arm64", "/v1/artifacts/plugins/ns/name?os=linux&arch=arm64"},
+		{"rulesfile", "", "", "", "/v1/artifacts/rulesfiles/ns/name?"},
+	} {
+		t.Run(variant.artifactType+"/"+variant.platform, func(t *testing.T) {
+			cache := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, cache.Load())
+			blob := artifactcache.BlobPath(cache.Dir(), variant.artifactType, "repo:tag", expectedDigest, variant.goos, variant.goarch)
+			content := "bytes for " + variant.artifactType + "/" + variant.platform
+			require.NoError(t, cache.Store(blob, []byte(content), 0o644))
+			require.NoError(t, cache.Set(variant.artifactType, "ns", "name", variant.platform, blob))
+			// A plugin index digest is shared across platforms, but the extracted binaries are not.
+			if variant.artifactType == "plugin" {
+				otherArch := arm64Arch
+				if variant.goarch == arm64Arch {
+					otherArch = amd64Arch
+				}
+				otherPath := artifactcache.BlobPath(cache.Dir(), "plugin", "repo:tag", expectedDigest, "linux", otherArch)
+				require.NoError(t, cache.Store(otherPath, []byte("wrong architecture"), 0o755))
+				require.NoError(t, cache.Set("plugin", "ns", "name", "linux-"+otherArch, otherPath))
+			}
+			handler := artifactserver.New(cache).Handler()
+			for _, tc := range []struct {
+				name, query string
+				status      int
+				confirmed   bool
+			}{
+				{"expected revision", "&digest=" + expectedDigest, http.StatusOK, true},
+				{"different revision", "&digest=" + otherDigest, http.StatusServiceUnavailable, false},
+				{"empty digest", "&digest=", http.StatusBadRequest, false},
+				{"malformed digest", "&digest=sha256:invalid", http.StatusBadRequest, false},
+				{"duplicate digest", "&digest=" + expectedDigest + "&digest=" + otherDigest, http.StatusBadRequest, false},
+				{"legacy client", "", http.StatusOK, false},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					request := httptest.NewRequestWithContext(context.Background(), http.MethodGet, variant.path+tc.query, http.NoBody)
+					response := httptest.NewRecorder()
+					handler.ServeHTTP(response, request)
+					require.Equal(t, tc.status, response.Code)
+					if tc.status == http.StatusOK {
+						require.Equal(t, content, response.Body.String())
+					} else {
+						require.NotContains(t, response.Body.String(), content)
+					}
+					if tc.confirmed {
+						require.Equal(t, expectedDigest, response.Header().Get(artifact.ArtifactDigestHeader))
+					} else {
+						require.Empty(t, response.Header().Get(artifact.ArtifactDigestHeader))
+					}
+					if tc.status == http.StatusServiceUnavailable {
+						require.Equal(t, "10", response.Header().Get("Retry-After"))
+					}
+				})
+			}
+		})
+	}
+}

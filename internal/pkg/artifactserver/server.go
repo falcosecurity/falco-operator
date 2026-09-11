@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/opencontainers/go-digest"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -241,10 +242,15 @@ func (s *Server) servePlugin(w http.ResponseWriter, r *http.Request) {
 	logger.V(1).Info("Artifact request received")
 
 	platformKey := goos + "-" + goarch
-	blobPath, ok := s.cache.Lookup("plugin", ns, name, platformKey)
+	blobPath, ok, err := s.lookupRequestedBlob(r, "plugin", ns, name, platformKey)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusBadRequest)).Inc()
+		return
+	}
 	if !ok {
 		cacheLookupsTotal.WithLabelValues("plugin", "miss").Inc()
-		logger.Info("Plugin not yet cached; waiting for aggregator reconcile")
+		logger.Info("Requested plugin revision not yet cached; waiting for aggregator reconcile")
 		w.Header().Set("Retry-After", "10")
 		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
 		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
@@ -286,10 +292,15 @@ func (s *Server) serveRulesfile(w http.ResponseWriter, r *http.Request) {
 	)
 	logger.V(1).Info("Artifact request received")
 
-	blobPath, ok := s.cache.Lookup("rulesfile", ns, name, "")
+	blobPath, ok, err := s.lookupRequestedBlob(r, "rulesfile", ns, name, "")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusBadRequest)).Inc()
+		return
+	}
 	if !ok {
 		cacheLookupsTotal.WithLabelValues("rulesfile", "miss").Inc()
-		logger.Info("Rulesfile not yet cached; waiting for aggregator reconcile")
+		logger.Info("Requested rulesfile revision not yet cached; waiting for aggregator reconcile")
 		w.Header().Set("Retry-After", "10")
 		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
 		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
@@ -302,6 +313,22 @@ func (s *Server) serveRulesfile(w http.ResponseWriter, r *http.Request) {
 	status := serveBlob(w, r, blobPath)
 	requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(status)).Inc()
 	requestDuration.WithLabelValues("rulesfile").Observe(time.Since(start).Seconds())
+}
+
+// lookupRequestedBlob binds a named cache entry to the requested immutable digest.
+// Requests without a digest retain the legacy behavior during sidecar upgrades. New clients
+// always supply a digest and reject responses from older servers that cannot confirm it.
+func (s *Server) lookupRequestedBlob(r *http.Request, artifactType, namespace, name, platformKey string) (blobPath string, ok bool, err error) {
+	values, supplied := r.URL.Query()["digest"]
+	if !supplied {
+		path, ok := s.cache.Lookup(artifactType, namespace, name, platformKey)
+		return path, ok, nil
+	}
+	if len(values) != 1 || digest.Digest(values[0]).Validate() != nil {
+		return "", false, fmt.Errorf("digest must be a single valid OCI digest")
+	}
+	path, ok := s.cache.LookupDigest(artifactType, namespace, name, platformKey, values[0])
+	return path, ok, nil
 }
 
 // statusCapturingWriter wraps an http.ResponseWriter and records the status code written,
@@ -339,6 +366,10 @@ func serveBlob(w http.ResponseWriter, r *http.Request, blobPath string) int {
 
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Artifact-Mode", strconv.FormatUint(uint64(perm), 10))
+	if expectedDigest := r.URL.Query().Get("digest"); expectedDigest != "" {
+		// The handler verified this digest against the immutable path before opening it.
+		w.Header().Set(artifact.ArtifactDigestHeader, expectedDigest)
+	}
 
 	sw := &statusCapturingWriter{ResponseWriter: w, status: http.StatusOK}
 	http.ServeContent(sw, r, filepath.Base(blobPath), stat.ModTime(), f)

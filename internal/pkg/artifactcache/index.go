@@ -163,6 +163,18 @@ func (c *Cache) Lookup(artifactType, namespace, name, platformKey string) (blobP
 	return blobPath, ok
 }
 
+// LookupDigest returns the indexed blob only if it matches the requested OCI root digest
+// and platform. The caller must supply a validated digest. It uses the same immutable blob
+// name as BlobPath, so existing snapshots need no migration or additional metadata.
+// A subsequent index update cannot change the identity of the returned path.
+func (c *Cache) LookupDigest(artifactType, namespace, name, platformKey, digest string) (string, bool) {
+	blobPath, ok := c.Lookup(artifactType, namespace, name, platformKey)
+	if !ok || digest == "" || filepath.Base(blobPath) != blobName(digest, platformKey) {
+		return "", false
+	}
+	return blobPath, true
+}
+
 // BlobExists reports whether blobPath is still known to the cache: either actively referenced
 // by an index entry, or dereferenced but still within its eviction grace period. A blob written
 // to disk but not yet indexed (e.g. a crash between Store and Set) reports false.

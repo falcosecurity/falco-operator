@@ -433,8 +433,10 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	}
 
 	parentSpecHash := ""
+	expectedDigest := ""
 	if plugin.Status.ArtifactMeta != nil {
 		parentSpecHash = plugin.Status.ArtifactMeta.SpecHash
+		expectedDigest = plugin.Status.ArtifactMeta.Digest
 	}
 	current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
 
@@ -455,7 +457,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		}
 	}
 
-	result, err := r.fetcher.FetchOCI(ctx, plugin.Namespace, plugin.Name, artifact.TypePlugin)
+	result, err := r.fetcher.FetchOCI(ctx, plugin.Namespace, plugin.Name, artifact.TypePlugin, expectedDigest)
 	if err != nil {
 		logger.Error(err, "unable to fetch plugin artifact")
 		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
