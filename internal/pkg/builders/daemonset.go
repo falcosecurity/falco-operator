@@ -89,6 +89,14 @@ func (b *DaemonSetBuilder) WithPodSecurityContext(sc *corev1.PodSecurityContext)
 	return b
 }
 
+// WithShareProcessNamespace sets shareProcessNamespace on the pod spec.
+func (b *DaemonSetBuilder) WithShareProcessNamespace(v *bool) *DaemonSetBuilder {
+	if v != nil {
+		b.daemonset.Spec.Template.Spec.ShareProcessNamespace = v
+	}
+	return b
+}
+
 // WithVolumes sets the pod volumes.
 func (b *DaemonSetBuilder) WithVolumes(volumes []corev1.Volume) *DaemonSetBuilder {
 	b.daemonset.Spec.Template.Spec.Volumes = volumes

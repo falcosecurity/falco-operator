@@ -95,6 +95,14 @@ func (b *DeploymentBuilder) WithPodSecurityContext(sc *corev1.PodSecurityContext
 	return b
 }
 
+// WithShareProcessNamespace sets shareProcessNamespace on the pod spec.
+func (b *DeploymentBuilder) WithShareProcessNamespace(v *bool) *DeploymentBuilder {
+	if v != nil {
+		b.deployment.Spec.Template.Spec.ShareProcessNamespace = v
+	}
+	return b
+}
+
 // WithVolumes sets the pod volumes.
 func (b *DeploymentBuilder) WithVolumes(volumes []corev1.Volume) *DeploymentBuilder {
 	b.deployment.Spec.Template.Spec.Volumes = volumes

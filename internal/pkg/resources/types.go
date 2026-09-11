@@ -60,7 +60,8 @@ type InstanceDefaults struct {
 	LivenessProbe        *corev1.Probe
 	ReadinessProbe       *corev1.Probe
 	SecurityContext      *corev1.SecurityContext
-	PodSecurityContext   *corev1.PodSecurityContext
+	PodSecurityContext    *corev1.PodSecurityContext
+	ShareProcessNamespace *bool
 	EnvVars              []corev1.EnvVar
 
 	// Tolerations

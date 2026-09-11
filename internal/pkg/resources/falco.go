@@ -103,6 +103,7 @@ var FalcoDefaults = &InstanceDefaults{
 	SecurityContext: &corev1.SecurityContext{
 		Privileged: new(true),
 	},
+	ShareProcessNamespace: new(true),
 	EnvVars: []corev1.EnvVar{
 		{Name: "HOST_ROOT", Value: "/host"},
 		{
@@ -273,6 +274,14 @@ var FalcoDefaults = &InstanceDefaults{
 						Port: intstr.FromInt32(8081),
 					},
 				},
+			},
+			// Run as root so the sidecar can send SIGHUP to the Falco process in the shared PID
+			// namespace (shareProcessNamespace: true). Falco runs as UID 0; the distroless image
+			// defaults to UID 65532, and a non-root→root kill(2) is blocked by the container
+			// runtime even with CAP_KILL in the effective set on Kubernetes 1.27+ (SeccompDefault
+			// active). Root can always signal root.
+			SecurityContext: &corev1.SecurityContext{
+				RunAsUser: new(int64),
 			},
 		},
 	},

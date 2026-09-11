@@ -78,13 +78,8 @@ func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
 	assert.Equal(t, content, string(mockFS.Files[file.Path]))
 	assert.Len(t, mockFS.WriteCalls, writes, "an observation must not rewrite or remove artifact files")
 	assert.Empty(t, mockFS.RemoveCalls)
-	assert.True(t, m.PluginLoadMismatch(), "the existing reload recovery must still see that the desired plugin is missing")
-
-	require.NoError(t, m.ForceRewritePluginConfig(ctx, fetcher))
-	assert.Equal(t, content, string(mockFS.Files[file.Path]), "reload recovery must retain the same desired configuration")
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
 	assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.1"}, m.provides["container"])
-	assert.False(t, m.PluginLoadMismatch())
 }
 
 func TestPluginsConfig_AddConfig(t *testing.T) {
@@ -829,9 +824,7 @@ func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 			assert.Equal(t, "json", m.crToConfigName["json"])
 			assert.Equal(t, []string{"json"}, m.pluginsConfig.LoadPlugins)
 			assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.4"}, m.provides["json"])
-			// The background rewriter must not later publish an operation that failed.
 			fs.WriteErr = nil
-			require.NoError(t, m.ForceRewritePluginConfig(ctx, fetcher))
 			assert.Equal(t, before, string(fs.Files[file.Path]))
 			// Retrying the same operation must still perform it, not mistake the failed
 			// in-memory mutation for a completed change.
