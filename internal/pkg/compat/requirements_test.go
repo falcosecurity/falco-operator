@@ -100,6 +100,40 @@ func TestSemverMajorCompatible(t *testing.T) {
 	}
 }
 
+func TestPluginVersionCompatible(t *testing.T) {
+	for _, tc := range []struct {
+		name, available, required string
+		want, wantErr             bool
+	}{
+		{"equal", "0.7.1", "0.7.1", true, false},
+		{"higher patch", "0.7.1", "0.7.0", true, false},
+		{"higher minor", "0.8.0", "0.7.9", true, false},
+		{"lower patch", "0.7.1", "0.7.2", false, false},
+		{"lower minor", "0.6.9", "0.7.0", false, false},
+		{"higher major is incompatible", "2.0.0", "1.0.0", false, false},
+		{"lower major is incompatible", "1.9.9", "2.0.0", false, false},
+		{"suffix ignored by Falco", "0.7.1", "0.7.0junk", true, false},
+		{"prerelease suffix is not precedence", "1.0.0-rc.1", "1.0.0", true, false},
+		{"build suffix ignored", "0.7.1", "0.7.1+build.4", true, false},
+		{"short requirement", "0.7.1", "0.7", false, true},
+		{"prefixed requirement", "0.7.1", "v0.7.0", false, true},
+		{"missing requirement", "0.7.1", "", false, true},
+		{"invalid available", "invalid", "0.7.0", false, true},
+		{"invalid minor", "0.7.1", "0.x.0", false, true},
+		{"missing patch", "0.7.1", "0.7.", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := PluginVersionCompatible(tc.available, tc.required)
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestParseRulesRequirements(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -176,6 +210,36 @@ func TestParseRulesRequirements(t *testing.T) {
 		{
 			name:    "invalid YAML returns error",
 			data:    []byte("key: [unclosed"),
+			wantErr: true,
+		},
+		{
+			name:    "invalid unused alternative",
+			data:    []byte("- required_plugin_versions:\n    - name: container\n      version: 0.7.0\n      alternatives:\n        - name: unused\n          version: garbage\n"),
+			wantErr: true,
+		},
+		{
+			name:    "duplicate candidate name",
+			data:    []byte("- required_plugin_versions:\n    - name: container\n      version: 0.7.0\n      alternatives:\n        - name: container\n          version: 0.6.0\n"),
+			wantErr: true,
+		},
+		{
+			name:    "missing plugin name",
+			data:    []byte("- required_plugin_versions:\n    - version: 0.7.0\n"),
+			wantErr: true,
+		},
+		{
+			name:    "missing plugin version",
+			data:    []byte("- required_plugin_versions:\n    - name: container\n"),
+			wantErr: true,
+		},
+		{
+			name:    "abbreviated plugin version is not a Falco version",
+			data:    []byte("- required_plugin_versions:\n    - name: container\n      version: '0.7'\n"),
+			wantErr: true,
+		},
+		{
+			name:    "prefixed plugin version is not a Falco version",
+			data:    []byte("- required_plugin_versions:\n    - name: container\n      version: v0.7.0\n"),
 			wantErr: true,
 		},
 	}

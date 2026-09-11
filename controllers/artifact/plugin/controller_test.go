@@ -1383,7 +1383,7 @@ func TestEnsurePluginConfig_RegistersProvidesWithNodeArtifactManager(t *testing.
 	require.NoError(t, r.ensurePluginConfig(context.Background(), pl, nodeObj))
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "some-rulesfile"}
-	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{testPluginName}})
+	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
 
 	err = r.store.RemovePluginConfigByName(context.Background(), r.fetcher, testPluginName, testPluginName)
 	require.Error(t, err)
@@ -1405,7 +1405,7 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 	_, _, err := r.store.AddPluginConfig(context.Background(), pl, nil, r.fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "some-rulesfile"}
-	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{testPluginName}})
+	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
 
 	require.NoError(t, cl.Delete(context.Background(), nodeObj))
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))

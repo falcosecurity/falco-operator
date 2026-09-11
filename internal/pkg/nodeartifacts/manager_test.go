@@ -18,6 +18,7 @@ package nodeartifacts_test
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -94,7 +95,7 @@ func TestManager_RemovePluginConfigByName_BlockedWhenSoleProvider(t *testing.T) 
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}}})
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container")
 
@@ -106,7 +107,9 @@ func TestManager_RemovePluginConfigByName_BlockedWhenSoleProvider(t *testing.T) 
 }
 
 func TestManager_RemovePluginConfigByName_AllowedWhenAlternativeCoversTheGroup(t *testing.T) {
-	m := newTestManager()
+	m := newTestManagerWithFetcher(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
+		"container": "1.0.0", "container-alt": "1.0.0",
+	}))
 	fetcher := &artifact.Fetcher{}
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
 	require.NoError(t, err)
@@ -114,7 +117,7 @@ func TestManager_RemovePluginConfigByName_AllowedWhenAlternativeCoversTheGroup(t
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container", "container-alt"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}, {Name: "container-alt", Version: "1.0.0"}}})
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container")
 
@@ -133,7 +136,7 @@ func TestManager_RemovePluginConfigByName_ClearsProvidesOnSuccess(t *testing.T) 
 	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), nil, fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container", "container-alt"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}, {Name: "container-alt", Version: "1.0.0"}}})
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "container-alt", "container-alt")
 	require.Error(t, err, "container was already cleared from provides, so container-alt is the sole remaining provider and its removal must be blocked")
@@ -147,7 +150,7 @@ func TestManager_AddPluginConfig_RenameBlockedWhenOldNameStillRequired(t *testin
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}}})
 
 	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
 	_, _, err = m.AddPluginConfig(context.Background(), pl, nil, fetcher)
@@ -165,7 +168,7 @@ func TestManager_Sync_ReplacesAndClears(t *testing.T) {
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
 
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}}})
 	require.Error(t, m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container"),
 		"blocked while rfKey requires it")
 
@@ -188,8 +191,8 @@ func TestRequirementGroupsFromDependencies(t *testing.T) {
 	got := nodeartifacts.RequirementGroupsFromDependencies(deps)
 
 	require.Len(t, got, 2)
-	assert.Equal(t, nodeartifacts.RequirementGroup{"container", "container-alt"}, got[0])
-	assert.Equal(t, nodeartifacts.RequirementGroup{"k8saudit"}, got[1])
+	assert.Equal(t, nodeartifacts.RequirementGroup{{Name: "container", Version: "0.4.0"}, {Name: "container-alt", Version: "0.1.0"}}, got[0])
+	assert.Equal(t, nodeartifacts.RequirementGroup{{Name: "k8saudit", Version: "1.0.0"}}, got[1])
 }
 
 func TestRequirementGroupsFromDependencies_Nil(t *testing.T) {
@@ -271,7 +274,7 @@ func TestManager_CheckDependency_PrimarySatisfied(t *testing.T) {
 func TestManager_CheckDependency_AlternativeSatisfied(t *testing.T) {
 	m := newTestManager()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
-		"container-alt": "1.0.0",
+		"container-alt": "0.2.0",
 	}).Result)
 
 	matched, provided, satisfied, err := m.CheckDependency(
@@ -282,7 +285,7 @@ func TestManager_CheckDependency_AlternativeSatisfied(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, satisfied)
 	assert.Equal(t, "container-alt", matched)
-	assert.Equal(t, "1.0.0", provided)
+	assert.Equal(t, "0.2.0", provided)
 }
 
 func TestManager_CheckDependency_NoneSatisfied(t *testing.T) {
@@ -297,6 +300,170 @@ func TestManager_CheckDependency_NoneSatisfied(t *testing.T) {
 	assert.False(t, satisfied)
 	assert.Empty(t, matched)
 	assert.Empty(t, provided)
+}
+
+func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
+	primary := nodeartifacts.Requirement{Name: "primary", Version: "1.2.0"}
+	alternatives := []nodeartifacts.Requirement{
+		{Name: "z-first", Version: "1.0.0"},
+		{Name: "a-second", Version: "2.0.0"},
+	}
+	tests := []struct {
+		name      string
+		versions  map[string]string
+		wantMatch string
+		wantOK    bool
+		wantErr   bool
+	}{
+		{name: "no observed candidate"},
+		{name: "equal version", versions: map[string]string{"primary": "1.2.0"}, wantMatch: "primary", wantOK: true},
+		{name: "higher minor", versions: map[string]string{"primary": "1.3.0"}, wantMatch: "primary", wantOK: true},
+		{name: "higher major is incompatible", versions: map[string]string{"primary": "2.0.0"}},
+		{name: "older primary cannot be bypassed", versions: map[string]string{"primary": "1.1.0", "z-first": "1.0.0"}},
+		{name: "absent primary permits alternative", versions: map[string]string{"z-first": "1.1.0"}, wantMatch: "z-first", wantOK: true},
+		{name: "first loaded alternative wins", versions: map[string]string{"z-first": "1.0.0", "a-second": "1.0.0"}, wantMatch: "z-first", wantOK: true},
+		{name: "incompatible first alternative stops search", versions: map[string]string{"z-first": "2.0.0", "a-second": "2.0.0"}},
+		{name: "absent first alternative permits second", versions: map[string]string{"a-second": "2.1.0"}, wantMatch: "a-second", wantOK: true},
+		{name: "invalid primary cannot be bypassed", versions: map[string]string{"primary": "invalid", "z-first": "1.0.0"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newTestManager()
+			m.SyncProvides(nodeartifacts.PluginConfigKey, primary.Name)
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.versions).Result)
+			matched, _, satisfied, err := m.CheckDependency(primary, alternatives)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantOK, satisfied)
+			if tt.wantOK {
+				assert.Equal(t, tt.wantMatch, matched)
+			}
+		})
+	}
+}
+
+func TestManager_RemovePluginConfigByName_ChecksRemainingVersions(t *testing.T) {
+	dep := commonv1alpha1.ArtifactMetaDependency{
+		Name: "primary", Version: "1.0.0",
+		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
+			{Name: "z-first", Version: "1.2.0"},
+			{Name: "a-second", Version: "2.0.0"},
+		},
+	}
+	tests := []struct {
+		name        string
+		versions    map[string]string
+		remove      string
+		wantBlocked bool
+	}{
+		{name: "unconfirmed alternatives", wantBlocked: true},
+		{name: "alternative too old", versions: map[string]string{"z-first": "1.1.0"}, wantBlocked: true},
+		{name: "alternative different major", versions: map[string]string{"z-first": "2.0.0"}, wantBlocked: true},
+		{name: "alternative invalid version", versions: map[string]string{"z-first": "invalid"}, wantBlocked: true},
+		{name: "compatible alternative", versions: map[string]string{"z-first": "1.3.0"}},
+		{name: "first alternative is decisive", versions: map[string]string{"z-first": "1.1.0", "a-second": "2.0.0"}, wantBlocked: true},
+		{name: "later alternative when first unobserved", versions: map[string]string{"a-second": "2.0.0"}},
+		{name: "remove unused alternative", remove: "z-first"},
+		{name: "remove unrelated plugin", remove: "unrelated"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsfake.NewMockFileSystem()
+			m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			fetcher := &artifact.Fetcher{}
+			var configFile *artifact.File
+			for _, name := range []string{"primary", "z-first", "a-second", "unrelated"} {
+				_, file, err := m.AddPluginConfig(t.Context(), testPlugin(name), nil, fetcher)
+				require.NoError(t, err)
+				configFile = file
+			}
+			versions := map[string]string{"primary": "1.0.0"}
+			maps.Copy(versions, tt.versions)
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(versions).Result)
+			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"}
+			m.Sync(key, nodeartifacts.RequirementGroupsFromDependencies([]commonv1alpha1.ArtifactMetaDependency{dep}))
+			remove := tt.remove
+			if remove == "" {
+				remove = "primary"
+			}
+			before, err := fs.ReadFile(configFile.Path)
+			require.NoError(t, err)
+			err = m.RemovePluginConfigByName(t.Context(), fetcher, remove, remove)
+			if tt.wantBlocked {
+				var blocked *nodeartifacts.BlockedError
+				require.ErrorAs(t, err, &blocked)
+				assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+				after, readErr := fs.ReadFile(configFile.Path)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after, "blocked removal must leave the shared config untouched")
+				return
+			}
+			require.NoError(t, err)
+			_, found, _, err := m.CheckRequirement(remove, "1.0.0")
+			require.NoError(t, err)
+			assert.False(t, found)
+		})
+	}
+}
+
+func TestManager_CheckDependency_PreservesMetadataOrder(t *testing.T) {
+	meta := &commonv1alpha1.ArtifactMeta{
+		Dependencies: []commonv1alpha1.ArtifactMetaDependency{{
+			Name: "absent", Version: "1.0.0",
+			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
+				{Name: "z-first", Version: "1.0.0"},
+				{Name: "a-second", Version: "2.0.0"},
+			},
+		}},
+	}
+	artifact.DeduplicateArtifactMeta(meta)
+	m := newTestManager()
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
+		"z-first": "1.0.0", "a-second": "1.0.0",
+	}).Result)
+	d := meta.Dependencies[0]
+	assert.Equal(t, "z-first", d.Alternatives[0].Name)
+	alternatives := make([]nodeartifacts.Requirement, len(d.Alternatives))
+	for i, alt := range d.Alternatives {
+		alternatives[i] = nodeartifacts.Requirement{Name: alt.Name, Version: alt.Version}
+	}
+	matched, _, satisfied, err := m.CheckDependency(nodeartifacts.Requirement{Name: d.Name, Version: d.Version}, alternatives)
+	require.NoError(t, err)
+	assert.True(t, satisfied)
+	assert.Equal(t, "z-first", matched)
+}
+
+func TestManager_CheckDependency_ValidatesAllCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		primary      nodeartifacts.Requirement
+		alternatives []nodeartifacts.Requirement
+		wantErr      bool
+	}{
+		{name: "unused malformed alternative", primary: nodeartifacts.Requirement{Name: "container", Version: "0.7.0"},
+			alternatives: []nodeartifacts.Requirement{{Name: "unused", Version: "garbage"}}, wantErr: true},
+		{name: "duplicate name", primary: nodeartifacts.Requirement{Name: "container", Version: "0.7.0"},
+			alternatives: []nodeartifacts.Requirement{{Name: "container", Version: "0.6.0"}}, wantErr: true},
+		{name: "short version", primary: nodeartifacts.Requirement{Name: "container", Version: "0.7"}, wantErr: true},
+		{name: "prefixed version", primary: nodeartifacts.Requirement{Name: "container", Version: "v0.7.0"}, wantErr: true},
+		{name: "numeric prefix matches Falco", primary: nodeartifacts.Requirement{Name: "container", Version: "0.7.0junk"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager()
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
+			_, _, satisfied, err := m.CheckDependency(tc.primary, tc.alternatives)
+			if tc.wantErr {
+				require.Error(t, err)
+				assert.False(t, satisfied)
+			} else {
+				require.NoError(t, err)
+				assert.True(t, satisfied)
+			}
+		})
+	}
 }
 
 func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *testing.T) {
@@ -316,7 +483,7 @@ func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *t
 	assert.Equal(t, "0.7.1", provided)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
-	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{"container"}})
+	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "0.4.0"}}})
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container")
 	require.Error(t, err, "the PluginConfigKey-registered entry must still be tracked for removal-blocking after a version observation merged into it")
 }

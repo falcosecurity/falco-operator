@@ -68,6 +68,51 @@ func parseSemver(value, role string) (semver.Version, error) {
 	return version, nil
 }
 
+// PluginVersionCompatible follows Falco's sinsp_version: three numeric components,
+// equal majors, and an available version at least as recent as the required version.
+// Suffixes do not participate in Falco's comparison; abbreviated or v-prefixed versions
+// are invalid. This is deliberately separate from the tolerant capability comparison.
+func PluginVersionCompatible(available, required string) (bool, error) {
+	av, err := parsePluginVersion(available)
+	if err != nil {
+		return false, fmt.Errorf("parse available plugin version: %w", err)
+	}
+	rv, err := parsePluginVersion(required)
+	if err != nil {
+		return false, fmt.Errorf("parse required plugin version: %w", err)
+	}
+	return av[0] == rv[0] && (av[1] > rv[1] || av[1] == rv[1] && av[2] >= rv[2]), nil
+}
+
+func parsePluginVersion(value string) ([3]uint32, error) {
+	var version [3]uint32
+	// Like Falco's sscanf, read major.minor.patch and ignore any trailing suffix.
+	if _, err := fmt.Sscanf(value, "%d.%d.%d", &version[0], &version[1], &version[2]); err != nil {
+		return version, fmt.Errorf("invalid plugin version %q: %w", value, err)
+	}
+	return version, nil
+}
+
+// ValidatePluginDependency checks every candidate before selecting a loaded plugin,
+// including unused alternatives. Falco rejects missing names/versions and repeated
+// names within a dependency group, even when the first candidate is compatible.
+func ValidatePluginDependency(candidates []puller.Dependency) error {
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.Name == "" {
+			return fmt.Errorf("plugin dependency name must not be empty")
+		}
+		if _, err := parsePluginVersion(candidate.Version); err != nil {
+			return fmt.Errorf("plugin dependency %q: %w", candidate.Name, err)
+		}
+		if _, exists := seen[candidate.Name]; exists {
+			return fmt.Errorf("duplicate plugin dependency %q in the same alternative group", candidate.Name)
+		}
+		seen[candidate.Name] = struct{}{}
+	}
+	return nil
+}
+
 // RulesRequirements holds requirements extracted from a Falco rules YAML document.
 type RulesRequirements struct {
 	// EngineVersion is the value of the required_engine_version directive, empty if absent.
@@ -135,6 +180,10 @@ func ParseRulesRequirements(data []byte) (*RulesRequirements, error) {
 			req := RulesPluginRequirement{Name: pv.Name, Version: pv.Version}
 			for _, alt := range pv.Alternatives {
 				req.Alternatives = append(req.Alternatives, puller.Dependency(alt))
+			}
+			candidates := append([]puller.Dependency{{Name: req.Name, Version: req.Version}}, req.Alternatives...)
+			if err := ValidatePluginDependency(candidates); err != nil {
+				return nil, err
 			}
 			result.PluginVersions = append(result.PluginVersions, req)
 		}
