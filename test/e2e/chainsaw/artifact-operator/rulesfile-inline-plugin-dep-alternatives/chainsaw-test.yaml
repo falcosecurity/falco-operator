@@ -1,0 +1,501 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-inline-plugin-dep-alternatives
+spec:
+  description: |
+    Uses real json 0.7.4 and container 0.7.1 plugins to check ordered dependencies.
+    An invalid unused alternative must preserve the installed rules byte-for-byte.
+    A loaded but incompatible alternative must block deletion of the required plugin;
+    correcting that requirement must allow cleanup without removing the Rulesfile.
+    A loaded incompatible primary must block installation despite a compatible alternative;
+    removing that primary must allow the alternative to satisfy the same Rulesfile.
+  bindings:
+    - name: falco_name
+      value: falco-inline-plugin-dep-alternatives-test
+    - name: rulesfile_name
+      value: rulesfile-inline-plugin-dep-alternatives-test
+    - name: test_name
+      value: rulesfile-inline-plugin-dep-alternatives
+    - name: inline_file
+      value: 50-03-rulesfile-inline-plugin-dep-alternatives-test-inline.yaml
+    - name: plugin_oci_tag
+      value: latest
+    - name: plugin_oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: rules
+      value:
+        - required_plugin_versions:
+            - name: json
+              version: "0.7.0"
+              alternatives:
+                - name: container
+                  version: "0.99.0"
+        - rule: Chainsaw inline plugin alternatives
+          desc: Generic syscall rule usable with either plugin.
+          condition: evt.type = execve
+          output: inline-plugin-alternatives event=%evt.type
+          priority: DEBUG
+          tags: [test]
+  steps:
+    - name: "Step 01: Create-single-pod-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-container"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: container
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Install-json"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: json
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Verify-real-loaded-versions"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: json
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (json_parse($stdout).plugin_version): "0.7.4"
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: container
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (json_parse($stdout).plugin_version): "0.7.1"
+
+    - name: "Step 05: Install-rules-satisfied-by-primary"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_spec
+              value:
+                inlineRules: ($rules)
+
+    - name: "Step 06: Assert-rules-satisfied-by-primary"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 07: Reject-malformed-unused-alternative"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $inline_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_checksum
+                value: (json_parse($stdout).checksum)
+
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: json
+                        version: "0.7.0"
+                        alternatives:
+                          - name: container
+                            version: garbage
+                  - rule: Chainsaw inline plugin alternatives
+                    desc: Generic syscall rule usable with either plugin.
+                    condition: evt.type = execve
+                    output: inline-plugin-alternatives event=%evt.type
+                    priority: DEBUG
+                    tags: [test]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+                    (contains(message, 'invalid plugin version')): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $inline_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_checksum): true
+
+    - name: "Step 08: Restore-valid-requirements"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules: ($rules)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 09: Block-primary-deletion-with-incompatible-alternative"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: json
+            content: bash ../../common/scripts/check_plugin_deletion_blocked.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: json
+                  artifact.falcosecurity.dev/kind: plugin
+                (deletionTimestamp != null): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: json
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 10: Verify-blocked-plugin-binary-retained"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: json.so
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 11: Allow-compatible-alternative-and-complete-deletion"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: json
+                        version: "0.7.0"
+                        alternatives:
+                          - name: container
+                            version: "0.7.0"
+                  - rule: Chainsaw inline plugin alternatives
+                    desc: Generic syscall rule usable with either plugin.
+                    condition: evt.type = execve
+                    output: inline-plugin-alternatives event=%evt.type
+                    priority: DEBUG
+                    tags: [test]
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: json
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (status.observedGeneration == metadata.generation): true
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: container
+              - name: EXPECTED_PLUGIN_VERSION
+                value: "0.7.1"
+              - name: ABSENT_PLUGINS
+                value: '["json"]'
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 12: Verify-deleted-plugin-binary-absent"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: json.so
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 13: Verify-deleted-plugin-removed-from-config"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: json
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 14: Remove-rules-before-reinstalling-primary"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 15: Reinstall-primary"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: json
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 16: Wait-for-reinstalled-primary-to-load"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: json
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (json_parse($stdout).plugin_version): "0.7.4"
+
+    - name: "Step 17: Reject-incompatible-primary-despite-compatible-alternative"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_plugin_versions:
+                      - name: json
+                        version: "0.99.0"
+                        alternatives:
+                          - name: container
+                            version: "0.7.0"
+                  - rule: Chainsaw primary dependency precedence
+                    desc: The loaded primary cannot be bypassed by a compatible alternative.
+                    condition: evt.type = execve
+                    output: primary-precedence event=%evt.type
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 18: Assert-incompatible-primary-blocked"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+
+    - name: "Step 19: Verify-rejected-rules-not-installed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 20: Delete-incompatible-primary-and-use-alternative"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: json
+              namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 21: Verify-fallback-rules-installed"
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: content_pattern
+              value: primary-precedence
+            - name: file_pattern
+              value: ($inline_file)
+
+    - name: "Step 22: Validate-installed-rules-with-real-falco"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $inline_file]))
+            content: bash ../../common/scripts/validate_rulesfile_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 23: Remove-rules-before-plugin-cleanup"
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+  catch:
+    - script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: bash ../../common/scripts/debug_snapshot.sh

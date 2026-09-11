@@ -6,6 +6,10 @@
 #   NAMESPACE:   Namespace of the Falco pod.
 #   FALCO_NAME:  Value of app.kubernetes.io/name label on the Falco pod.
 #   PLUGIN_NAME: Plugin name expected under plugin_versions (e.g. "container").
+# Optional env vars:
+#   EXPECTED_PLUGIN_VERSION: Exact version to wait for. Default: any loaded version.
+#   ABSENT_PLUGINS: JSON array of plugins that must be absent from the same snapshot.
+#                   Default: [] (no absence check).
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -13,6 +17,8 @@ set -o pipefail
 NAMESPACE="${NAMESPACE}"
 FALCO_NAME="${FALCO_NAME}"
 PLUGIN_NAME="${PLUGIN_NAME}"
+EXPECTED_PLUGIN_VERSION="${EXPECTED_PLUGIN_VERSION:-}"
+ABSENT_PLUGINS="${ABSENT_PLUGINS:-[]}"
 
 MAX_RETRIES="${MAX_RETRIES:-200}"
 RETRY_DELAY="${RETRY_DELAY:-1}"
@@ -40,7 +46,13 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
     continue
   fi
 
-  if PLUGIN_VERSION=$(printf '%s' "$VERSIONS" | jq -er --arg name "$PLUGIN_NAME" '.plugin_versions[$name]' 2>&1); then
+  if PLUGIN_VERSION=$(printf '%s' "$VERSIONS" | jq -er \
+      --arg name "$PLUGIN_NAME" --arg expected "$EXPECTED_PLUGIN_VERSION" --argjson absent "$ABSENT_PLUGINS" '
+        .plugin_versions as $plugins |
+        $plugins[$name] |
+        select(($expected == "" or . == $expected) and
+          all($absent[]; . as $name | $plugins | has($name) | not))
+      ' 2>&1); then
     cat <<EOF
 {
   "status": "success",
@@ -56,14 +68,14 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
 EOF
     exit 0
   fi
-  LAST_ERROR="plugin '$PLUGIN_NAME' not found in plugin_versions: $VERSIONS"
+  LAST_ERROR="expected '$PLUGIN_NAME' (version '${EXPECTED_PLUGIN_VERSION:-any}') loaded and $ABSENT_PLUGINS absent; got: $VERSIONS"
   sleep "$RETRY_DELAY"
 done
 
 cat <<EOF
 {
   "status": "failure",
-  "message": "Plugin not reported as loaded by Falco after $MAX_RETRIES attempts",
+  "message": "Plugin checks did not succeed after $MAX_RETRIES attempts",
   "namespace": "$NAMESPACE",
   "falco_name": "$FALCO_NAME",
   "pod": "$POD",
