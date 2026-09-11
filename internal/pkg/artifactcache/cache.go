@@ -48,11 +48,20 @@ const (
 // For platform-specific artifacts (plugins) pass goos and goarch; for platform-agnostic
 // artifacts (rulesfiles) pass empty strings.
 func BlobPath(cacheDir, artifactType, ref, digest, goos, goarch string) string {
-	name := strings.ReplaceAll(digest, ":", "-")
+	platformKey := ""
 	if goos != "" && goarch != "" {
-		name = fmt.Sprintf("%s-%s-%s", name, goos, goarch)
+		platformKey = goos + "-" + goarch
 	}
-	return filepath.Join(cacheDir, BlobsDir, artifactType, RefToPath(ref), name)
+	return filepath.Join(cacheDir, BlobsDir, artifactType, RefToPath(ref), blobName(digest, platformKey))
+}
+
+// blobName is the immutable digest/platform identity shared by writes and lookups.
+func blobName(digest, platformKey string) string {
+	name := strings.ReplaceAll(digest, ":", "-")
+	if platformKey != "" {
+		name += "-" + platformKey
+	}
+	return name
 }
 
 // Store atomically writes content to blobPath and records perm in the companion .perm file.

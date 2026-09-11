@@ -528,3 +528,52 @@ func TestCache_RemoveAll(t *testing.T) {
 		assert.True(t, os.IsNotExist(err))
 	})
 }
+
+func TestCache_LookupDigest(t *testing.T) {
+	oldDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	newDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	for _, tc := range []struct{ artifactType, goos, goarch, platform string }{
+		{"plugin", "linux", "amd64", "linux-amd64"},
+		{"plugin", "linux", "arm64", "linux-arm64"},
+		{"rulesfile", "", "", ""},
+	} {
+		t.Run(tc.artifactType+"/"+tc.platform, func(t *testing.T) {
+			cache := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, cache.Load())
+			oldPath := artifactcache.BlobPath(cache.Dir(), tc.artifactType, "repo:old", oldDigest, tc.goos, tc.goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), tc.artifactType, "repo:new", newDigest, tc.goos, tc.goarch)
+			require.NoError(t, cache.Store(oldPath, []byte("old"), 0o644))
+			require.NoError(t, cache.Store(newPath, []byte("new"), 0o644))
+			require.NoError(t, cache.Set(tc.artifactType, "ns", "name", tc.platform, oldPath))
+
+			// Existing snapshots already encode digest and platform in the immutable blob path.
+			reloaded := artifactcache.NewCache(cache.Dir())
+			require.NoError(t, reloaded.Load())
+			selected, ok := reloaded.LookupDigest(tc.artifactType, "ns", "name", tc.platform, oldDigest)
+			require.True(t, ok)
+			require.Equal(t, oldPath, selected)
+			for _, requested := range []string{"", newDigest} {
+				path, found := reloaded.LookupDigest(tc.artifactType, "ns", "name", tc.platform, requested)
+				require.False(t, found)
+				require.Empty(t, path)
+			}
+			_, ok = reloaded.LookupDigest(tc.artifactType, "other-ns", "name", tc.platform, oldDigest)
+			require.False(t, ok)
+			_, ok = reloaded.LookupDigest(tc.artifactType, "ns", "other-name", tc.platform, oldDigest)
+			require.False(t, ok)
+			_, ok = reloaded.LookupDigest(tc.artifactType, "ns", "name", "other-platform", oldDigest)
+			require.False(t, ok)
+
+			require.NoError(t, reloaded.Set(tc.artifactType, "ns", "name", tc.platform, newPath))
+			// A lookup made before the index update still identifies the old bytes, not the new slot.
+			content, err := os.ReadFile(selected)
+			require.NoError(t, err)
+			require.Equal(t, []byte("old"), content)
+			_, ok = reloaded.LookupDigest(tc.artifactType, "ns", "name", tc.platform, oldDigest)
+			require.False(t, ok)
+			current, ok := reloaded.LookupDigest(tc.artifactType, "ns", "name", tc.platform, newDigest)
+			require.True(t, ok)
+			require.Equal(t, newPath, current)
+		})
+	}
+}

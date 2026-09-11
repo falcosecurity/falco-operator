@@ -486,8 +486,10 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 	p := rulesfile.Spec.Priority
 
 	parentSpecHash := ""
+	expectedDigest := ""
 	if rulesfile.Status.ArtifactMeta != nil {
 		parentSpecHash = rulesfile.Status.ArtifactMeta.SpecHash
+		expectedDigest = rulesfile.Status.ArtifactMeta.Digest
 	}
 	current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
 
@@ -507,7 +509,7 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 	}
 
 	if needFetch {
-		result, err := r.fetcher.FetchOCI(ctx, rulesfile.Namespace, rulesfile.Name, artifact.TypeRulesfile)
+		result, err := r.fetcher.FetchOCI(ctx, rulesfile.Namespace, rulesfile.Name, artifact.TypeRulesfile, expectedDigest)
 		if err != nil {
 			logger.Error(err, "unable to fetch Rulesfile OCI artifact")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
