@@ -1074,6 +1074,8 @@ func TestFetchAndCacheArtifactMeta_CombinesConstraintsWithoutMaskingConflicts(t 
     alternatives:
     - name: cloudtrail
       version: "0.2.0"
+    - name: aws
+      version: "0.1.0"
 `},
 	}
 	mockPuller := &pullerfake.MockOCIPuller{
@@ -1120,7 +1122,10 @@ func TestFetchAndCacheArtifactMeta_CombinesConstraintsWithoutMaskingConflicts(t 
 		},
 		{
 			Name: "container", Version: "0.5.0",
-			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "cloudtrail", Version: "0.2.0"}},
+			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
+				{Name: "cloudtrail", Version: "0.2.0"},
+				{Name: "aws", Version: "0.1.0"},
+			},
 		},
 	}, rf.Status.ArtifactMeta.Dependencies,
 		"identical dependency groups are deduplicated, but distinct AND constraints remain visible")

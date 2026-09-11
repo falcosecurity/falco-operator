@@ -131,7 +131,7 @@ func TestDeduplicateArtifactMeta(t *testing.T) {
 			},
 		},
 		{
-			name: "identical dependency groups and alternatives are deduplicated",
+			name: "alternative order and repeated candidates are preserved",
 			input: commonv1alpha1.ArtifactMeta{
 				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
 					dep("json", "0.7.0",
@@ -150,6 +150,35 @@ func TestDeduplicateArtifactMeta(t *testing.T) {
 					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
 					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
 				),
+				dep("json", "0.7.0",
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+				),
+			},
+		},
+		{
+			name: "only groups with identical candidate order are deduplicated",
+			input: commonv1alpha1.ArtifactMeta{
+				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
+					dep("json", "0.7.0",
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"}),
+					dep("json", "0.7.0",
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"}),
+					dep("json", "0.7.0",
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+						commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"}),
+				},
+			},
+			wantDeps: []commonv1alpha1.ArtifactMetaDependency{
+				dep("json", "0.7.0",
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"},
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"}),
+				dep("json", "0.7.0",
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "zeta", Version: "2.0.0"},
+					commonv1alpha1.ArtifactMetaDependencyVariant{Name: "alpha", Version: "1.0.0"}),
 			},
 		},
 		{

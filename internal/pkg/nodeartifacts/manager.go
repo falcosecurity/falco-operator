@@ -33,6 +33,7 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
 // Kind identifies which artifact type a registry Key belongs to.
@@ -60,20 +61,14 @@ type Key struct {
 // PluginConfigKey is the single registry key for the shared plugins-config aggregate file.
 var PluginConfigKey = Key{Kind: KindPluginConfig, Name: "plugins-config"}
 
-// RequirementGroup is one dependency slot: a plugin's primary name plus any alternatives that
-// can also satisfy it. Satisfied if any of these names is currently provided on this node.
-//
-// Name-only, no version: used by blockedByOthers' presence-based removal-safety check.
-// Version-aware satisfaction checking is separate; see Requirement/CheckRequirement.
-type RequirementGroup []string
+// RequirementGroup is an ordered plugin dependency: the primary followed by its alternatives.
+// Like Falco, both installation and removal checks use the first observed candidate and require
+// a compatible version; an incompatible candidate cannot be bypassed by a later alternative.
+type RequirementGroup []Requirement
 
-// Requirement is a single named capability or plugin requirement with its minimum version. Used
-// by CheckRequirement/CheckDependency to answer "is X currently safe to depend on"; distinct
-// from RequirementGroup, which only tracks presence for removal-safety checks.
-type Requirement struct {
-	Name    string
-	Version string
-}
+// Requirement is a plugin name and its required version. Compatible versions must have the
+// same major and be at least as recent as the requirement.
+type Requirement = puller.Dependency
 
 // BlockedError is returned by RemovePluginConfigByName when removing a name would leave some
 // other artifact's dependency unsatisfied. It is an expected, retriable condition: callers
@@ -204,26 +199,37 @@ func (m *Manager) CheckRequirement(name, minVersion string) (providedVersion str
 	return p.Version, true, satisfied, err
 }
 
-// CheckDependency tries primary first, then each alternative in order, returning the first
-// name/version that satisfies its own requirement. satisfied=false with no error means none of
-// the candidates are currently provided at a satisfying version (or at all).
+// CheckDependency checks primary then alternatives against one locked provider snapshot.
+// The first observed candidate determines the result, even when its version is incompatible.
 func (m *Manager) CheckDependency(primary Requirement, alternatives []Requirement) (matchedName, providedVersion string, satisfied bool, err error) {
-	candidates := append([]Requirement{primary}, alternatives...)
-	for _, req := range candidates {
-		p, found, ok, cerr := m.CheckRequirement(req.Name, req.Version)
-		if cerr != nil {
-			return "", "", false, cerr
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.checkDependencyLocked(append(RequirementGroup{primary}, alternatives...), "")
+}
+
+// checkDependencyLocked follows Falco's candidate order and major-version compatibility.
+// excludedName simulates a plugin removal without changing the registry. Caller holds m.mu.
+func (m *Manager) checkDependencyLocked(group RequirementGroup, excludedName string) (matchedName, providedVersion string, satisfied bool, err error) {
+	if err := compat.ValidatePluginDependency(group); err != nil {
+		return "", "", false, err
+	}
+	for _, req := range group {
+		if req.Name == excludedName {
+			continue
 		}
-		if found && ok {
-			return req.Name, p, true, nil
+		p, found := m.provides[req.Name]
+		if !found || p.Version == "" {
+			continue
 		}
+		satisfied, err = compat.PluginVersionCompatible(p.Version, req.Version)
+		return req.Name, p.Version, satisfied, err
 	}
 	return "", "", false, nil
 }
 
 // versionSatisfies applies one special case: plugin_api_version compares by major-version
-// compatibility; everything else (engine version, individual plugin versions) requires
-// at-least.
+// compatibility; other capabilities require at-least. Plugin dependencies are checked
+// separately by checkDependencyLocked.
 func versionSatisfies(name, available, required string) (bool, error) {
 	if name == compat.CapabilityPluginAPIVersion {
 		return compat.SemverMajorCompatible(available, required)
@@ -342,28 +348,18 @@ func (m *Manager) ForceRewritePluginConfig(ctx context.Context, fetcher artifact
 	return err
 }
 
-// blockedByOthers reports which currently-registered RequirementGroups would lose their only
-// satisfier if name stopped being provided. An empty result means it's safe to stop providing
-// name. Caller must hold m.mu.
+// blockedByOthers reports which registered dependencies would remain unsatisfied after name
+// stops being provided. Only groups mentioning name are affected. Caller must hold m.mu.
 func (m *Manager) blockedByOthers(name string) []Key {
 	var blockedBy []Key
 	for key, groups := range m.requires {
 		for _, group := range groups {
-			if !slices.Contains(group, name) {
+			if !slices.ContainsFunc(group, func(req Requirement) bool { return req.Name == name }) {
 				continue
 			}
-			coveredByOther := false
-			for _, alt := range group {
-				if alt == name {
-					continue
-				}
-				if _, ok := m.provides[alt]; ok {
-					coveredByOther = true
-					break
-				}
-			}
-			if !coveredByOther {
+			if _, _, satisfied, err := m.checkDependencyLocked(group, name); err != nil || !satisfied {
 				blockedBy = append(blockedBy, key)
+				break
 			}
 		}
 	}
@@ -372,16 +368,16 @@ func (m *Manager) blockedByOthers(name string) []Key {
 
 // RequirementGroupsFromDependencies converts ArtifactMeta.Dependencies (as populated by the
 // instance operator on a Rulesfile's status) into the form Sync expects: each dependency's
-// primary name plus its alternatives, as one group. Returns nil for an empty/nil input.
+// primary plus its alternatives, retaining versions and order. Returns nil for empty input.
 func RequirementGroupsFromDependencies(deps []commonv1alpha1.ArtifactMetaDependency) []RequirementGroup {
 	if len(deps) == 0 {
 		return nil
 	}
 	groups := make([]RequirementGroup, 0, len(deps))
 	for _, d := range deps {
-		group := RequirementGroup{d.Name}
+		group := RequirementGroup{{Name: d.Name, Version: d.Version}}
 		for _, alt := range d.Alternatives {
-			group = append(group, alt.Name)
+			group = append(group, Requirement{Name: alt.Name, Version: alt.Version})
 		}
 		groups = append(groups, group)
 	}

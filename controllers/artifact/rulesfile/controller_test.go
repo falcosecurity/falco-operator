@@ -1397,13 +1397,13 @@ func TestCheckDependency(t *testing.T) {
 			wantSatisfied: true,
 		},
 		{
-			name:      "primary found but version too low alternative satisfied",
+			name:      "incompatible primary cannot be bypassed by an alternative",
 			falcaCaps: map[string]string{"container": "0.3.0", "k8smeta": "0.1.0"},
 			dep: commonv1alpha1.ArtifactMetaDependency{
 				Name: "container", Version: "0.4.0",
 				Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}},
 			},
-			wantSatisfied: true,
+			wantFailMsg: true,
 		},
 		{
 			name:      "primary not found alternative satisfied",
@@ -1917,6 +1917,65 @@ func TestReconcile_RegistersDependenciesWithNodeArtifactManager(t *testing.T) {
 	blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err)
 	require.True(t, ok)
 	assert.Equal(t, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: testRulesfileName}, blocked.BlockedBy[0])
+}
+
+func TestReconcile_IncompatiblePluginVersion(t *testing.T) {
+	for _, enforce := range []bool{false, true} {
+		for _, preInstalled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("enforce=%t installed=%t", enforce, preInstalled), func(t *testing.T) {
+				ctx := t.Context()
+				rf := &artifactv1alpha1.Rulesfile{
+					ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
+					Spec: artifactv1alpha1.RulesfileSpec{
+						OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/rules", Tag: "new"}},
+					},
+					Status: artifactv1alpha1.RulesfileStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{
+						Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}},
+					}},
+				}
+				node := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
+					n.Finalizers = []string{rulesfileNodeFinalizer}
+				})
+				r, cl := newTestReconciler(t, rf, node)
+				r.enforceRequirements = enforce
+				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "2.0.0"}).Result)
+				var installedFile *artifact.File
+				if preInstalled {
+					result, err := r.fetcher.FetchInline(ctx, []byte(testRulesData))
+					require.NoError(t, err)
+					action, file, err := r.store.Store(ctx, nil, rf.Name, 0, artifact.TypeRulesfile, artifact.MediumOCI, result)
+					require.NoError(t, err)
+					installedFile = file
+					artifact.UpdateInstalledStatus(&node.Status.InstalledArtifacts, action, artifact.MediumOCI, file)
+					artifact.UpdateInstalledSpecHash(&node.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
+					require.NoError(t, cl.Status().Update(ctx, node))
+				}
+				oldInstalled := node.Status.InstalledArtifacts
+				request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)}
+				_, err := r.Reconcile(ctx, request)
+				require.NoError(t, err)
+				require.NoError(t, cl.Get(ctx, request.NamespacedName, node))
+				condition := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+				require.NotNil(t, condition)
+				assert.Equal(t, metav1.ConditionFalse, condition.Status)
+				if enforce {
+					assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
+					assert.Equal(t, oldInstalled, node.Status.InstalledArtifacts)
+					if preInstalled {
+						assert.Equal(t, artifact.ReasonDependenciesNotSatisfiedUpdateRejected, condition.Reason)
+						intact, err := r.store.Verify(ctx, installedFile)
+						require.NoError(t, err)
+						assert.True(t, intact, "a rejected update must preserve installed rules")
+					} else {
+						assert.Equal(t, artifact.ReasonDependenciesNotSatisfied, condition.Reason)
+					}
+				} else {
+					assert.Equal(t, 1, r.fetcher.(*testFetcher).ociCallCount, "advise mode still permits installation")
+					assert.Equal(t, artifact.ReasonDependenciesNotSatisfiedInstalledAnyway, condition.Reason)
+				}
+			})
+		}
+	}
 }
 
 func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {

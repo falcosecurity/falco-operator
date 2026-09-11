@@ -42,8 +42,8 @@ func ComputeOCIArtifactSpecHash(ociArtifact *commonv1alpha1.OCIArtifact) (string
 // DeduplicateArtifactMeta removes semantically redundant requirements and dependency groups.
 // Monotonic requirements with the same name are collapsed to the strictest version, while
 // incompatible plugin API majors and unparsable versions are preserved for the compatibility
-// checker to reject. Dependency alternatives are OR-ed within a group, while distinct groups
-// are AND-ed by Falco, so only identical dependency groups can be safely removed.
+// checker to reject. Falco checks alternatives in declaration order and requires every group
+// to pass, so only groups with identical ordered candidates can be safely removed.
 func DeduplicateArtifactMeta(meta *commonv1alpha1.ArtifactMeta) {
 	meta.Requirements = deduplicateRequirements(meta.Requirements)
 	meta.Dependencies = deduplicateDependencies(meta.Dependencies)
@@ -147,7 +147,6 @@ func deduplicateDependencies(deps []commonv1alpha1.ArtifactMetaDependency) []com
 	}
 	result := make([]commonv1alpha1.ArtifactMetaDependency, 0, len(deps))
 	for _, dep := range deps {
-		dep = canonicalizeDependency(dep)
 		duplicate := false
 		for _, current := range result {
 			if dep.Name == current.Name && dep.Version == current.Version &&
@@ -162,28 +161,6 @@ func deduplicateDependencies(deps []commonv1alpha1.ArtifactMetaDependency) []com
 	}
 	sort.Slice(result, func(i, j int) bool { return dependencyLess(result[i], result[j]) })
 	return result
-}
-
-func canonicalizeDependency(dep commonv1alpha1.ArtifactMetaDependency) commonv1alpha1.ArtifactMetaDependency {
-	if len(dep.Alternatives) == 0 {
-		dep.Alternatives = nil
-		return dep
-	}
-
-	alternatives := append([]commonv1alpha1.ArtifactMetaDependencyVariant(nil), dep.Alternatives...)
-	sort.Slice(alternatives, func(i, j int) bool {
-		if alternatives[i].Name != alternatives[j].Name {
-			return alternatives[i].Name < alternatives[j].Name
-		}
-		return alternatives[i].Version < alternatives[j].Version
-	})
-	dep.Alternatives = alternatives[:0]
-	for _, alternative := range alternatives {
-		if len(dep.Alternatives) == 0 || dep.Alternatives[len(dep.Alternatives)-1] != alternative {
-			dep.Alternatives = append(dep.Alternatives, alternative)
-		}
-	}
-	return dep
 }
 
 func dependencyLess(a, b commonv1alpha1.ArtifactMetaDependency) bool {
