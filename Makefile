@@ -100,11 +100,7 @@ deadcode: ## Report functions unreachable from any binary entry point (cmd/).
 
 .PHONY: test
 test: manifests generate fmt vet ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
-
-.PHONY: test.e2e
-test.e2e: manifests generate fmt vet cluster.create ## Run the e2e tests. Creates the local dev cluster (see hack/make/cluster.mk) if it doesn't already exist.
-	go test ./test/e2e/ -v -ginkgo.v
+	KUBEBUILDER_ASSETS="$(shell $(SETUP_ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test ./... -coverprofile cover.out
 
 .PHONY: registry.setup
 registry.setup: kubectl falcoctl ## Deploy the local OCI registry and push test artifacts. Requires a running cluster.

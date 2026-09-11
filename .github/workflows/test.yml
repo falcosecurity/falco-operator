@@ -28,4 +28,4 @@ jobs:
 
       - name: Run tests
         run: |
-          go test $(go list ./... | grep -v /e2e) -coverprofile cover.out
+          go test ./... -coverprofile cover.out
