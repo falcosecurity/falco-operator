@@ -52,6 +52,41 @@ func defaultLibraryPath(name string) string {
 	return artifact.ArtifactPath(artifact.DefaultArtifactDirs(), name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
 }
 
+func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
+	ctx := context.Background()
+	mockFS := fsfake.NewMockFileSystem()
+	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container"}}
+	fetcher := &artifact.Fetcher{}
+	_, file, err := m.AddPluginConfig(ctx, plugin, nil, fetcher)
+	require.NoError(t, err)
+	rulesKey := Key{Kind: KindRulesfile, Name: "rules"}
+	m.Sync(rulesKey, []RequirementGroup{{{Name: "container", Version: "0.7.0"}}})
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1", "external": "1.0.0"}).Result)
+	content := string(mockFS.Files[file.Path])
+	writes := len(mockFS.WriteCalls)
+
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(nil).Result)
+	p, ok := m.provides["container"]
+	require.True(t, ok, "a configured plugin keeps its structural registration")
+	assert.Equal(t, PluginConfigKey, p.Key)
+	assert.Empty(t, p.Version, "only its confirmed runtime version is invalidated")
+	assert.NotContains(t, m.provides, "external", "an observation-only entry has no desired registration to preserve")
+	assert.Equal(t, "container", m.crToConfigName[plugin.Name])
+	assert.Equal(t, []string{"container"}, m.pluginsConfig.LoadPlugins)
+	assert.Equal(t, []RequirementGroup{{{Name: "container", Version: "0.7.0"}}}, m.requires[rulesKey])
+	assert.Equal(t, content, string(mockFS.Files[file.Path]))
+	assert.Len(t, mockFS.WriteCalls, writes, "an observation must not rewrite or remove artifact files")
+	assert.Empty(t, mockFS.RemoveCalls)
+	assert.True(t, m.PluginLoadMismatch(), "the existing reload recovery must still see that the desired plugin is missing")
+
+	require.NoError(t, m.ForceRewritePluginConfig(ctx, fetcher))
+	assert.Equal(t, content, string(mockFS.Files[file.Path]), "reload recovery must retain the same desired configuration")
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
+	assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.1"}, m.provides["container"])
+	assert.False(t, m.PluginLoadMismatch())
+}
+
 func TestPluginsConfig_AddConfig(t *testing.T) {
 	tests := []struct {
 		name            string
@@ -760,6 +795,62 @@ func TestManager_AddPluginConfig_StoreFailureSurfacesError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disk full")
+	assert.Empty(t, m.pluginsConfig.Configs, "a failed addition must not change the aggregate")
+	assert.Empty(t, m.crToConfigName)
+	assert.Empty(t, m.provides)
+}
+
+func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
+	const removeOperation, renameOperation = "remove", "rename"
+	for _, operation := range []string{removeOperation, renameOperation, "update"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			falco := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"json": "0.7.4"})
+			m := NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, falco)
+			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
+			fetcher := &artifact.Fetcher{}
+			_, file, err := m.AddPluginConfig(ctx, plugin, nil, fetcher)
+			require.NoError(t, err)
+			before := string(fs.Files[file.Path])
+			fs.WriteErr = fmt.Errorf("disk full")
+			switch operation {
+			case removeOperation:
+				err = m.RemovePluginConfigByName(ctx, fetcher, "json", "json")
+			case renameOperation:
+				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
+				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+			case "update":
+				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{OpenParams: "changed"}
+				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+			}
+			require.ErrorContains(t, err, "disk full")
+			assert.Equal(t, before, string(fs.Files[file.Path]))
+			assert.Equal(t, "json", m.crToConfigName["json"])
+			assert.Equal(t, []string{"json"}, m.pluginsConfig.LoadPlugins)
+			assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.4"}, m.provides["json"])
+			// The background rewriter must not later publish an operation that failed.
+			fs.WriteErr = nil
+			require.NoError(t, m.ForceRewritePluginConfig(ctx, fetcher))
+			assert.Equal(t, before, string(fs.Files[file.Path]))
+			// Retrying the same operation must still perform it, not mistake the failed
+			// in-memory mutation for a completed change.
+			if operation == removeOperation {
+				require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "json", "json"))
+				assert.Empty(t, m.pluginsConfig.LoadPlugins)
+				assert.True(t, m.provides["json"].Removed)
+			} else {
+				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+				require.NoError(t, err)
+				assert.NotEqual(t, before, string(fs.Files[file.Path]))
+				if operation == renameOperation {
+					assert.True(t, m.provides["json"].Removed, "the post-install poll still reports the old name")
+					assert.Empty(t, m.provides["json"].Version)
+					assert.Equal(t, "renamed", m.crToConfigName["json"])
+				}
+			}
+		})
+	}
 }
 
 func TestManager_RemovePluginConfigByName_EmptyAfterRemovalKeepsFileOnDisk(t *testing.T) {

@@ -89,6 +89,9 @@ func (e *BlockedError) Error() string {
 type provided struct {
 	Key     Key
 	Version string
+	// Removed records an explicit configuration removal. Keep it until an explicit
+	// registration so a pre-reload (or delayed) observation cannot resurrect the provider.
+	Removed bool
 }
 
 // Manager coordinates disk writes across the artifact-operator sidecar's per-node reconcilers.
@@ -201,6 +204,7 @@ func (m *Manager) CheckRequirement(name, minVersion string) (providedVersion str
 
 // CheckDependency checks primary then alternatives against one locked provider snapshot.
 // The first observed candidate determines the result, even when its version is incompatible.
+// A configured candidate awaiting observation blocks fallback until its version is known.
 func (m *Manager) CheckDependency(primary Requirement, alternatives []Requirement) (matchedName, providedVersion string, satisfied bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -218,8 +222,14 @@ func (m *Manager) checkDependencyLocked(group RequirementGroup, excludedName str
 			continue
 		}
 		p, found := m.provides[req.Name]
-		if !found || p.Version == "" {
+		if !found || p.Removed {
 			continue
+		}
+		if p.Version == "" {
+			// Configured is not absent: Falco may already have loaded this candidate since
+			// our last observation. Do not install rules (or allow removal) via a later
+			// alternative while the earlier candidate's compatibility is still unknown.
+			return req.Name, "", false, nil
 		}
 		satisfied, err = compat.PluginVersionCompatible(p.Version, req.Version)
 		return req.Name, p.Version, satisfied, err
@@ -237,7 +247,7 @@ func versionSatisfies(name, available, required string) (bool, error) {
 	return compat.SemverAtLeast(available, required)
 }
 
-// RefreshFalcoVersions fetches Falco's current /versions snapshot and merges it into the
+// RefreshFalcoVersions fetches Falco's current /versions snapshot and reconciles it with the
 // provides registry (see OnFalcoVersionsObserved). Returns the fetched snapshot so callers that
 // also want to inspect it directly (e.g. compat.VersionsWatcher, for its own change-diffing) can
 // do so without a second fetch.
@@ -252,7 +262,7 @@ func (m *Manager) RefreshFalcoVersions(ctx context.Context) (*compat.Versions, e
 
 // Events returns a new channel that receives one GenericEvent each time OnFalcoVersionsObserved
 // changes the version this Manager reports for any name; e.g. a name transitioning from
-// not-yet-confirmed to confirmed, or an existing version bumping. Each call returns an
+// not-yet-confirmed to confirmed, a version bumping, or a confirmed name disappearing. Each call returns an
 // independent channel, so every subscriber sees every event.
 //
 // Events reacts to the Manager's own bookkeeping rather than compat.VersionsWatcher's diff of
@@ -279,24 +289,44 @@ func (m *Manager) notifySubscribers() {
 	}
 }
 
-// OnFalcoVersionsObserved merges a freshly-observed Falco capability snapshot into the provides
+// OnFalcoVersionsObserved reconciles a complete Falco capability snapshot with the provides
 // registry. Existing (operator-tracked) entries (e.g. a plugin already registered via
 // AddPluginConfig/SyncProvides) get their Version filled in or updated, preserving their
-// original Key. Names not already tracked (Falco's own engine_version_semver/
+// original Key. Explicitly removed entries stay unavailable until registered again.
+// Names not already tracked (Falco's own engine_version_semver/
 // plugin_api_version, or any plugin name Falco reports that the operator didn't configure) get a
 // new entry under KindFalco. Used as compat.VersionsWatcher's sink (wired in
 // cmd/artifact/main.go) and by RefreshFalcoVersions' own merge step; safe to call directly with
-// any observed snapshot.
+// any successfully observed snapshot. Missing operator-tracked entries retain their Key but
+// lose their confirmed Version; missing observation-only entries are removed.
 //
 // Notifies Events() subscribers whenever any name's Version changes value, including "" -> a
-// confirmed version.
+// confirmed version and a confirmed version becoming unavailable.
 func (m *Manager) OnFalcoVersionsObserved(v *compat.Versions) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.lastFalcoPluginVersions = v.PluginVersions()
+	observed := v.All()
 	changed := false
-	for name, version := range v.All() {
+	for name, existing := range m.provides {
+		if _, ok := observed[name]; ok {
+			continue
+		}
+		if existing.Key.Kind == KindFalco {
+			delete(m.provides, name)
+			changed = true
+		} else if existing.Version != "" {
+			// Keep the desired registration, but do not treat an unloaded plugin as available.
+			existing.Version = ""
+			m.provides[name] = existing
+			changed = true
+		}
+	}
+	for name, version := range observed {
 		existing, ok := m.provides[name]
+		if existing.Removed {
+			continue
+		}
 		if !ok {
 			m.provides[name] = provided{Key: Key{Kind: KindFalco, Name: name}, Version: version}
 			changed = true
@@ -344,7 +374,7 @@ func (m *Manager) PluginLoadMismatch() bool {
 func (m *Manager) ForceRewritePluginConfig(ctx context.Context, fetcher artifact.ArtifactFetcher) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, _, err := m.writePluginsConfig(ctx, nil, fetcher)
+	_, _, err := m.writePluginsConfig(ctx, nil, fetcher, m.pluginsConfig)
 	return err
 }
 

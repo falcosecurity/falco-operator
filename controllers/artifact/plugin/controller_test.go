@@ -32,13 +32,16 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
@@ -1410,10 +1413,10 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 	require.NoError(t, cl.Delete(context.Background(), nodeObj))
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))
 
-	done, err := r.handleDeletion(context.Background(), nodeObj)
+	handled, err := r.handleDeletion(context.Background(), nodeObj)
 
 	require.NoError(t, err, "a blocked removal must not surface as a reconcile error")
-	assert.False(t, done, "deletion cleanup must not be reported done while blocked")
+	assert.True(t, handled, "blocked cleanup must stop normal reconciliation")
 	assert.True(t, controllerutil.ContainsFinalizer(nodeObj, pluginNodeFinalizer), "finalizer must remain while blocked")
 
 	cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
@@ -1430,9 +1433,82 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 
 	// Now clear the requirement and confirm cleanup proceeds.
 	r.store.Sync(rfKey, nil)
-	done, err = r.handleDeletion(context.Background(), nodeObj)
+	handled, err = r.handleDeletion(context.Background(), nodeObj)
 	require.NoError(t, err)
-	assert.True(t, done)
+	assert.True(t, handled)
+}
+
+func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
+	patchFailure := errors.New("status unavailable")
+	for _, failPatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("status patch fails=%t", failPatch), func(t *testing.T) {
+			ctx := t.Context()
+			parent := &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "new"}},
+				},
+				Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "new-spec"}},
+			}
+			node := newTestPluginNodeObj(withPluginOwnerRef(), withPluginFinalizer())
+			r, cl := newTestReconciler(t, parent, node)
+			_, configFile, err := r.store.AddPluginConfig(ctx, parent, nil, r.fetcher)
+			require.NoError(t, err)
+			result, err := r.fetcher.FetchInline(ctx, []byte("installed binary"))
+			require.NoError(t, err)
+			action, binaryFile, err := r.store.Store(ctx, nil, parent.Name, 0, artifact.TypePlugin, artifact.MediumOCI, result)
+			require.NoError(t, err)
+			artifact.UpdateInstalledStatus(&node.Status.InstalledArtifacts, action, artifact.MediumOCI, binaryFile)
+			artifact.UpdateInstalledSpecHash(&node.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
+			require.NoError(t, cl.Status().Update(ctx, node))
+			installed := node.Status.InstalledArtifacts
+			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "installed-rules"}
+			r.store.Sync(key, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
+			require.NoError(t, cl.Delete(ctx, node))
+			if failPatch {
+				watchClient, ok := cl.(client.WithWatch)
+				require.True(t, ok)
+				r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+					SubResourceApply: func(context.Context, client.Client, string, k8sruntime.ApplyConfiguration, ...client.SubResourceApplyOption) error {
+						return patchFailure
+					},
+				})
+			}
+			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)}
+			_, err = r.Reconcile(ctx, request)
+			if failPatch {
+				require.ErrorIs(t, err, patchFailure)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount, "deletion must not fall through to an OCI update")
+			for _, file := range []*artifact.File{binaryFile, configFile} {
+				intact, verifyErr := r.store.Verify(ctx, file)
+				require.NoError(t, verifyErr)
+				assert.True(t, intact, "blocked deletion must preserve installed files")
+			}
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, node))
+			assert.Contains(t, node.Finalizers, pluginNodeFinalizer)
+			assert.Equal(t, installed, node.Status.InstalledArtifacts)
+			if !failPatch {
+				condition := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
+				require.NotNil(t, condition)
+				assert.Equal(t, metav1.ConditionTrue, condition.Status)
+			}
+
+			// Once the dependent rules are removed, normal cleanup can finish without installing.
+			r.Client = cl
+			r.store.Sync(key, nil)
+			_, err = r.Reconcile(ctx, request)
+			require.NoError(t, err)
+			err = cl.Get(ctx, request.NamespacedName, node)
+			require.True(t, k8serrors.IsNotFound(err), "cleanup should release the finalizer and delete the ArtifactNode: %v", err)
+			present, err := r.store.Verify(ctx, binaryFile)
+			require.NoError(t, err)
+			assert.False(t, present)
+			assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
+		})
+	}
 }
 
 func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
