@@ -19,6 +19,8 @@ package rulesfile
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -32,6 +34,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"oras.land/oras-go/v2/registry/remote/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -43,6 +46,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
@@ -50,8 +54,11 @@ import (
 )
 
 const (
-	testRulesfileName   = "test-rulesfile"
-	testRulesfileDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testRulesfileName       = "test-rulesfile"
+	testRulesfileDigest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	testNextRulesfileDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testRulesfileRepository = "test/rulesfile"
+	testEngine22Rules       = "- required_engine_version: 22"
 )
 
 func testRulesfileNodeName() string {
@@ -845,7 +852,7 @@ func TestFetchAndCacheArtifactMeta_OCIContentFetchError(t *testing.T) {
 
 func TestFetchAndCacheArtifactMeta_OCIWithContentRequirements(t *testing.T) {
 	// Content YAML declares engine version requirement.
-	yamlContent := []byte(`- required_engine_version: 22`)
+	yamlContent := []byte(testEngine22Rules)
 	mockPuller := &pullerfake.MockOCIPuller{
 		ConfigResult:  &puller.ArtifactConfig{},
 		ConfigDigest:  testRulesfileDigest,
@@ -895,7 +902,7 @@ func TestFetchAndCacheArtifactMeta_ConfigMapMissing(t *testing.T) {
 func TestFetchAndCacheArtifactMeta_ConfigMapRequiredKeyMissing(t *testing.T) {
 	cm := &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
-		Data:       map[string]string{"other.yaml": "- required_engine_version: 22"},
+		Data:       map[string]string{"other.yaml": testEngine22Rules},
 	}
 	rf := newTestRulesfile(withRulesfileConfigMapRef(cm.Name))
 	r, _ := newTestReconciler(t, rf, cm)
@@ -1012,7 +1019,7 @@ func TestFetchAndCacheArtifactMeta_ConfigMapChangeRebuildsCompleteAggregate(t *t
 
 	updatedCM := &corev1.ConfigMap{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), updatedCM))
-	updatedCM.Data[commonv1alpha1.ConfigMapRulesKey] = `- required_engine_version: 22`
+	updatedCM.Data[commonv1alpha1.ConfigMapRulesKey] = testEngine22Rules
 	require.NoError(t, cl.Update(context.Background(), updatedCM))
 
 	require.NoError(t, r.fetchAndCacheArtifactMeta(context.Background(), rf))
@@ -1121,7 +1128,7 @@ func TestFetchAndCacheArtifactMeta_CombinesConstraintsWithoutMaskingConflicts(t 
 
 func TestAppendYAMLRequirements_EngineVersionInt(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{}
-	content := []byte(`- required_engine_version: 22`)
+	content := []byte(testEngine22Rules)
 	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Requirements, 1)
 	assert.Equal(t, "engine_version", meta.Requirements[0].Name)
@@ -1606,6 +1613,87 @@ func TestFetchAndCacheBinary_PullError(t *testing.T) {
 	assert.Contains(t, err.Error(), "registry down")
 }
 
+func TestReconcile_NewNodeKeepsResolvedRevision(t *testing.T) {
+	const emptyCache = "empty after restart"
+	ctx := context.Background()
+	rf := newTestRulesfile(withRulesfileOCI())
+	rf.Spec.OCIArtifact.Image.Repository = testRulesfileRepository
+	rf.Generation = 1
+	layer, err := pullerfake.MakeTarGz("rules.yaml", []byte("rules from revision A"))
+	require.NoError(t, err)
+	mockPuller := &pullerfake.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{}, ConfigDigest: testRulesfileDigest,
+		Result:       &puller.RegistryResult{RootDigest: testRulesfileDigest, Type: puller.Rulesfile},
+		LayerContent: layer,
+	}
+	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, t.TempDir(), rf, newTestNode(), newTestFalco(), newRunningFalcoPod())
+	_, err = r.Reconcile(ctx, testutil.Request(rf.Name))
+	require.NoError(t, err)
+	require.Len(t, mockPuller.PullCalls, 1)
+
+	mockPuller.ConfigDigest = testNextRulesfileDigest
+	mockPuller.ResolveDigestResult = mockPuller.ConfigDigest
+	added := newTestNode()
+	added.Name = "new-node"
+	require.NoError(t, r.Create(ctx, added))
+	pod := newRunningFalcoPod()
+	pod.Name = "new-falco"
+	pod.Spec.NodeName = added.Name
+	require.NoError(t, r.Create(ctx, pod))
+
+	for _, state := range []string{"warm", "reloaded", emptyCache} {
+		t.Run(state, func(t *testing.T) {
+			if state != "warm" {
+				cacheDir := r.cache.Dir()
+				if state == emptyCache {
+					cacheDir = t.TempDir()
+				}
+				r.cache = artifactcache.NewCache(cacheDir)
+				require.NoError(t, r.cache.Load())
+			}
+			if state == emptyCache {
+				mockPuller.PullErr = fmt.Errorf("revision unavailable")
+				_, reconcileErr := r.Reconcile(ctx, testutil.Request(rf.Name))
+				require.ErrorContains(t, reconcileErr, "revision unavailable")
+				_, ok := r.cache.Lookup("rulesfile", rf.Namespace, rf.Name, "")
+				require.False(t, ok)
+				mockPuller.PullErr = nil
+			}
+			pullsBefore := len(mockPuller.PullCalls)
+			_, reconcileErr := r.Reconcile(ctx, testutil.Request(rf.Name))
+			require.NoError(t, reconcileErr)
+			wantPulls := pullsBefore
+			if state == emptyCache {
+				wantPulls++
+			}
+			require.Len(t, mockPuller.PullCalls, wantPulls)
+			child := &artifactv1alpha1.ArtifactNode{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{
+				Namespace: rf.Namespace,
+				Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, rf.Name, added.Name),
+			}, child))
+			require.Equal(t, added.Name, child.Spec.NodeName)
+			got := &artifactv1alpha1.Rulesfile{}
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(rf), got))
+			require.Equal(t, testRulesfileDigest, got.Status.ArtifactMeta.Digest)
+			require.Equal(t, got.Generation, got.Status.ObservedGeneration)
+			require.Len(t, mockPuller.FetchConfigCalls, 1)
+			require.Len(t, mockPuller.FetchContentCalls, 1)
+			require.Empty(t, mockPuller.ResolveDigestCalls)
+			for _, call := range mockPuller.PullCalls {
+				require.Equal(t, "ghcr.io/test/rulesfile@"+testRulesfileDigest, call.Ref)
+			}
+			request := httptest.NewRequestWithContext(ctx, http.MethodGet,
+				"/v1/artifacts/rulesfiles/"+rf.Namespace+"/"+rf.Name+"?digest="+testRulesfileDigest, http.NoBody)
+			response := httptest.NewRecorder()
+			artifactserver.New(r.cache).Handler().ServeHTTP(response, request)
+			require.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, "rules from revision A", response.Body.String())
+			require.Equal(t, testRulesfileDigest, response.Header().Get(artifact.ArtifactDigestHeader))
+		})
+	}
+}
+
 func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
 	// Selector requires env=prod; plain node doesn't have that label → staleNode is stale.
 	// staleNode has a finalizer and a Falco pod still runs there, so orphan detection calls
@@ -1680,4 +1768,206 @@ func TestReconcile_FetchAndCacheBinaryError(t *testing.T) {
 	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry down")
+}
+
+type referenceConfigPuller struct {
+	*pullerfake.MockOCIPuller
+	fetchConfig func(string) (*puller.ArtifactConfig, string, error)
+}
+
+func (p *referenceConfigPuller) FetchConfig(
+	_ context.Context, ref string, _ auth.CredentialFunc, _ *puller.RegistryOptions,
+) (*puller.ArtifactConfig, string, error) {
+	p.FetchConfigCalls = append(p.FetchConfigCalls, ref)
+	return p.fetchConfig(ref)
+}
+
+func TestFetchAndCacheArtifactMeta_LocalChangesKeepResolvedDigest(t *testing.T) {
+	const newDigest = testNextRulesfileDigest
+	ctx := context.Background()
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: testutil.TestNamespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: "- required_engine_version: 15"},
+	}
+	rf := newTestRulesfile(withRulesfileOCI(), withRulesfileConfigMapRef(cm.Name))
+	rf.Spec.OCIArtifact.Image.Repository = testRulesfileRepository
+	originalOCI := rf.Spec.OCIArtifact.DeepCopy()
+	tagRef := artifact.ResolveReference(originalOCI)
+	pinnedRef := "ghcr.io/test/rulesfile@" + testRulesfileDigest
+	oldConfig := &puller.ArtifactConfig{Dependencies: []puller.ArtifactDependency{{Name: "container", Version: "1.0.0"}}}
+	newConfig := &puller.ArtifactConfig{Dependencies: []puller.ArtifactDependency{{Name: "different-plugin", Version: "2.0.0"}}}
+	tagMoved := false
+	mockPuller := &referenceConfigPuller{
+		MockOCIPuller: &pullerfake.MockOCIPuller{},
+		fetchConfig: func(ref string) (*puller.ArtifactConfig, string, error) {
+			switch ref {
+			case pinnedRef:
+				return oldConfig, testRulesfileDigest, nil
+			case tagRef:
+				if !tagMoved {
+					return oldConfig, testRulesfileDigest, nil
+				}
+				return newConfig, newDigest, nil
+			case "ghcr.io/test/rulesfile:v2":
+				return newConfig, newDigest, nil
+			default:
+				return nil, "", fmt.Errorf("unexpected reference %q", ref)
+			}
+		},
+	}
+	r, cl := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	originalSpecHash := rf.Status.ArtifactMeta.SpecHash
+	require.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest)
+	require.Equal(t, []string{tagRef}, mockPuller.FetchConfigCalls)
+
+	// Moving the registry tag alone must not cause a new resolution.
+	tagMoved = true
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	require.Len(t, mockPuller.FetchConfigCalls, 1)
+
+	for _, change := range []string{"configmap", "inline", "remove local sources"} {
+		t.Run(change, func(t *testing.T) {
+			previousSourcesHash := rf.Status.ArtifactMetaSourcesHash
+			switch change {
+			case "configmap":
+				updated := &corev1.ConfigMap{}
+				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(cm), updated))
+				updated.Data[commonv1alpha1.ConfigMapRulesKey] = testEngine22Rules
+				require.NoError(t, cl.Update(ctx, updated))
+			case "inline":
+				rf.Spec.InlineRules = &apiextensionsv1.JSON{Raw: []byte(`- required_engine_version: "0.30.0"`)}
+			case "remove local sources":
+				rf.Spec.ConfigMapRef = nil
+				rf.Spec.InlineRules = nil
+			}
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			require.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest, "local source changes must not move the OCI tag")
+			require.Equal(t, originalSpecHash, rf.Status.ArtifactMeta.SpecHash)
+			require.Equal(t, originalOCI, rf.Spec.OCIArtifact, "pinning must not mutate the requested spec")
+			require.NotEqual(t, previousSourcesHash, rf.Status.ArtifactMetaSourcesHash)
+			require.Equal(t, pinnedRef, mockPuller.FetchConfigCalls[len(mockPuller.FetchConfigCalls)-1])
+			require.Equal(t, pinnedRef, mockPuller.FetchContentCalls[len(mockPuller.FetchContentCalls)-1])
+			require.Equal(t, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}, rf.Status.ArtifactMeta.Dependencies)
+			var wantRequirements []commonv1alpha1.ArtifactMetaRequirement
+			if rf.Spec.ConfigMapRef != nil {
+				wantRequirements = append(wantRequirements, commonv1alpha1.ArtifactMetaRequirement{Name: "engine_version", Version: "22"})
+			}
+			if rf.Spec.InlineRules != nil {
+				wantRequirements = append(wantRequirements, commonv1alpha1.ArtifactMetaRequirement{Name: "engine_version_semver", Version: "0.30.0"})
+			}
+			require.ElementsMatch(t, wantRequirements, rf.Status.ArtifactMeta.Requirements, "local metadata must still be rebuilt completely")
+		})
+	}
+	// An explicit OCI spec change is allowed to resolve a new revision.
+	rf.Spec.OCIArtifact.Image.Tag = "v2"
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	require.Equal(t, newDigest, rf.Status.ArtifactMeta.Digest)
+	require.NotEqual(t, originalSpecHash, rf.Status.ArtifactMeta.SpecHash)
+	require.Equal(t, "ghcr.io/test/rulesfile:v2", mockPuller.FetchConfigCalls[len(mockPuller.FetchConfigCalls)-1])
+
+	// A recreated CR has no previous metadata, even if its name and OCI spec are identical.
+	recreated := newTestRulesfile(withRulesfileOCI())
+	recreated.UID = "replacement"
+	recreated.Spec.OCIArtifact = originalOCI.DeepCopy()
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, recreated))
+	require.Equal(t, newDigest, recreated.Status.ArtifactMeta.Digest)
+	require.Equal(t, originalSpecHash, recreated.Status.ArtifactMeta.SpecHash)
+	require.Equal(t, tagRef, mockPuller.FetchConfigCalls[len(mockPuller.FetchConfigCalls)-1])
+	require.Equal(t, "ghcr.io/test/rulesfile@"+newDigest, mockPuller.FetchContentCalls[len(mockPuller.FetchContentCalls)-1])
+}
+
+func TestFetchAndCacheArtifactMeta_PinnedFetchFailurePreservesAggregate(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		fail         func(*pullerfake.MockOCIPuller)
+		wantErr      string
+		contentCalls int
+	}{
+		{
+			name:         "config unavailable",
+			fail:         func(p *pullerfake.MockOCIPuller) { p.FetchConfigErr = fmt.Errorf("manifest unavailable") },
+			wantErr:      "manifest unavailable",
+			contentCalls: 1,
+		},
+		{
+			name: "unexpected digest",
+			fail: func(p *pullerfake.MockOCIPuller) {
+				p.ConfigDigest = testNextRulesfileDigest
+			},
+			wantErr:      "does not match expected digest",
+			contentCalls: 1,
+		},
+		{
+			name:         "content unavailable",
+			fail:         func(p *pullerfake.MockOCIPuller) { p.FetchContentErr = fmt.Errorf("content unavailable") },
+			wantErr:      "content unavailable",
+			contentCalls: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			rf := newTestRulesfile(withRulesfileOCI(), withInlineRules("- required_engine_version: 15"))
+			rf.Spec.OCIArtifact.Image.Repository = testRulesfileRepository
+			mockPuller := &pullerfake.MockOCIPuller{
+				ConfigResult: &puller.ArtifactConfig{Dependencies: []puller.ArtifactDependency{{Name: "container", Version: "1.0.0"}}},
+				ConfigDigest: testRulesfileDigest,
+			}
+			r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			previousMeta := rf.Status.ArtifactMeta.DeepCopy()
+			previousHash := rf.Status.ArtifactMetaSourcesHash
+
+			rf.Spec.InlineRules.Raw = []byte(testEngine22Rules)
+			tc.fail(mockPuller)
+			require.ErrorContains(t, r.fetchAndCacheArtifactMeta(ctx, rf), tc.wantErr)
+			require.Equal(t, previousMeta, rf.Status.ArtifactMeta, "a failed pinned fetch must not replace the last complete aggregate")
+			require.Equal(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+			pinnedRef := "ghcr.io/test/rulesfile@" + testRulesfileDigest
+			require.Equal(t, []string{artifact.ResolveReference(rf.Spec.OCIArtifact), pinnedRef}, mockPuller.FetchConfigCalls,
+				"a failed pinned fetch must not fall back to the tag")
+			require.Len(t, mockPuller.FetchContentCalls, tc.contentCalls)
+			for _, ref := range mockPuller.FetchContentCalls {
+				require.Equal(t, pinnedRef, ref)
+			}
+
+			// A later successful retry applies the local change at the same OCI revision.
+			mockPuller.FetchConfigErr = nil
+			mockPuller.FetchContentErr = nil
+			mockPuller.ConfigDigest = testRulesfileDigest
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			require.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest)
+			require.Equal(t, previousMeta.Dependencies, rf.Status.ArtifactMeta.Dependencies)
+			require.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "22"}}, rf.Status.ArtifactMeta.Requirements)
+			require.NotEqual(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+			require.Equal(t, pinnedRef, mockPuller.FetchConfigCalls[len(mockPuller.FetchConfigCalls)-1])
+			require.Equal(t, pinnedRef, mockPuller.FetchContentCalls[len(mockPuller.FetchContentCalls)-1])
+		})
+	}
+}
+
+func TestFetchAndCacheArtifactMeta_RemovingAndReaddingOCIResolvesAgain(t *testing.T) {
+	ctx := context.Background()
+	rf := newTestRulesfile(withRulesfileOCI(), withInlineRules(testEngine22Rules))
+	mockPuller := &pullerfake.MockOCIPuller{
+		ConfigResult: &puller.ArtifactConfig{Dependencies: []puller.ArtifactDependency{{Name: "container", Version: "1.0.0"}}},
+		ConfigDigest: testRulesfileDigest,
+	}
+	r, _ := newTestReconcilerWithPuller(t, mockPuller, rf)
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	oci := rf.Spec.OCIArtifact.DeepCopy()
+	rf.Spec.OCIArtifact = nil
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	require.Empty(t, rf.Status.ArtifactMeta.Digest)
+	require.Empty(t, rf.Status.ArtifactMeta.SpecHash)
+	require.Empty(t, rf.Status.ArtifactMeta.Dependencies)
+	require.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "22"}}, rf.Status.ArtifactMeta.Requirements)
+	require.Len(t, mockPuller.FetchConfigCalls, 1)
+
+	mockPuller.ConfigDigest = testNextRulesfileDigest
+	rf.Spec.OCIArtifact = oci
+	require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+	require.Equal(t, mockPuller.ConfigDigest, rf.Status.ArtifactMeta.Digest)
+	require.Equal(t, []string{artifact.ResolveReference(oci), artifact.ResolveReference(oci)}, mockPuller.FetchConfigCalls,
+		"re-adding an OCI source is a new resolution, not reuse of removed metadata")
 }

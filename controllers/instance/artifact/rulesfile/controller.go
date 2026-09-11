@@ -360,9 +360,15 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 		}
 		am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
 
+		// A ConfigMap/inline change rebuilds the aggregate, but must not update an unchanged
+		// OCI source by following its tag. Re-read that source at its previously resolved digest.
+		var knownDigest string
+		if cached := rulesfile.Status.ArtifactMeta; artifact.ArtifactMetaCacheHit(cached, sources.OCIArtifactSpecHash) {
+			knownDigest = cached.Digest
+		}
 		ref := artifact.ResolveReference(rulesfile.Spec.OCIArtifact)
 		logger.Info("Fetching rulesfile ArtifactMeta from OCI config layer", "ref", ref)
-		fetched, digest, fetchErr := am.FetchConfig(ctx, rulesfile.Spec.OCIArtifact)
+		fetched, digest, fetchErr := am.FetchConfig(ctx, rulesfile.Spec.OCIArtifact, knownDigest)
 		if fetchErr != nil {
 			logger.Error(fetchErr, "Unable to fetch rulesfile OCI config; ArtifactMeta will remain stale", "ref", ref)
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactProgramFailed,
