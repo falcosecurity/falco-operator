@@ -130,6 +130,8 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Programmed is derived here as a gateway: True only when all other conditions are True.
 	// In advise mode DependenciesSatisfied is excluded from the gate; it's advisory only.
 	defer func() {
+		key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+		r.store.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap}, &nodeObj.Status.InstalledArtifacts)
 		skipDependenciesSatisfied := func(condType string) bool {
 			return !r.enforceRequirements && condType == commonv1alpha1.ConditionDependenciesSatisfied.String()
 		}
@@ -179,7 +181,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// False. Without this they are absent, which lets another node's True status win in
 		// AggregateConditions and makes the Rulesfile-level status show e.g.
 		// OCIArtifactProgrammed=True even when DependenciesSatisfied=False.
-		if len(nodeObj.Status.InstalledArtifacts) == 0 {
+		if len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) == 0 {
 			depCond := apimeta.FindStatusCondition(nodeObj.Status.Conditions,
 				commonv1alpha1.ConditionDependenciesSatisfied.String())
 			reason := artifact.ReasonDependenciesNotSatisfied
@@ -210,7 +212,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Register this rulesfile's current dependencies with the shared node artifact manager
 	// before writing anything, so a concurrent Plugin removal's blocked-by check can see them
 	// (avoids a race with ensureRulesfile's own write).
-	r.store.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: rulesfile.Name},
+	r.store.Sync(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
 		nodeartifacts.RequirementGroupsFromDependencies(dependenciesOf(rulesfile)))
 
 	// Ensure the rulesfile artifacts are on the local filesystem. A transient OCI-fetch failure
@@ -241,17 +243,27 @@ func (r *RulesfileReconciler) handleDeletion(ctx context.Context, nodeObj *artif
 
 	logger.Info("RulesfileNode marked for deletion, cleaning up")
 
-	if err := r.store.Remove(ctx, nodeObj.Status.InstalledArtifacts); err != nil {
+	// Resolves the rulesfile name from the ownerRef: needed both to key the installed-cache
+	// lookup below and, unchanged from before, to forget its dependency registration.
+	var rulesfileName string
+	for _, ref := range nodeObj.OwnerReferences {
+		if ref.Kind == controllerhelper.KindRulesfile {
+			rulesfileName = ref.Name
+			break
+		}
+	}
+	// OwnerReferences never carry a namespace (they're always same-namespace by k8s convention);
+	// nodeObj's own namespace is the rulesfile's.
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: nodeObj.Namespace, Name: rulesfileName}
+
+	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
 		logger.Error(err, "unable to remove installed rulesfile artifacts from disk")
 		return false, err
 	}
 
 	// Forget this rulesfile's dependencies so a Plugin removal blocked on them can proceed.
-	for _, ref := range nodeObj.OwnerReferences {
-		if ref.Kind == controllerhelper.KindRulesfile {
-			r.store.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: ref.Name}, nil)
-			break
-		}
+	if rulesfileName != "" {
+		r.store.Sync(key, nil)
 	}
 
 	patch := client.MergeFrom(nodeObj.DeepCopy())
@@ -462,11 +474,12 @@ func (r *RulesfileReconciler) cleanupStaleMedium(
 	}
 	logger := log.FromContext(ctx)
 	apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, conditionType)
-	existing := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, medium)
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	existing := r.store.FindInstalled(key, medium)
 	if existing == nil {
 		return nil
 	}
-	if err := r.store.Remove(ctx, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(medium)}}); err != nil {
+	if err := r.store.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(medium)}}); err != nil {
 		logger.Error(err, "unable to remove stale rulesfile", "medium", medium)
 		return err
 	}
@@ -491,7 +504,8 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 		parentSpecHash = rulesfile.Status.ArtifactMeta.SpecHash
 		expectedDigest = rulesfile.Status.ArtifactMeta.Digest
 	}
-	current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	current := r.store.FindInstalled(key, artifact.MediumOCI)
 
 	// Decide whether to hit the artifact server.
 	// Skip only when the spec hash is unchanged AND the disk file is intact.
@@ -519,7 +533,7 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 			))
 			return err
 		}
-		ociAction, newFile, err := r.store.Store(ctx, current, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumOCI, result)
+		ociAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumOCI, result)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile OCI artifact")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
@@ -529,14 +543,17 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 			))
 			return err
 		}
-		artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, ociAction, artifact.MediumOCI, newFile)
 		// Persist specHash even when StoreActionUnchanged (same content, different spec).
-		artifact.UpdateInstalledSpecHash(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, parentSpecHash)
+		r.store.UpdateInstalledSpecHash(key, artifact.MediumOCI, parentSpecHash)
 		artifact.RecordStoreEvent(r.recorder, rulesfile, ociAction, artifact.MediumOCI)
 		if ociAction == artifact.StoreActionAdded || ociAction == artifact.StoreActionUpdated || ociAction == artifact.StoreActionPriorityChanged {
 			logger.Info("Rulesfile OCI artifact written to disk", "path", newFile.Path, "action", string(ociAction))
 		}
 	}
+	// Mirrors the cache into status unconditionally, whether this reconcile fetched anything or
+	// took the skip-fetch shortcut above: see Manager.SyncInstalledStatus's doc comment for why a
+	// write gated on this reconcile's own StoreAction would leave status permanently behind.
+	r.store.SyncInstalledStatus(key, artifact.MediumOCI, &nodeObj.Status.InstalledArtifacts)
 	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, gen,
 	))
@@ -573,8 +590,7 @@ func (r *RulesfileReconciler) ensureInlineRulesfile(
 			))
 			return err
 		}
-		current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
-		inlineAction, newFile, err := r.store.Store(ctx, current, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumInline, result)
+		inlineAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumInline, result)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile inline rules")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
@@ -584,7 +600,10 @@ func (r *RulesfileReconciler) ensureInlineRulesfile(
 			))
 			return err
 		}
-		artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, inlineAction, artifact.MediumInline, newFile)
+		r.store.SyncInstalledStatus(
+			nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
+			artifact.MediumInline, &nodeObj.Status.InstalledArtifacts,
+		)
 		artifact.RecordStoreEvent(r.recorder, rulesfile, inlineAction, artifact.MediumInline)
 		if inlineAction == artifact.StoreActionAdded || inlineAction == artifact.StoreActionUpdated ||
 			inlineAction == artifact.StoreActionPriorityChanged {
@@ -617,8 +636,7 @@ func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 		))
 		return err
 	}
-	current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumConfigMap)
-	cmAction, newFile, err := r.store.Store(ctx, current, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumConfigMap, result)
+	cmAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumConfigMap, result)
 	if err != nil {
 		logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
 		artifact.RecordWarning(r.recorder, rulesfile,
@@ -629,7 +647,10 @@ func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 		))
 		return err
 	}
-	artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, cmAction, artifact.MediumConfigMap, newFile)
+	r.store.SyncInstalledStatus(
+		nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
+		artifact.MediumConfigMap, &nodeObj.Status.InstalledArtifacts,
+	)
 	artifact.RecordStoreEvent(r.recorder, rulesfile, cmAction, artifact.MediumConfigMap)
 	if cmAction == artifact.StoreActionAdded || cmAction == artifact.StoreActionUpdated || cmAction == artifact.StoreActionPriorityChanged {
 		logger.Info("Rulesfile ConfigMap artifact written to disk", "path", newFile.Path, "action", string(cmAction))
@@ -742,7 +763,7 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 		if r.enforceRequirements {
 			baseMsg := "artifact metadata declares no requirements; installation blocked in enforce mode"
 			reason, msg := artifact.ReasonDependenciesUnknown, baseMsg
-			if len(nodeObj.Status.InstalledArtifacts) > 0 {
+			if len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) > 0 {
 				reason = artifact.ReasonDependenciesNotSatisfiedUpdateRejected
 				msg = baseMsg + artifact.MessageSuffixUpdateRejected
 			}
@@ -791,7 +812,8 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	if len(unsatisfied) > 0 {
 		baseMsg := strings.Join(unsatisfied, "; ")
 		logger.Info("Rulesfile plugin dependencies not satisfied", "count", len(unsatisfied), "unsatisfied", unsatisfied)
-		alreadyInstalled := len(nodeObj.Status.InstalledArtifacts) > 0
+		rfKey := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+		alreadyInstalled := len(r.store.GetInstalled(rfKey)) > 0
 		skip, reason, msg := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, alreadyInstalled, baseMsg)
 		artifact.RecordWarning(r.recorder, rulesfile, reason, msg)
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
@@ -819,7 +841,8 @@ func (r *RulesfileReconciler) checkEngineRequirement(
 	gen int64,
 ) (skip, satisfied bool, err error) {
 	logger := log.FromContext(ctx)
-	alreadyInstalled := len(nodeObj.Status.InstalledArtifacts) > 0
+	rfKey := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	alreadyInstalled := len(r.store.GetInstalled(rfKey)) > 0
 	provided, found, ok, semverErr := r.store.CheckRequirement(name, requiredVersion)
 	if semverErr != nil {
 		msg := fmt.Sprintf("Unable to compare %s versions: %s", name, semverErr.Error())

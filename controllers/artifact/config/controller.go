@@ -122,6 +122,8 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// Patch node object status via defer to ensure it's always called.
 	// Programmed is derived here as a gateway: True only when all other conditions are True.
 	defer func() {
+		key := nodeartifacts.KeyFromObj(nodeartifacts.KindConfig, config)
+		r.store.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumInline, artifact.MediumConfigMap}, &nodeObj.Status.InstalledArtifacts)
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
 			nodeObj.Status.Conditions, nil,
 			artifact.ReasonProgrammed, artifact.MessageProgrammed, artifact.ReasonProgramFailed,
@@ -187,7 +189,17 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 
 	logger.Info("ConfigNode marked for deletion, cleaning up")
 
-	if err := r.store.Remove(ctx, nodeObj.Status.InstalledArtifacts); err != nil {
+	var configName string
+	for _, ref := range nodeObj.OwnerReferences {
+		if ref.Kind == controllerhelper.KindConfig {
+			configName = ref.Name
+			break
+		}
+	}
+	// OwnerReferences never carry a namespace; nodeObj's own namespace is the config's.
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: nodeObj.Namespace, Name: configName}
+
+	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
 		logger.Error(err, "unable to remove installed config artifacts from disk")
 		return false, err
 	}
@@ -295,12 +307,14 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	gen := config.GetGeneration()
 	logger := log.FromContext(ctx)
 	p := config.Spec.Priority
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindConfig, config)
 
 	// Stale-entry cleanup: remove files and conditions for mediums no longer in spec.
 	if config.Spec.Config == nil {
 		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
-		if existing := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumInline); existing != nil {
-			if err := r.store.Remove(ctx, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(artifact.MediumInline)}}); err != nil {
+		if existing := r.store.FindInstalled(key, artifact.MediumInline); existing != nil {
+			toRemove := []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(artifact.MediumInline)}}
+			if err := r.store.Remove(ctx, key, toRemove); err != nil {
 				logger.Error(err, "unable to remove stale inline config")
 				return err
 			}
@@ -309,8 +323,9 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	}
 	if config.Spec.ConfigMapRef == nil {
 		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigMapArtifactProgrammed.String())
-		if existing := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumConfigMap); existing != nil {
-			if err := r.store.Remove(ctx, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(artifact.MediumConfigMap)}}); err != nil {
+		if existing := r.store.FindInstalled(key, artifact.MediumConfigMap); existing != nil {
+			toRemove := []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(artifact.MediumConfigMap)}}
+			if err := r.store.Remove(ctx, key, toRemove); err != nil {
 				logger.Error(err, "unable to remove stale configmap config")
 				return err
 			}
@@ -342,8 +357,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 				))
 				return err
 			}
-			current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
-			inlineAction, newFile, err := r.store.Store(ctx, current, config.Name, p, artifact.TypeConfig, artifact.MediumInline, result)
+			inlineAction, _, err := r.store.Store(ctx, config.Namespace, config.Name, p, artifact.TypeConfig, artifact.MediumInline, result)
 			if err != nil {
 				logger.Error(err, "unable to store inline config")
 				artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
@@ -353,7 +367,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 				))
 				return err
 			}
-			artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, inlineAction, artifact.MediumInline, newFile)
+			r.store.SyncInstalledStatus(key, artifact.MediumInline, &nodeObj.Status.InstalledArtifacts)
 			artifact.RecordStoreEvent(r.recorder, config, inlineAction, artifact.MediumInline)
 		}
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
@@ -374,8 +388,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 			))
 			return err
 		}
-		current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumConfigMap)
-		cmAction, newFile, err := r.store.Store(ctx, current, config.Name, p, artifact.TypeConfig, artifact.MediumConfigMap, result)
+		cmAction, _, err := r.store.Store(ctx, config.Namespace, config.Name, p, artifact.TypeConfig, artifact.MediumConfigMap, result)
 		if err != nil {
 			logger.Error(err, "unable to store config from ConfigMap reference")
 			artifact.RecordWarning(r.recorder, config,
@@ -386,7 +399,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 			))
 			return err
 		}
-		artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, cmAction, artifact.MediumConfigMap, newFile)
+		r.store.SyncInstalledStatus(key, artifact.MediumConfigMap, &nodeObj.Status.InstalledArtifacts)
 		artifact.RecordStoreEvent(r.recorder, config, cmAction, artifact.MediumConfigMap)
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
 			metav1.ConditionTrue, artifact.ReasonConfigMapArtifactProgrammed, artifact.MessageConfigMapArtifactProgrammed, gen,

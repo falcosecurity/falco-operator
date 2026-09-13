@@ -166,15 +166,46 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	seedInstalledCacheFromObjs(store, objs)
 
 	return &PluginReconciler{
 		Client:   cl,
 		Scheme:   s,
 		recorder: events.NewFakeRecorder(100),
 		fetcher:  newTestFetcher(cl),
-		store:    nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
+		store:    store,
 		nodeName: testutil.TestNodeName,
 	}, cl
+}
+
+// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
+// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
+// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
+// from that cache, never from status, so a test simulating "this was already installed" must
+// seed the cache the same way a real restart would, not just set status on the object.
+func seedInstalledCacheFromObjs(store *nodeartifacts.Manager, objs []client.Object) {
+	for _, obj := range objs {
+		node, ok := obj.(*artifactv1alpha1.ArtifactNode)
+		if !ok || len(node.Status.InstalledArtifacts) == 0 {
+			continue
+		}
+		for _, ref := range node.OwnerReferences {
+			var kind nodeartifacts.Kind
+			switch ref.Kind {
+			case controllerhelper.KindRulesfile:
+				kind = nodeartifacts.KindRulesfile
+			case controllerhelper.KindPlugin:
+				kind = nodeartifacts.KindPlugin
+			case controllerhelper.KindConfig:
+				kind = nodeartifacts.KindConfig
+			default:
+				continue
+			}
+			store.SeedInstalled(nodeartifacts.Key{Kind: kind, Namespace: node.Namespace, Name: ref.Name}, node.Status.InstalledArtifacts)
+			break
+		}
+	}
 }
 
 func TestNewPluginReconciler(t *testing.T) {
@@ -520,7 +551,7 @@ func TestReconcile(t *testing.T) {
 			}
 
 			if tt.preInstallPlugin != nil {
-				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, nil, r.fetcher)
+				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, r.fetcher)
 				require.NoError(t, err)
 			}
 
@@ -561,6 +592,41 @@ func TestReconcile(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReconcile_SecondReconcileDoesNotDropConfigSubEntry covers repeated back-to-back reconciles
+// for the same PluginNode with nothing in the spec changed (e.g. a watch event bounce): the
+// second Reconcile call must not lose the Config sub-entry a prior reconcile already established
+// in installedArtifacts[0].config.
+func TestReconcile_SecondReconcileDoesNotDropConfigSubEntry(t *testing.T) {
+	plugin := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/container", Tag: "latest"},
+			},
+		},
+	}
+	nodeObj := newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef())
+	r, cl := newTestReconciler(t, plugin, nodeObj)
+	req := testutil.Request(testPluginNodeName())
+
+	_, err := r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	got := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
+	require.Len(t, got.Status.InstalledArtifacts, 1, "after the first reconcile")
+	require.NotNil(t, got.Status.InstalledArtifacts[0].Config, "Config must be set after the first reconcile")
+
+	// Second reconcile: nothing changed in the spec, simulating a watch event bounce (e.g. a
+	// Secret or unrelated ArtifactNode update re-enqueuing this object).
+	_, err = r.Reconcile(context.Background(), req)
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
+	require.Len(t, got.Status.InstalledArtifacts, 1, "after the second reconcile")
+	assert.NotNil(t, got.Status.InstalledArtifacts[0].Config, "second reconcile must not drop the Config sub-entry")
 }
 
 func TestHandleDeletion(t *testing.T) {
@@ -625,7 +691,7 @@ func TestHandleDeletion(t *testing.T) {
 			r, cl := newTestReconciler(t, tt.objects...)
 
 			if tt.preInstallPlugin != nil {
-				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, nil, r.fetcher)
+				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, r.fetcher)
 				require.NoError(t, err)
 			}
 
@@ -940,6 +1006,45 @@ func TestEnsurePluginConfig(t *testing.T) {
 			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 		})
 	}
+}
+
+// TestEnsurePluginConfig_PopulatesConfigSubEntryEvenWhenUnchanged covers the shared
+// plugins-config aggregate, tracked in the manager's own cache (keyed by PluginConfigKey) rather
+// than per-Plugin-CR status: a re-add that the cache already knows is unchanged must still
+// mirror the file's path into this Plugin's own status entry, not only on the reconcile that
+// first wrote it.
+func TestEnsurePluginConfig_PopulatesConfigSubEntryEvenWhenUnchanged(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	plugin := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/json", Tag: "latest"},
+			},
+		},
+	}
+	// Establishes the shared config file in the manager's cache (StoreActionAdded).
+	require.NoError(t, r.ensurePluginConfig(context.Background(), plugin, newTestPluginNodeObj()))
+
+	// A separate nodeObj whose status never recorded the Config sub-entry (e.g. an earlier status
+	// patch dropped by an SSA conflict), even though the OCI binary entry already exists and the
+	// shared file, per the cache, is unchanged (configAction will be StoreActionUnchanged).
+	nodeObj := newTestPluginNodeObj()
+	nodeObj.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+		{Path: "/usr/share/falco/plugins/json.so", Medium: string(artifact.MediumOCI)},
+	}
+
+	require.NoError(t, r.ensurePluginConfig(context.Background(), plugin, nodeObj))
+
+	var configEntry *artifactv1alpha1.InstalledArtifactConfig
+	for _, a := range nodeObj.Status.InstalledArtifacts {
+		if a.Medium == string(artifact.MediumOCI) {
+			configEntry = a.Config
+			break
+		}
+	}
+	require.NotNil(t, configEntry, "Config sub-entry must be populated from the cache even when configAction is Unchanged")
+	assert.NotEmpty(t, configEntry.Path)
 }
 
 func TestEnforceReferenceResolution(t *testing.T) {
@@ -1340,9 +1445,13 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 			}
 			nodeObj := newTestPluginNodeObj()
 			if tt.preInstalled {
-				nodeObj.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+				installed := []artifactv1alpha1.InstalledArtifact{
 					{Path: "/var/lib/falco/plugins/test.so", Medium: string(artifact.MediumOCI)},
 				}
+				nodeObj.Status.InstalledArtifacts = installed
+				// alreadyInstalled is read from the manager's cache, not status; seed it the way
+				// WarmSync would from a real restart.
+				r.store.SeedInstalled(nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: testutil.TestNamespace, Name: testPluginName}, installed)
 			}
 
 			skip, err := r.enforcePluginCompatibility(context.Background(), tt.plugin, nodeObj)
@@ -1405,7 +1514,7 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))
 
 	// Simulate config already installed for this plugin (as if a prior reconcile ran).
-	_, _, err := r.store.AddPluginConfig(context.Background(), pl, nil, r.fetcher)
+	_, _, err := r.store.AddPluginConfig(context.Background(), pl, r.fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "some-rulesfile"}
 	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
@@ -1452,11 +1561,11 @@ func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
 			}
 			node := newTestPluginNodeObj(withPluginOwnerRef(), withPluginFinalizer())
 			r, cl := newTestReconciler(t, parent, node)
-			_, configFile, err := r.store.AddPluginConfig(ctx, parent, nil, r.fetcher)
+			_, configFile, err := r.store.AddPluginConfig(ctx, parent, r.fetcher)
 			require.NoError(t, err)
 			result, err := r.fetcher.FetchInline(ctx, []byte("installed binary"))
 			require.NoError(t, err)
-			action, binaryFile, err := r.store.Store(ctx, nil, parent.Name, 0, artifact.TypePlugin, artifact.MediumOCI, result)
+			action, binaryFile, err := r.store.Store(ctx, parent.Namespace, parent.Name, 0, artifact.TypePlugin, artifact.MediumOCI, result)
 			require.NoError(t, err)
 			artifact.UpdateInstalledStatus(&node.Status.InstalledArtifacts, action, artifact.MediumOCI, binaryFile)
 			artifact.UpdateInstalledSpecHash(&node.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")

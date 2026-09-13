@@ -297,22 +297,6 @@ func UpdateInstalledSpecHash(artifacts *[]artifactv1alpha1.InstalledArtifact, me
 	}
 }
 
-// FindInstalledConfig returns the config sub-entry for the artifact matching medium, or nil.
-// The returned File uses MediumInline and priority.MaxPriority (fixed for plugin config files).
-// ContentHash is always empty; callers must populate it via Verify before passing to Store.
-func FindInstalledConfig(artifacts []artifactv1alpha1.InstalledArtifact, medium Medium) *File {
-	for _, a := range artifacts {
-		if a.Medium == string(medium) && a.Config != nil {
-			return &File{
-				Path:     a.Config.Path,
-				Medium:   MediumInline,
-				Priority: priority.MaxPriority,
-			}
-		}
-	}
-	return nil
-}
-
 // UpdateInstalledConfig sets the Config sub-entry on the artifact matching medium.
 // No-op when f is nil or no entry matches medium.
 func UpdateInstalledConfig(artifacts *[]artifactv1alpha1.InstalledArtifact, medium Medium, f *File) {

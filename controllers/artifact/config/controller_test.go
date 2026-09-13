@@ -149,16 +149,47 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	seedInstalledCacheFromObjs(store, objs)
 
 	return &ConfigReconciler{
 		Client:    cl,
 		Scheme:    s,
 		recorder:  events.NewFakeRecorder(100),
 		fetcher:   newTestFetcher(cl),
-		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
+		store:     store,
 		nodeName:  testutil.TestNodeName,
 		namespace: testutil.TestNamespace,
 	}, cl
+}
+
+// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
+// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
+// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
+// from that cache, never from status, so a test simulating "this was already installed" must
+// seed the cache the same way a real restart would, not just set status on the object.
+func seedInstalledCacheFromObjs(store *nodeartifacts.Manager, objs []client.Object) {
+	for _, obj := range objs {
+		node, ok := obj.(*artifactv1alpha1.ArtifactNode)
+		if !ok || len(node.Status.InstalledArtifacts) == 0 {
+			continue
+		}
+		for _, ref := range node.OwnerReferences {
+			var kind nodeartifacts.Kind
+			switch ref.Kind {
+			case controllerhelper.KindRulesfile:
+				kind = nodeartifacts.KindRulesfile
+			case controllerhelper.KindPlugin:
+				kind = nodeartifacts.KindPlugin
+			case controllerhelper.KindConfig:
+				kind = nodeartifacts.KindConfig
+			default:
+				continue
+			}
+			store.SeedInstalled(nodeartifacts.Key{Kind: kind, Namespace: node.Namespace, Name: ref.Name}, node.Status.InstalledArtifacts)
+			break
+		}
+	}
 }
 
 func TestNewConfigReconciler(t *testing.T) {
@@ -738,6 +769,48 @@ func TestEnsureConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty covers the case where the
+// manager's cache (seeded from disk by WarmSync, or surviving a status patch dropped by an SSA
+// conflict) already considers the inline config installed and unchanged, but this specific
+// ArtifactNode's own Status.InstalledArtifacts starts empty. ensureConfig must still populate
+// status from the cache, not only when Store returns a fresh Added/Updated action.
+func TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	mockFS := fsfake.NewMockFileSystem()
+	r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+
+	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), testConfigName, 50, artifact.MediumInline, artifact.TypeConfig)
+	content := []byte(testConfigYAML)
+	hash := sha256hexForTest(content)
+	mockFS.Files[path] = content
+
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: testutil.TestNamespace, Name: testConfigName}
+	r.store.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+		{Path: path, Medium: string(artifact.MediumInline), Priority: 50, ContentHash: hash},
+	})
+
+	config := &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace, Generation: 1},
+		Spec: artifactv1alpha1.ConfigSpec{
+			Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+			Priority: 50,
+		},
+	}
+	nodeObj := newTestConfigNodeObj() // Status.InstalledArtifacts starts nil, unlike the cache.
+
+	require.NoError(t, r.ensureConfig(context.Background(), config, nodeObj))
+
+	entry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
+	require.NotNil(t, entry, "status must be synced from the cache even when Store returns Unchanged")
+	assert.Equal(t, path, entry.Path)
+	assert.Equal(t, hash, entry.ContentHash)
+}
+
+func sha256hexForTest(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }
 
 // TestEnsureConfig_ProgrammedLastTransitionTime verifies LastTransitionTime stays put on a

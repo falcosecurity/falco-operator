@@ -131,6 +131,10 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// Programmed is a gateway condition: True only when all other conditions are True. In advise
 	// mode, DependenciesSatisfied is excluded from the gate since it's advisory only.
 	defer func() {
+		r.store.SyncAllInstalledStatus(
+			nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin),
+			[]artifact.Medium{artifact.MediumOCI}, &nodeObj.Status.InstalledArtifacts,
+		)
 		skipDependenciesSatisfied := func(condType string) bool {
 			return !r.enforceRequirements && condType == commonv1alpha1.ConditionDependenciesSatisfied.String()
 		}
@@ -179,7 +183,8 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		// Plugin-level status show ConfigProgrammed=True even when DependenciesSatisfied=False.
 		// When alreadyInstalled=true (update-rejected), the old version is still on disk and
 		// ConfigProgrammed/OCIArtifactProgrammed correctly remain True; don't touch them.
-		if artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI) == nil {
+		key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+		if r.store.FindInstalled(key, artifact.MediumOCI) == nil {
 			depCond := apimeta.FindStatusCondition(nodeObj.Status.Conditions,
 				commonv1alpha1.ConditionDependenciesSatisfied.String())
 			reason := artifact.ReasonDependenciesNotSatisfied
@@ -287,8 +292,10 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 		}
 	}
 
-	// Binary second: remove the plugin binary from disk.
-	if err := r.store.Remove(ctx, nodeObj.Status.InstalledArtifacts); err != nil {
+	// Binary second: remove the plugin binary from disk. OwnerReferences never carry a
+	// namespace; nodeObj's own namespace is the plugin's.
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: nodeObj.Namespace, Name: pluginName}
+	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
 		logger.Error(err, "unable to remove installed plugin artifacts from disk")
 		return false, err
 	}
@@ -411,15 +418,17 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	gen := plugin.GetGeneration()
 	logger := log.FromContext(ctx)
 
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+
 	if plugin.Spec.OCIArtifact == nil {
 		// OCI spec removed while the Plugin CR still exists: removes the config entry, then the
 		// binary.
-		if existing := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI); existing != nil {
+		if existing := r.store.FindInstalled(key, artifact.MediumOCI); existing != nil {
 			if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
 				logger.Error(err, "unable to remove plugin config during OCI spec removal")
 				return err
 			}
-			if err := r.store.Remove(ctx, []artifactv1alpha1.InstalledArtifact{
+			if err := r.store.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{
 				{Path: existing.Path, Medium: string(existing.Medium)},
 			}); err != nil {
 				logger.Error(err, "unable to remove stale plugin binary")
@@ -440,7 +449,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		parentSpecHash = plugin.Status.ArtifactMeta.SpecHash
 		expectedDigest = plugin.Status.ArtifactMeta.Digest
 	}
-	current := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+	current := r.store.FindInstalled(key, artifact.MediumOCI)
 
 	// Fetches from the artifact server unless the spec hash is unchanged and the disk file is
 	// intact.
@@ -452,6 +461,10 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 			logger.V(4).Info("plugin artifact missing or corrupted on disk; re-fetching")
 		} else {
 			logger.V(4).Info("plugin artifact verified on disk; skipping fetch")
+			// Mirrors the cache into status even though this reconcile didn't call Store: see
+			// Manager.SyncInstalledStatus's doc comment for why a write gated on a StoreAction
+			// would leave status permanently behind the cache.
+			r.store.SyncInstalledStatus(key, artifact.MediumOCI, &nodeObj.Status.InstalledArtifacts)
 			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
 				metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, gen,
 			))
@@ -469,7 +482,8 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		))
 		return err
 	}
-	ociAction, newFile, err := r.store.Store(ctx, current, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, artifact.MediumOCI, result)
+	ociAction, _, err := r.store.Store(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority,
+		artifact.TypePlugin, artifact.MediumOCI, result)
 	if err != nil {
 		logger.Error(err, "unable to store plugin artifact")
 		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
@@ -479,9 +493,9 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		))
 		return err
 	}
-	artifact.UpdateInstalledStatus(&nodeObj.Status.InstalledArtifacts, ociAction, artifact.MediumOCI, newFile)
 	// Persist specHash even when StoreActionUnchanged (same content, different spec).
-	artifact.UpdateInstalledSpecHash(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, parentSpecHash)
+	r.store.UpdateInstalledSpecHash(key, artifact.MediumOCI, parentSpecHash)
+	r.store.SyncInstalledStatus(key, artifact.MediumOCI, &nodeObj.Status.InstalledArtifacts)
 	artifact.RecordStoreEvent(r.recorder, plugin, ociAction, artifact.MediumOCI)
 	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, gen,
@@ -534,6 +548,7 @@ func (r *PluginReconciler) enforcePluginCompatibility(
 ) (bool, error) {
 	gen := plugin.GetGeneration()
 	logger := log.FromContext(ctx)
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
 
 	if plugin.Spec.OCIArtifact == nil {
 		logger.Info("Skipping compatibility check: no OCI artifact configured")
@@ -561,7 +576,7 @@ func (r *PluginReconciler) enforcePluginCompatibility(
 		if r.enforceRequirements {
 			baseMsg := "artifact metadata declares no requirements; installation blocked in enforce mode"
 			reason, msg := artifact.ReasonDependenciesUnknown, baseMsg
-			if artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI) != nil {
+			if r.store.FindInstalled(key, artifact.MediumOCI) != nil {
 				reason = artifact.ReasonDependenciesNotSatisfiedUpdateRejected
 				msg = baseMsg + artifact.MessageSuffixUpdateRejected
 			}
@@ -578,7 +593,7 @@ func (r *PluginReconciler) enforcePluginCompatibility(
 		return false, nil
 	}
 
-	alreadyInstalled := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI) != nil
+	alreadyInstalled := r.store.FindInstalled(key, artifact.MediumOCI) != nil
 	for _, req := range plugin.Status.ArtifactMeta.Requirements {
 		provided, found, ok, semverErr := r.store.CheckRequirement(req.Name, req.Version)
 		if semverErr != nil {
@@ -647,8 +662,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	logger := log.FromContext(ctx)
 	logger.Info("Ensuring plugin configuration")
 
-	configCurrent := artifact.FindInstalledConfig(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
-	configAction, configFile, err := r.store.AddPluginConfig(ctx, plugin, configCurrent, r.fetcher)
+	configAction, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
 	if err != nil {
 		if blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err); ok {
 			logger.Info("Plugin config rename deferred: old name still required by a Rulesfile on this node",
@@ -665,9 +679,15 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 		return err
 	}
 
-	// Both helpers below no-op when configFile is nil (StoreActionUnchanged/StoreActionNone).
 	artifact.RecordStoreEvent(r.recorder, plugin, configAction, artifact.MediumInline)
-	artifact.UpdateInstalledConfig(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, configFile)
+	// Mirrors the shared config file's current path from the manager's cache (keyed by
+	// PluginConfigKey, not per-Plugin-CR status) unconditionally, regardless of configAction: a
+	// re-add the cache already knows is unchanged must still populate this Plugin's own Config
+	// sub-entry if an earlier reconcile's status patch never landed. UpdateInstalledConfig no-ops
+	// if there's no matching OCI entry yet (the binary itself isn't tracked) or the cache has none.
+	if sharedFile := r.store.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline); sharedFile != nil {
+		artifact.UpdateInstalledConfig(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, sharedFile)
+	}
 	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
 		metav1.ConditionTrue, artifact.ReasonConfigProgrammed, artifact.MessageConfigProgrammed, gen,
 	))

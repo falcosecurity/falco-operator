@@ -167,16 +167,47 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconcile
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	seedInstalledCacheFromObjs(store, objs)
 
 	return &RulesfileReconciler{
 		Client:    cl,
 		Scheme:    s,
 		recorder:  events.NewFakeRecorder(100),
 		fetcher:   newTestFetcher(cl),
-		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
+		store:     store,
 		nodeName:  testutil.TestNodeName,
 		namespace: testutil.TestNamespace,
 	}, cl
+}
+
+// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
+// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
+// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
+// from that cache, never from status, so a test simulating "this was already installed" must
+// seed the cache the same way a real restart would, not just set status on the object.
+func seedInstalledCacheFromObjs(store *nodeartifacts.Manager, objs []client.Object) {
+	for _, obj := range objs {
+		node, ok := obj.(*artifactv1alpha1.ArtifactNode)
+		if !ok || len(node.Status.InstalledArtifacts) == 0 {
+			continue
+		}
+		for _, ref := range node.OwnerReferences {
+			var kind nodeartifacts.Kind
+			switch ref.Kind {
+			case controllerhelper.KindRulesfile:
+				kind = nodeartifacts.KindRulesfile
+			case controllerhelper.KindPlugin:
+				kind = nodeartifacts.KindPlugin
+			case controllerhelper.KindConfig:
+				kind = nodeartifacts.KindConfig
+			default:
+				continue
+			}
+			store.SeedInstalled(nodeartifacts.Key{Kind: kind, Namespace: node.Namespace, Name: ref.Name}, node.Status.InstalledArtifacts)
+			break
+		}
+	}
 }
 
 func TestNewRulesfileReconciler(t *testing.T) {
@@ -936,6 +967,57 @@ func TestEnsureRulesfile_ProgrammedLastTransitionTime(t *testing.T) {
 			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
 		})
 	}
+}
+
+// TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty covers the case where
+// the manager's cache (seeded from disk by WarmSync, or surviving a status patch dropped by an
+// SSA conflict) already considers the OCI artifact installed and verified, but this specific
+// ArtifactNode's own Status.InstalledArtifacts starts empty. The "already verified on disk, skip
+// fetch" shortcut must still populate status from the cache before returning, not just set the
+// condition True and leave installedArtifacts missing.
+func TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	mockFS := fsfake.NewMockFileSystem()
+	r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+
+	content := []byte("- rule: test\n  condition: true\n")
+	hash := sha256hexForTest(content)
+	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), testRulesfileName, 50, artifact.MediumOCI, artifact.TypeRulesfile)
+	mockFS.Files[path] = content
+
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
+	r.store.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+		{Path: path, Medium: string(artifact.MediumOCI), Priority: 50, ContentHash: hash, SpecHash: "spec-v1"},
+	})
+
+	rf := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			Priority: 50,
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/rules/falco-rules", Tag: "latest"},
+			},
+		},
+		Status: artifactv1alpha1.RulesfileStatus{
+			ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "spec-v1"},
+		},
+	}
+	nodeObj := newTestNodeObj() // Status.InstalledArtifacts starts nil, unlike the cache.
+
+	tf := r.fetcher.(*testFetcher)
+	require.NoError(t, r.ensureOCIRulesfile(context.Background(), rf, nodeObj))
+
+	assert.Zero(t, tf.ociCallCount, "the cache already verified this content; no fetch should happen")
+	entry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+	require.NotNil(t, entry, "status must be synced from the cache even on the skip-fetch path")
+	assert.Equal(t, path, entry.Path)
+	assert.Equal(t, hash, entry.ContentHash)
+	assert.Equal(t, "spec-v1", entry.SpecHash)
+}
+
+func sha256hexForTest(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }
 
 func TestEnforceReferenceResolution(t *testing.T) {
@@ -1797,9 +1879,13 @@ func TestEnforceRulesfileCompatibility(t *testing.T) {
 				nodeObj.Status.Conditions = tt.presetConditions
 			}
 			if tt.preInstalled {
-				nodeObj.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+				installed := []artifactv1alpha1.InstalledArtifact{
 					{Path: "/etc/falco/rules.d/test.yaml", Medium: string(artifact.MediumOCI)},
 				}
+				nodeObj.Status.InstalledArtifacts = installed
+				// alreadyInstalled is read from the manager's cache, not status; seed it the way
+				// WarmSync would from a real restart.
+				r.store.SeedInstalled(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: tt.rf.Namespace, Name: tt.rf.Name}, installed)
 			}
 
 			skip, err := r.enforceRulesfileCompatibility(context.Background(), tt.rf, nodeObj)
@@ -1875,6 +1961,54 @@ func TestFindAllNodeObjectsOnVersionChange_Empty(t *testing.T) {
 	assert.Empty(t, requests)
 }
 
+// TestReconcile_ResyncsAllMediaFromCacheBeforePatching covers an overlapping-reconcile race:
+// two reconciles for different spec generations of the same Rulesfile race to patch status via
+// SSA ForceOwnership. One reconcile (working off an older spec generation that still had an
+// inline source) can finish its patch after a newer reconcile has already removed that source,
+// resurrecting a stale InstalledArtifacts entry the newer reconcile had already cleared from the
+// cache.
+//
+// This test doesn't simulate the race directly; it simulates its end state: an ArtifactNode whose
+// persisted status still has a stale "inline" entry (as if an in-flight reconcile's Get read it
+// before it was removed), while the cache — the actual source of truth for what's installed —
+// already has none. A single Reconcile call must patch status back into agreement with the cache,
+// not merely leave a stale entry alone because this reconcile's own ensureX calls never touched it
+// (the current spec has no inline source at all, so cleanupStaleMedium's own cache-based check
+// finds nothing to remove and would otherwise return without touching status).
+func TestReconcile_ResyncsAllMediaFromCacheBeforePatching(t *testing.T) {
+	rf := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.RulesfileSpec{
+			Priority: 50,
+			OCIArtifact: &commonv1alpha1.OCIArtifact{
+				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/rules/falco-rules", Tag: "latest"},
+			},
+			// No InlineRules: this generation never configured it.
+		},
+	}
+	nodeObj := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
+		n.Finalizers = []string{rulesfileNodeFinalizer}
+		// Stale status: as if read before a concurrent reconcile's removal of inline landed.
+		n.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+			{Path: "/etc/falco/rules.d/50-03-test-rulesfile-inline.yaml", Medium: string(artifact.MediumInline)},
+		}
+	})
+
+	r, cl := newTestReconciler(t, rf, nodeObj)
+	// The cache already reflects inline having been removed (by the "newer" reconcile this test
+	// doesn't simulate directly) — nothing seeded for it, unlike the stale status above.
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
+	r.store.SeedInstalled(key, nil)
+
+	_, err := r.Reconcile(context.Background(), testutil.Request(testNodeObjectName()))
+	require.NoError(t, err)
+
+	got := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: testNodeObjectName(), Namespace: testutil.TestNamespace}, got))
+	assert.Nil(t, artifact.FindInstalled(got.Status.InstalledArtifacts, artifact.MediumInline),
+		"the persisted status must be resynced from the cache, not left with a stale entry the cache no longer has")
+}
+
 func TestReconcile_RegistersDependenciesWithNodeArtifactManager(t *testing.T) {
 	rf := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1916,7 +2050,8 @@ func TestReconcile_RegistersDependenciesWithNodeArtifactManager(t *testing.T) {
 	require.Error(t, err, "Reconcile must have registered this rulesfile's dependency on \"container\"")
 	blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err)
 	require.True(t, ok)
-	assert.Equal(t, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: testRulesfileName}, blocked.BlockedBy[0])
+	wantKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
+	assert.Equal(t, wantKey, blocked.BlockedBy[0])
 }
 
 func TestReconcile_IncompatiblePluginVersion(t *testing.T) {
@@ -1943,11 +2078,13 @@ func TestReconcile_IncompatiblePluginVersion(t *testing.T) {
 				if preInstalled {
 					result, err := r.fetcher.FetchInline(ctx, []byte(testRulesData))
 					require.NoError(t, err)
-					action, file, err := r.store.Store(ctx, nil, rf.Name, 0, artifact.TypeRulesfile, artifact.MediumOCI, result)
+					action, file, err := r.store.Store(ctx, rf.Namespace, rf.Name, 0, artifact.TypeRulesfile, artifact.MediumOCI, result)
 					require.NoError(t, err)
 					installedFile = file
 					artifact.UpdateInstalledStatus(&node.Status.InstalledArtifacts, action, artifact.MediumOCI, file)
 					artifact.UpdateInstalledSpecHash(&node.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
+					specHashKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: rf.Namespace, Name: rf.Name}
+					r.store.UpdateInstalledSpecHash(specHashKey, artifact.MediumOCI, "old-spec")
 					require.NoError(t, cl.Status().Update(ctx, node))
 				}
 				oldInstalled := node.Status.InstalledArtifacts
