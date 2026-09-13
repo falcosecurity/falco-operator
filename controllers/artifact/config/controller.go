@@ -269,28 +269,11 @@ func (r *ConfigReconciler) findNodeObjectsForConfigMap(ctx context.Context, conf
 func (r *ConfigReconciler) enforceReferenceResolution(
 	ctx context.Context, config *artifactv1alpha1.Config, nodeObj *artifactv1alpha1.ArtifactNode,
 ) error {
-	logger := log.FromContext(ctx)
-
+	var checks []controllerhelper.ReferenceCheck
 	if config.Spec.ConfigMapRef != nil {
-		err := r.Get(ctx, client.ObjectKey{Namespace: config.Namespace, Name: config.Spec.ConfigMapRef.Name}, &corev1.ConfigMap{})
-		if err != nil {
-			logger.Error(err, "ConfigMap reference resolution failed", "configMap", config.Spec.ConfigMapRef.Name)
-			artifact.RecordWarning(r.recorder, config, artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, config.Spec.ConfigMapRef.Name), config.GetGeneration()))
-			return err
-		}
-
-		artifact.RecordNormal(r.recorder, config, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, config.GetGeneration(),
-		))
-	} else {
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
+		checks = append(checks, controllerhelper.ConfigMapReferenceCheck(config.Namespace, config.Spec.ConfigMapRef.Name))
 	}
-
-	return nil
+	return controllerhelper.ResolveReferences(ctx, r.Client, r.recorder, config, &nodeObj.Status.Conditions, checks...)
 }
 
 // ensureConfig ensures the configuration is written to the filesystem.
