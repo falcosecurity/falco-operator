@@ -161,11 +161,10 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// changes) until the instance operator has processed the current spec generation.
 	// The guard runs after the defer so the ArtifactNode status is still patched on every
 	// reconcile (skipping the patch would leave the parent Rulesfile status stale indefinitely).
-	if r.enforceRequirements && rulesfile.Status.ObservedGeneration != rulesfile.Generation {
-		logger.Info("instance operator has not yet processed current spec generation; deferring",
-			"observedGeneration", rulesfile.Status.ObservedGeneration,
-			"specGeneration", rulesfile.Generation)
-		return ctrl.Result{}, nil
+	if r.enforceRequirements {
+		if controllerhelper.WaitForObservedGeneration(logger, rulesfile.Status.ObservedGeneration, rulesfile.Generation) {
+			return ctrl.Result{}, nil
+		}
 	} else {
 		logger.Info("instance operator has processed current spec generation; proceeding",
 			"observedGeneration", rulesfile.Status.ObservedGeneration,

@@ -160,11 +160,10 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 
 	// In enforce mode, waits until the instance operator has processed the current spec
 	// generation before running compatibility checks or filesystem changes.
-	if r.enforceRequirements && plugin.Status.ObservedGeneration != plugin.Generation {
-		logger.Info("instance operator has not yet processed current spec generation; deferring",
-			"observedGeneration", plugin.Status.ObservedGeneration,
-			"specGeneration", plugin.Generation)
-		return ctrl.Result{}, nil
+	if r.enforceRequirements {
+		if controllerhelper.WaitForObservedGeneration(logger, plugin.Status.ObservedGeneration, plugin.Generation) {
+			return ctrl.Result{}, nil
+		}
 	} else {
 		logger.Info("instance operator has processed current spec generation; proceeding",
 			"observedGeneration", plugin.Status.ObservedGeneration,

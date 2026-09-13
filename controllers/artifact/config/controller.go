@@ -146,15 +146,8 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 
 	// Wait until the instance operator has processed the current spec generation before proceeding.
 	// Placed after the status-patch defer above, so ArtifactNode status is still patched while waiting.
-	if config.Status.ObservedGeneration != config.Generation {
-		logger.Info("instance operator has not yet processed current spec generation; deferring",
-			"observedGeneration", config.Status.ObservedGeneration,
-			"specGeneration", config.Generation)
+	if controllerhelper.WaitForObservedGeneration(logger, config.Status.ObservedGeneration, config.Generation) {
 		return ctrl.Result{}, nil
-	} else {
-		logger.Info("instance operator has processed current spec generation; proceeding",
-			"observedGeneration", config.Status.ObservedGeneration,
-			"specGeneration", config.Generation)
 	}
 
 	// Ensure the configuration is written to the filesystem.
