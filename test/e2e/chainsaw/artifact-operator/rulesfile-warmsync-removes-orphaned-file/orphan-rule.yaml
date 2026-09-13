@@ -1,0 +1,6 @@
+- rule: orphan-warmsync-test-noop
+  desc: Test-only rule for the WarmSync orphaned-file regression test. Never matches anything.
+  condition: proc.name=this-name-will-never-match-anything-zzz
+  output: noop
+  priority: INFO
+  source: syscall

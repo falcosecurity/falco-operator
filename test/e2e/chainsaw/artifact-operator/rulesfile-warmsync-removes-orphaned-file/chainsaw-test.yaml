@@ -1,0 +1,126 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-warmsync-removes-orphaned-file
+spec:
+  description: |
+    Regression test for the artifact-operator sidecar's WarmSync: at startup it scans disk
+    (ArtifactStore.ScanAll) for every artifact file, and any name with files on disk but no
+    ArtifactNode at all for this node is removed immediately, since nothing will ever ask
+    about it again. This is the disk-ground-truth cleanup path, distinct from a normal
+    finalizer-driven deletion (which the per-node sidecar itself performs while running).
+
+    ScanAll doesn't care WHY a file has no matching live ArtifactNode, only that it doesn't, so
+    this test never creates a real Rulesfile at all: it writes a correctly-named file (matching
+    the "PP-SS-{name}-oci.yaml" convention scan.go parses) straight into rules.d via kubectl
+    exec, simulating a file whose parent CR and ArtifactNode are long gone. Deleting a real
+    Rulesfile instead would not reliably reach that state: the still-running sidecar's own
+    Reconcile calls EnsureFinalizer immediately after handleDeletion, so a finalizer stripped out
+    from under it gets re-added before a delete can land, and the file ends up removed by a
+    perfectly normal (and correct) handleDeletion rather than orphaned. Writing the file directly
+    has no such live reconcile loop to race against, since no CR for it ever existed.
+
+    The artifact-operator container is then restarted IN PLACE (never the Pod: see
+    restart_artifact_operator_container.sh's doc comment for why the shared EmptyDir
+    volumes make that the only way to test WarmSync's disk-recovery logic at all), and the
+    new process's WarmSync is expected to sweep the orphaned file from disk.
+
+  bindings:
+    - name: falco_name
+      value: falco-warmsync-orphan-test
+    - name: rulesfile_name
+      value: rulesfile-warmsync-orphan-test
+    - name: test_name
+      value: rulesfile-warmsync-removes-orphaned-file
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Write-orphaned-file-to-disk"
+      description: |
+        50-01-{name}-oci.yaml matches the naming convention scan.go's yamlFilenamePattern
+        parses (priority-subpriority-name-medium.yaml); no Rulesfile or ArtifactNode is ever
+        created for this name.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: falco
+              - name: REMOTE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+              - name: LOCAL_FILE
+                value: orphan-rule.yaml
+            content: |
+              bash ../../common/scripts/write_file_on_node.sh
+
+    - name: "Step 03: Assert-file-on-disk"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+    - name: "Step 04: Restart-artifact-operator-container-in-place"
+      description: |
+        Forces WarmSync to run again on the SAME Pod/EmptyDir, this time scanning a file
+        with no ArtifactNode of any kind ever having existed for it.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              bash ../../common/scripts/restart_artifact_operator_container.sh
+
+    - name: "Step 05: Assert-orphaned-file-removed"
+      description: |
+        The core assertion: WarmSync scanned disk, found this file with no ArtifactNode
+        left to claim it, and removed it.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_name)
+            content: |
+              bash ../../common/scripts/check_file_absent_on_node.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

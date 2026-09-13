@@ -1,0 +1,177 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-warmsync-recovers-spechash
+spec:
+  description: |
+    Regression test for the artifact-operator sidecar's WarmSync: when it seeds the
+    installed-artifact cache from disk at startup, it must recover each entry's SpecHash
+    from the ArtifactNode's still-accurate status (matched by ContentHash) rather than
+    leaving it blank. If it didn't, the reconcile right after every sidecar restart would
+    see current.SpecHash == "" != parentSpecHash and force a needless re-fetch from the OCI
+    artifact server for every installed artifact, even though nothing changed.
+
+    "Restart" here specifically means the artifact-operator CONTAINER crashing and coming
+    back (e.g. an OOM kill or a panic), not the Pod being replaced: the directories it
+    writes into (falco-configs/falco-rulesfiles/falco-plugins, see
+    internal/pkg/resources/falco.go) are EmptyDir volumes, torn down and recreated empty
+    whenever the Pod itself is replaced. A Pod-level restart would legitimately find nothing
+    on disk and have to re-fetch regardless of this fix, proving nothing about it either
+    way. So this kills only the artifact-operator process in place (see
+    restart_artifact_operator_container.sh), leaving the Pod, its UID, and its EmptyDir
+    volumes untouched, which is the actual scenario WarmSync's disk-seeded cache exists for.
+
+    Expected outcome: after the container restarts, the new process's first reconcile of the
+    Rulesfile does not write anything to disk again (no "Rulesfile OCI artifact written to
+    disk" log line appears in its own logs, which only ever contain what it logged since it
+    started), and the file and Programmed=True condition are unaffected.
+
+  bindings:
+    - name: falco_name
+      value: falco-warmsync-spechash-test
+    - name: rulesfile_name
+      value: rulesfile-warmsync-spechash-test
+    - name: test_name
+      value: rulesfile-warmsync-recovers-spechash
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: |
+        falco-test/rulesfile-engine-req-met declares only an engine-version requirement
+        (always satisfied), so this needs no plugin installed first.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 03: Assert-file-on-disk"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+    - name: "Step 04: Restart-artifact-operator-container-in-place"
+      description: |
+        Kills and waits for the artifact-operator process to come back inside the SAME Pod
+        (see the script's own doc comment for why this must never be a Pod-level restart).
+        The ArtifactNode's durable status is untouched throughout, so the new process's
+        WarmSync has the SpecHash to recover.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              bash ../../common/scripts/restart_artifact_operator_container.sh
+
+    - name: "Step 05: Assert-no-refetch-after-restart"
+      description: |
+        The restarted process's own logs only ever contain what it logged since it started,
+        so any occurrence at all of the "written to disk" success log for this Rulesfile
+        means a needless re-fetch+rewrite happened on the very first reconcile after
+        restart: the regression this test guards against. Polls for a settle window rather
+        than checking once, since the first reconcile may take a moment after the container
+        reports ready.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: artifact-operator
+              - name: PATTERN
+                value: Rulesfile OCI artifact written to disk
+              - name: MAX_RETRIES
+                value: "20"
+            content: |
+              bash ../../common/scripts/check_log_absent_on_pod.sh
+
+    - name: "Step 06: Assert-still-programmed-and-file-present"
+      description: Sanity check that the artifact itself is unaffected by the restart.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: FILE_PATTERN
+                value: ($rulesfile_name)
+            content: |
+              bash ../../common/scripts/check_file_on_node.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
