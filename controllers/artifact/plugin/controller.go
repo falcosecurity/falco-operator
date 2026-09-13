@@ -206,11 +206,7 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// RequeueAfter instead of returning an error, which would otherwise tie up this worker for
 	// controller-runtime's retry backoff.
 	if err := r.ensurePlugin(ctx, plugin, nodeObj); err != nil {
-		if delay, ok := artifact.RequeueDelay(err); ok {
-			logger.Info("artifact server not ready, requeueing", "delay", delay)
-			return ctrl.Result{RequeueAfter: delay}, nil
-		}
-		return ctrl.Result{}, err
+		return controllerhelper.ResultForEnsureError(logger, err)
 	}
 
 	// Ensure the plugin configuration is written to the config file.
