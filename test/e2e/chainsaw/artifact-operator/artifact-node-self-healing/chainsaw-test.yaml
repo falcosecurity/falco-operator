@@ -45,6 +45,8 @@ spec:
       value: self-healing-falco
     - name: falco_pod_name
       value: (join('-', ['falco-pod', $namespace]))
+    - name: artifact_node_name
+      value: (join('--', ['plugin', $plugin_name, $node_name]))
 
   steps:
     - name: "Step 01: Create-fake-node"
@@ -128,25 +130,59 @@ spec:
                   - status: 'Unknown'
                     reason: Pending
 
-    - name: "Step 04: Delete-artifactnode-directly"
+    - name: "Step 04: Delete-artifactnode-directly-and-assert-recreated"
       description: |
-        Scenario 1. Deletes the ArtifactNode itself, bypassing node/selector changes
-        entirely, simulates a crash, bug, or stray manual `kubectl delete` of a managed
-        child object.
-      try:
-        - delete:
-            ref:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              name: (join('--', ['plugin', $plugin_name, $node_name]))
-              namespace: ($namespace)
+        Scenario 1. Deletes the ArtifactNode itself, bypassing node/selector changes entirely,
+        simulates a crash, bug, or stray manual `kubectl delete` of a managed child object, then
+        confirms the ArtifactNode watch (EnqueueRequestForOwner) noticed the delete event and
+        requeued the Plugin, whose reconcile recreates it via EnsureNodeObject.
 
-    - name: "Step 05: Assert-artifactnode-recreated-after-direct-deletion"
-      description: |
-        Scenario 1. The ArtifactNode watch (EnqueueRequestForOwner) must notice the delete
-        event and requeue the Plugin, whose reconcile recreates it via EnsureNodeObject, a
-        fresh object, so it's back to the CRD-defaulted Programmed=Unknown/Pending.
+        The UID is captured first because chainsaw's own `delete:` step can't be used here: it
+        waits for the object to be absent by namespace+name, which can never observe "gone" once
+        EnsureNodeObject has already recreated it under the same name (see
+        delete_resource_no_wait.sh's doc comment). Comparing UIDs before and after instead proves
+        an actual delete-and-recreate cycle happened, not just that an object with an acceptable
+        shape exists at this name (which would also be true if the original object had simply
+        never been deleted at all), and the recreated object is a fresh one (a new UID, confirmed
+        first), so it's back to the CRD-defaulted Programmed=Unknown/Pending.
       try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($artifact_node_name)
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: artifact_node_uid_before
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($artifact_node_name)
+            content: |
+              bash ../../common/scripts/delete_resource_no_wait.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($artifact_node_name)
+              - name: OLD_UID
+                value: ($artifact_node_uid_before)
+            content: |
+              bash ../../common/scripts/wait_for_resource_uid_changed.sh
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -161,7 +197,7 @@ spec:
                   - status: 'Unknown'
                     reason: Pending
 
-    - name: "Step 06: Corrupt-artifactnode-label"
+    - name: "Step 05: Corrupt-artifactnode-label"
       description: |
         Scenario 2. A JSON merge patch to metadata.labels only touches the key given:
         artifact.falcosecurity.dev/parent and artifact.falcosecurity.dev/node are left alone,
@@ -177,7 +213,7 @@ spec:
                 labels:
                   artifact.falcosecurity.dev/kind: corrupted-by-test
 
-    - name: "Step 07: Assert-artifactnode-label-restored-after-drift"
+    - name: "Step 06: Assert-artifactnode-label-restored-after-drift"
       description: Scenario 2. EnforceNodeObjectMeta must have detected the mismatch and patched the label back.
       try:
         - assert:
@@ -190,7 +226,7 @@ spec:
                 labels:
                   artifact.falcosecurity.dev/kind: plugin
 
-    - name: "Step 08: Delete-plugin"
+    - name: "Step 07: Delete-plugin"
       try:
         - delete:
             ref:
@@ -199,7 +235,7 @@ spec:
               name: ($plugin_name)
               namespace: ($namespace)
 
-    - name: "Step 09: Wait-for-artifactnode-cleanup"
+    - name: "Step 08: Wait-for-artifactnode-cleanup"
       try:
         - wait:
             apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -209,7 +245,7 @@ spec:
             for:
               deletion: {}
 
-    - name: "Step 10: Delete-fake-node-and-falco-cr"
+    - name: "Step 09: Delete-fake-node-and-falco-cr"
       try:
         - delete:
             ref:
