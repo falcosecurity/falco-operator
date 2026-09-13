@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 )
 
@@ -41,6 +42,29 @@ func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
 		Config:    "/configs",
 	}
 	return &LocalStore{FS: mockFS, Dirs: dirs}, mockFS
+}
+
+// TestSetInstalled_PreservesExistingConfigSubEntry reproduces a real regression: SetInstalled
+// used to overwrite the whole InstalledArtifact struct when updating an existing medium entry,
+// silently dropping its Config sub-field (set separately by UpdateInstalledConfig, e.g. for a
+// Plugin's shared config-file linkage) because File has no Config field to carry it forward.
+// Any caller that re-syncs a medium's main fields from a source that only knows about File (like
+// Manager's installed-artifact cache) must never destroy a Config sub-entry nothing else tracks.
+func TestSetInstalled_PreservesExistingConfigSubEntry(t *testing.T) {
+	artifacts := []artifactv1alpha1.InstalledArtifact{
+		{
+			Path: "/old", Medium: "oci", Priority: 50, ContentHash: "old-hash",
+			Config: &artifactv1alpha1.InstalledArtifactConfig{Path: "/etc/falco/config.d/99-03-plugins-config-inline.yaml"},
+		},
+	}
+
+	SetInstalled(&artifacts, File{Path: "/new", Medium: MediumOCI, Priority: 50, ContentHash: "new-hash"})
+
+	require.Len(t, artifacts, 1)
+	assert.Equal(t, "/new", artifacts[0].Path)
+	assert.Equal(t, "new-hash", artifacts[0].ContentHash)
+	require.NotNil(t, artifacts[0].Config, "updating the main fields must not drop the Config sub-entry")
+	assert.Equal(t, "/etc/falco/config.d/99-03-plugins-config-inline.yaml", artifacts[0].Config.Path)
 }
 
 func TestLocalStore_Store_PriorityChange(t *testing.T) {

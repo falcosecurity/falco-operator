@@ -233,7 +233,10 @@ func FindInstalled(artifacts []artifactv1alpha1.InstalledArtifact, medium Medium
 	return nil
 }
 
-// SetInstalled upserts a File into the InstalledArtifacts slice (matched by Medium).
+// SetInstalled upserts a File into the InstalledArtifacts slice (matched by Medium). File carries
+// no Config sub-entry (that's tracked separately via UpdateInstalledConfig, e.g. for a Plugin's
+// shared config-file linkage), so updating an existing entry's main fields preserves whatever
+// Config it already had rather than clearing it.
 func SetInstalled(artifacts *[]artifactv1alpha1.InstalledArtifact, f File) {
 	for i, a := range *artifacts {
 		if a.Medium == string(f.Medium) {
@@ -243,6 +246,7 @@ func SetInstalled(artifacts *[]artifactv1alpha1.InstalledArtifact, f File) {
 				Priority:    f.Priority,
 				ContentHash: f.ContentHash,
 				SpecHash:    f.SpecHash,
+				Config:      a.Config,
 			}
 			return
 		}
