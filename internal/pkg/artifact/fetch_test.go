@@ -54,7 +54,6 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, runtime.GOOS, r.URL.Query().Get("os"))
 				assert.Equal(t, runtime.GOARCH, r.URL.Query().Get("arch"))
-				w.Header().Set("X-Artifact-Mode", "493") // 0o755
 				_, _ = w.Write([]byte("binary-content"))
 			},
 			wantContent:    "binary-content",
@@ -68,7 +67,6 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Empty(t, r.URL.Query().Get("os"))
 				assert.Empty(t, r.URL.Query().Get("arch"))
-				w.Header().Set("X-Artifact-Mode", "420") // 0o644
 				_, _ = w.Write([]byte("rule content"))
 			},
 			wantContent:    "rule content",
@@ -83,23 +81,22 @@ func TestFetcher_FetchOCI(t *testing.T) {
 				_, _ = w.Write([]byte("x"))
 			},
 			wantContent:    "x",
-			wantPerm:       0o755, // no X-Artifact-Mode header set by this handler → default
+			wantPerm:       0o644,
 			wantNodeHeader: "",
 		},
 		{
-			name:         "missing X-Artifact-Mode header defaults to 0o755",
+			name:         "rulesfile perm is 0o644 regardless of server response headers",
 			artifactType: TypeRulesfile,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
 			wantContent: "x",
-			wantPerm:    0o755,
+			wantPerm:    0o644,
 		},
 		{
-			name:         "unparseable X-Artifact-Mode header defaults to 0o755",
-			artifactType: TypeRulesfile,
+			name:         "plugin perm is 0o755 regardless of server response headers",
+			artifactType: TypePlugin,
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("X-Artifact-Mode", "not-a-number")
 				_, _ = w.Write([]byte("x"))
 			},
 			wantContent: "x",

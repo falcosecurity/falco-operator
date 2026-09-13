@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"runtime"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +44,15 @@ const (
 	// TypeConfig represents a config artifact.
 	TypeConfig Type = "config"
 )
+
+// PermFor returns the deterministic filesystem permission for the given artifact type.
+// Plugins need the execute bit for dlopen; rules and config files are read-only for Falco.
+func PermFor(t Type) fs.FileMode {
+	if t == TypePlugin {
+		return 0o755
+	}
+	return 0o644
+}
 
 // Manager provides OCI registry operations for the aggregator (instance) controllers.
 // It does NOT manage on-disk artifact state; that is handled by LocalStore on the sidecar side.
@@ -205,7 +215,7 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 		return "", fmt.Errorf("extract from OCI layer %q: %w", ref, err)
 	}
 
-	if err := artifactcache.Store(blobPath, file.Content, file.Perm); err != nil {
+	if err := artifactcache.Store(blobPath, file.Content, PermFor(artifactType)); err != nil {
 		return "", err
 	}
 
