@@ -131,7 +131,9 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// In advise mode DependenciesSatisfied is excluded from the gate; it's advisory only.
 	defer func() {
 		key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
-		r.store.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap}, &nodeObj.Status.InstalledArtifacts)
+		r.store.SyncAllInstalledStatus(key,
+			[]artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap},
+			&nodeObj.Status.InstalledArtifacts)
 		skipDependenciesSatisfied := func(condType string) bool {
 			return !r.enforceRequirements && condType == commonv1alpha1.ConditionDependenciesSatisfied.String()
 		}
