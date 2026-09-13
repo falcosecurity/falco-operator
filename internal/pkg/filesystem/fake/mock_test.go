@@ -14,23 +14,28 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package filesystem
+package fake
 
 import (
-	"io"
-	"io/fs"
+	"sort"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-// FileSystem defines the interface for filesystem operations used by the artifact manager.
-type FileSystem interface {
-	Stat(name string) (fs.FileInfo, error)
-	ReadFile(name string) ([]byte, error)
-	WriteFile(name string, data []byte, perm fs.FileMode) error
-	Remove(name string) error
-	Rename(oldpath, newpath string) error
-	Open(name string) (io.ReadCloser, error)
-	Exists(path string) (bool, error)
-	// Glob returns the names of all files matching pattern (see filepath.Glob semantics: "*"
-	// never crosses a path separator, so this never descends into subdirectories).
-	Glob(pattern string) ([]string, error)
+func TestMockFileSystem_Glob_MatchesOnlyPatternInSameDirectory(t *testing.T) {
+	m := NewMockFileSystem()
+	m.Files["/rules.d/50-01-my-rules-oci.yaml"] = []byte("x")
+	m.Files["/rules.d/50-02-other-inline.yaml"] = []byte("x")
+	m.Files["/rules.d/notes.txt"] = []byte("x")
+	m.Files["/rules.d/sub/50-03-nested-oci.yaml"] = []byte("x")
+
+	matches, err := m.Glob("/rules.d/*.yaml")
+	require.NoError(t, err)
+
+	sort.Strings(matches)
+	require.Equal(t, []string{
+		"/rules.d/50-01-my-rules-oci.yaml",
+		"/rules.d/50-02-other-inline.yaml",
+	}, matches)
 }

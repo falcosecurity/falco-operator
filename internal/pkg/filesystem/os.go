@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 )
 
 // OS implements FileSystem using the real os package.
@@ -58,6 +59,11 @@ func (OS) Rename(oldpath, newpath string) error {
 // Open opens the file at the given path.
 func (OS) Open(name string) (io.ReadCloser, error) {
 	return os.Open(name) //nolint:gosec // This is intentional - the filesystem abstraction needs to accept variable paths
+}
+
+// Glob returns the names of all files matching pattern, per filepath.Glob.
+func (OS) Glob(pattern string) ([]string, error) {
+	return filepath.Glob(pattern)
 }
 
 // Exists checks if the file exists.

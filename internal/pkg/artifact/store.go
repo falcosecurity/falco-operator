@@ -64,6 +64,10 @@ type ArtifactStore interface {
 
 	// Remove deletes every path listed in installed from disk.
 	Remove(ctx context.Context, installed []artifactv1alpha1.InstalledArtifact) error
+
+	// ScanAll discovers every artifact file on disk for artifactType, grouped by artifact name,
+	// by listing the type's directory and parsing each filename. See scan.go's doc comment.
+	ScanAll(ctx context.Context, artifactType Type) (map[string][]artifactv1alpha1.InstalledArtifact, error)
 }
 
 // LocalStore implements ArtifactStore against the local filesystem.

@@ -21,6 +21,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"path/filepath"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 )
@@ -155,6 +156,26 @@ func (m *mockReadCloser) Read(p []byte) (n int, err error) {
 
 func (m *mockReadCloser) Close() error {
 	return nil
+}
+
+// Glob returns the names of all files in the mock filesystem matching pattern, restricted to
+// the same directory as pattern (matching filepath.Glob semantics: "*" never crosses "/").
+func (m *MockFileSystem) Glob(pattern string) ([]string, error) {
+	var matches []string
+	dir := filepath.Dir(pattern)
+	for name := range m.Files {
+		if filepath.Dir(name) != dir {
+			continue
+		}
+		ok, err := filepath.Match(pattern, name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			matches = append(matches, name)
+		}
+	}
+	return matches, nil
 }
 
 // Exists checks if a file exists in the mock filesystem.
