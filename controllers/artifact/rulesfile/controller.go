@@ -666,50 +666,16 @@ func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 func (r *RulesfileReconciler) enforceReferenceResolution(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
 ) error {
-	logger := log.FromContext(ctx)
-	hasRefs := false
-
+	var checks []controllerhelper.ReferenceCheck
 	if rulesfile.Spec.ConfigMapRef != nil {
-		hasRefs = true
-		err := r.Get(ctx, client.ObjectKey{Namespace: rulesfile.Namespace, Name: rulesfile.Spec.ConfigMapRef.Name}, &corev1.ConfigMap{})
-		if err != nil {
-			logger.Error(err, "ConfigMap reference resolution failed", "configMap", rulesfile.Spec.ConfigMapRef.Name)
-			artifact.RecordWarning(r.recorder, rulesfile,
-				artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-				metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-				fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, rulesfile.Spec.ConfigMapRef.Name), rulesfile.GetGeneration()))
-			return err
-		}
+		checks = append(checks, controllerhelper.ConfigMapReferenceCheck(rulesfile.Namespace, rulesfile.Spec.ConfigMapRef.Name))
 	}
-
 	if ociArt := rulesfile.Spec.OCIArtifact; ociArt != nil && ociArt.Registry != nil {
 		if reg := ociArt.Registry; reg.Auth != nil && reg.Auth.SecretRef != nil {
-			hasRefs = true
-			secretName := reg.Auth.SecretRef.Name
-			err := r.Get(ctx, client.ObjectKey{Namespace: rulesfile.Namespace, Name: secretName}, &corev1.Secret{})
-			if err != nil {
-				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
-				artifact.RecordWarning(r.recorder, rulesfile,
-					artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), rulesfile.GetGeneration()))
-				return err
-			}
+			checks = append(checks, controllerhelper.SecretReferenceCheck(rulesfile.Namespace, reg.Auth.SecretRef.Name))
 		}
 	}
-
-	if hasRefs {
-		artifact.RecordNormal(r.recorder, rulesfile, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, rulesfile.GetGeneration(),
-		))
-	} else {
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
-	}
-
-	return nil
+	return controllerhelper.ResolveReferences(ctx, r.Client, r.recorder, rulesfile, &nodeObj.Status.Conditions, checks...)
 }
 
 // enforceRulesfileCompatibility checks requirements and plugin dependencies against the running

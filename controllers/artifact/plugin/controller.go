@@ -506,35 +506,13 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 func (r *PluginReconciler) enforceReferenceResolution(
 	ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode,
 ) error {
-	logger := log.FromContext(ctx)
-	hasRefs := false
-
+	var checks []controllerhelper.ReferenceCheck
 	if ociArt := plugin.Spec.OCIArtifact; ociArt != nil && ociArt.Registry != nil {
 		if reg := ociArt.Registry; reg.Auth != nil && reg.Auth.SecretRef != nil {
-			hasRefs = true
-			secretName := reg.Auth.SecretRef.Name
-			err := r.Get(ctx, client.ObjectKey{Namespace: plugin.Namespace, Name: secretName}, &corev1.Secret{})
-			if err != nil {
-				logger.Error(err, "OCIArtifact auth secret reference resolution failed", "secret", secretName)
-				artifact.RecordWarning(r.recorder, plugin, artifact.ReasonReferenceResolutionFailed, artifact.MessageFormatReferenceResolutionFailed, err.Error())
-				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-					metav1.ConditionFalse, artifact.ReasonReferenceResolutionFailed,
-					fmt.Sprintf(artifact.MessageFormatReferenceResolutionFailed, secretName), plugin.GetGeneration()))
-				return err
-			}
+			checks = append(checks, controllerhelper.SecretReferenceCheck(plugin.Namespace, reg.Auth.SecretRef.Name))
 		}
 	}
-
-	if hasRefs {
-		artifact.RecordNormal(r.recorder, plugin, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved)
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewResolvedRefsCondition(
-			metav1.ConditionTrue, artifact.ReasonReferenceResolved, artifact.MessageReferencesResolved, plugin.GetGeneration(),
-		))
-	} else {
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
-	}
-
-	return nil
+	return controllerhelper.ResolveReferences(ctx, r.Client, r.recorder, plugin, &nodeObj.Status.Conditions, checks...)
 }
 
 // enforcePluginCompatibility verifies that the plugin's declared requirements (from
