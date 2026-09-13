@@ -221,11 +221,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// instead of returning a reconcile error, avoiding tying up the worker for controller-runtime's
 	// own retry backoff.
 	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj); err != nil {
-		if delay, ok := artifact.RequeueDelay(err); ok {
-			logger.Info("artifact server not ready, requeueing", "delay", delay)
-			return ctrl.Result{RequeueAfter: delay}, nil
-		}
-		return ctrl.Result{}, err
+		return controllerhelper.ResultForEnsureError(logger, err)
 	}
 
 	return ctrl.Result{}, nil
