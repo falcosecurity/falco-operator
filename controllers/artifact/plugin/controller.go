@@ -184,13 +184,7 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		// ConfigProgrammed/OCIArtifactProgrammed correctly remain True; don't touch them.
 		key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
 		if r.store.FindInstalled(key, artifact.MediumOCI) == nil {
-			depCond := apimeta.FindStatusCondition(nodeObj.Status.Conditions,
-				commonv1alpha1.ConditionDependenciesSatisfied.String())
-			reason := artifact.ReasonDependenciesNotSatisfied
-			msg := "dependency requirements not satisfied on this node"
-			if depCond != nil {
-				reason, msg = depCond.Reason, depCond.Message
-			}
+			reason, msg := artifact.DependenciesNotSatisfiedReasonFromCondition(nodeObj.Status.Conditions)
 			gen := plugin.GetGeneration()
 			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
 				metav1.ConditionFalse, reason, msg, gen,

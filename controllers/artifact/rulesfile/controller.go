@@ -183,13 +183,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// AggregateConditions and makes the Rulesfile-level status show e.g.
 		// OCIArtifactProgrammed=True even when DependenciesSatisfied=False.
 		if len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) == 0 {
-			depCond := apimeta.FindStatusCondition(nodeObj.Status.Conditions,
-				commonv1alpha1.ConditionDependenciesSatisfied.String())
-			reason := artifact.ReasonDependenciesNotSatisfied
-			msg := "dependency requirements not satisfied on this node"
-			if depCond != nil {
-				reason, msg = depCond.Reason, depCond.Message
-			}
+			reason, msg := artifact.DependenciesNotSatisfiedReasonFromCondition(nodeObj.Status.Conditions)
 			gen := rulesfile.GetGeneration()
 			if rulesfile.Spec.OCIArtifact != nil {
 				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(

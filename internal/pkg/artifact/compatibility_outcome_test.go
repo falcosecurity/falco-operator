@@ -20,6 +20,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
 func TestDependenciesNotSatisfiedOutcome(t *testing.T) {
@@ -71,6 +74,51 @@ func TestDependenciesNotSatisfiedOutcome(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			skip, reason, message := DependenciesNotSatisfiedOutcome(tt.enforceRequirements, tt.alreadyInstalled, baseMsg)
 			assert.Equal(t, tt.wantSkip, skip)
+			assert.Equal(t, tt.wantReason, reason)
+			assert.Equal(t, tt.wantMessage, message)
+		})
+	}
+}
+
+func TestDependenciesNotSatisfiedReasonFromCondition(t *testing.T) {
+	tests := []struct {
+		name        string
+		conditions  []metav1.Condition
+		wantReason  string
+		wantMessage string
+	}{
+		{
+			name:        "no DependenciesSatisfied condition present falls back to generic message",
+			conditions:  nil,
+			wantReason:  ReasonDependenciesNotSatisfied,
+			wantMessage: "dependency requirements not satisfied on this node",
+		},
+		{
+			name: "unrelated condition present falls back to generic message",
+			conditions: []metav1.Condition{
+				{Type: string(commonv1alpha1.ConditionResolvedRefs), Status: metav1.ConditionTrue, Reason: "Resolved", Message: "ok"},
+			},
+			wantReason:  ReasonDependenciesNotSatisfied,
+			wantMessage: "dependency requirements not satisfied on this node",
+		},
+		{
+			name: "existing DependenciesSatisfied condition is reused verbatim",
+			conditions: []metav1.Condition{
+				{
+					Type:    string(commonv1alpha1.ConditionDependenciesSatisfied),
+					Status:  metav1.ConditionFalse,
+					Reason:  ReasonDependenciesNotSatisfiedUpdateRejected,
+					Message: "requires foo >= 1.0.0 but Falco reports 0.9.0" + MessageSuffixUpdateRejected,
+				},
+			},
+			wantReason:  ReasonDependenciesNotSatisfiedUpdateRejected,
+			wantMessage: "requires foo >= 1.0.0 but Falco reports 0.9.0" + MessageSuffixUpdateRejected,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, message := DependenciesNotSatisfiedReasonFromCondition(tt.conditions)
 			assert.Equal(t, tt.wantReason, reason)
 			assert.Equal(t, tt.wantMessage, message)
 		})
