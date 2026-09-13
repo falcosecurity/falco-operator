@@ -161,6 +161,7 @@ func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifact
 	if err != nil && retryable {
 		return FetchResult{}, &RetryableError{Err: err, RetryAfter: retryAfter}
 	}
+	result.Perm = PermFor(artifactType)
 	return result, err
 }
 
@@ -199,13 +200,6 @@ func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name, exp
 		return FetchResult{}, 0, true, fmt.Errorf("artifact server did not confirm OCI digest for %s/%s: expected %s, got %q", namespace, name, expectedDigest, got)
 	}
 
-	perm := fs.FileMode(0o755)
-	if modeStr := resp.Header.Get("X-Artifact-Mode"); modeStr != "" {
-		if p, parseErr := strconv.ParseUint(modeStr, 10, 32); parseErr == nil {
-			perm = fs.FileMode(p)
-		}
-	}
-
 	h := sha256.New()
 	content, err := io.ReadAll(io.TeeReader(resp.Body, h))
 	if err != nil {
@@ -215,7 +209,6 @@ func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name, exp
 	return FetchResult{
 		Content:     content,
 		ContentHash: hex.EncodeToString(h.Sum(nil)),
-		Perm:        perm,
 	}, 0, false, nil
 }
 
@@ -246,16 +239,17 @@ func (f *Fetcher) FetchConfigMap(ctx context.Context, namespace string, cmRef *c
 	return FetchResult{
 		Content:     content,
 		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        0o600,
+		Perm:        PermFor(artifactType),
 	}, nil
 }
 
 // FetchInline wraps inline content bytes into a FetchResult.
+// Inline content is always YAML (rules or config), never a plugin binary.
 func (f *Fetcher) FetchInline(_ context.Context, content []byte) (FetchResult, error) {
 	h := sha256.Sum256(content)
 	return FetchResult{
 		Content:     content,
 		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        0o600,
+		Perm:        0o644,
 	}, nil
 }
