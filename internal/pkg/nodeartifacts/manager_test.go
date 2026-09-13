@@ -43,11 +43,28 @@ func newTestManagerWithFetcher(fetcher compat.VersionsFetcher) *nodeartifacts.Ma
 	return nodeartifacts.NewManager(store, fetcher)
 }
 
+func TestManager_ScanAllPassesThroughToUnderlyingStore(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	_, _, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+
+	found, err := m.ScanAll(context.Background(), artifact.TypeConfig)
+
+	require.NoError(t, err)
+	require.Len(t, found["myfile"], 1)
+	assert.Equal(t, string(artifact.MediumInline), found["myfile"][0].Medium)
+}
+
 func TestManager_StorePassesThroughToUnderlyingStore(t *testing.T) {
 	m := newTestManager()
-	result := artifact.FetchResult{Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644}
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
 
-	action, file, err := m.Store(context.Background(), nil, "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	action, file, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
 
 	require.NoError(t, err)
 	assert.Equal(t, artifact.StoreActionAdded, action)
@@ -60,11 +77,14 @@ func TestManager_StorePassesThroughToUnderlyingStore(t *testing.T) {
 
 func TestManager_RemovePassesThroughToUnderlyingStore(t *testing.T) {
 	m := newTestManager()
-	result := artifact.FetchResult{Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644}
-	_, file, err := m.Store(context.Background(), nil, "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	_, file, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
 	require.NoError(t, err)
 
-	err = m.Remove(context.Background(), []artifactv1alpha1.InstalledArtifact{
+	err = m.Remove(context.Background(), key, []artifactv1alpha1.InstalledArtifact{
 		{Path: file.Path, Medium: string(artifact.MediumInline)},
 	})
 	require.NoError(t, err)
@@ -74,14 +94,212 @@ func TestManager_RemovePassesThroughToUnderlyingStore(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestManager_Store_UsesCacheForCurrent_SecondIdenticalStoreIsUnchanged(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+
+	action1, _, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+	require.Equal(t, artifact.StoreActionAdded, action1)
+
+	// No caller-supplied "current": Manager must derive it from its own cache, not from any
+	// status object, to recognize the second call as a no-op.
+	action2, _, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+	assert.Equal(t, artifact.StoreActionUnchanged, action2)
+}
+
+// TestManager_Store_IsolatesByNamespace proves that two artifacts with the same Kind and Name
+// but different Namespace are tracked as distinct cache entries, not merged into one.
+func TestManager_Store_IsolatesByNamespace(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+
+	_, _, err := m.Store(context.Background(), "ns-a", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+
+	keyA := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns-a", Name: "myfile"}
+	keyB := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns-b", Name: "myfile"}
+
+	assert.NotNil(t, m.FindInstalled(keyA, artifact.MediumInline), "ns-a's artifact must be tracked under its own namespace")
+	assert.Nil(t, m.FindInstalled(keyB, artifact.MediumInline), "ns-b must not see ns-a's artifact of the same kind+name")
+}
+
+func TestManager_FindInstalled_ReturnsWhatStoreWrote(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+
+	assert.Nil(t, m.FindInstalled(key, artifact.MediumInline), "nothing stored yet")
+
+	_, file, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+
+	found := m.FindInstalled(key, artifact.MediumInline)
+	require.NotNil(t, found)
+	assert.Equal(t, file.Path, found.Path)
+	assert.Equal(t, file.ContentHash, found.ContentHash)
+}
+
+func TestManager_Remove_ClearsCacheForRemovedMedium(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	_, file, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+
+	require.NoError(t, m.Remove(context.Background(), key, []artifactv1alpha1.InstalledArtifact{
+		{Path: file.Path, Medium: string(artifact.MediumInline)},
+	}))
+
+	assert.Nil(t, m.FindInstalled(key, artifact.MediumInline))
+}
+
+func TestManager_SeedInstalled_ThenFindInstalled(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}
+
+	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+		{Path: "/x", Medium: "oci", Priority: 50, ContentHash: "h1", SpecHash: "s1"},
+	})
+
+	found := m.FindInstalled(key, artifact.MediumOCI)
+	require.NotNil(t, found)
+	assert.Equal(t, "/x", found.Path)
+	assert.Equal(t, "s1", found.SpecHash)
+}
+
+func TestManager_UpdateInstalledSpecHash_SetsSpecHashOnCachedEntry(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}
+	_, _, err := m.Store(context.Background(), "", "my-rules", 50, artifact.TypeRulesfile, artifact.MediumOCI, result)
+	require.NoError(t, err)
+
+	m.UpdateInstalledSpecHash(key, artifact.MediumOCI, "spec-hash-v1")
+
+	found := m.FindInstalled(key, artifact.MediumOCI)
+	require.NotNil(t, found)
+	assert.Equal(t, "spec-hash-v1", found.SpecHash)
+}
+
+// TestManager_SyncInstalledStatus_MirrorsCacheEvenWhenStatusStartsEmpty covers a reconcile that
+// takes the "already verified on disk, skip re-fetch" shortcut (or hits StoreActionUnchanged): a
+// status write gated on the StoreAction actually having changed something would leave
+// status.InstalledArtifacts permanently missing an entry the cache (seeded by WarmSync, or
+// surviving a status patch that lost an SSA conflict) already considers installed.
+// SyncInstalledStatus must mirror the cache unconditionally, regardless of any StoreAction.
+func TestManager_SyncInstalledStatus_MirrorsCacheEvenWhenStatusStartsEmpty(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+		{Path: "/x", Medium: "oci", Priority: 50, ContentHash: "h1", SpecHash: "s1"},
+	})
+	var status []artifactv1alpha1.InstalledArtifact
+
+	m.SyncInstalledStatus(key, artifact.MediumOCI, &status)
+
+	entry := artifact.FindInstalled(status, artifact.MediumOCI)
+	require.NotNil(t, entry, "status must be populated from the cache even though no Store call happened on this status object")
+	assert.Equal(t, "/x", entry.Path)
+	assert.Equal(t, "s1", entry.SpecHash)
+}
+
+// TestManager_SyncInstalledStatus_ClearsStatusWhenCacheHasNoEntry covers the removal direction:
+// if the cache no longer has an entry for medium, status must not keep a stale one either.
+func TestManager_SyncInstalledStatus_ClearsStatusWhenCacheHasNoEntry(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	status := []artifactv1alpha1.InstalledArtifact{{Path: "/stale", Medium: "oci"}}
+
+	m.SyncInstalledStatus(key, artifact.MediumOCI, &status)
+
+	assert.Nil(t, artifact.FindInstalled(status, artifact.MediumOCI))
+}
+
+// TestManager_SyncAllInstalledStatus_SyncsEveryMediumGiven covers SyncAllInstalledStatus, the
+// helper each controller's Reconcile defer uses to resync every medium of its artifact type from
+// the cache before patching status: every medium passed in must be synced, whether that means
+// upserting an entry or clearing a stale one.
+func TestManager_SyncAllInstalledStatus_SyncsEveryMediumGiven(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+		{Path: "/oci", Medium: "oci", Priority: 50, ContentHash: "h-oci"},
+		{Path: "/inline", Medium: "inline", Priority: 90, ContentHash: "h-inline"},
+	})
+	status := []artifactv1alpha1.InstalledArtifact{{Path: "/stale", Medium: "configmap"}}
+
+	m.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap}, &status)
+
+	ociEntry := artifact.FindInstalled(status, artifact.MediumOCI)
+	require.NotNil(t, ociEntry)
+	assert.Equal(t, "/oci", ociEntry.Path)
+	inlineEntry := artifact.FindInstalled(status, artifact.MediumInline)
+	require.NotNil(t, inlineEntry)
+	assert.Equal(t, "/inline", inlineEntry.Path)
+	assert.Nil(t, artifact.FindInstalled(status, artifact.MediumConfigMap),
+		"a medium the cache has no entry for must be cleared, not left stale")
+}
+
+// TestKeyFromObj covers building a Key from the parent CR object (Plugin, Rulesfile, or Config)
+// that owns it.
+func TestKeyFromObj(t *testing.T) {
+	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: "ns"}}
+
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+
+	assert.Equal(t, nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: "ns", Name: "my-plugin"}, key)
+}
+
+func TestManager_GetInstalled_ReturnsIndependentCopy(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}
+	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{{Path: "/x", Medium: "oci"}})
+
+	got := m.GetInstalled(key)
+	got[0].Path = "/mutated"
+
+	assert.Equal(t, "/x", m.FindInstalled(key, artifact.MediumOCI).Path, "caller mutation must not affect the cache")
+}
+
 func testPlugin(name string) *artifactv1alpha1.Plugin {
 	return &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: name}}
+}
+
+// TestManager_AddPluginConfig_DedupsFromItsOwnCacheNotTheCaller proves AddPluginConfig's dedup
+// decision comes from the manager's own installed-artifact cache rather than the current the
+// caller happens to pass: two calls with an identical plugin config, both passing nil, still
+// dedup on the second (a caller with no tracked state of its own, e.g. right after a restart,
+// gets the same correct behavior as one that tracked it).
+func TestManager_AddPluginConfig_DedupsFromItsOwnCacheNotTheCaller(t *testing.T) {
+	m := newTestManager()
+	fetcher := &artifact.Fetcher{}
+
+	action1, file, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	assert.Equal(t, artifact.StoreActionAdded, action1)
+
+	action2, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
+	require.NoError(t, err)
+	assert.Equal(t, artifact.StoreActionUnchanged, action2)
 }
 
 func TestManager_RemovePluginConfigByName_AllowedWhenNothingRequiresIt(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container")
@@ -91,7 +309,7 @@ func TestManager_RemovePluginConfigByName_AllowedWhenNothingRequiresIt(t *testin
 func TestManager_RemovePluginConfigByName_BlockedWhenSoleProvider(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
@@ -111,9 +329,9 @@ func TestManager_RemovePluginConfigByName_AllowedWhenAlternativeCoversTheGroup(t
 		"container": "1.0.0", "container-alt": "1.0.0",
 	}))
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
-	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), fetcher)
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
@@ -127,13 +345,13 @@ func TestManager_RemovePluginConfigByName_AllowedWhenAlternativeCoversTheGroup(t
 func TestManager_RemovePluginConfigByName_ClearsProvidesOnSuccess(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 	require.NoError(t, m.RemovePluginConfigByName(context.Background(), fetcher, "container", "container"))
 
 	// container must have been cleared from provides by the removal above; container-alt is now
 	// the sole remaining provider, so removing it next must be blocked.
-	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
 	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}, {Name: "container-alt", Version: "1.0.0"}}})
@@ -146,14 +364,14 @@ func TestManager_AddPluginConfig_RenameBlockedWhenOldNameStillRequired(t *testin
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
 	pl := testPlugin("container")
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
 	m.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: "container", Version: "1.0.0"}}})
 
 	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
-	_, _, err = m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
 
 	require.Error(t, err, "the old name \"container\" is still required, so the rename must be refused")
 	var blocked *nodeartifacts.BlockedError
@@ -164,7 +382,7 @@ func TestManager_AddPluginConfig_RenameBlockedWhenOldNameStillRequired(t *testin
 func TestManager_Sync_ReplacesAndClears(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
 
@@ -321,7 +539,7 @@ func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	// have loaded since the last poll, so its unknown version must not allow fallback.
 	m.OnFalcoVersionsObserved(versions.Result)
 	check("container", true)
-	_, _, err := m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(ctx, testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	check("json", false)
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
@@ -337,7 +555,7 @@ func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	check("json", false)
 	require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "json", "json"))
 	check("container", true)
-	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	check("json", false)
 
@@ -421,7 +639,7 @@ func TestManager_RemovePluginConfigByName_ChecksRemainingVersions(t *testing.T) 
 			fetcher := &artifact.Fetcher{}
 			var configFile *artifact.File
 			for _, name := range []string{"primary", "z-first", "a-second", "unrelated"} {
-				_, file, err := m.AddPluginConfig(t.Context(), testPlugin(name), nil, fetcher)
+				_, file, err := m.AddPluginConfig(t.Context(), testPlugin(name), fetcher)
 				require.NoError(t, err)
 				configFile = file
 			}
@@ -517,7 +735,7 @@ func TestManager_RemovePluginConfigByName_StaleObservationCannotRestoreRemovedPr
 	m := newTestManagerWithFetcher(falco)
 	fetcher := &artifact.Fetcher{}
 	for _, name := range []string{"json", "container"} {
-		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), nil, fetcher)
+		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
 		require.NoError(t, err)
 	}
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"}
@@ -536,7 +754,7 @@ func TestManager_RemovePluginConfigByName_StaleObservationCannotRestoreRemovedPr
 	m.OnFalcoVersionsObserved(falco.Result)
 	require.ErrorAs(t, m.RemovePluginConfigByName(ctx, fetcher, "container", "container"), &blocked)
 	// An explicit re-add, unlike a poll, makes json eligible again once observed.
-	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), nil, fetcher)
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	require.NoError(t, m.RemovePluginConfigByName(ctx, fetcher, "container", "container"))
 }
@@ -546,7 +764,7 @@ func TestManager_RemovePluginConfigByName_ObservedExternalAlternativeStillWorks(
 		"json": "0.7.4", "container": "0.7.1",
 	}))
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	m.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"},
 		[]nodeartifacts.RequirementGroup{{{Name: "json", Version: "0.7.0"}, {Name: "container", Version: "0.7.0"}}})
@@ -557,7 +775,7 @@ func TestManager_RemovePluginConfigByName_ObservedExternalAlternativeStillWorks(
 func TestManager_RemovePluginConfigByName_RetryAfterConfigRemoval(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	require.NoError(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"))
 	// A newly registered dependency cannot block retrying the remaining binary/finalizer
@@ -565,7 +783,7 @@ func TestManager_RemovePluginConfigByName_RetryAfterConfigRemoval(t *testing.T) 
 	m.Sync(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "new-rules"},
 		[]nodeartifacts.RequirementGroup{{{Name: "json", Version: "0.7.0"}}})
 	require.NoError(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"))
-	_, _, err = m.AddPluginConfig(t.Context(), testPlugin("json"), nil, fetcher)
+	_, _, err = m.AddPluginConfig(t.Context(), testPlugin("json"), fetcher)
 	require.NoError(t, err)
 	var blocked *nodeartifacts.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfigByName(t.Context(), fetcher, "json", "json"), &blocked,
@@ -575,7 +793,7 @@ func TestManager_RemovePluginConfigByName_RetryAfterConfigRemoval(t *testing.T) 
 func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *testing.T) {
 	m := newTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 
 	// AddPluginConfig already triggered an opportunistic refresh via the mock fetcher, which
@@ -622,7 +840,7 @@ func TestManager_OnFalcoVersionsObserved_NotifiesOnNewCapability(t *testing.T) {
 func TestManager_OnFalcoVersionsObserved_NotifiesWhenConfigEntryVersionIsFirstConfirmed(t *testing.T) {
 	// An empty-to-confirmed version transition on an existing provides entry counts as a change.
 	m := newTestManager()
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, &artifact.Fetcher{})
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), &artifact.Fetcher{})
 	require.NoError(t, err)
 	ch := m.Events()
 
@@ -806,7 +1024,7 @@ func TestManager_AddPluginConfig_ConcurrentWithCheckRequirement(t *testing.T) {
 	}()
 
 	for range 20 {
-		_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), nil, fetcher)
+		_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 		require.NoError(t, err)
 	}
 	<-done

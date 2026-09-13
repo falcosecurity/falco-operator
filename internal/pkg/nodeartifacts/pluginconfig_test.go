@@ -58,7 +58,7 @@ func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
 	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container"}}
 	fetcher := &artifact.Fetcher{}
-	_, file, err := m.AddPluginConfig(ctx, plugin, nil, fetcher)
+	_, file, err := m.AddPluginConfig(ctx, plugin, fetcher)
 	require.NoError(t, err)
 	rulesKey := Key{Kind: KindRulesfile, Name: "rules"}
 	m.Sync(rulesKey, []RequirementGroup{{{Name: "container", Version: "0.7.0"}}})
@@ -718,7 +718,7 @@ func TestManager_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
 		},
 	}
 
-	action, file, err := m.AddPluginConfig(context.Background(), pl, nil, &artifact.Fetcher{})
+	action, file, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
 
 	require.NoError(t, err)
 	assert.Equal(t, artifact.StoreActionAdded, action)
@@ -741,7 +741,7 @@ func TestManager_AddPluginConfig_WritesConfigWithInitConfig(t *testing.T) {
 		},
 	}
 
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, &artifact.Fetcher{})
+	_, _, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
 
 	require.NoError(t, err)
 	found := findPluginConfig(m.pluginsConfig.Configs, "container")
@@ -753,12 +753,12 @@ func TestManager_AddPluginConfig_RenameRemovesStaleEntryWhenUnblocked(t *testing
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 	require.NotNil(t, findPluginConfig(m.pluginsConfig.Configs, "my-plugin"))
 
 	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "new-name"}
-	_, _, err = m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
 
 	require.NoError(t, err)
 	require.Len(t, m.pluginsConfig.Configs, 1)
@@ -771,10 +771,10 @@ func TestManager_AddPluginConfig_SameConfigNameDoesNotRemoveEntry(t *testing.T) 
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 
-	_, _, err = m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
 
 	require.NoError(t, err)
 	require.Len(t, m.pluginsConfig.Configs, 1)
@@ -786,7 +786,7 @@ func TestManager_AddPluginConfig_StoreFailureSurfacesError(t *testing.T) {
 	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "test-plugin"}}
 
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, &artifact.Fetcher{})
+	_, _, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disk full")
@@ -805,7 +805,7 @@ func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 			m := NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, falco)
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
 			fetcher := &artifact.Fetcher{}
-			_, file, err := m.AddPluginConfig(ctx, plugin, nil, fetcher)
+			_, file, err := m.AddPluginConfig(ctx, plugin, fetcher)
 			require.NoError(t, err)
 			before := string(fs.Files[file.Path])
 			fs.WriteErr = fmt.Errorf("disk full")
@@ -814,10 +814,10 @@ func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 				err = m.RemovePluginConfigByName(ctx, fetcher, "json", "json")
 			case renameOperation:
 				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
-				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
 			case "update":
 				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{OpenParams: "changed"}
-				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
 			}
 			require.ErrorContains(t, err, "disk full")
 			assert.Equal(t, before, string(fs.Files[file.Path]))
@@ -833,7 +833,7 @@ func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 				assert.Empty(t, m.pluginsConfig.LoadPlugins)
 				assert.True(t, m.provides["json"].Removed)
 			} else {
-				_, _, err = m.AddPluginConfig(ctx, plugin, file, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
 				require.NoError(t, err)
 				assert.NotEqual(t, before, string(fs.Files[file.Path]))
 				if operation == renameOperation {
@@ -852,7 +852,7 @@ func TestManager_RemovePluginConfigByName_EmptyAfterRemovalKeepsFileOnDisk(t *te
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, file, err := m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, file, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "json", "json")
@@ -871,9 +871,9 @@ func TestManager_RemovePluginConfigByName_EmptyAfterRemovalKeepsFileOnDisk(t *te
 func TestManager_RemovePluginConfigByName_NotEmptyAfterRemovalWritesUpdatedConfig(t *testing.T) {
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}, fetcher)
 	require.NoError(t, err)
-	_, _, err = m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "k8saudit"}}, nil, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "k8saudit"}}, fetcher)
 	require.NoError(t, err)
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "json", "json")
@@ -887,7 +887,7 @@ func TestManager_RemovePluginConfigByName_NotEmptyAfterRemovalWritesUpdatedConfi
 func TestManager_RemovePluginConfigByName_AlreadyAbsentIsANoOp(t *testing.T) {
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}, fetcher)
 	require.NoError(t, err)
 
 	err = m.RemovePluginConfigByName(context.Background(), fetcher, "nonexistent", "nonexistent")
@@ -901,11 +901,33 @@ func TestManager_RemovePluginConfigByName_ForgetsCrToConfigName(t *testing.T) {
 	m := newPluginConfigTestManager()
 	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, nil, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 	require.Contains(t, m.crToConfigName, "json")
 
 	require.NoError(t, m.RemovePluginConfigByName(context.Background(), fetcher, "json", "json"))
 
 	assert.NotContains(t, m.crToConfigName, "json")
+}
+
+// TestWritePluginsConfig_ForceStillClassifiesUnchangedContentCorrectly reproduces a real bug:
+// writePluginsConfig(force=true) used to pass a nil current to Store regardless of what was
+// already cached, so a forced rewrite of byte-identical content (e.g. RemovePluginConfigByName
+// called when the entry was already absent) was always misreported as StoreActionAdded, a fresh
+// install. force must only bypass the skip-if-unchanged early return, not the current lookup
+// itself, so Store can still classify what actually happened.
+func TestWritePluginsConfig_ForceStillClassifiesUnchangedContentCorrectly(t *testing.T) {
+	m := newPluginConfigTestManager()
+	fetcher := &artifact.Fetcher{}
+	config := &pluginsConfig{}
+
+	action, file, err := m.writePluginsConfig(context.Background(), fetcher, config, true)
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	assert.Equal(t, artifact.StoreActionAdded, action, "first write of the shared config file is a real install")
+
+	action, _, err = m.writePluginsConfig(context.Background(), fetcher, config, true)
+	require.NoError(t, err)
+	assert.Equal(t, artifact.StoreActionUnchanged, action,
+		"forced rewrite of byte-identical content must not be misreported as a fresh install")
 }

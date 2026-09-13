@@ -176,12 +176,13 @@ func (pc *pluginsConfig) toString() (string, error) {
 // *BlockedError and leaves both the in-memory aggregate and disk untouched, so the rename can be
 // retried on the next reconcile without having lost the old entry in the interim.
 //
-// current is the caller's previously-tracked config file (nil if none), matching
-// ArtifactStore.Store's convention; passed through so an unchanged write can be skipped.
+// The file this aggregate is written to is a single shared, node-level singleton (keyed by
+// PluginConfigKey in the installed-artifact cache), not per-Plugin-CR; whether the write can be
+// skipped as unchanged is decided from that cache entry, not from anything the caller passes in.
 // fetcher prepares the serialized aggregate into a FetchResult (content hash, perm).
 func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin,
-	current *artifact.File, fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
-	action, file, err := m.addPluginConfigLocked(ctx, plugin, current, fetcher)
+	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
+	action, file, err := m.addPluginConfigLocked(ctx, plugin, fetcher)
 	if err != nil {
 		return action, file, err
 	}
@@ -197,7 +198,7 @@ func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.
 }
 
 func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1alpha1.Plugin,
-	current *artifact.File, fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
+	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -215,7 +216,7 @@ func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1a
 	}
 	updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
 
-	action, file, err := m.writePluginsConfig(ctx, current, fetcher, updated)
+	action, file, err := m.writePluginsConfig(ctx, fetcher, updated, false)
 	if err != nil {
 		return artifact.StoreActionNone, nil, err
 	}
@@ -268,7 +269,9 @@ func (m *Manager) RemovePluginConfigByName(ctx context.Context, fetcher artifact
 	updated := m.pluginsConfig.clone()
 	updated.removeByName(configName)
 
-	if _, _, err := m.writePluginsConfig(ctx, nil, fetcher, updated); err != nil {
+	// Always rewritten (even down to an explicitly-empty "plugins: []"), bypassing the dedup
+	// check: see this function's doc comment for why the file is never left un-rewritten.
+	if _, _, err := m.writePluginsConfig(ctx, fetcher, updated, true); err != nil {
 		return err
 	}
 
@@ -281,10 +284,12 @@ func (m *Manager) RemovePluginConfigByName(ctx context.Context, fetcher artifact
 	return nil
 }
 
-// writePluginsConfig serializes the current in-memory aggregate and stores it, skipping the
-// write when current's content hash already matches what's on disk. Caller must hold m.mu.
-func (m *Manager) writePluginsConfig(ctx context.Context, current *artifact.File, fetcher artifact.ArtifactFetcher,
-	config *pluginsConfig) (artifact.StoreAction, *artifact.File, error) {
+// writePluginsConfig serializes the current in-memory aggregate and stores it. Unless force is
+// set, the write is skipped when the installed cache's tracked current content hash already
+// matches what's on disk; force bypasses that check entirely (see RemovePluginConfigByName's doc
+// comment for why it needs this). Caller must hold m.mu.
+func (m *Manager) writePluginsConfig(ctx context.Context, fetcher artifact.ArtifactFetcher,
+	config *pluginsConfig, force bool) (artifact.StoreAction, *artifact.File, error) {
 	pluginConfigString, err := config.toString()
 	if err != nil {
 		return artifact.StoreActionNone, nil, fmt.Errorf("convert plugin config to string: %w", err)
@@ -293,10 +298,16 @@ func (m *Manager) writePluginsConfig(ctx context.Context, current *artifact.File
 	if err != nil {
 		return artifact.StoreActionNone, nil, fmt.Errorf("prepare plugin config content: %w", err)
 	}
-	if current != nil {
+	current := artifact.FindInstalled(m.installed[PluginConfigKey], artifact.MediumInline)
+	if !force && current != nil {
 		if ok, verifyErr := m.store.Verify(ctx, &artifact.File{Path: current.Path, ContentHash: result.ContentHash}); verifyErr == nil && ok {
 			return artifact.StoreActionUnchanged, nil, nil
 		}
 	}
-	return m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.TypeConfig, artifact.MediumInline, result)
+	action, file, err := m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.TypeConfig, artifact.MediumInline, result)
+	if err != nil {
+		return action, file, err
+	}
+	m.upsertInstalledLocked(PluginConfigKey, action, artifact.MediumInline, file)
+	return action, file, nil
 }
