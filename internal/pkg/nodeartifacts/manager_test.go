@@ -163,6 +163,37 @@ func TestManager_Remove_ClearsCacheForRemovedMedium(t *testing.T) {
 	assert.Nil(t, m.FindInstalled(key, artifact.MediumInline))
 }
 
+func TestManager_RemoveIfInstalled_NoOpWhenNothingInstalled(t *testing.T) {
+	m := newTestManager()
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+
+	path, removed, err := m.RemoveIfInstalled(context.Background(), key, artifact.MediumInline)
+
+	require.NoError(t, err)
+	assert.False(t, removed)
+	assert.Empty(t, path)
+}
+
+func TestManager_RemoveIfInstalled_RemovesWhenInstalled(t *testing.T) {
+	m := newTestManager()
+	result := artifact.FetchResult{
+		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
+	}
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	_, file, err := m.Store(context.Background(), "", "myfile", 50, artifact.TypeConfig, artifact.MediumInline, result)
+	require.NoError(t, err)
+
+	path, removed, err := m.RemoveIfInstalled(context.Background(), key, artifact.MediumInline)
+
+	require.NoError(t, err)
+	assert.True(t, removed)
+	assert.Equal(t, file.Path, path)
+	assert.Nil(t, m.FindInstalled(key, artifact.MediumInline), "cache entry must be cleared")
+	ok, err := m.Verify(context.Background(), file)
+	require.NoError(t, err)
+	assert.False(t, ok, "file must be removed from the underlying store")
+}
+
 func TestManager_SeedInstalled_ThenFindInstalled(t *testing.T) {
 	m := newTestManager()
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}

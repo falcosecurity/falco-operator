@@ -412,19 +412,18 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	if plugin.Spec.OCIArtifact == nil {
 		// OCI spec removed while the Plugin CR still exists: removes the config entry, then the
 		// binary.
-		if existing := r.store.FindInstalled(key, artifact.MediumOCI); existing != nil {
+		if r.store.FindInstalled(key, artifact.MediumOCI) != nil {
 			if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
 				logger.Error(err, "unable to remove plugin config during OCI spec removal")
 				return err
 			}
-			if err := r.store.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{
-				{Path: existing.Path, Medium: string(existing.Medium)},
-			}); err != nil {
+			if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumOCI); err != nil {
 				logger.Error(err, "unable to remove stale plugin binary")
 				return err
+			} else if removed {
+				artifact.RecordStoreEvent(r.recorder, plugin, artifact.StoreActionRemoved, artifact.MediumOCI)
+				artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
 			}
-			artifact.RecordStoreEvent(r.recorder, plugin, artifact.StoreActionRemoved, artifact.MediumOCI)
-			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
 		}
 		// Removes the OCIArtifactProgrammed condition instead of leaving it stale. Mirrors
 		// ensureRulesfile's per-medium stale-cleanup behavior.

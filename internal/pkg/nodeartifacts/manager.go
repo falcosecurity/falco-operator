@@ -222,6 +222,20 @@ func (m *Manager) FindInstalled(key Key, medium artifact.Medium) *artifact.File 
 	return artifact.FindInstalled(m.installed[key], medium)
 }
 
+// RemoveIfInstalled removes key's medium from disk and the cache when something is currently
+// installed for it, returning the removed file's path (removed=true), or a no-op
+// (removed=false) when nothing is installed for medium.
+func (m *Manager) RemoveIfInstalled(ctx context.Context, key Key, medium artifact.Medium) (path string, removed bool, err error) {
+	existing := m.FindInstalled(key, medium)
+	if existing == nil {
+		return "", false, nil
+	}
+	if err := m.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(medium)}}); err != nil {
+		return "", false, err
+	}
+	return existing.Path, true, nil
+}
+
 // UpdateInstalledSpecHash sets SpecHash on key's cache entry for medium; no-op if not found.
 // Store's own dedup only knows about content, not the parent spec, so a caller whose Store call
 // returned StoreActionUnchanged despite the parent spec changing (e.g. a new OCI tag resolving to
