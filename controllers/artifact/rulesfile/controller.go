@@ -466,17 +466,17 @@ func (r *RulesfileReconciler) cleanupStaleMedium(
 	logger := log.FromContext(ctx)
 	apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, conditionType)
 	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
-	existing := r.store.FindInstalled(key, medium)
-	if existing == nil {
-		return nil
-	}
-	if err := r.store.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(medium)}}); err != nil {
+	path, removed, err := r.store.RemoveIfInstalled(ctx, key, medium)
+	if err != nil {
 		logger.Error(err, "unable to remove stale rulesfile", "medium", medium)
 		return err
 	}
+	if !removed {
+		return nil
+	}
 	artifact.RecordStoreEvent(r.recorder, rulesfile, artifact.StoreActionRemoved, medium)
 	artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, medium)
-	logger.Info("Removed stale rulesfile from disk", "medium", medium, "path", existing.Path)
+	logger.Info("Removed stale rulesfile from disk", "medium", medium, "path", path)
 	return nil
 }
 
