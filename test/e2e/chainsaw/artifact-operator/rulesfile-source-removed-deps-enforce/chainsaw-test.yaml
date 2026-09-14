@@ -32,8 +32,8 @@ spec:
     5. Assert inline file is present on the node filesystem.
     6. Assert ConfigMap file is present on the node filesystem.
     7. Remove inlineRules from spec; assert DependenciesSatisfied=Unknown,
-       InlineArtifactProgrammed still present (stale, cleanup was skipped),
-       ConfigMapArtifactProgrammed=True, Programmed=False.
+       both parent source conditions Unknown for generation 2, Programmed=False.
+       ArtifactNode source conditions remain True for generation 1 (cleanup was skipped).
     8. Assert inline file STILL on the node filesystem (stale cleanup skipped).
     9. Assert ConfigMap file STILL on the node filesystem.
     10. Assert ArtifactNode installedArtifacts count is still 2 (cleanup was skipped).
@@ -175,8 +175,8 @@ spec:
         fetchAndCacheArtifactMeta produces ArtifactMeta with empty requirements. With artifacts
         already installed, enforceRulesfileCompatibility sets DependenciesNotSatisfiedUpdateRejected
         and returns skip=true in enforce mode. ensureRulesfile is never called: stale inline
-        file stays on disk, InlineArtifactProgrammed stays in conditions (stale), and
-        Programmed flips to False.
+        file stays on disk and the ArtifactNode keeps its generation-1 source conditions.
+        The parent reports both source conditions Unknown for generation 2, and Programmed=False.
       try:
         - patch:
             resource:
@@ -194,16 +194,23 @@ spec:
               metadata:
                 name: ($rulesfile_name)
                 namespace: ($namespace)
+              (metadata.generation): 2
               status:
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'Unknown'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
+                  - status: 'Unknown'
+                    reason: Pending
+                    observedGeneration: 2
                 (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
+                  - status: 'Unknown'
+                    reason: Pending
+                    observedGeneration: 2
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -216,13 +223,17 @@ spec:
               status:
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'Unknown'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'InlineArtifactProgrammed']):
                   - status: 'True'
+                    observedGeneration: 1
                 (conditions[?type == 'ConfigMapArtifactProgrammed']):
                   - status: 'True'
+                    observedGeneration: 1
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
 
     - name: "Step 08: Assert-inline-file-still-on-filesystem"
       description: |
