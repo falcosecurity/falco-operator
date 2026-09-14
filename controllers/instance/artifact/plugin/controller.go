@@ -166,18 +166,8 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// aggregation pass below never runs in this branch, since node creation depends on
 		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
 		// would never reach the Plugin's own status.
-		activeNodes := &artifactv1alpha1.ArtifactNodeList{}
-		for i := range existingNodes.Items {
-			nodeObject := &existingNodes.Items[i]
-			if !nodeObject.DeletionTimestamp.IsZero() {
-				continue
-			}
-			if _, ok := desired[nodeObject.Spec.NodeName]; !ok {
-				continue
-			}
-			activeNodes.Items = append(activeNodes.Items, *nodeObject)
-		}
-		controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, activeNodes)
+		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
+		controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, nodeSets)
 
 		// The instance-level metadata failure is the more specific, authoritative cause of
 		// Programmed=False; it must win over whatever the per-node aggregate computed above.
@@ -237,21 +227,11 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// A stale or terminating child no longer represents the desired assignment and must not
 	// keep its last condition in the aggregate while deletion is pending.
-	activeNodes := &artifactv1alpha1.ArtifactNodeList{}
-	for i := range existingNodes.Items {
-		nodeObject := &existingNodes.Items[i]
-		if !nodeObject.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if _, ok := desired[nodeObject.Spec.NodeName]; !ok {
-			continue
-		}
-		activeNodes.Items = append(activeNodes.Items, *nodeObject)
-	}
+	nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
 
 	condSnap := make([]metav1.Condition, len(plugin.Status.Conditions))
 	copy(condSnap, plugin.Status.Conditions)
-	controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, activeNodes)
+	controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, nodeSets)
 	if !apiequality.Semantic.DeepEqual(condSnap, plugin.Status.Conditions) {
 		if err := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); err != nil {
 			return ctrl.Result{}, err

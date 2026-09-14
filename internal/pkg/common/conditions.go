@@ -66,9 +66,13 @@ func NewProgrammedCondition(status metav1.ConditionStatus, reason, message strin
 
 // ComputeProgrammedCondition derives the gateway Programmed condition from every other
 // condition currently in conditions: True only when all of them (except any skip excludes)
-// are also True. skip is consulted per condition type — pass nil to gate on everything — and
+// are also True for generation. Stale conditions cannot certify a new spec.
+// skip is consulted per condition type — pass nil to gate on everything — and
 // lets callers make a specific condition (e.g. DependenciesSatisfied in advise mode)
 // advisory-only rather than blocking.
+//
+// observedGeneration is the instance operator's processed generation. Callers that do not
+// enforce this gate pass generation. It does not indicate what Falco has loaded.
 //
 // On failure the message names the specific blocking condition and its own message (e.g.
 // "blocked by ConfigProgrammed (False): unable to fetch ConfigMap").
@@ -79,28 +83,43 @@ func ComputeProgrammedCondition(
 	conditions []metav1.Condition,
 	skip func(condType string) bool,
 	trueReason, trueMessage, falseReason string,
-	generation int64,
+	generation, observedGeneration int64,
 ) metav1.Condition {
 	n := 0
-	var blocking *metav1.Condition
+	var blocking, stale *metav1.Condition
 	for i := range conditions {
 		cond := &conditions[i]
 		if cond.Type == commonv1alpha1.ConditionProgrammed.String() || (skip != nil && skip(cond.Type)) {
 			continue
 		}
 		n++
+		if cond.ObservedGeneration != generation {
+			if stale == nil {
+				stale = cond
+			}
+			continue
+		}
 		if cond.Status != metav1.ConditionTrue && blocking == nil {
 			blocking = cond
 		}
 	}
-	if n > 0 && blocking == nil {
+	if blocking != nil {
+		msg := fmt.Sprintf("blocked by %s (%s): %s", blocking.Type, blocking.Status, blocking.Message)
+		return NewProgrammedCondition(metav1.ConditionFalse, falseReason, msg, generation)
+	}
+	if observedGeneration != generation {
+		msg := fmt.Sprintf("Waiting for the instance operator to process generation %d", generation)
+		return NewProgrammedCondition(metav1.ConditionUnknown, "GenerationPending", msg, generation)
+	}
+	if stale != nil {
+		msg := fmt.Sprintf("Waiting for %s to be evaluated for generation %d (last observed %d)",
+			stale.Type, generation, stale.ObservedGeneration)
+		return NewProgrammedCondition(metav1.ConditionUnknown, "GenerationPending", msg, generation)
+	}
+	if n > 0 {
 		return NewProgrammedCondition(metav1.ConditionTrue, trueReason, trueMessage, generation)
 	}
-	msg := msgNoConditionsToGateOn
-	if blocking != nil {
-		msg = fmt.Sprintf("blocked by %s (%s): %s", blocking.Type, blocking.Status, blocking.Message)
-	}
-	return NewProgrammedCondition(metav1.ConditionFalse, falseReason, msg, generation)
+	return NewProgrammedCondition(metav1.ConditionFalse, falseReason, msgNoConditionsToGateOn, generation)
 }
 
 // NewDependenciesSatisfiedCondition creates a ConditionDependenciesSatisfied condition.

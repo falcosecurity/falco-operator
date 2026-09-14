@@ -174,10 +174,10 @@ func TestComputeProgrammedCondition(t *testing.T) {
 
 	t.Run("all true -> Programmed True", func(t *testing.T) {
 		conditions := []metav1.Condition{
-			{Type: "A", Status: metav1.ConditionTrue},
-			{Type: "B", Status: metav1.ConditionTrue},
+			{Type: "A", ObservedGeneration: gen, Status: metav1.ConditionTrue},
+			{Type: "B", ObservedGeneration: gen, Status: metav1.ConditionTrue},
 		}
-		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		if got.Status != metav1.ConditionTrue || got.Reason != "TrueReason" || got.Message != "TrueMsg" {
 			t.Errorf("got %+v, want Status=True Reason=TrueReason Message=TrueMsg", got)
 		}
@@ -188,10 +188,10 @@ func TestComputeProgrammedCondition(t *testing.T) {
 
 	t.Run("one condition false -> Programmed False naming the blocker", func(t *testing.T) {
 		conditions := []metav1.Condition{
-			{Type: "A", Status: metav1.ConditionTrue},
-			{Type: "B", Status: metav1.ConditionFalse, Message: "disk full"},
+			{Type: "A", ObservedGeneration: gen, Status: metav1.ConditionTrue},
+			{Type: "B", ObservedGeneration: gen, Status: metav1.ConditionFalse, Message: "disk full"},
 		}
-		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		if got.Status != metav1.ConditionFalse || got.Reason != "FalseReason" {
 			t.Errorf("got %+v, want Status=False Reason=FalseReason", got)
 		}
@@ -203,10 +203,10 @@ func TestComputeProgrammedCondition(t *testing.T) {
 
 	t.Run("first blocking condition wins when several are not True", func(t *testing.T) {
 		conditions := []metav1.Condition{
-			{Type: "A", Status: metav1.ConditionFalse, Message: "first failure"},
-			{Type: "B", Status: metav1.ConditionUnknown, Message: "second failure"},
+			{Type: "A", ObservedGeneration: gen, Status: metav1.ConditionFalse, Message: "first failure"},
+			{Type: "B", ObservedGeneration: gen, Status: metav1.ConditionUnknown, Message: "second failure"},
 		}
-		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		want := "blocked by A (False): first failure"
 		if got.Message != want {
 			t.Errorf("got Message=%q, want %q", got.Message, want)
@@ -215,11 +215,11 @@ func TestComputeProgrammedCondition(t *testing.T) {
 
 	t.Run("skip excludes a condition type from the gate even when False", func(t *testing.T) {
 		conditions := []metav1.Condition{
-			{Type: "A", Status: metav1.ConditionTrue},
+			{Type: "A", ObservedGeneration: gen, Status: metav1.ConditionTrue},
 			{Type: "DependenciesSatisfied", Status: metav1.ConditionFalse, Message: "advisory only"},
 		}
 		skip := func(condType string) bool { return condType == "DependenciesSatisfied" }
-		got := ComputeProgrammedCondition(conditions, skip, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(conditions, skip, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		if got.Status != metav1.ConditionTrue {
 			t.Errorf("got Status=%v, want True (DependenciesSatisfied should be skipped)", got.Status)
 		}
@@ -229,7 +229,7 @@ func TestComputeProgrammedCondition(t *testing.T) {
 		conditions := []metav1.Condition{
 			{Type: string(commonv1alpha1.ConditionProgrammed), Status: metav1.ConditionFalse},
 		}
-		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(conditions, nil, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		// The only input condition is Programmed and it's excluded, so n stays 0 and the
 		// result is False with the msgNoConditionsToGateOn message.
 		if got.Status != metav1.ConditionFalse || got.Message != msgNoConditionsToGateOn {
@@ -238,9 +238,36 @@ func TestComputeProgrammedCondition(t *testing.T) {
 	})
 
 	t.Run("empty conditions -> False, no conditions to gate on", func(t *testing.T) {
-		got := ComputeProgrammedCondition(nil, nil, "TrueReason", "TrueMsg", "FalseReason", gen)
+		got := ComputeProgrammedCondition(nil, nil, "TrueReason", "TrueMsg", "FalseReason", gen, gen)
 		if got.Status != metav1.ConditionFalse || got.Message != msgNoConditionsToGateOn {
 			t.Errorf("got %+v, want Status=False Message=%q", got, msgNoConditionsToGateOn)
 		}
 	})
+}
+
+func TestComputeProgrammedCondition_WaitsForCurrentGeneration(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		observedGeneration  int64
+		conditionGeneration int64
+		status              metav1.ConditionStatus
+		want                metav1.ConditionStatus
+	}{
+		{name: "metadata pending before first installation", observedGeneration: 1, conditionGeneration: 2, status: metav1.ConditionTrue, want: metav1.ConditionUnknown},
+		{name: "old successful source", observedGeneration: 2, conditionGeneration: 1, status: metav1.ConditionTrue, want: metav1.ConditionUnknown},
+		{name: "old failed source", observedGeneration: 2, conditionGeneration: 1, status: metav1.ConditionFalse, want: metav1.ConditionUnknown},
+		{name: "current reference failure is still visible while metadata is pending", observedGeneration: 1, conditionGeneration: 2, status: metav1.ConditionFalse, want: metav1.ConditionFalse},
+		{name: "current successful source", observedGeneration: 2, conditionGeneration: 2, status: metav1.ConditionTrue, want: metav1.ConditionTrue},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			conditions := []metav1.Condition{{Type: "Source", Status: tt.status, ObservedGeneration: tt.conditionGeneration}}
+			got := ComputeProgrammedCondition(conditions, nil, "Ready", "Ready", "Failed", 2, tt.observedGeneration)
+			if got.Status != tt.want {
+				t.Fatalf("got %+v, want %s", got, tt.want)
+			}
+			if conditions[0].Status != tt.status || conditions[0].ObservedGeneration != tt.conditionGeneration {
+				t.Fatal("gateway mutated its input conditions")
+			}
+		})
+	}
 }

@@ -141,21 +141,11 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// A stale or terminating child no longer represents the desired assignment and must not
 	// keep its last condition in the aggregate while deletion is pending.
-	activeNodes := &artifactv1alpha1.ArtifactNodeList{}
-	for i := range existingNodes.Items {
-		nodeObject := &existingNodes.Items[i]
-		if !nodeObject.DeletionTimestamp.IsZero() {
-			continue
-		}
-		if _, ok := desired[nodeObject.Spec.NodeName]; !ok {
-			continue
-		}
-		activeNodes.Items = append(activeNodes.Items, *nodeObject)
-	}
+	nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
 
 	oldStatus := config.Status.DeepCopy()
 	config.Status.ObservedGeneration = config.Generation
-	controllerhelper.ComputeAggregateConditions(ctx, config, &config.Status.Conditions, activeNodes)
+	controllerhelper.ComputeAggregateConditions(ctx, config, &config.Status.Conditions, nodeSets)
 	if !apiequality.Semantic.DeepEqual(*oldStatus, config.Status) {
 		return ctrl.Result{}, controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, config, ControllerName)
 	}

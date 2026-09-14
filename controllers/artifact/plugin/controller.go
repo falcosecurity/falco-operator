@@ -138,10 +138,14 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		skipDependenciesSatisfied := func(condType string) bool {
 			return !r.enforceRequirements && condType == commonv1alpha1.ConditionDependenciesSatisfied.String()
 		}
+		observedGeneration := plugin.Generation
+		if r.enforceRequirements {
+			observedGeneration = plugin.Status.ObservedGeneration
+		}
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
 			nodeObj.Status.Conditions, skipDependenciesSatisfied,
 			artifact.ReasonProgrammed, artifact.MessageProgrammed, artifact.ReasonProgramFailed,
-			plugin.GetGeneration(),
+			plugin.GetGeneration(), observedGeneration,
 		))
 		var patchErr error
 		if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {
