@@ -17,9 +17,6 @@
 package artifact
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"slices"
 	"sort"
 
@@ -27,17 +24,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
-
-// ComputeOCIArtifactSpecHash returns the SHA-256 hex digest of the JSON-marshaled OCIArtifact spec.
-// A change in the hash signals that the spec changed and any cached config must be re-fetched.
-func ComputeOCIArtifactSpecHash(ociArtifact *commonv1alpha1.OCIArtifact) (string, error) {
-	data, err := json.Marshal(ociArtifact)
-	if err != nil {
-		return "", err
-	}
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:]), nil
-}
 
 // DeduplicateArtifactMeta removes semantically redundant requirements and dependency groups.
 // Monotonic requirements with the same name are collapsed to the strictest version, while
@@ -107,15 +93,6 @@ func deduplicateRequirements(reqs []commonv1alpha1.ArtifactMetaRequirement) []co
 		return result[i].Version < result[j].Version
 	})
 	return result
-}
-
-// ArtifactMetaCacheHit reports whether cached is still valid for the given specHash.
-// The check is purely in-memory: a hit requires cached to be non-nil and its SpecHash to
-// equal specHash. The registry is never consulted; to pick up a new image pushed to the
-// same tag, users must change the OCIArtifact spec (e.g. pin a new digest or bump the tag),
-// which bumps Generation and invalidates the spec hash.
-func ArtifactMetaCacheHit(cached *commonv1alpha1.ArtifactMeta, specHash string) bool {
-	return cached != nil && cached.SpecHash == specHash
 }
 
 // AppendConfigLayerRequirements converts an OCI config layer's parsed requirements and

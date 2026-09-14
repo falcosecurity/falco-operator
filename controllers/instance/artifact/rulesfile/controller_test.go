@@ -785,9 +785,9 @@ func TestFetchAndCacheArtifactMeta_OCICacheHit(t *testing.T) {
 		SpecHash: specHash,
 		Digest:   "sha256:abc",
 	}
-	sources, err := r.collectArtifactMetaSources(context.Background(), rf)
+	sources, err := artifact.ResolveRulesfileSources(t.Context(), &artifact.Fetcher{K8sClient: r.Client}, rf)
 	require.NoError(t, err)
-	rf.Status.ArtifactMetaSourcesHash, err = sources.hash()
+	rf.Status.ArtifactMetaSourcesHash, err = sources.Hash()
 	require.NoError(t, err)
 
 	err = r.fetchAndCacheArtifactMeta(context.Background(), rf)
@@ -909,7 +909,7 @@ func TestFetchAndCacheArtifactMeta_ConfigMapRequiredKeyMissing(t *testing.T) {
 
 	err := r.fetchAndCacheArtifactMeta(context.Background(), rf)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), `does not contain required key "rules.yaml"`)
+	assert.Contains(t, err.Error(), `missing expected key "rules.yaml"`)
 	assert.Nil(t, rf.Status.ArtifactMeta)
 	assert.Empty(t, rf.Status.ArtifactMetaSourcesHash)
 }
@@ -1456,9 +1456,9 @@ func TestFetchAndCacheArtifactMeta_OCICacheHitIgnoresDigest(t *testing.T) {
 		SpecHash: specHash,
 		Digest:   "sha256:old",
 	}
-	sources, err := r.collectArtifactMetaSources(context.Background(), rf)
+	sources, err := artifact.ResolveRulesfileSources(t.Context(), &artifact.Fetcher{K8sClient: r.Client}, rf)
 	require.NoError(t, err)
-	rf.Status.ArtifactMetaSourcesHash, err = sources.hash()
+	rf.Status.ArtifactMetaSourcesHash, err = sources.Hash()
 	require.NoError(t, err)
 
 	err = r.fetchAndCacheArtifactMeta(context.Background(), rf)

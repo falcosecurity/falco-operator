@@ -92,6 +92,8 @@ const (
 	ReasonDependenciesNotSatisfied = "DependenciesNotSatisfied"
 	// ReasonDependenciesUnknown indicates the Falco API was unreachable and requirements could not be checked.
 	ReasonDependenciesUnknown = "DependenciesUnknown"
+	// ReasonArtifactMetaNotReady indicates that metadata does not yet match the source content.
+	ReasonArtifactMetaNotReady = "ArtifactMetaNotReady"
 	// ReasonDependenciesNotSatisfiedInstalledAnyway indicates one or more requirements are not
 	// met but the artifact was installed anyway because requirement enforcement is disabled.
 	ReasonDependenciesNotSatisfiedInstalledAnyway = "DependenciesNotSatisfiedInstalledAnyway"
