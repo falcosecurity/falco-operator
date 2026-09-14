@@ -17,10 +17,14 @@
 package artifactcache_test
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -117,7 +121,7 @@ func TestCache_Load_RestartResilience(t *testing.T) {
 	first := artifactcache.NewCache(dir)
 	require.NoError(t, first.Load())
 	blobPath := filepath.Join(dir, "blobs", "plugin", "ref", "sha256-abc-linux-amd64")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("content"), 0o755))
+	require.NoError(t, first.Store(blobPath, []byte("content"), 0o755))
 	require.NoError(t, first.Set("plugin", "ns", "json", "linux-amd64", blobPath))
 
 	second := artifactcache.NewCache(dir)
@@ -135,8 +139,8 @@ func TestCache_Lookup(t *testing.T) {
 
 	blobAmd64 := filepath.Join(dir, "blobs", "amd64")
 	blobArm64 := filepath.Join(dir, "blobs", "arm64")
-	require.NoError(t, artifactcache.Store(blobAmd64, []byte("x"), 0o755))
-	require.NoError(t, artifactcache.Store(blobArm64, []byte("x"), 0o755))
+	require.NoError(t, c.Store(blobAmd64, []byte("x"), 0o755))
+	require.NoError(t, c.Store(blobArm64, []byte("x"), 0o755))
 	require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobAmd64))
 	require.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobArm64))
 
@@ -168,7 +172,7 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		blobPath := filepath.Join(dir, "blobs", "v1")
-		require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+		require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
 
 		got, ok := c.Lookup("rulesfile", "ns", "rules", "")
@@ -183,7 +187,7 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		blobPath := filepath.Join(dir, "blobs", "v1")
-		require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+		require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
 		require.NoError(t, c.RemoveAll("rulesfile", "ns", "rules"))
@@ -200,8 +204,8 @@ func TestCache_Set(t *testing.T) {
 
 		oldBlob := filepath.Join(dir, "blobs", "v1")
 		newBlob := filepath.Join(dir, "blobs", "v2")
-		require.NoError(t, artifactcache.Store(oldBlob, []byte("v1"), 0o755))
-		require.NoError(t, artifactcache.Store(newBlob, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
@@ -224,8 +228,8 @@ func TestCache_Set(t *testing.T) {
 
 		oldBlob := artifactcache.BlobPath(dir, "plugin", "old-ref", "sha256:old", "linux", "amd64")
 		newBlob := artifactcache.BlobPath(dir, "plugin", "new-ref", "sha256:new", "linux", "amd64")
-		require.NoError(t, artifactcache.Store(oldBlob, []byte("v1"), 0o755))
-		require.NoError(t, artifactcache.Store(newBlob, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", oldBlob))
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", newBlob))
@@ -244,8 +248,8 @@ func TestCache_Set(t *testing.T) {
 		// Same ref, different digests: both blobs share one ref directory.
 		blob1 := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:aaa", "linux", "amd64")
 		blob2 := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:bbb", "linux", "amd64")
-		require.NoError(t, artifactcache.Store(blob1, []byte("v1"), 0o755))
-		require.NoError(t, artifactcache.Store(blob2, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(blob1, []byte("v1"), 0o755))
+		require.NoError(t, c.Store(blob2, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blob1))
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blob2))
@@ -263,8 +267,8 @@ func TestCache_Set(t *testing.T) {
 
 		sharedBlob := filepath.Join(dir, "blobs", "shared")
 		newBlob := filepath.Join(dir, "blobs", "new")
-		require.NoError(t, artifactcache.Store(sharedBlob, []byte("x"), 0o755))
-		require.NoError(t, artifactcache.Store(newBlob, []byte("y"), 0o755))
+		require.NoError(t, c.Store(sharedBlob, []byte("x"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("y"), 0o755))
 
 		require.NoError(t, c.Set("plugin", "ns", "a", "", sharedBlob))
 		require.NoError(t, c.Set("plugin", "ns", "b", "", sharedBlob))
@@ -290,7 +294,7 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, os.MkdirAll(oldBlob, 0o755))
 		require.NoError(t, os.WriteFile(filepath.Join(oldBlob, "occupied"), []byte("x"), 0o600))
 		newBlob := filepath.Join(dir, "blobs", "v2")
-		require.NoError(t, artifactcache.Store(newBlob, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
@@ -307,8 +311,8 @@ func TestCache_Set(t *testing.T) {
 
 		oldBlob := filepath.Join(dir, "blobs", "v1")
 		newBlob := filepath.Join(dir, "blobs", "v2")
-		require.NoError(t, artifactcache.Store(oldBlob, []byte("v1"), 0o755))
-		require.NoError(t, artifactcache.Store(newBlob, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
 		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
@@ -330,8 +334,8 @@ func TestCache_Set(t *testing.T) {
 
 		blob := filepath.Join(dir, "blobs", "v1")
 		other := filepath.Join(dir, "blobs", "v2")
-		require.NoError(t, artifactcache.Store(blob, []byte("v1"), 0o755))
-		require.NoError(t, artifactcache.Store(other, []byte("v2"), 0o755))
+		require.NoError(t, c.Store(blob, []byte("v1"), 0o755))
+		require.NoError(t, c.Store(other, []byte("v2"), 0o755))
 
 		require.NoError(t, c.Set("rulesfile", "ns", "a", "", blob))
 		require.NoError(t, c.Set("rulesfile", "ns", "a", "", other)) // dereferences blob, pending eviction
@@ -402,8 +406,8 @@ func TestCache_Set(t *testing.T) {
 
 		oldBlob := filepath.Join(dir, "blobs", "old")
 		newBlob := filepath.Join(dir, "blobs", "new")
-		require.NoError(t, artifactcache.Store(oldBlob, []byte("old"), 0o755))
-		require.NoError(t, artifactcache.Store(newBlob, []byte("new"), 0o755))
+		require.NoError(t, c.Store(oldBlob, []byte("old"), 0o755))
+		require.NoError(t, c.Store(newBlob, []byte("new"), 0o755))
 		require.NoError(t, c.Set("plugin", "ns", "json", "", oldBlob))
 
 		snapshotPath := filepath.Join(dir, "index.json")
@@ -440,7 +444,7 @@ func TestCache_Set(t *testing.T) {
 			go func() {
 				defer wg.Done()
 				blobPath := filepath.Join(dir, "blobs", "concurrent")
-				_ = artifactcache.Store(blobPath, []byte("x"), 0o755)
+				_ = c.Store(blobPath, []byte("x"), 0o755)
 				_ = c.Set("plugin", "ns", "concurrent", "", blobPath)
 			}()
 			go func() {
@@ -461,9 +465,9 @@ func TestCache_RemoveAll(t *testing.T) {
 		blobAmd64 := filepath.Join(dir, "blobs", "amd64")
 		blobArm64 := filepath.Join(dir, "blobs", "arm64")
 		otherBlob := filepath.Join(dir, "blobs", "other")
-		require.NoError(t, artifactcache.Store(blobAmd64, []byte("x"), 0o755))
-		require.NoError(t, artifactcache.Store(blobArm64, []byte("x"), 0o755))
-		require.NoError(t, artifactcache.Store(otherBlob, []byte("x"), 0o755))
+		require.NoError(t, c.Store(blobAmd64, []byte("x"), 0o755))
+		require.NoError(t, c.Store(blobArm64, []byte("x"), 0o755))
+		require.NoError(t, c.Store(otherBlob, []byte("x"), 0o755))
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobAmd64))
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobArm64))
 		require.NoError(t, c.Set("plugin", "ns", "other-name", "", otherBlob))
@@ -500,7 +504,7 @@ func TestCache_RemoveAll(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		blobPath := filepath.Join(dir, "blobs", "json")
-		require.NoError(t, artifactcache.Store(blobPath, []byte("plugin"), 0o755))
+		require.NoError(t, c.Store(blobPath, []byte("plugin"), 0o755))
 		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobPath))
 
 		snapshotPath := filepath.Join(dir, "index.json")
@@ -574,6 +578,81 @@ func TestCache_LookupDigest(t *testing.T) {
 			current, ok := reloaded.LookupDigest(tc.artifactType, "ns", "name", tc.platform, newDigest)
 			require.True(t, ok)
 			require.Equal(t, newPath, current)
+		})
+	}
+}
+
+func TestCache_Ensure(t *testing.T) {
+	const missingFile = "missing file"
+	for _, state := range []string{"referenced", "pending eviction", "orphan", missingFile} {
+		t.Run(state, func(t *testing.T) {
+			cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(time.Nanosecond))
+			require.NoError(t, cache.Load())
+			path := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:abc", "linux", "arm64")
+			require.NoError(t, cache.Store(path, []byte("existing"), 0o755))
+			old := time.Now().Add(-time.Hour)
+			require.NoError(t, os.Chtimes(path, old, old))
+			if state != "orphan" {
+				require.NoError(t, cache.Set("plugin", "ns", "old", "linux-arm64", path))
+			}
+			if state == "pending eviction" {
+				require.NoError(t, cache.RemoveAll("plugin", "ns", "old"))
+			}
+			if state == missingFile {
+				require.NoError(t, os.Remove(path))
+			}
+			calls := 0
+			err := cache.Ensure("plugin", "ns", "new", "linux-arm64", path, func() ([]byte, fs.FileMode, error) {
+				calls++
+				// A load can call back into the cache: it must run outside its mutex.
+				_, sweepErr := cache.Sweep(context.Background())
+				return []byte("downloaded"), 0o755, sweepErr
+			})
+			require.NoError(t, err)
+			if state == missingFile {
+				require.Equal(t, 1, calls)
+			} else {
+				require.Zero(t, calls)
+			}
+			indexed, ok := cache.Lookup("plugin", "ns", "new", "linux-arm64")
+			require.True(t, ok)
+			require.Equal(t, path, indexed)
+			removed, err := cache.Sweep(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, removed)
+			require.FileExists(t, path)
+		})
+	}
+}
+
+func TestCache_EnsureFailureKeepsPreviousReference(t *testing.T) {
+	for _, failure := range []string{"fetch", "persist"} {
+		t.Run(failure, func(t *testing.T) {
+			cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
+			require.NoError(t, cache.Load())
+			oldPath := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:old", "", "")
+			newPath := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:new", "", "")
+			require.NoError(t, cache.Store(oldPath, []byte("old"), 0o755))
+			require.NoError(t, cache.Set("plugin", "ns", "plugin", "", oldPath))
+			if failure == "persist" {
+				require.NoError(t, os.Mkdir(filepath.Join(cache.Dir(), "index.json.tmp"), 0o750))
+			}
+			err := cache.Ensure("plugin", "ns", "plugin", "", newPath, func() ([]byte, fs.FileMode, error) {
+				if failure == "fetch" {
+					return nil, 0, errors.New("fetch failed")
+				}
+				return []byte("new"), 0o755, nil
+			})
+			require.Error(t, err)
+			indexed, ok := cache.Lookup("plugin", "ns", "plugin", "")
+			require.True(t, ok)
+			require.Equal(t, oldPath, indexed)
+			require.FileExists(t, oldPath)
+			restarted := artifactcache.NewCache(cache.Dir())
+			require.NoError(t, restarted.Load())
+			indexed, ok = restarted.Lookup("plugin", "ns", "plugin", "")
+			require.True(t, ok)
+			require.Equal(t, oldPath, indexed, "failed persistence must not publish a partial index")
 		})
 	}
 }

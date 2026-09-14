@@ -24,9 +24,11 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/credentials"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -72,4 +74,16 @@ func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
 	default:
 		return false
 	}
+}
+
+func (am *Manager) fetchOCICredentials(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) (auth.CredentialFunc, error) {
+	secret, err := am.fetchOCIAuthSecret(ctx, authSecretRef(ociArtifact))
+	if err != nil {
+		return nil, fmt.Errorf("fetch auth secret: %w", err)
+	}
+	creds, err := credentials.FromSecret(ResolveRegistryHost(ociArtifact), secret)
+	if err != nil {
+		return nil, fmt.Errorf("derive credentials: %w", err)
+	}
+	return creds, nil
 }

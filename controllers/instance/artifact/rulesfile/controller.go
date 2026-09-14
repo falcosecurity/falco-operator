@@ -479,48 +479,29 @@ func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error
 // This runs in the instance operator so that per-node sidecars can fetch from HTTP
 // without touching the registry.
 //
-// Fast path: fetchAndCacheArtifactMeta already resolved the current digest and wrote it to
-// rulesfile.Status.ArtifactMeta.Digest. If r.cache already indexes that exact blob, no
-// filesystem or registry access is needed at all. EnsureBlob is only called when the cache
-// doesn't already have the answer.
+// Cache.Ensure owns reuse, writes and reference registration. Registry access is skipped
+// when the resolved blob is already present, including reuse after a previous dereference.
 func (r *RulesfileAggregatorReconciler) fetchAndCacheBlob(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
 	if r.cache == nil || rulesfile.Spec.OCIArtifact == nil {
 		return nil
 	}
 
 	logger := log.FromContext(ctx)
-	ref := artifact.ResolveReference(rulesfile.Spec.OCIArtifact)
 
-	// Fast path: this CR's index already points at the blob for the known digest.
-	// Pure in-memory comparison, no filesystem or registry access on a warm cache.
-	if meta := rulesfile.Status.ArtifactMeta; meta != nil && meta.Digest != "" {
-		want := artifactcache.BlobPath(r.cache.Dir(), string(artifact.TypeRulesfile), ref, meta.Digest, "", "")
-		if current, ok := r.cache.Lookup(string(artifact.TypeRulesfile), rulesfile.Namespace, rulesfile.Name, ""); ok && current == want {
-			logger.V(2).Info("Rulesfile blob already cached", "digest", meta.Digest)
-			return nil
-		}
-	}
-
-	// Slow path: cache doesn't already have the answer.
-	// Pass the digest already resolved by fetchAndCacheArtifactMeta to avoid a
-	// second GET /manifests call. Falls back to resolving if digest is not known.
-	var knownDigest string
-	if meta := rulesfile.Status.ArtifactMeta; meta != nil {
-		knownDigest = meta.Digest
-	}
-	logger.Info("Pulling rulesfile blob")
 	var opts []artifact.ManagerOption
 	if r.ociPuller != nil {
 		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
 	}
 	am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
 
-	blobPath, err := am.EnsureBlob(ctx, rulesfile.Spec.OCIArtifact, artifact.TypeRulesfile, "", "", r.cache, knownDigest)
+	var knownDigest string
+	if meta := rulesfile.Status.ArtifactMeta; meta != nil {
+		knownDigest = meta.Digest
+	}
+	logger.V(2).Info("Ensuring rulesfile blob is cached", "digest", knownDigest)
+	_, err := am.EnsureBlob(ctx, rulesfile.Name, rulesfile.Spec.OCIArtifact, artifact.TypeRulesfile, "", "", r.cache, knownDigest)
 	if err != nil {
 		return fmt.Errorf("cache rulesfile blob: %w", err)
-	}
-	if err := r.cache.Set(string(artifact.TypeRulesfile), rulesfile.Namespace, rulesfile.Name, "", blobPath); err != nil {
-		return fmt.Errorf("index rulesfile blob: %w", err)
 	}
 	return nil
 }

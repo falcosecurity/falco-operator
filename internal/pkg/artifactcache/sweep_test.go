@@ -38,10 +38,10 @@ func TestCache_Sweep(t *testing.T) {
 	}{
 		{
 			name: "orphaned blob past the grace window is removed, .perm companion too",
-			setup: func(t *testing.T, dir string, _ *artifactcache.Cache) string {
+			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "orphan-old")
-				require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 				old := time.Now().Add(-time.Hour)
 				require.NoError(t, os.Chtimes(blobPath, old, old))
 				return blobPath
@@ -51,10 +51,10 @@ func TestCache_Sweep(t *testing.T) {
 		},
 		{
 			name: "orphaned blob within the grace window is skipped",
-			setup: func(t *testing.T, dir string, _ *artifactcache.Cache) string {
+			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "orphan-fresh")
-				require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 				return blobPath
 			},
 			wantRemoved: 0,
@@ -65,7 +65,7 @@ func TestCache_Sweep(t *testing.T) {
 			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "referenced")
-				require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 				old := time.Now().Add(-time.Hour)
 				require.NoError(t, os.Chtimes(blobPath, old, old))
 				require.NoError(t, c.Set("plugin", "ns", "json", "", blobPath))
@@ -122,7 +122,7 @@ func TestCache_Sweep_RemovesNowEmptyRefDirectory(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := artifactcache.BlobPath(dir, "plugin", "orphan-ref", "sha256:old", "linux", "amd64")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(blobPath, old, old))
 
@@ -142,8 +142,8 @@ func TestCache_Sweep_RefDirectorySurvivesWithSiblingBlob(t *testing.T) {
 	// Same ref, two digests: one orphaned and old, one still referenced.
 	orphan := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:old", "linux", "amd64")
 	kept := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:new", "linux", "amd64")
-	require.NoError(t, artifactcache.Store(orphan, []byte("x"), 0o755))
-	require.NoError(t, artifactcache.Store(kept, []byte("y"), 0o755))
+	require.NoError(t, c.Store(orphan, []byte("x"), 0o755))
+	require.NoError(t, c.Store(kept, []byte("y"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(orphan, old, old))
 	require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", kept))
@@ -201,7 +201,7 @@ func TestSweeper_Start(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, "blobs", "orphan")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(blobPath, old, old))
 
@@ -235,8 +235,8 @@ func TestSweeper_Start_DeferredEviction(t *testing.T) {
 
 	oldBlob := filepath.Join(dir, "blobs", "v1")
 	newBlob := filepath.Join(dir, "blobs", "v2")
-	require.NoError(t, artifactcache.Store(oldBlob, []byte("v1"), 0o755))
-	require.NoError(t, artifactcache.Store(newBlob, []byte("v2"), 0o755))
+	require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
+	require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 	require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
 	require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob)) // dereferences oldBlob
 

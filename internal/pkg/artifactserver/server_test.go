@@ -54,7 +54,7 @@ import (
 func seedPlugin(t *testing.T, cache *artifactcache.Cache, ns, name, goos, goarch string, content []byte, perm fs.FileMode) {
 	t.Helper()
 	blobPath := artifactcache.BlobPath(cache.Dir(), "plugin", ns+"/"+name, "sha256:deadbeef", goos, goarch)
-	require.NoError(t, artifactcache.Store(blobPath, content, perm))
+	require.NoError(t, cache.Store(blobPath, content, perm))
 	require.NoError(t, cache.Set("plugin", ns, name, goos+"-"+goarch, blobPath))
 }
 
@@ -62,7 +62,7 @@ func seedRulesfile(t *testing.T, cache *artifactcache.Cache, name string, conten
 	t.Helper()
 	const ns = "default"
 	blobPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", ns+"/"+name, "sha256:deadbeef", "", "")
-	require.NoError(t, artifactcache.Store(blobPath, content, 0o644))
+	require.NoError(t, cache.Store(blobPath, content, 0o644))
 	require.NoError(t, cache.Set("rulesfile", ns, name, "", blobPath))
 }
 

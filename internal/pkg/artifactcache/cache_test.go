@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package artifactcache_test
+package artifactcache
 
 import (
 	"io/fs"
@@ -25,8 +25,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 )
 
 func TestBlobPath(t *testing.T) {
@@ -62,7 +60,7 @@ func TestBlobPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := artifactcache.BlobPath(tt.cacheDir, tt.artifactType, tt.ref, tt.digest, tt.goos, tt.goarch)
+			got := BlobPath(tt.cacheDir, tt.artifactType, tt.ref, tt.digest, tt.goos, tt.goarch)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -92,7 +90,7 @@ func TestRefToPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, artifactcache.RefToPath(tt.ref))
+			assert.Equal(t, tt.want, RefToPath(tt.ref))
 		})
 	}
 }
@@ -124,7 +122,7 @@ func TestStore(t *testing.T) {
 			perm:    0o600,
 			setup: func(t *testing.T, dir string) string {
 				blobPath := filepath.Join(dir, "blob")
-				require.NoError(t, artifactcache.Store(blobPath, []byte("v1"), 0o644))
+				require.NoError(t, store(blobPath, []byte("v1"), 0o644))
 				return blobPath
 			},
 			wantPermDecimal: "384", // 0o600
@@ -174,7 +172,7 @@ func TestStore(t *testing.T) {
 			dir := t.TempDir()
 			blobPath := tt.setup(t, dir)
 
-			err := artifactcache.Store(blobPath, tt.content, tt.perm)
+			err := store(blobPath, tt.content, tt.perm)
 
 			if tt.wantErrContains != "" {
 				require.Error(t, err)
@@ -192,7 +190,7 @@ func TestStore(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, string(tt.content), string(content))
 
-			perm, err := os.ReadFile(blobPath + artifactcache.PermSuffix)
+			perm, err := os.ReadFile(blobPath + PermSuffix)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantPermDecimal, string(perm))
 		})
@@ -209,7 +207,7 @@ func TestStore_ConcurrentSamePath(t *testing.T) {
 	for range 32 {
 		wg.Go(func() {
 			<-start
-			errs <- artifactcache.Store(blobPath, []byte("shared content"), 0o750)
+			errs <- store(blobPath, []byte("shared content"), 0o750)
 		})
 	}
 	close(start)
@@ -236,7 +234,7 @@ func TestReadPerm(t *testing.T) {
 		{
 			name: "reads a valid perm file",
 			setup: func(t *testing.T, blobPath string) {
-				require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o700))
+				require.NoError(t, store(blobPath, []byte("x"), 0o700))
 			},
 			want: 0o700,
 		},
@@ -250,7 +248,7 @@ func TestReadPerm(t *testing.T) {
 		{
 			name: "unparseable perm file defaults to 0o755",
 			setup: func(t *testing.T, blobPath string) {
-				require.NoError(t, os.WriteFile(blobPath+artifactcache.PermSuffix, []byte("not-a-number"), 0o600))
+				require.NoError(t, os.WriteFile(blobPath+PermSuffix, []byte("not-a-number"), 0o600))
 			},
 			want: 0o755,
 		},
@@ -260,7 +258,7 @@ func TestReadPerm(t *testing.T) {
 			dir := t.TempDir()
 			blobPath := filepath.Join(dir, "blob")
 			tt.setup(t, blobPath)
-			assert.Equal(t, tt.want, artifactcache.ReadPerm(blobPath))
+			assert.Equal(t, tt.want, ReadPerm(blobPath))
 		})
 	}
 }

@@ -197,7 +197,12 @@ func (c *Cache) Set(artifactType, namespace, name, platformKey, blobPath string)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := indexKey{artifactType, namespace, name, platformKey}
+	return c.setLocked(indexKey{artifactType, namespace, name, platformKey}, blobPath)
+}
+
+// setLocked persists the next index before publishing it in memory or evicting old blobs.
+// Caller must hold c.mu.
+func (c *Cache) setLocked(key indexKey, blobPath string) error {
 	old, exists := c.index[key]
 	if exists && old == blobPath {
 		return nil

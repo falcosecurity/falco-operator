@@ -379,11 +379,8 @@ func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // that per-node artifact-operator sidecars can fetch the pre-extracted binary over HTTP
 // without touching the OCI registry directly.
 //
-// Fast path: fetchAndCacheArtifactMeta already resolved the current digest and wrote it to
-// plugin.Status.ArtifactMeta.Digest. If r.cache already indexes that exact blob, no
-// filesystem or registry access is needed at all. EnsureBlob (which re-resolves the digest)
-// is only called when the cache doesn't already have the answer: first install or after a
-// digest change.
+// Cache.Ensure owns reuse, writes and reference registration. Registry access is skipped
+// when the resolved blob is already present, including reuse after a previous dereference.
 func (r *PluginAggregatorReconciler) fetchAndCacheBlobs(ctx context.Context, plugin *artifactv1alpha1.Plugin, nodes []corev1.Node) error {
 	if r.cache == nil || plugin.Spec.OCIArtifact == nil {
 		return nil
@@ -406,8 +403,6 @@ func (r *PluginAggregatorReconciler) fetchAndCacheBlobs(ctx context.Context, plu
 		return nil
 	}
 
-	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
-
 	var opts []artifact.ManagerOption
 	if r.ociPuller != nil {
 		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
@@ -415,32 +410,16 @@ func (r *PluginAggregatorReconciler) fetchAndCacheBlobs(ctx context.Context, plu
 	am := artifact.NewManagerWithOptions(r.Client, plugin.Namespace, opts...)
 
 	for p := range seen {
-		platformKey := p.goos + "-" + p.goarch
-
-		// Fast path: this CR's index already points at the blob for the known digest.
-		// Pure in-memory comparison, no filesystem or registry access on a warm cache.
-		if meta := plugin.Status.ArtifactMeta; meta != nil && meta.Digest != "" {
-			want := artifactcache.BlobPath(r.cache.Dir(), string(artifact.TypePlugin), ref, meta.Digest, p.goos, p.goarch)
-			if current, ok := r.cache.Lookup(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, platformKey); ok && current == want {
-				logger.V(2).Info("Plugin blob already cached", "os", p.goos, "arch", p.goarch, "digest", meta.Digest)
-				continue
-			}
-		}
-
-		// Slow path: cache doesn't already have the answer.
 		// Pass the digest already resolved by fetchAndCacheArtifactMeta to avoid a
 		// second GET /manifests call. Falls back to resolving if digest is not known.
 		var knownDigest string
 		if meta := plugin.Status.ArtifactMeta; meta != nil {
 			knownDigest = meta.Digest
 		}
-		logger.Info("Pulling plugin blob", "os", p.goos, "arch", p.goarch)
-		blobPath, err := am.EnsureBlob(ctx, plugin.Spec.OCIArtifact, artifact.TypePlugin, p.goos, p.goarch, r.cache, knownDigest)
+		logger.Info("Ensuring plugin blob is cached", "os", p.goos, "arch", p.goarch)
+		_, err := am.EnsureBlob(ctx, plugin.Name, plugin.Spec.OCIArtifact, artifact.TypePlugin, p.goos, p.goarch, r.cache, knownDigest)
 		if err != nil {
 			return fmt.Errorf("cache plugin blob (%s/%s): %w", p.goos, p.goarch, err)
-		}
-		if err := r.cache.Set(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, platformKey, blobPath); err != nil {
-			return fmt.Errorf("index plugin blob (%s/%s): %w", p.goos, p.goarch, err)
 		}
 	}
 
