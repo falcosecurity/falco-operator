@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -134,4 +135,38 @@ func TestLocalStore_Store_ContentAndPriorityChangeTogether(t *testing.T) {
 	_, oldExists := mockFS.Files[oldPath]
 	assert.False(t, oldExists, "old path should have been removed")
 	assert.Equal(t, newContent, mockFS.Files[newPath])
+}
+
+func TestLocalStore_StoreRepairsTrackedContent(t *testing.T) {
+	for _, source := range []struct {
+		artifactType Type
+		medium       Medium
+	}{{TypePlugin, MediumOCI}, {TypeConfig, MediumInline}, {TypeRulesfile, MediumConfigMap}} {
+		for _, state := range []string{"intact", "corrupt", "missing", "unreadable"} {
+			t.Run(string(source.artifactType)+"/"+state, func(t *testing.T) {
+				store, mockFS := newTestStore()
+				result := FetchResult{Content: []byte("expected"), ContentHash: sha256hex([]byte("expected")), Perm: PermFor(source.artifactType)}
+				_, current, err := store.Store(t.Context(), nil, "artifact", 10, source.artifactType, source.medium, result)
+				require.NoError(t, err)
+				switch state {
+				case "corrupt":
+					mockFS.Files[current.Path] = []byte("corrupt")
+				case "missing":
+					delete(mockFS.Files, current.Path)
+				case "unreadable":
+					mockFS.ReadErr = fmt.Errorf("read failed")
+				}
+				action, updated, err := store.Store(t.Context(), current, "artifact", 10, source.artifactType, source.medium, result)
+				require.NoError(t, err)
+				if state == "intact" {
+					require.Equal(t, StoreActionUnchanged, action)
+					require.Nil(t, updated)
+				} else {
+					require.NotEqual(t, StoreActionUnchanged, action)
+					require.NotNil(t, updated)
+				}
+				require.Equal(t, result.Content, mockFS.Files[current.Path])
+			})
+		}
+	}
 }
