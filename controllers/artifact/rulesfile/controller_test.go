@@ -42,6 +42,8 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	instancerulesfile "github.com/falcosecurity/falco-operator/controllers/instance/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
@@ -61,18 +63,25 @@ const testRulesfileName = "test-rulesfile"
 // ConfigMap and Inline use the real artifact.Fetcher backed by the fake k8s client.
 // FetchOCI returns in-memory bytes to avoid HTTP calls to a real artifact server.
 type testFetcher struct {
-	delegate     *artifact.Fetcher
-	ociErr       error
-	ociBytes     []byte
-	ociCallCount int // incremented on every FetchOCI call
+	delegate           *artifact.Fetcher
+	ociErr             error
+	ociBytes           []byte
+	ociCallCount       int // incremented on every FetchOCI call
+	configMapCallCount int
+	onFetchOCI         func()
+	ociDigest          string
 }
 
 func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, expectedDigest string) (artifact.FetchResult, error) {
 	f.ociCallCount++
+	f.ociDigest = expectedDigest
+	if f.onFetchOCI != nil {
+		f.onFetchOCI()
+	}
 	if f.ociErr != nil {
 		return artifact.FetchResult{}, f.ociErr
 	}
@@ -95,6 +104,7 @@ func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact
 func (f *testFetcher) FetchConfigMap(
 	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Type,
 ) (artifact.FetchResult, error) {
+	f.configMapCallCount++
 	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
 }
 
@@ -222,6 +232,237 @@ func TestNewRulesfileReconciler(t *testing.T) {
 	assert.Equal(t, "my-namespace", r.namespace)
 	assert.NotNil(t, r.fetcher)
 	assert.NotNil(t, r.store)
+}
+
+func TestReconcile_ConfigMapUpdateWaitsForMatchingMetadata(t *testing.T) {
+	for _, instanceFirst := range []bool{false, true} {
+		for _, installed := range []bool{false, true} {
+			for _, compatible := range []bool{false, true} {
+				t.Run(fmt.Sprintf("instanceFirst=%t/installed=%t/compatible=%t", instanceFirst, installed, compatible), func(t *testing.T) {
+					testConfigMapUpdate(t, instanceFirst, installed, compatible)
+				})
+			}
+		}
+	}
+}
+
+func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool) {
+	t.Helper()
+	ctx := t.Context()
+	parent := &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 1},
+		Spec:       artifactv1alpha1.RulesfileSpec{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "rules"}},
+	}
+	oldContent := "- required_engine_version: 0.57.0\n" + testRulesData
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: parent.Namespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: oldContent},
+	}
+	scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+	kubeNode := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: testutil.TestNodeName}}
+	falco := &instancev1alpha1.Falco{ObjectMeta: metav1.ObjectMeta{Name: "falco", Namespace: parent.Namespace}}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "falco", Namespace: parent.Namespace, Labels: map[string]string{"app.kubernetes.io/instance": falco.Name}},
+		Spec:       corev1.PodSpec{NodeName: kubeNode.Name},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, cm, kubeNode, falco, pod).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}, &artifactv1alpha1.Rulesfile{}).
+		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).Build()
+	fs := fsfake.NewMockFileSystem()
+	versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
+	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, versions)
+	store.OnFalcoVersionsObserved(versions.Result)
+	fetcher := newTestFetcher(cl)
+	r := NewRulesfileReconciler(cl, scheme, events.NewFakeRecorder(100), testutil.TestNodeName,
+		testutil.TestNamespace, true, fetcher, store)
+	aggregator := instancerulesfile.NewRulesfileAggregatorReconciler(cl, scheme, events.NewFakeRecorder(100), nil)
+	_, err := aggregator.Reconcile(ctx, testutil.Request(parent.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(parent), parent))
+	require.NotEmpty(t, parent.Status.ArtifactMetaSourcesHash)
+	require.Equal(t, parent.Generation, parent.Status.ObservedGeneration)
+
+	node := newTestNodeObj()
+	// The first sidecar reconcile only adds its finalizer to the assignment created above.
+	_, err = r.Reconcile(ctx, testutil.Request(node.Name))
+	require.NoError(t, err)
+	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority, artifact.MediumConfigMap, artifact.TypeRulesfile)
+	var previousContent []byte
+	if installed {
+		_, err = r.Reconcile(ctx, testutil.Request(node.Name))
+		require.NoError(t, err)
+		previousContent = []byte(oldContent)
+		require.Equal(t, previousContent, fs.Files[path])
+	}
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), node))
+	previousInstalled := node.Status.DeepCopy().InstalledArtifacts
+
+	// ConfigMap and Rulesfile informer events can arrive in either order. Change only the
+	// ConfigMap, leaving the parent generation and the instance operator's metadata untouched.
+	oldConfigMap := cm.DeepCopy()
+	newContent := "- required_engine_version: 999.0.0\n" + testRulesData
+	if compatible {
+		newContent = "- required_engine_version: 0.56.0\n" + testRulesData
+	}
+	cm.Data[commonv1alpha1.ConfigMapRulesKey] = newContent
+	require.NoError(t, cl.Update(ctx, cm))
+	if instanceFirst {
+		_, err = aggregator.Reconcile(ctx, testutil.Request(parent.Name))
+		require.NoError(t, err)
+		// Model the sidecar's independent informer cache still holding the old ConfigMap.
+		fetcher.delegate.K8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldConfigMap).Build()
+	}
+	_, err = r.Reconcile(ctx, testutil.Request(node.Name))
+	require.NoError(t, err)
+	require.Equal(t, previousContent, fs.Files[path], "mismatching metadata must not authorize any write")
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), node))
+	require.Equal(t, previousInstalled, node.Status.InstalledArtifacts)
+	wantConditions := []testutil.ConditionExpect{
+		{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+		{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionUnknown, Reason: artifact.ReasonArtifactMetaNotReady},
+		{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonProgramFailed},
+	}
+	if installed {
+		wantConditions = append(wantConditions, testutil.ConditionExpect{
+			Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+			Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
+		})
+	} else {
+		wantConditions = append(wantConditions, testutil.ConditionExpect{
+			Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+			Status: metav1.ConditionFalse, Reason: artifact.ReasonArtifactMetaNotReady,
+		})
+	}
+	testutil.RequireConditions(t, node.Status.Conditions, wantConditions)
+
+	// Once both controllers see matching inputs, resume without any spec/generation change.
+	fetcher.delegate.K8sClient = cl
+	_, err = aggregator.Reconcile(ctx, testutil.Request(parent.Name))
+	require.NoError(t, err)
+	_, err = r.Reconcile(ctx, testutil.Request(node.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(parent), parent))
+	require.EqualValues(t, 1, parent.Generation)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), node))
+	if compatible {
+		require.Equal(t, []byte(newContent), fs.Files[path])
+		require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+	} else {
+		require.Equal(t, previousContent, fs.Files[path], "incompatible update must leave the installed rules untouched")
+		require.Equal(t, previousInstalled, node.Status.InstalledArtifacts)
+		require.True(t, apimeta.IsStatusConditionFalse(node.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String()))
+		require.True(t, apimeta.IsStatusConditionFalse(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+	}
+}
+
+func TestReconcile_ConfigMapSnapshot(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		enforce    bool
+		metadata   string
+		missingKey bool
+		wantWrite  bool
+	}{
+		{name: "enforce stores the checked snapshot even if ConfigMap changes during OCI fetch", enforce: true, metadata: "current", wantWrite: true},
+		{name: "enforce waits for matching metadata before installing any source", enforce: true, metadata: "stale"},
+		{name: "enforce waits for the source hash", enforce: true, metadata: "no hash"},
+		{name: "enforce waits for metadata even if the hash matches", enforce: true, metadata: "nil"},
+		{name: "missing ConfigMap key prevents writes of every source", enforce: true, metadata: "current", missingKey: true},
+		{name: "advise still installs without matching metadata", metadata: "stale", wantWrite: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			content := "- required_engine_version: 0.57.0\n" + testRulesData
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: content},
+			}
+			parent := &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 1},
+				Spec: artifactv1alpha1.RulesfileSpec{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: cm.Name},
+					InlineRules:  &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
+					OCIArtifact:  &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "test/rules", Tag: "latest"}},
+				},
+			}
+			sourceClient := fake.NewClientBuilder().WithScheme(testutil.Scheme(t)).WithObjects(cm).Build()
+			sources, err := artifact.ResolveRulesfileSources(ctx, &artifact.Fetcher{K8sClient: sourceClient}, parent)
+			require.NoError(t, err)
+			parent.Status.ObservedGeneration = parent.Generation
+			ociSpecHash, err := sources.OCISpecHash()
+			require.NoError(t, err)
+			parent.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{
+				SpecHash:     ociSpecHash,
+				Digest:       "sha256:pinned",
+				Requirements: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "0.57.0"}},
+			}
+			if tt.metadata == "stale" {
+				sources.ConfigMap.Content = []byte("old rules")
+			}
+			parent.Status.ArtifactMetaSourcesHash, err = sources.Hash()
+			require.NoError(t, err)
+			if tt.metadata == "no hash" {
+				parent.Status.ArtifactMetaSourcesHash = ""
+			}
+			if tt.metadata == "nil" {
+				parent.Status.ArtifactMeta = nil
+			}
+			if tt.missingKey {
+				delete(cm.Data, commonv1alpha1.ConfigMapRulesKey)
+			}
+			node := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
+				n.Finalizers = []string{rulesfileNodeFinalizer}
+			})
+			r, cl := newTestReconciler(t, parent, cm, node)
+			r.enforceRequirements = tt.enforce
+			fs := fsfake.NewMockFileSystem()
+			versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
+			r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()},
+				versions)
+			r.store.OnFalcoVersionsObserved(versions.Result)
+			fetcher := r.fetcher.(*testFetcher)
+			fetcher.onFetchOCI = func() {
+				// Fetching OCI can take time: a concurrent ConfigMap edit must not replace the
+				// content whose requirements were checked earlier in this reconcile.
+				cm.Data[commonv1alpha1.ConfigMapRulesKey] = "- required_engine_version: 999.0.0\n" + testRulesData
+				require.NoError(t, cl.Update(ctx, cm))
+			}
+			_, err = r.Reconcile(ctx, testutil.Request(node.Name))
+			if tt.missingKey {
+				require.ErrorContains(t, err, commonv1alpha1.ConfigMapRulesKey)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), node))
+			if tt.wantWrite {
+				require.Equal(t, 1, fetcher.configMapCallCount, "install must consume the checked content without refetching")
+				require.Len(t, fs.Files, 3)
+				path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority, artifact.MediumConfigMap, artifact.TypeRulesfile)
+				require.Equal(t, []byte(content), fs.Files[path])
+				require.Equal(t, 1, fetcher.ociCallCount)
+				require.Equal(t, parent.Status.ArtifactMeta.Digest, fetcher.ociDigest, "floating tags must retain the resolved digest")
+				require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+			} else {
+				require.Empty(t, fs.Files)
+				require.Empty(t, node.Status.InstalledArtifacts)
+				require.Zero(t, fetcher.ociCallCount)
+				require.True(t, apimeta.IsStatusConditionFalse(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				if !tt.missingKey {
+					for _, conditionType := range []commonv1alpha1.ConditionType{
+						commonv1alpha1.ConditionOCIArtifactProgrammed,
+						commonv1alpha1.ConditionInlineArtifactProgrammed,
+						commonv1alpha1.ConditionConfigMapArtifactProgrammed,
+					} {
+						condition := apimeta.FindStatusCondition(node.Status.Conditions, conditionType.String())
+						require.NotNil(t, condition)
+						require.Equal(t, metav1.ConditionFalse, condition.Status)
+						require.Equal(t, artifact.ReasonArtifactMetaNotReady, condition.Reason)
+					}
+				}
+			}
+		})
+	}
 }
 
 func TestReconcile(t *testing.T) {
@@ -879,7 +1120,9 @@ func TestEnsureRulesfile(t *testing.T) {
 					tt.preRf.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{SpecHash: tt.preSpecHash}
 				}
 				preNode := newTestNodeObj()
-				require.NoError(t, r.ensureRulesfile(context.Background(), tt.preRf, preNode), "preRf setup failed")
+				sources, err := r.resolveRulesfileSources(t.Context(), tt.preRf, preNode)
+				require.NoError(t, err)
+				require.NoError(t, r.ensureRulesfile(t.Context(), tt.preRf, preNode, sources), "preRf setup failed")
 				testutil.DrainEvents(r.recorder.(*events.FakeRecorder).Events)
 				nodeObj.Status = preNode.Status
 			}
@@ -890,7 +1133,10 @@ func TestEnsureRulesfile(t *testing.T) {
 			tf := r.fetcher.(*testFetcher)
 			tf.ociCallCount = 0 // reset counter before the main reconcile
 
-			err := r.ensureRulesfile(context.Background(), tt.rf, nodeObj)
+			sources, err := r.resolveRulesfileSources(t.Context(), tt.rf, nodeObj)
+			if err == nil {
+				err = r.ensureRulesfile(t.Context(), tt.rf, nodeObj, sources)
+			}
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -959,7 +1205,9 @@ func TestEnsureRulesfile_ProgrammedLastTransitionTime(t *testing.T) {
 				LastTransitionTime: pinned,
 			}}
 
-			require.NoError(t, r.ensureRulesfile(context.Background(), rf, nodeObj))
+			sources, err := r.resolveRulesfileSources(t.Context(), rf, nodeObj)
+			require.NoError(t, err)
+			require.NoError(t, r.ensureRulesfile(t.Context(), rf, nodeObj, sources))
 
 			cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 			require.NotNil(t, cond)
@@ -1888,7 +2136,9 @@ func TestEnforceRulesfileCompatibility(t *testing.T) {
 				r.store.SeedInstalled(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: tt.rf.Namespace, Name: tt.rf.Name}, installed)
 			}
 
-			skip, err := r.enforceRulesfileCompatibility(context.Background(), tt.rf, nodeObj)
+			sources, err := artifact.ResolveRulesfileSources(t.Context(), r.fetcher, tt.rf)
+			require.NoError(t, err)
+			skip, err := r.enforceRulesfileCompatibility(t.Context(), tt.rf, nodeObj, sources)
 
 			assert.Equal(t, tt.wantSkip, skip)
 			if tt.wantErr {

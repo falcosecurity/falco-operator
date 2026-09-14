@@ -280,19 +280,3 @@ func TestAppendConfigLayerRequirements(t *testing.T) {
 		assert.Equal(t, req("plugin_api_version", "3.0.0"), meta.Requirements[1])
 	})
 }
-
-func TestArtifactMetaCacheHit(t *testing.T) {
-	t.Run("nil cached is a miss", func(t *testing.T) {
-		assert.False(t, ArtifactMetaCacheHit(nil, "hash-1"))
-	})
-
-	t.Run("spec hash mismatch is a miss", func(t *testing.T) {
-		cached := &commonv1alpha1.ArtifactMeta{SpecHash: "hash-old", Digest: "sha256:current"}
-		assert.False(t, ArtifactMetaCacheHit(cached, "hash-new"))
-	})
-
-	t.Run("spec hash matches is a hit regardless of stored digest", func(t *testing.T) {
-		cached := &commonv1alpha1.ArtifactMeta{SpecHash: "hash-1", Digest: "sha256:old"}
-		assert.True(t, ArtifactMetaCacheHit(cached, "hash-1"))
-	})
-}

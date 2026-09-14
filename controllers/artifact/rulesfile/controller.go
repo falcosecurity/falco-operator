@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -171,9 +172,15 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			"specGeneration", rulesfile.Generation)
 	}
 
+	// Resolve mutable sources once; compatibility checks and installation share these bytes.
+	sources, err := r.resolveRulesfileSources(ctx, rulesfile, nodeObj)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Enforce rulesfile compatibility (OCI requirements and plugin dependencies). A blocked
 	// reconcile does not touch disk, so any previously installed rulesfile stays in place.
-	skip, compatErr := r.enforceRulesfileCompatibility(ctx, rulesfile, nodeObj)
+	skip, compatErr := r.enforceRulesfileCompatibility(ctx, rulesfile, nodeObj, sources)
 	if compatErr != nil {
 		return ctrl.Result{}, compatErr
 	}
@@ -214,7 +221,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// (the artifact server hasn't cached this yet, or a network blip) requeues via RequeueAfter
 	// instead of returning a reconcile error, avoiding tying up the worker for controller-runtime's
 	// own retry backoff.
-	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj); err != nil {
+	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj, sources); err != nil {
 		return controllerhelper.ResultForEnsureError(logger, err)
 	}
 
@@ -420,32 +427,33 @@ func (r *RulesfileReconciler) findAllNodeObjectsOnVersionChange(ctx context.Cont
 // if the medium is no longer active in the spec, then the active mediums are fetched/stored.
 func (r *RulesfileReconciler) ensureRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
+	sources *artifact.RulesfileSources,
 ) error {
-	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, rulesfile.Spec.OCIArtifact != nil,
+	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, sources.OCIArtifact != nil,
 		artifact.MediumOCI, commonv1alpha1.ConditionOCIArtifactProgrammed.String()); err != nil {
 		return err
 	}
-	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, rulesfile.Spec.InlineRules != nil,
+	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, sources.InlineRules != nil,
 		artifact.MediumInline, commonv1alpha1.ConditionInlineArtifactProgrammed.String()); err != nil {
 		return err
 	}
-	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, rulesfile.Spec.ConfigMapRef != nil,
+	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, sources.ConfigMap != nil,
 		artifact.MediumConfigMap, commonv1alpha1.ConditionConfigMapArtifactProgrammed.String()); err != nil {
 		return err
 	}
 
-	if rulesfile.Spec.OCIArtifact != nil {
+	if sources.OCIArtifact != nil {
 		if err := r.ensureOCIRulesfile(ctx, rulesfile, nodeObj); err != nil {
 			return err
 		}
 	}
-	if rulesfile.Spec.InlineRules != nil {
-		if err := r.ensureInlineRulesfile(ctx, rulesfile, nodeObj); err != nil {
+	if sources.InlineRules != nil {
+		if err := r.ensureInlineRulesfile(ctx, rulesfile, nodeObj, sources.InlineRules); err != nil {
 			return err
 		}
 	}
-	if rulesfile.Spec.ConfigMapRef != nil {
-		if err := r.ensureConfigMapRulesfile(ctx, rulesfile, nodeObj); err != nil {
+	if sources.ConfigMap != nil {
+		if err := r.ensureConfigMapRulesfile(ctx, rulesfile, nodeObj, *sources.ConfigMap); err != nil {
 			return err
 		}
 	}
@@ -555,12 +563,13 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 // the InlineArtifactProgrammed condition.
 func (r *RulesfileReconciler) ensureInlineRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
+	inlineRules *apiextensionsv1.JSON,
 ) error {
 	logger := log.FromContext(ctx)
 	gen := rulesfile.GetGeneration()
 	p := rulesfile.Spec.Priority
 
-	inlineRulesData, err := common.JSONRawToYAML(rulesfile.Spec.InlineRules)
+	inlineRulesData, err := common.JSONRawToYAML(inlineRules)
 	if err != nil {
 		logger.Error(err, "unable to convert inline rules to YAML")
 		artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
@@ -607,16 +616,14 @@ func (r *RulesfileReconciler) ensureInlineRulesfile(
 	return nil
 }
 
-// ensureConfigMapRulesfile fetches and stores the ConfigMap-sourced rulesfile, then sets the
-// ConfigMapArtifactProgrammed condition.
-func (r *RulesfileReconciler) ensureConfigMapRulesfile(
+// resolveRulesfileSources resolves source inputs before compatibility checks or writes.
+func (r *RulesfileReconciler) resolveRulesfileSources(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
-) error {
+) (*artifact.RulesfileSources, error) {
 	logger := log.FromContext(ctx)
 	gen := rulesfile.GetGeneration()
-	p := rulesfile.Spec.Priority
 
-	result, err := r.fetcher.FetchConfigMap(ctx, rulesfile.Namespace, rulesfile.Spec.ConfigMapRef, artifact.TypeRulesfile)
+	result, err := artifact.ResolveRulesfileSources(ctx, r.fetcher, rulesfile)
 	if err != nil {
 		logger.Error(err, "unable to fetch Rulesfile from ConfigMap reference")
 		artifact.RecordWarning(r.recorder, rulesfile,
@@ -625,8 +632,20 @@ func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 			metav1.ConditionFalse, artifact.ReasonConfigMapArtifactProgramFailed,
 			fmt.Sprintf(artifact.MessageFormatConfigMapRulesStoreFailed, err.Error()), gen,
 		))
-		return err
+		return nil, err
 	}
+	return result, nil
+}
+
+// ensureConfigMapRulesfile stores the previously checked ConfigMap content, then sets the
+// ConfigMapArtifactProgrammed condition.
+func (r *RulesfileReconciler) ensureConfigMapRulesfile(
+	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
+	result artifact.FetchResult,
+) error {
+	logger := log.FromContext(ctx)
+	gen := rulesfile.GetGeneration()
+	p := rulesfile.Spec.Priority
 	cmAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumConfigMap, result)
 	if err != nil {
 		logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
@@ -679,6 +698,7 @@ func (r *RulesfileReconciler) enforceReferenceResolution(
 // fetch failures result in DependenciesSatisfied=Unknown without blocking install.
 func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
+	sources *artifact.RulesfileSources,
 ) (bool, error) {
 	gen := rulesfile.GetGeneration()
 	logger := log.FromContext(ctx)
@@ -690,6 +710,22 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 		logger.Info("Skipping compatibility check: no artifact sources configured")
 		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 		return false, nil
+	}
+
+	// ConfigMap edits do not change the parent generation. Requirements must describe
+	// the same source snapshot that ensureRulesfile will install.
+	if r.enforceRequirements && sources.ConfigMap != nil {
+		sourcesHash, err := sources.Hash()
+		if err != nil {
+			return false, err
+		}
+		if rulesfile.Status.ArtifactMeta == nil || rulesfile.Status.ArtifactMetaSourcesHash != sourcesHash {
+			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
+				metav1.ConditionUnknown, artifact.ReasonArtifactMetaNotReady,
+				"Waiting for artifact metadata matching the current ConfigMap content", gen,
+			))
+			return true, nil
+		}
 	}
 
 	// All requirements come from parent.Status.ArtifactMeta (populated by the instance operator).

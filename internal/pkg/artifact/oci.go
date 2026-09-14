@@ -18,6 +18,9 @@ package artifact
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +29,26 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
+
+// ComputeOCIArtifactSpecHash returns the SHA-256 hex digest of the JSON-marshaled OCIArtifact spec.
+// A change in the hash signals that the spec changed and any cached config must be re-fetched.
+func ComputeOCIArtifactSpecHash(ociArtifact *commonv1alpha1.OCIArtifact) (string, error) {
+	data, err := json.Marshal(ociArtifact)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:]), nil
+}
+
+// ArtifactMetaCacheHit reports whether cached is still valid for the given specHash.
+// The check is purely in-memory: a hit requires cached to be non-nil and its SpecHash to
+// equal specHash. The registry is never consulted; to pick up a new image pushed to the
+// same tag, users must change the OCIArtifact spec (e.g. pin a new digest or bump the tag),
+// which bumps Generation and invalidates the spec hash.
+func ArtifactMetaCacheHit(cached *commonv1alpha1.ArtifactMeta, specHash string) bool {
+	return cached != nil && cached.SpecHash == specHash
+}
 
 func (am *Manager) fetchOCIAuthSecret(ctx context.Context, ref *commonv1alpha1.SecretRef) (*corev1.Secret, error) {
 	if ref == nil {
