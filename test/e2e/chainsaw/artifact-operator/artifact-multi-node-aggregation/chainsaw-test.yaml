@@ -55,6 +55,8 @@ spec:
     polls for actual removal and would time out against the intentionally-blocked deletion) to
     request parent CR deletion, then chainsaw's own assert/wait steps for everything after.
 
+    Simulated conditions refer to parent generation 1; these scenarios never change the parent specs.
+
   bindings:
     - name: plugin_name
       value: multi-node-agg-plugin
@@ -280,6 +282,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthy
                     message: Simulated healthy per-node sidecar for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -295,6 +298,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthy
                     message: Simulated healthy per-node sidecar for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -310,6 +314,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthy
                     message: Simulated healthy per-node sidecar for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -329,6 +334,7 @@ spec:
                     status: "False"
                     reason: SimulatedFailure
                     message: Simulated per-node failure for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -344,6 +350,7 @@ spec:
                     status: "False"
                     reason: SimulatedFailure
                     message: Simulated per-node failure for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -359,6 +366,7 @@ spec:
                     status: "False"
                     reason: SimulatedFailure
                     message: Simulated per-node failure for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -425,6 +433,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -440,6 +449,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -455,6 +465,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -470,6 +481,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -485,6 +497,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -500,6 +513,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -562,6 +576,7 @@ spec:
                     status: "Unknown"
                     reason: SimulatedPending
                     message: Simulated per-node initialization pending for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -577,6 +592,7 @@ spec:
                     status: "Unknown"
                     reason: SimulatedPending
                     message: Simulated per-node initialization pending for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -592,6 +608,7 @@ spec:
                     status: "Unknown"
                     reason: SimulatedPending
                     message: Simulated per-node initialization pending for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -661,11 +678,13 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: DeletionBlocked
                     status: "True"
                     reason: SimulatedNodeBlock
                     message: Simulated node-level deletion block for aggregation type test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -681,11 +700,13 @@ spec:
                     status: "Unknown"
                     reason: SimulatedPending
                     message: Simulated per-node initialization pending for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: DeletionBlocked
                     status: "True"
                     reason: SimulatedNodeBlock
                     message: Simulated node-level deletion block for aggregation type test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -727,6 +748,7 @@ spec:
                     status: "True"
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -742,6 +764,7 @@ spec:
                     status: "Unknown"
                     reason: SimulatedPending
                     message: Simulated per-node initialization pending for aggregation test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 

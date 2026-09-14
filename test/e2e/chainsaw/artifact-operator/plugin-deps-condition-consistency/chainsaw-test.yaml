@@ -36,6 +36,8 @@ spec:
       Expected: Plugin shows all four conditions True, with no "(failing nodes: ...)" suffix
       lingering from Scenario 1.
 
+    Simulated conditions refer to parent generation 1; these scenarios never change the parent specs.
+
   bindings:
     - name: plugin_name
       value: deps-consistency-plugin
@@ -185,21 +187,25 @@ spec:
                     status: "False"
                     reason: SimulatedDepsNotSatisfied
                     message: Simulated blocked node (requirements not met, never installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: ConfigProgrammed
                     status: "False"
                     reason: SimulatedDepsNotSatisfied
                     message: Simulated blocked node (requirements not met, never installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: OCIArtifactProgrammed
                     status: "False"
                     reason: SimulatedDepsNotSatisfied
                     message: Simulated blocked node (requirements not met, never installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: Programmed
                     status: "False"
                     reason: SimulatedDepsNotSatisfied
                     message: Simulated blocked node (requirements not met, never installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -223,21 +229,25 @@ spec:
                     status: "True"
                     reason: SimulatedDepsOk
                     message: Simulated healthy node (requirements met, artifact installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: ConfigProgrammed
                     status: "True"
                     reason: SimulatedDepsOk
                     message: Simulated healthy node (requirements met, artifact installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: OCIArtifactProgrammed
                     status: "True"
                     reason: SimulatedDepsOk
                     message: Simulated healthy node (requirements met, artifact installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: Programmed
                     status: "True"
                     reason: SimulatedDepsOk
                     message: Simulated healthy node (requirements met, artifact installed).
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 
@@ -289,21 +299,25 @@ spec:
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: ConfigProgrammed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: OCIArtifactProgrammed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: Programmed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
         - patch:
@@ -319,21 +333,25 @@ spec:
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: ConfigProgrammed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: OCIArtifactProgrammed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
                   - type: Programmed
                     status: "True"
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
+                    observedGeneration: 1
                     lastTransitionTime: "2024-01-01T00:00:00Z"
             subresource: status
 

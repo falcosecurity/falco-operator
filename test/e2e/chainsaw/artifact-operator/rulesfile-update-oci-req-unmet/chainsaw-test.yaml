@@ -21,7 +21,8 @@ spec:
     After patching the OCI repository to rulesfile-engine-req-unmet:latest (req 999.0.0):
     - DependenciesSatisfied=False, reason=DependenciesNotSatisfiedUpdateRejected.
     - Programmed=False.
-    - OCIArtifactProgrammed=True (the old file is still on disk from previous install).
+    - Parent OCIArtifactProgrammed=Unknown: the retained install belongs to generation 1,
+      not the rejected generation 2. ArtifactNode still reports the previous successful install.
     - The rules file on disk is NOT removed.
 
   bindings:
@@ -125,7 +126,8 @@ spec:
       description: |
         DependenciesSatisfied=False with reason DependenciesNotSatisfiedUpdateRejected because
         a prior install exists and the new requirement (engine 999.0.0) is unmet.
-        OCIArtifactProgrammed=True because the old file is still on disk.
+        The parent's OCIArtifactProgrammed is Unknown for generation 2; the ArtifactNode
+        retains True for generation 1, and the old file must remain on disk.
         Programmed=False because DependenciesSatisfied gates Programmed in enforce mode.
       try:
         - assert:
@@ -135,14 +137,19 @@ spec:
               metadata:
                 name: ($rulesfile_name)
                 namespace: ($namespace)
+              (metadata.generation): 2
               status:
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'False'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
+                  - status: 'Unknown'
+                    reason: Pending
+                    observedGeneration: 2
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -153,11 +160,16 @@ spec:
                   artifact.falcosecurity.dev/parent: ($rulesfile_name)
                   artifact.falcosecurity.dev/kind: rulesfile
               status:
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 1
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'False'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
 
     - name: "Step 07: Assert-old-file-preserved"
       description: A rejected update must never remove the previously installed file.

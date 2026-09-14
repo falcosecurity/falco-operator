@@ -10,14 +10,15 @@ spec:
     Setup: real Falco in enforce mode. No json plugin is loaded, so any rule that
     declares required_plugin_versions=[{json, 0.7.0}] will have an unmet dependency.
     Rulesfile starts with an inline-only source that has no requirements (all met).
-    Both sources are installed and Programmed=True.
+    The inline source is installed and Programmed=True.
 
     After adding a ConfigMap source (simple-rules.yaml) that declares
     required_plugin_versions=[{json, 0.7.0}], not present in Falco since no json plugin
     is loaded, the merged requirements include an unmet dependency:
     - DependenciesSatisfied=False, reason=DependenciesNotSatisfiedUpdateRejected
       (artifacts already installed; enforce gate blocks the update).
-    - ensureRulesfile is skipped: InlineArtifactProgrammed=True persists (stale);
+    - ensureRulesfile is skipped: the ArtifactNode retains InlineArtifactProgrammed=True
+      for generation 1; the parent reports Unknown for generation 2.
       ConfigMapArtifactProgrammed is never set.
     - Programmed=False.
     - installedArtifacts still has only the inline entry (unchanged).
@@ -148,7 +149,8 @@ spec:
       description: |
         Merged requirements now include an unmet json plugin dep.
         alreadyInstalled=true → DependenciesNotSatisfiedUpdateRejected.
-        ensureRulesfile skipped: inline state is stale-but-preserved,
+        ensureRulesfile skipped: the ArtifactNode keeps the generation-1 inline install,
+        while the parent's inline condition is Unknown for generation 2.
         CM source condition is never set, Programmed=False.
       try:
         - assert:
@@ -158,14 +160,19 @@ spec:
               metadata:
                 name: ($rulesfile_name)
                 namespace: ($namespace)
+              (metadata.generation): 2
               status:
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'False'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
+                  - status: 'Unknown'
+                    reason: Pending
+                    observedGeneration: 2
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
                 (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
         - assert:
             resource:
@@ -180,11 +187,14 @@ spec:
                 (length(installedArtifacts || `[]`)): 1
                 (conditions[?type == 'DependenciesSatisfied']):
                   - status: 'False'
+                    observedGeneration: 2
                     reason: DependenciesNotSatisfiedUpdateRejected
                 (conditions[?type == 'InlineArtifactProgrammed']):
                   - status: 'True'
+                    observedGeneration: 1
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
+                    observedGeneration: 2
                 (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
                 (installedArtifacts[?medium == 'inline']):
                   - path: /etc/falco/rules.d/50-03-rulesfile-deps-add-source-unmet-req-test-inline.yaml
