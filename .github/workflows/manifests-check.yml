@@ -1,4 +1,4 @@
-name: Generated Manifests Check
+name: manifests-check
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   manifests-check:
-    name: Verify Generated Manifests
+    name: manifests-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the code

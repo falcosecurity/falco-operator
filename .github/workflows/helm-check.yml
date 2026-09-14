@@ -1,4 +1,4 @@
-name: Helm Chart Check
+name: helm-chart-check
 
 on:
   push:
@@ -7,8 +7,8 @@ on:
   pull_request:
 
 jobs:
-  helm-check:
-    name: Verify Helm Chart
+  helm-chart-check:
+    name: helm-chart-check
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the code
