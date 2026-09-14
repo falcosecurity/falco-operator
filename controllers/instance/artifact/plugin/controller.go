@@ -96,17 +96,16 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Deletion is gated by NodeObjectsInUseFinalizer, which stays set while owned ArtifactNode
-	// objects exist. A per-node artifact operator keeps its ArtifactNode's finalizer in place as
+	// Deletion is gated by NodeObjectsInUseFinalizer while node objects or the OCI cache need
+	// cleanup. A per-node artifact operator keeps its ArtifactNode's finalizer in place as
 	// long as a Rulesfile on that node still depends on this plugin.
 	if !plugin.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("Plugin marked for deletion, running cleanup")
 		return ctrl.Result{}, r.handleDeletion(ctx, plugin)
 	}
 
-	// allMatchingNodes: all nodes matching the selector, used for blob pre-fetching (all
-	// platforms) and the in-use finalizer (ensures eviction runs even when no Falco pods land
-	// on a node, e.g. a KWOK fake arm64 node in artifact-cache-lifecycle).
+	// allMatchingNodes includes every selected platform for blob pre-fetching, even when no
+	// Falco pod currently runs there. OCI cache ownership is retained independently of this set.
 	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, plugin.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -126,12 +125,8 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 	logger.V(1).Info("Listed existing ArtifactNode objects", "count", len(existingNodes.Items))
 
-	// Keep the parent alive when nodes are desired or until every existing child is
-	// physically gone. The desired-node check also covers a just-created child that the
-	// informer cache may not expose in the immediate re-list yet.
-	if err := controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, plugin,
-		controllerhelper.NodeObjectsInUseFinalizer,
+	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
+		ctx, r.Client, plugin, r.cache,
 		len(allMatchingNodes) > 0 || len(existingNodes.Items) > 0,
 	); err != nil {
 		return ctrl.Result{}, err

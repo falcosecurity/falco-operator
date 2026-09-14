@@ -1380,3 +1380,37 @@ func TestReconcile_FetchAndCacheBinariesError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry down")
 }
+
+func TestReconcile_CacheOwnershipSurvivesLastNodeRemoval(t *testing.T) {
+	ctx := context.Background()
+	plugin := newTestPlugin(withPluginOCI(), withPluginSelector())
+	plugin.Generation = 2
+	plugin.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	specHash, err := artifact.ComputeOCIArtifactSpecHash(plugin.Spec.OCIArtifact)
+	require.NoError(t, err)
+	plugin.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: testPluginDigest, SpecHash: specHash}
+	plugin.Status.ObservedGeneration = plugin.Generation
+
+	// A prior successful reconcile left the cache populated. The selector has now
+	// stopped matching all nodes and the previous child cleanup has completed.
+	cacheDir := t.TempDir()
+	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, plugin)
+	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
+	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypePlugin), ref, testPluginDigest, "linux", "amd64")
+	require.NoError(t, r.cache.Store(blobPath, []byte("previously-installed-plugin"), 0o755))
+	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, "linux-amd64", blobPath))
+
+	_, err = r.Reconcile(ctx, testutil.Request(testPluginName))
+	require.NoError(t, err)
+	got := &artifactv1alpha1.Plugin{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(plugin), got))
+	t.Logf("after zero matches: finalizers=%v", got.Finalizers)
+	require.NoError(t, r.Delete(ctx, got))
+	_, err = r.Reconcile(ctx, testutil.Request(testPluginName))
+	require.NoError(t, err)
+	removed, err := r.cache.Sweep(ctx)
+	require.NoError(t, err)
+	t.Logf("deleted parent; cache sweep removed=%d", removed)
+	_, cached := r.cache.Lookup(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, "linux-amd64")
+	require.False(t, cached, "deleting the parent must release its cache reference even after its selector stopped matching nodes")
+}

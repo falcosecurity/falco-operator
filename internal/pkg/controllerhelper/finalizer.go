@@ -25,6 +25,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 )
 
 // patchFinalizer adds (add=true) or removes (add=false) finalizer on obj, then applies the
@@ -210,4 +213,32 @@ func isLegacyParentFinalizer(f string) bool {
 		}
 	}
 	return false
+}
+
+// ReconcileArtifactInUseFinalizer keeps an artifact alive while its nodes or OCI cache
+// require cleanup. Cache ownership outlives node assignments. Removing the OCI source
+// releases its references before the finalizer may be dropped.
+func ReconcileArtifactInUseFinalizer(ctx context.Context, cl client.Client, obj client.Object,
+	cache *artifactcache.Cache, nodesInUse bool,
+) error {
+	var kind string
+	var hasOCI bool
+	switch parent := obj.(type) {
+	case *artifactv1alpha1.Plugin:
+		kind, hasOCI = ArtifactKindPlugin, parent.Spec.OCIArtifact != nil
+	case *artifactv1alpha1.Rulesfile:
+		kind, hasOCI = ArtifactKindRulesfile, parent.Spec.OCIArtifact != nil
+	case *artifactv1alpha1.Config:
+		return ReconcileInUseFinalizer(ctx, cl, obj, NodeObjectsInUseFinalizer, nodesInUse)
+	default:
+		return fmt.Errorf("unsupported artifact type %T", obj)
+	}
+	if cache != nil {
+		if hasOCI {
+			nodesInUse = true
+		} else if err := cache.RemoveAll(kind, obj.GetNamespace(), obj.GetName()); err != nil {
+			return fmt.Errorf("evict removed OCI source: %w", err)
+		}
+	}
+	return ReconcileInUseFinalizer(ctx, cl, obj, NodeObjectsInUseFinalizer, nodesInUse)
 }
