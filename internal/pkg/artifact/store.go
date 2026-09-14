@@ -102,9 +102,12 @@ func (s *LocalStore) Store(ctx context.Context, current *File, name string, arti
 
 	newPath := ArtifactPath(s.Dirs, name, artifactPriority, medium, artifactType)
 
-	// Detect unchanged: same content hash and same final path.
+	// A remembered hash identifies the intended content, not the file's current bytes.
+	// Only skip the write when that content is still present at the desired path.
 	if current != nil && current.ContentHash == result.ContentHash && current.Path == newPath {
-		return StoreActionUnchanged, nil, nil
+		if ok, err := s.Verify(ctx, current); err == nil && ok {
+			return StoreActionUnchanged, nil, nil
+		}
 	}
 
 	// Priority rename: content is the same but the file needs to move.

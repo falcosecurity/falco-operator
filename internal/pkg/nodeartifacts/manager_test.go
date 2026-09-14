@@ -1060,3 +1060,31 @@ func TestManager_AddPluginConfig_ConcurrentWithCheckRequirement(t *testing.T) {
 	}
 	<-done
 }
+
+func TestManager_StoreRepairsCorruptionWithoutChangingInstalledIdentity(t *testing.T) {
+	fs := fsfake.NewMockFileSystem()
+	manager := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	fetcher := &artifact.Fetcher{}
+	result, err := fetcher.FetchInline(t.Context(), []byte("expected rules"))
+	require.NoError(t, err)
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "test", Name: "rules"}
+	_, file, err := manager.Store(t.Context(), key.Namespace, key.Name, 10, artifact.TypeRulesfile, artifact.MediumOCI, result)
+	require.NoError(t, err)
+	manager.UpdateInstalledSpecHash(key, artifact.MediumOCI, "pinned-revision")
+	fs.Files[file.Path] = []byte("corrupt")
+	verified, err := manager.Verify(t.Context(), file)
+	require.NoError(t, err)
+	require.False(t, verified)
+
+	action, repaired, err := manager.Store(t.Context(), key.Namespace, key.Name, 10, artifact.TypeRulesfile, artifact.MediumOCI, result)
+	require.NoError(t, err)
+	require.Equal(t, artifact.StoreActionUpdated, action)
+	require.Equal(t, file.Path, repaired.Path)
+	require.Equal(t, result.Content, fs.Files[repaired.Path])
+	manager.UpdateInstalledSpecHash(key, artifact.MediumOCI, "pinned-revision")
+	current := manager.FindInstalled(key, artifact.MediumOCI)
+	require.Equal(t, "pinned-revision", current.SpecHash)
+	verified, err = manager.Verify(t.Context(), current)
+	require.NoError(t, err)
+	require.True(t, verified)
+}
