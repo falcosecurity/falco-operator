@@ -47,7 +47,7 @@ func TestAggregateConditions_EmptyInput(t *testing.T) {
 func TestAggregateConditions_SingleNodeTrue(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", Message: "ok"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionTrue, Reason: "Programmed", Message: "ok"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -60,10 +60,10 @@ func TestAggregateConditions_SingleNodeTrue(t *testing.T) {
 func TestAggregateConditions_FalseWinsOverTrue(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", Message: "ok"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionTrue, Reason: "Programmed", Message: "ok"},
 		}},
 		{NodeName: "node2", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -76,13 +76,13 @@ func TestAggregateConditions_FalseWinsOverTrue(t *testing.T) {
 func TestAggregateConditions_FalseListsFailingNodesSortedRegardlessOfArrivalOrder(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node-c", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
 		}},
 		{NodeName: "node-a", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
 		}},
 		{NodeName: "node-b", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "disk full"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -96,7 +96,7 @@ func TestAggregateConditions_FalseListsExactlyFiveFailingNodesWithoutOverflowSuf
 		sets[i] = controllerhelper.NodeConditionSet{
 			NodeName: fmt.Sprintf("node-%d", i+1),
 			Conditions: []metav1.Condition{
-				{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "boom"},
+				{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "boom"},
 			},
 		}
 	}
@@ -112,7 +112,7 @@ func TestAggregateConditions_FalseSummarizesBeyondFiveFailingNodes(t *testing.T)
 		sets[i] = controllerhelper.NodeConditionSet{
 			NodeName: fmt.Sprintf("node-%d", i+1),
 			Conditions: []metav1.Condition{
-				{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "boom"},
+				{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed", Message: "boom"},
 			},
 		}
 	}
@@ -124,7 +124,7 @@ func TestAggregateConditions_FalseSummarizesBeyondFiveFailingNodes(t *testing.T)
 func TestAggregateConditions_FalseWithEmptyBaseMessageOmitsLeadingParen(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -135,10 +135,10 @@ func TestAggregateConditions_FalseWithEmptyBaseMessageOmitsLeadingParen(t *testi
 func TestAggregateConditions_UnknownWinsOverTrue(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionTrue},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionTrue},
 		}},
 		{NodeName: "node2", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionUnknown, Reason: "Pending", Message: "waiting"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionUnknown, Reason: "Pending", Message: "waiting"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -150,10 +150,10 @@ func TestAggregateConditions_UnknownWinsOverTrue(t *testing.T) {
 func TestAggregateConditions_FalseWinsOverUnknown(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionUnknown, Reason: "Pending"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionUnknown, Reason: "Pending"},
 		}},
 		{NodeName: "node2", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionFalse, Reason: "ProgramFailed"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionFalse, Reason: "ProgramFailed"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -165,23 +165,25 @@ func TestAggregateConditions_FalseWinsOverUnknown(t *testing.T) {
 func TestAggregateConditions_MultipleTypesSortedDeterministically(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Zeta", Status: metav1.ConditionTrue},
-			{Type: "Alpha", Status: metav1.ConditionTrue},
+			{Type: "Zeta", ObservedGeneration: 1, Status: metav1.ConditionTrue},
+			{Type: "Alpha", ObservedGeneration: 1, Status: metav1.ConditionTrue},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
-	require.Len(t, result, 2)
+	require.Len(t, result, 3)
 	assert.Equal(t, "Alpha", result[0].Type)
-	assert.Equal(t, "Zeta", result[1].Type)
+	assert.Equal(t, "Programmed", result[1].Type)
+	assert.Equal(t, metav1.ConditionUnknown, result[1].Status)
+	assert.Equal(t, "Zeta", result[2].Type)
 }
 
 func TestAggregateConditions_FirstTrueReasonCapturedWhenAllTrue(t *testing.T) {
 	sets := []controllerhelper.NodeConditionSet{
 		{NodeName: "node1", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "FirstReason"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionTrue, Reason: "FirstReason"},
 		}},
 		{NodeName: "node2", Conditions: []metav1.Condition{
-			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "SecondReason"},
+			{Type: "Programmed", ObservedGeneration: 1, Status: metav1.ConditionTrue, Reason: "SecondReason"},
 		}},
 	}
 	result := controllerhelper.AggregateConditions(sets, 1)
@@ -308,4 +310,90 @@ func TestUpdateAggregateConditions(t *testing.T) {
 		require.NotNil(t, cond)
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	})
+}
+
+func TestAggregateConditions_WaitsForEveryAssignedNode(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		conditions []metav1.Condition
+		ready      bool
+	}{
+		{name: "new assignment has no status"},
+		{
+			name: "new assignment has only resolved references",
+			conditions: []metav1.Condition{{
+				Type: "ResolvedRefs", Status: metav1.ConditionTrue,
+				Reason: "ReferenceResolved", ObservedGeneration: 2,
+			}},
+		},
+		{
+			name: "both assignments have programmed status",
+			conditions: []metav1.Condition{{
+				Type: "Programmed", Status: metav1.ConditionTrue,
+				Reason: "Programmed", ObservedGeneration: 2,
+			}},
+			ready: true,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := &artifactv1alpha1.Config{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			nodes := &artifactv1alpha1.ArtifactNodeList{Items: []artifactv1alpha1.ArtifactNode{
+				{
+					Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "existing-node"},
+					Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: []metav1.Condition{{
+						Type: "Programmed", Status: metav1.ConditionTrue,
+						Reason: "Programmed", ObservedGeneration: 2,
+					}}},
+				},
+				{
+					Spec:   artifactv1alpha1.ArtifactNodeSpec{NodeName: "new-node"},
+					Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: tt.conditions},
+				},
+			}}
+			controllerhelper.ComputeAggregateConditions(t.Context(), parent, &parent.Status.Conditions,
+				controllerhelper.NodeConditionsForAssignments(nodes, map[string]struct{}{"existing-node": {}, "new-node": {}}))
+			assert.Equal(t, tt.ready, apimeta.IsStatusConditionTrue(parent.Status.Conditions, "Programmed"),
+				"Programmed must not certify an assigned node which has not reported installation")
+		})
+	}
+}
+
+func TestAggregateConditions_StaleReportsCannotCertifyCurrentGeneration(t *testing.T) {
+	for _, status := range []metav1.ConditionStatus{metav1.ConditionTrue, metav1.ConditionFalse, metav1.ConditionUnknown} {
+		t.Run(string(status), func(t *testing.T) {
+			sets := []controllerhelper.NodeConditionSet{{
+				NodeName:   "old-node",
+				Conditions: []metav1.Condition{{Type: "Programmed", Status: status, Reason: "Old", ObservedGeneration: 1}},
+			}}
+			got := controllerhelper.AggregateConditions(sets, 2)
+			require.Len(t, got, 1)
+			require.Equal(t, metav1.ConditionUnknown, got[0].Status)
+			require.Equal(t, "Pending", got[0].Reason)
+			require.EqualValues(t, 2, got[0].ObservedGeneration)
+			require.Equal(t, status, sets[0].Conditions[0].Status, "aggregation must not mutate child status")
+		})
+	}
+}
+
+func TestNodeConditionsForAssignments(t *testing.T) {
+	now := metav1.Now()
+	ready := []metav1.Condition{{Type: "Programmed", Status: metav1.ConditionTrue, ObservedGeneration: 1}}
+	nodes := &artifactv1alpha1.ArtifactNodeList{Items: []artifactv1alpha1.ArtifactNode{
+		{Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "ready"}, Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: ready}},
+		{ObjectMeta: metav1.ObjectMeta{DeletionTimestamp: &now}, Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "terminating"},
+			Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: ready}},
+		{Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "no-longer-assigned"}, Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: ready}},
+	}}
+	sets := controllerhelper.NodeConditionsForAssignments(nodes, map[string]struct{}{"ready": {}, "terminating": {}, "not-cached-yet": {}})
+	require.Len(t, sets, 3)
+	for _, set := range sets {
+		if set.NodeName == "ready" {
+			require.Equal(t, ready, set.Conditions)
+		} else {
+			require.Empty(t, set.Conditions)
+		}
+	}
+	got := controllerhelper.AggregateConditions(sets, 1)
+	require.Equal(t, metav1.ConditionUnknown, apimeta.FindStatusCondition(got, "Programmed").Status)
+	require.Empty(t, controllerhelper.NodeConditionsForAssignments(nodes, map[string]struct{}{}))
 }

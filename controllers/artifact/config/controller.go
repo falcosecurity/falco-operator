@@ -127,7 +127,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
 			nodeObj.Status.Conditions, nil,
 			artifact.ReasonProgrammed, artifact.MessageProgrammed, artifact.ReasonProgramFailed,
-			config.GetGeneration(),
+			config.GetGeneration(), config.Status.ObservedGeneration,
 		))
 		var patchErr error
 		if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {

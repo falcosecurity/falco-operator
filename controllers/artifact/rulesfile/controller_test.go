@@ -465,6 +465,35 @@ func TestReconcile_ConfigMapSnapshot(t *testing.T) {
 	}
 }
 
+func TestReconcile_DeferredGenerationCannotReportProgrammed(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("installed=%t", installed), func(t *testing.T) {
+			parent := &artifactv1alpha1.Rulesfile{
+				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 2},
+				Status:     artifactv1alpha1.RulesfileStatus{ObservedGeneration: 1},
+			}
+			node := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
+				n.Finalizers = []string{rulesfileNodeFinalizer}
+				if installed {
+					n.Status.Conditions = []metav1.Condition{
+						common.NewOCIArtifactProgrammedCondition(metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, "old rules installed", 1),
+					}
+				}
+			})
+			r, cl := newTestReconciler(t, parent, node)
+			r.enforceRequirements = true
+			_, err := r.Reconcile(t.Context(), testutil.Request(node.Name))
+			require.NoError(t, err)
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(node), node))
+			programmed := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+			require.NotNil(t, programmed)
+			require.Equal(t, metav1.ConditionUnknown, programmed.Status)
+			require.Equal(t, "GenerationPending", programmed.Reason)
+			require.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
+		})
+	}
+}
+
 func TestReconcile(t *testing.T) {
 	parentRulesfile := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{

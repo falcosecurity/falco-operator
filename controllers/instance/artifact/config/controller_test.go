@@ -159,6 +159,58 @@ func TestReconcile_GetError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestReconcile_NewAssignmentWaitsForStatus(t *testing.T) {
+	ctx := t.Context()
+	config := newTestConfig(func(c *artifactv1alpha1.Config) {
+		c.Generation = 1
+		c.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: "config-data"}
+	})
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "config-data", Namespace: config.Namespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: "json_output: true"},
+	}
+	ready := newTestConfigNode(func(n *artifactv1alpha1.ArtifactNode) {
+		n.Status.Conditions = []metav1.Condition{{
+			Type: "Programmed", Status: metav1.ConditionTrue,
+			Reason: "Programmed", ObservedGeneration: config.Generation,
+		}}
+	})
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), newTestFalco(), newRunningFalcoPod(), ready)
+	_, err := r.Reconcile(ctx, testutil.Request(config.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
+	require.True(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"))
+
+	newNode := newTestNode()
+	newNode.Name = "new-node"
+	require.NoError(t, cl.Create(ctx, newNode))
+	newPod := newRunningFalcoPod()
+	newPod.Name = "new-falco-pod"
+	newPod.Spec.NodeName = newNode.Name
+	require.NoError(t, cl.Create(ctx, newPod))
+
+	// The real instance reconcile creates the additional assignment and re-aggregates status.
+	_, err = r.Reconcile(ctx, testutil.Request(config.Name))
+	require.NoError(t, err)
+	assignment := &artifactv1alpha1.ArtifactNode{}
+	key := client.ObjectKey{
+		Namespace: config.Namespace,
+		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, config.Name, newNode.Name),
+	}
+	require.NoError(t, cl.Get(ctx, key, assignment))
+	require.Empty(t, assignment.Status.Conditions, "the new sidecar has not reported yet")
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
+	assert.False(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"),
+		"one ready node must not certify the newly created assignment")
+
+	assignment.Status.Conditions = ready.Status.Conditions
+	require.NoError(t, cl.Update(ctx, assignment))
+	_, err = r.Reconcile(ctx, testutil.Request(config.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
+	assert.True(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"))
+}
+
 func TestReconcile_DeletionNoNodeObjects(t *testing.T) {
 	// A finalizer makes cl.Delete set DeletionTimestamp on the object rather than removing it.
 	config := newTestConfig(func(c *artifactv1alpha1.Config) {
