@@ -496,6 +496,63 @@ func TestCache_RemoveAll(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		require.NoError(t, c.RemoveAll("plugin", "ns", "missing"))
+
+		// A populated index must not be cloned just to discover that this CR is absent.
+		blobPath := filepath.Join(dir, "blobs", "other")
+		require.NoError(t, c.Store(blobPath, []byte("other"), 0o755))
+		require.NoError(t, c.Set("plugin", "ns", "other", "linux-amd64", blobPath))
+		require.NoError(t, c.Set("plugin", "other-ns", "missing", "linux-arm64", blobPath))
+		require.NoError(t, c.Set("rulesfile", "ns", "missing", "", blobPath))
+		snapshotPath := filepath.Join(dir, "index.json")
+		before, err := os.ReadFile(snapshotPath)
+		require.NoError(t, err)
+
+		allocs := testing.AllocsPerRun(100, func() {
+			if err := c.RemoveAll("plugin", "ns", "missing"); err != nil {
+				t.Fatal(err)
+			}
+		})
+		assert.Zero(t, allocs, "a no-op removal must not allocate an index snapshot")
+		after, err := os.ReadFile(snapshotPath)
+		require.NoError(t, err)
+		assert.Equal(t, before, after)
+		assert.True(t, c.BlobExists(blobPath))
+	})
+
+	t.Run("-race: concurrent removals and updates preserve shared blob references", func(t *testing.T) {
+		dir := t.TempDir()
+		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
+		require.NoError(t, c.Load())
+		blobPath := filepath.Join(dir, "blobs", "shared")
+		require.NoError(t, c.Store(blobPath, []byte("plugin"), 0o755))
+		require.NoError(t, c.Set("plugin", "ns", "other", "linux-amd64", blobPath))
+
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Go(func() {
+				assert.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobPath))
+				assert.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobPath))
+			})
+			wg.Go(func() {
+				assert.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+				c.Lookup("plugin", "ns", "json", "linux-amd64")
+			})
+		}
+		wg.Wait()
+		require.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+		assert.FileExists(t, blobPath, "another CR still references the shared blob")
+
+		restarted := artifactcache.NewCache(dir)
+		require.NoError(t, restarted.Load())
+		for _, platform := range []string{"linux-amd64", "linux-arm64"} {
+			_, ok := restarted.Lookup("plugin", "ns", "json", platform)
+			assert.False(t, ok)
+		}
+		got, ok := restarted.Lookup("plugin", "ns", "other", "linux-amd64")
+		require.True(t, ok)
+		assert.Equal(t, blobPath, got)
+		require.NoError(t, c.RemoveAll("plugin", "ns", "other"))
+		assert.NoFileExists(t, blobPath, "the last removal must release all references")
 	})
 
 	t.Run("failed removal changes neither the live index nor the persisted snapshot", func(t *testing.T) {
