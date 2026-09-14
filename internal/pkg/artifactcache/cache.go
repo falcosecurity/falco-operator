@@ -64,10 +64,10 @@ func blobName(digest, platformKey string) string {
 	return name
 }
 
-// Store atomically writes content to blobPath and records perm in the companion .perm file.
+// store atomically writes content to blobPath and records perm in the companion .perm file.
 // Each writer uses a unique temporary file, then renames it into place.
-// Call Cache.Store when the write belongs to a live Cache that may be swept concurrently.
-func Store(blobPath string, content []byte, perm fs.FileMode) error {
+// Live cache users must use Cache.Ensure, which coordinates writes and references with eviction.
+func store(blobPath string, content []byte, perm fs.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(blobPath), 0o750); err != nil {
 		return fmt.Errorf("create blob dir: %w", err)
 	}
@@ -97,12 +97,12 @@ func Store(blobPath string, content []byte, perm fs.FileMode) error {
 }
 
 // Store writes a blob while holding the cache mutex so the sweeper cannot delete the same
-// path between the write and its final freshness check. Index registration remains the caller's
-// responsibility through Set.
+// path between the write and its final freshness check. This only writes the file; production
+// acquisition uses Ensure to publish the reference in the same critical section.
 func (c *Cache) Store(blobPath string, content []byte, perm fs.FileMode) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Store(blobPath, content, perm)
+	return store(blobPath, content, perm)
 }
 
 // ReadPerm reads the file mode from the companion .perm file.
@@ -121,4 +121,46 @@ func ReadPerm(blobPath string) fs.FileMode {
 // Example: "ghcr.io/falcosecurity/plugins/cloudtrail:0.12.0" becomes "ghcr.io-falcosecurity-plugins-cloudtrail-0.12.0".
 func RefToPath(ref string) string {
 	return strings.NewReplacer("/", "-", ":", "-", "@", "-").Replace(ref)
+}
+
+// Ensure makes a blob available and registers its CR reference as one cache operation.
+// Reusing a blob cancels eviction under the same lock as the sweeper. A missing blob is
+// fetched outside the lock, then written and indexed together. If fetching or persisting
+// fails, the previous index/reference remains intact; an unindexed write is swept later.
+func (c *Cache) Ensure(artifactType, namespace, name, platformKey, blobPath string,
+	fetch func() ([]byte, fs.FileMode, error),
+) error {
+	key := indexKey{artifactType, namespace, name, platformKey}
+	if found, err := c.acquireExisting(key, blobPath); found || err != nil {
+		return err
+	}
+
+	content, perm, err := fetch()
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := store(blobPath, content, perm); err != nil {
+		return err
+	}
+	return c.setLocked(key, blobPath)
+}
+
+// acquireExisting checks the actual file and publishes its reference before eviction can
+// intervene. This also recovers unindexed blobs left by an interrupted snapshot write.
+func (c *Cache) acquireExisting(key indexKey, blobPath string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, err := os.Stat(blobPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("stat cached blob: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("cached blob %q is not a regular file", blobPath)
+	}
+	return true, c.setLocked(key, blobPath)
 }

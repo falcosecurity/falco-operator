@@ -504,12 +504,12 @@ func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
 
 	// An exclusively-referenced blob: gone once this CR's last node object disappears.
 	ownBlob := filepath.Join(cacheDir, "blobs", "own")
-	require.NoError(t, artifactcache.Store(ownBlob, []byte("x"), 0o755))
+	require.NoError(t, r.cache.Store(ownBlob, []byte("x"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", ownBlob))
 
 	// A blob shared with another CR: refcount drops but the file survives.
 	sharedBlob := filepath.Join(cacheDir, "blobs", "shared")
-	require.NoError(t, artifactcache.Store(sharedBlob, []byte("y"), 0o755))
+	require.NoError(t, r.cache.Store(sharedBlob, []byte("y"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-arm64", sharedBlob))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, "other-plugin", "", sharedBlob))
 
@@ -536,7 +536,7 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, plugin, pluginNode)
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
 
 	err := r.handleDeletion(context.Background(), plugin)
@@ -1088,7 +1088,7 @@ func TestFetchAndCacheBinaries_FastPath(t *testing.T) {
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
 	const digest = testPluginDigest
 	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypePlugin), ref, digest, "linux", "amd64")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("fake-plugin"), 0o755))
+	require.NoError(t, r.cache.Store(blobPath, []byte("fake-plugin"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
 
 	plugin.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: digest}

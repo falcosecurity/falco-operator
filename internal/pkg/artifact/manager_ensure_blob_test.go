@@ -22,6 +22,7 @@ import (
 	"os"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -135,7 +136,7 @@ func TestManager_EnsureBlob_PinsDigest(t *testing.T) {
 			}
 			wantPath := artifactcache.BlobPath(cache.Dir(), string(TypePlugin), ResolveReference(ociArt), digest, "linux", "arm64")
 
-			path, err := manager.EnsureBlob(context.Background(), ociArt, TypePlugin, "linux", "arm64", cache, tt.knownDigest)
+			path, err := manager.EnsureBlob(context.Background(), "test-artifact", ociArt, TypePlugin, "linux", "arm64", cache, tt.knownDigest)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				assert.Empty(t, path)
@@ -196,7 +197,7 @@ func TestManager_EnsureBlob_PinnedPlatformsAndCacheHits(t *testing.T) {
 			mockPuller.Result = &puller.RegistryResult{RootDigest: testDigest, Digest: testOtherDigest, Type: tt.ociType}
 			mockPuller.PullCalls = nil
 
-			path, err := manager.EnsureBlob(context.Background(), ociArt, tt.artifactType, tt.os, tt.arch, cache, testDigest)
+			path, err := manager.EnsureBlob(context.Background(), "test-artifact", ociArt, tt.artifactType, tt.os, tt.arch, cache, testDigest)
 			require.NoError(t, err)
 			assert.Equal(t, artifactcache.BlobPath(cache.Dir(), string(tt.artifactType), ResolveReference(ociArt), testDigest, tt.os, tt.arch), path)
 			assert.False(t, paths[path], "each platform needs a separate cached file")
@@ -208,9 +209,11 @@ func TestManager_EnsureBlob_PinnedPlatformsAndCacheHits(t *testing.T) {
 			if tt.os != "" && tt.arch != "" {
 				platformKey = tt.os + "-" + tt.arch
 			}
-			require.NoError(t, cache.Set(string(tt.artifactType), "test-namespace", "test-artifact", platformKey, path))
+			indexed, ok := cache.Lookup(string(tt.artifactType), "test-namespace", "test-artifact", platformKey)
+			require.True(t, ok, "EnsureBlob must register the reference before returning")
+			require.Equal(t, path, indexed)
 
-			cached, err := manager.EnsureBlob(context.Background(), ociArt, tt.artifactType, tt.os, tt.arch, cache, testDigest)
+			cached, err := manager.EnsureBlob(context.Background(), "test-artifact", ociArt, tt.artifactType, tt.os, tt.arch, cache, testDigest)
 			require.NoError(t, err)
 			assert.Equal(t, path, cached)
 			require.Len(t, mockPuller.PullCalls, 1, "a cache hit must not download the artifact again")
@@ -220,4 +223,27 @@ func TestManager_EnsureBlob_PinnedPlatformsAndCacheHits(t *testing.T) {
 			assert.Empty(t, mockPuller.ResolveDigestCalls)
 		})
 	}
+}
+
+func TestManager_EnsureBlob_ReacquiresBeforeSweep(t *testing.T) {
+	cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(time.Nanosecond))
+	require.NoError(t, cache.Load())
+	ociArt := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "test/plugin", Tag: "latest"}}
+	path := artifactcache.BlobPath(cache.Dir(), string(TypePlugin), ResolveReference(ociArt), testDigest, "linux", "arm64")
+	require.NoError(t, cache.Store(path, []byte("cached plugin"), 0o755))
+	require.NoError(t, cache.Set(string(TypePlugin), "test-namespace", "old", "linux-arm64", path))
+	require.NoError(t, cache.RemoveAll(string(TypePlugin), "test-namespace", "old"))
+	mockPuller := &pullerfake.MockOCIPuller{}
+	manager := NewManagerWithOptions(fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(), "test-namespace", WithOCIPuller(mockPuller))
+	reused, err := manager.EnsureBlob(t.Context(), "new", ociArt, TypePlugin, "linux", "arm64", cache, testDigest)
+	require.NoError(t, err)
+	require.Equal(t, path, reused)
+	removed, err := cache.Sweep(t.Context())
+	require.NoError(t, err)
+	require.Zero(t, removed)
+	indexed, ok := cache.Lookup(string(TypePlugin), "test-namespace", "new", "linux-arm64")
+	require.True(t, ok)
+	require.FileExists(t, indexed)
+	require.Empty(t, mockPuller.PullCalls)
+	require.Empty(t, mockPuller.ResolveDigestCalls)
 }

@@ -567,7 +567,7 @@ func TestHandleDeletion_EvictsCacheEntry(t *testing.T) {
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, rf)
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o644))
+	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	// No ArtifactNode objects are owned by this Rulesfile, so handleDeletion evicts the cache entry now.
@@ -588,7 +588,7 @@ func TestHandleDeletion_SharedBlobSurvivesEviction(t *testing.T) {
 	// Two Rulesfile CRs reference the same content-addressed blob; deleting one decrements
 	// the refcount and leaves the file in place.
 	sharedBlob := filepath.Join(cacheDir, "blobs", "shared")
-	require.NoError(t, artifactcache.Store(sharedBlob, []byte("y"), 0o644))
+	require.NoError(t, r.cache.Store(sharedBlob, []byte("y"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", sharedBlob))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, "other-rulesfile", "", sharedBlob))
 
@@ -612,7 +612,7 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, rf, rfNode)
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("x"), 0o644))
+	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	err := r.handleDeletion(context.Background(), rf)
@@ -1566,7 +1566,7 @@ func TestFetchAndCacheBinary_FastPath(t *testing.T) {
 	ref := artifact.ResolveReference(rf.Spec.OCIArtifact)
 	const digest = testRulesfileDigest
 	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypeRulesfile), ref, digest, "", "")
-	require.NoError(t, artifactcache.Store(blobPath, []byte("rule content"), 0o644))
+	require.NoError(t, r.cache.Store(blobPath, []byte("rule content"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	rf.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: digest}

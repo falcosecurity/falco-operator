@@ -38,7 +38,7 @@ func TestRemoveOrphansLocked_SkipsReReferenced(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, BlobsDir, "reref")
-	require.NoError(t, Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
 
 	c.mu.Lock()
 	c.refs[blobPath] = 1
@@ -59,7 +59,7 @@ func TestRemoveOrphansLocked_SkipsFreshlyRewrittenCandidate(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, BlobsDir, "rewritten")
-	require.NoError(t, Store(blobPath, []byte("old orphan"), 0o755))
+	require.NoError(t, store(blobPath, []byte("old orphan"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(blobPath, old, old))
 
@@ -108,7 +108,7 @@ func TestRemoveExpiredDerefsLocked_RemovesExpiredEntry(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := BlobPath(dir, "plugin", "expired-ref", "sha256:old", "linux", "amd64")
-	require.NoError(t, Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
 
 	c.mu.Lock()
 	c.derefTimes[blobPath] = time.Now().Add(-time.Hour) // well past DefaultEvictionGracePeriod
@@ -138,7 +138,7 @@ func TestRemoveExpiredDerefsLocked_SkipsWithinGracePeriod(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, BlobsDir, "fresh")
-	require.NoError(t, Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
 
 	c.mu.Lock()
 	c.derefTimes[blobPath] = time.Now()
@@ -193,7 +193,7 @@ func TestFindOrphanCandidates_SkipsPendingDeref(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, BlobsDir, "pending")
-	require.NoError(t, Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
 	old := time.Now().Add(-time.Hour) // mtime well past sweepGraceWindow
 	require.NoError(t, os.Chtimes(blobPath, old, old))
 
@@ -208,7 +208,7 @@ func TestRemoveOrphansLocked_SkipsPendingDeref(t *testing.T) {
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, BlobsDir, "pending")
-	require.NoError(t, Store(blobPath, []byte("x"), 0o755))
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
 
 	c.mu.Lock()
 	c.derefTimes[blobPath] = time.Now() // within its own grace period

@@ -23,13 +23,13 @@ import (
 	"io/fs"
 	"runtime"
 
+	"oras.land/oras-go/v2/registry/remote/auth"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	"github.com/falcosecurity/falco-operator/internal/pkg/credentials"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -95,14 +95,9 @@ func NewManagerWithOptions(cl client.Client, namespace string, opts ...ManagerOp
 // Pass knownDigest to read an already resolved revision; an empty value resolves the spec's
 // reference. Like EnsureBlob, a pinned fetch must return the requested root digest.
 func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact, knownDigest string) (*puller.ArtifactConfig, string, error) {
-	secretRef := authSecretRef(ociArtifact)
-	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
+	creds, err := am.fetchOCICredentials(ctx, ociArtifact)
 	if err != nil {
-		return nil, "", fmt.Errorf("fetch auth secret: %w", err)
-	}
-	creds, err := credentials.FromSecret(ResolveRegistryHost(ociArtifact), authSecret)
-	if err != nil {
-		return nil, "", fmt.Errorf("derive credentials: %w", err)
+		return nil, "", err
 	}
 	ref := ResolveReference(ociArtifact)
 	if knownDigest != "" {
@@ -124,14 +119,9 @@ func (am *Manager) FetchConfig(ctx context.Context, ociArtifact *commonv1alpha1.
 // FetchContent downloads the artifact content layer at the root digest returned by
 // FetchConfig and returns the extracted file bytes.
 func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact, digest string) ([]byte, error) {
-	secretRef := authSecretRef(ociArtifact)
-	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
+	creds, err := am.fetchOCICredentials(ctx, ociArtifact)
 	if err != nil {
-		return nil, fmt.Errorf("fetch auth secret: %w", err)
-	}
-	creds, err := credentials.FromSecret(ResolveRegistryHost(ociArtifact), authSecret)
-	if err != nil {
-		return nil, fmt.Errorf("derive credentials: %w", err)
+		return nil, err
 	}
 	ref, err := pinReferenceToDigest(ResolveReference(ociArtifact), digest)
 	if err != nil {
@@ -141,8 +131,8 @@ func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1
 }
 
 // EnsureBlob ensures the OCI binary for ociArt/platform is present in the blob cache.
-// If the blob already exists (digest + platform match), the path is returned immediately.
-// Otherwise the binary is pulled from the registry, extracted, and written atomically.
+// An existing blob (digest + platform match) is referenced before returning its path.
+// Otherwise it is pulled, extracted, written and indexed for name through Cache.Ensure.
 //
 // Pass knownDigest when the caller already resolved the digest (e.g. from
 // Status.ArtifactMeta.Digest set by fetchAndCacheArtifactMeta) to skip the
@@ -151,25 +141,22 @@ func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1
 // For platform-specific artifacts (plugins) supply goos and goarch; for platform-agnostic
 // artifacts (rulesfiles) pass empty strings; the pull still uses the server's own platform
 // to satisfy the puller API, but the cached blob has no platform suffix.
-func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArtifact, artifactType Type,
+func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1alpha1.OCIArtifact, artifactType Type,
 	goos, goarch string, cache *artifactcache.Cache, knownDigest string) (string, error) {
 	logger := log.FromContext(ctx)
 
-	secretRef := authSecretRef(ociArt)
-	authSecret, err := am.fetchOCIAuthSecret(ctx, secretRef)
-	if err != nil {
-		return "", fmt.Errorf("fetch auth secret: %w", err)
-	}
-	creds, err := credentials.FromSecret(ResolveRegistryHost(ociArt), authSecret)
-	if err != nil {
-		return "", fmt.Errorf("derive credentials: %w", err)
-	}
+	var creds auth.CredentialFunc
+	var err error
 
 	ref := ResolveReference(ociArt)
 	opts := ResolveRegistryOptions(ociArt)
 
 	digest := knownDigest
 	if digest == "" {
+		creds, err = am.fetchOCICredentials(ctx, ociArt)
+		if err != nil {
+			return "", err
+		}
 		digest, err = am.ociPuller.ResolveDigest(ctx, ref, creds, opts)
 		if err != nil {
 			return "", fmt.Errorf("resolve digest for %q: %w", ref, err)
@@ -177,45 +164,53 @@ func (am *Manager) EnsureBlob(ctx context.Context, ociArt *commonv1alpha1.OCIArt
 	}
 	blobPath := artifactcache.BlobPath(cache.Dir(), string(artifactType), ref, digest, goos, goarch)
 
-	if cache.BlobExists(blobPath) {
-		logger.V(2).Info("Blob already cached", "ref", ref, "digest", digest, "blob", blobPath)
-		return blobPath, nil
+	platformKey := ""
+	if goos != "" && goarch != "" {
+		platformKey = goos + "-" + goarch
 	}
+	err = cache.Ensure(string(artifactType), am.namespace, name, platformKey, blobPath, func() ([]byte, fs.FileMode, error) {
+		if knownDigest != "" {
+			creds, err = am.fetchOCICredentials(ctx, ociArt)
+			if err != nil {
+				return nil, 0, err
+			}
+		}
+		pinnedRef, err := pinReferenceToDigest(ref, digest)
+		if err != nil {
+			return nil, 0, fmt.Errorf("pin OCI reference %q to %q: %w", ref, digest, err)
+		}
 
-	pinnedRef, err := pinReferenceToDigest(ref, digest)
+		pullGOOS, pullGOARCH := goos, goarch
+		if pullGOOS == "" || pullGOARCH == "" {
+			pullGOOS, pullGOARCH = runtime.GOOS, runtime.GOARCH
+		}
+
+		logger.Info("Pulling OCI blob", "ref", pinnedRef, "os", pullGOOS, "arch", pullGOARCH)
+
+		var buf bytes.Buffer
+		res, err := am.ociPuller.Pull(ctx, pinnedRef, pullGOOS, pullGOARCH, creds, opts, &buf)
+		if err != nil {
+			return nil, 0, fmt.Errorf("pull %q (%s/%s): %w", pinnedRef, pullGOOS, pullGOARCH, err)
+		}
+		if res == nil {
+			return nil, 0, fmt.Errorf("puller returned nil result for %q", ref)
+		}
+		// Compare the root digest, not the selected platform manifest's digest.
+		if res.RootDigest != digest {
+			return nil, 0, fmt.Errorf("pulled OCI root digest %q does not match expected digest %q", res.RootDigest, digest)
+		}
+		if !isExpectedOCIArtifactType(artifactType, res.Type) {
+			return nil, 0, fmt.Errorf("pulled OCI artifact type %q does not match expected %q", res.Type, artifactType)
+		}
+
+		file, err := common.ExtractSingleFileFromTarGz(ctx, &buf, 0)
+		if err != nil {
+			return nil, 0, fmt.Errorf("extract from OCI layer %q: %w", ref, err)
+		}
+
+		return file.Content, PermFor(artifactType), nil
+	})
 	if err != nil {
-		return "", fmt.Errorf("pin OCI reference %q to %q: %w", ref, digest, err)
-	}
-
-	pullGOOS, pullGOARCH := goos, goarch
-	if pullGOOS == "" || pullGOARCH == "" {
-		pullGOOS, pullGOARCH = runtime.GOOS, runtime.GOARCH
-	}
-
-	logger.Info("Pulling OCI blob", "ref", pinnedRef, "os", pullGOOS, "arch", pullGOARCH)
-
-	var buf bytes.Buffer
-	res, err := am.ociPuller.Pull(ctx, pinnedRef, pullGOOS, pullGOARCH, creds, opts, &buf)
-	if err != nil {
-		return "", fmt.Errorf("pull %q (%s/%s): %w", pinnedRef, pullGOOS, pullGOARCH, err)
-	}
-	if res == nil {
-		return "", fmt.Errorf("puller returned nil result for %q", ref)
-	}
-	// Compare the root digest, not the selected platform manifest's digest.
-	if res.RootDigest != digest {
-		return "", fmt.Errorf("pulled OCI root digest %q does not match expected digest %q", res.RootDigest, digest)
-	}
-	if !isExpectedOCIArtifactType(artifactType, res.Type) {
-		return "", fmt.Errorf("pulled OCI artifact type %q does not match expected %q", res.Type, artifactType)
-	}
-
-	file, err := common.ExtractSingleFileFromTarGz(ctx, &buf, 0)
-	if err != nil {
-		return "", fmt.Errorf("extract from OCI layer %q: %w", ref, err)
-	}
-
-	if err := artifactcache.Store(blobPath, file.Content, PermFor(artifactType)); err != nil {
 		return "", err
 	}
 
