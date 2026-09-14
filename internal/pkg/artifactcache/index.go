@@ -228,14 +228,32 @@ func (c *Cache) setLocked(key indexKey, blobPath string) error {
 // evicting each now-unreferenced blob the same way Set does. No-op (no error, no persist)
 // if nothing is indexed for this CR.
 func (c *Cache) RemoveAll(artifactType, namespace, name string) error {
+	// Most reconciles have nothing to evict. Keep that path read-only and allocation-free.
+	c.mu.RLock()
+	hasEntries := false
+	for key := range c.index {
+		if key.ArtifactType == artifactType && key.Namespace == namespace && key.Name == name {
+			hasEntries = true
+			break
+		}
+	}
+	c.mu.RUnlock()
+	if !hasEntries {
+		return nil
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	nextIndex := maps.Clone(c.index)
+	// Recheck the current index: another writer may have changed it since the read lock.
+	var nextIndex map[indexKey]string
 	var removedBlobs []string
 	for key, blobPath := range c.index {
 		if key.ArtifactType != artifactType || key.Namespace != namespace || key.Name != name {
 			continue
+		}
+		if nextIndex == nil {
+			nextIndex = maps.Clone(c.index)
 		}
 		delete(nextIndex, key)
 		removedBlobs = append(removedBlobs, blobPath)
