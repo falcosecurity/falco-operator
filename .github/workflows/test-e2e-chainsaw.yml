@@ -1,4 +1,4 @@
-name: E2E Chainsaw Tests
+name: e2e-chainsaw
 
 on:
   push:
@@ -59,7 +59,7 @@ jobs:
 
   # Split by what each group of tests exercises, each on its own runner.
   test-e2e-chainsaw:
-    name: tests-e2e-chainsaw (${{ matrix.category.name }}, ${{ matrix.mode.name }})
+    name: e2e-chainsaw (${{ matrix.category.name }}, ${{ matrix.mode.name }})
     needs: build-e2e-binaries
     runs-on: ubuntu-latest
     strategy:
@@ -235,7 +235,7 @@ jobs:
   # CRD admission validation only: rejected by the API server before any controller sees it,
   # so no KWOK/OCI registry/mTLS needed, and no need to run twice for http/mtls.
   test-e2e-chainsaw-validation:
-    name: tests-e2e-chainsaw (validation)
+    name: e2e-chainsaw (validation)
     needs: build-e2e-binaries
     runs-on: ubuntu-latest
     env:
@@ -312,8 +312,8 @@ jobs:
           retention-days: 7
 
   # Stable required check covering every matrix entry and CRD validation.
-  test-e2e-chainsaw-result:
-    name: tests-e2e-chainsaw
+  e2e-chainsaw-summary:
+    name: e2e-chainsaw-summary
     if: always()
     needs: [build-e2e-binaries, test-e2e-chainsaw, test-e2e-chainsaw-validation]
     runs-on: ubuntu-latest
