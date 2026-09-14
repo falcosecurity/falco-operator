@@ -310,3 +310,18 @@ jobs:
           path: /tmp/chainsaw
           if-no-files-found: ignore
           retention-days: 7
+
+  # Stable required check covering every matrix entry and CRD validation.
+  test-e2e-chainsaw-result:
+    name: tests-e2e-chainsaw
+    if: always()
+    needs: [build-e2e-binaries, test-e2e-chainsaw, test-e2e-chainsaw-validation]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all e2e jobs to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          printf '%s\n' "$JOB_RESULTS"
+          jq -e 'length > 0 and all(.[]; .result == "success")' <<< "$JOB_RESULTS"
