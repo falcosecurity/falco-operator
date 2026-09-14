@@ -19,6 +19,8 @@ package controllerhelper_test
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -35,6 +37,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	common "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 )
 
@@ -139,6 +144,68 @@ func TestEnsureFinalizer(t *testing.T) {
 				got := &corev1.ConfigMap{}
 				require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.obj), got))
 				assert.True(t, controllerutil.ContainsFinalizer(got, testFinalizer))
+			}
+		})
+	}
+}
+
+func TestReconcileArtifactInUseFinalizer(t *testing.T) {
+	for _, kind := range []string{controllerhelper.ArtifactKindPlugin, controllerhelper.ArtifactKindRulesfile} {
+		t.Run(kind, func(t *testing.T) {
+			for _, tt := range []struct {
+				name          string
+				hasOCI        bool
+				nodesInUse    bool
+				failCleanup   bool
+				wantFinalizer bool
+			}{
+				{name: "cache ownership survives last node", hasOCI: true, wantFinalizer: true},
+				{name: "removed source releases cache and finalizer"},
+				{name: "nodes still require finalizer", nodesInUse: true, wantFinalizer: true},
+				{name: "failed cleanup retains ownership", failCleanup: true, wantFinalizer: true},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					ctx := context.Background()
+					scheme := newFinalizerScheme(t)
+					require.NoError(t, artifactv1alpha1.AddToScheme(scheme))
+					meta := metav1.ObjectMeta{
+						Name: "artifact", Namespace: "default",
+						Finalizers: []string{controllerhelper.NodeObjectsInUseFinalizer, testForeignFinalizer},
+					}
+					var source *common.OCIArtifact
+					if tt.hasOCI {
+						source = &common.OCIArtifact{Image: common.ImageSpec{Repository: "example.org/artifact", Tag: "latest"}}
+					}
+					var parent client.Object
+					if kind == controllerhelper.ArtifactKindPlugin {
+						parent = &artifactv1alpha1.Plugin{ObjectMeta: meta, Spec: artifactv1alpha1.PluginSpec{OCIArtifact: source}}
+					} else {
+						parent = &artifactv1alpha1.Rulesfile{ObjectMeta: meta, Spec: artifactv1alpha1.RulesfileSpec{OCIArtifact: source}}
+					}
+					cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent).Build()
+					dir := t.TempDir()
+					cache := artifactcache.NewCache(dir)
+					require.NoError(t, cache.Load())
+					blobPath := filepath.Join(dir, "blobs", "owned")
+					require.NoError(t, cache.Store(blobPath, []byte("blob"), 0o644))
+					require.NoError(t, cache.Set(kind, meta.Namespace, meta.Name, "", blobPath))
+					if tt.failCleanup {
+						require.NoError(t, os.Mkdir(filepath.Join(dir, "index.json.tmp"), 0o755))
+					}
+
+					err := controllerhelper.ReconcileArtifactInUseFinalizer(ctx, cl, parent, cache, tt.nodesInUse)
+					if tt.failCleanup {
+						require.Error(t, err)
+					} else {
+						require.NoError(t, err)
+					}
+					require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(parent), parent))
+					assert.Equal(t, tt.wantFinalizer,
+						controllerutil.ContainsFinalizer(parent, controllerhelper.NodeObjectsInUseFinalizer))
+					assert.Contains(t, parent.GetFinalizers(), testForeignFinalizer)
+					_, owned := cache.Lookup(kind, meta.Namespace, meta.Name, "")
+					assert.Equal(t, tt.hasOCI || tt.failCleanup, owned)
+				})
 			}
 		})
 	}

@@ -131,9 +131,8 @@ func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	// Keep the parent alive when children are desired or until every existing child is
 	// physically gone. The desired-node check also covers a just-created child that the
 	// informer cache may not expose in the immediate re-list yet.
-	if err := controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, config,
-		controllerhelper.NodeObjectsInUseFinalizer,
+	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
+		ctx, r.Client, config, nil,
 		len(matchingNodes) > 0 || len(existingNodes.Items) > 0,
 	); err != nil {
 		return ctrl.Result{}, err

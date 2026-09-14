@@ -97,15 +97,14 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Handle deletion: remove the in-use finalizer once all node objects are gone.
+	// Handle deletion: release the finalizer after node objects and cache references are cleaned up.
 	if !rulesfile.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("Rulesfile marked for deletion, running cleanup")
 		return ctrl.Result{}, r.handleDeletion(ctx, rulesfile)
 	}
 
-	// allMatchingNodes: all nodes matching the selector; the blob is pre-fetched unconditionally
-	// (fetchAndCacheBlob is not per-node), but the in-use finalizer is anchored here so that
-	// handleDeletion runs cache eviction even when matchingNodes is empty.
+	// allMatchingNodes contains all selected nodes; the blob is platform-agnostic and is
+	// pre-fetched independently of this set. OCI cache ownership also survives an empty set.
 	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, rulesfile.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -126,13 +125,8 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 	logger.V(1).Info("Listed existing ArtifactNode objects", "count", len(existingNodes.Items))
 
-	// Keep the parent alive when nodes are desired or until every existing child is
-	// physically gone. The desired-node check also covers a just-created child that the
-	// informer cache may not expose in the immediate re-list yet.
-	// The SSA variant also strips any legacy per-node finalizers left by old operators.
-	if err := controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, rulesfile,
-		controllerhelper.NodeObjectsInUseFinalizer,
+	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
+		ctx, r.Client, rulesfile, r.cache,
 		len(allMatchingNodes) > 0 || len(existingNodes.Items) > 0,
 	); err != nil {
 		return ctrl.Result{}, err
