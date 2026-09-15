@@ -64,16 +64,6 @@ type pluginsConfig struct {
 	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
 }
 
-// ResolveConfigName returns the canonical plugin name used by Falco and referenced in a
-// Rulesfile's dependency list. Prefers spec.config.name (explicit override) over the CR's
-// metadata.name, which may be an arbitrary Kubernetes identifier.
-func ResolveConfigName(plugin *artifactv1alpha1.Plugin) string {
-	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
-		return plugin.Spec.Config.Name
-	}
-	return plugin.Name
-}
-
 // AddPluginConfig ensures plugin's entry is present and current in the shared plugins-config
 // aggregate file, then registers the resulting config name as provided.
 //
@@ -103,17 +93,6 @@ func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.
 		log.FromContext(ctx).V(1).Info("post-install Falco versions refresh failed; will retry on next periodic poll", "err", refreshErr)
 	}
 	return action, file, nil
-}
-
-// StorePlugin checks installed ownership before replacing a plugin's binary.
-func (m *Manager) StorePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin,
-	result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.checkPluginOwnershipLocked(plugin); err != nil {
-		return artifact.StoreActionNone, nil, err
-	}
-	return m.storeLocked(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, artifact.MediumOCI, result)
 }
 
 // RemovePluginConfig removes the installed entry by CR identity, never by desired spec.
@@ -184,37 +163,6 @@ func (m *Manager) writePluginsConfigLocked(ctx context.Context, fetcher artifact
 	}
 	m.publishPluginConfigLocked(config, owners)
 	return action, file, nil
-}
-
-func (m *Manager) installedPluginNameLocked(plugin *artifactv1alpha1.Plugin) string {
-	owner := pluginOwner(plugin)
-	for _, config := range m.pluginsConfig.Configs {
-		if m.pluginConfigOwners[config.Name] == owner {
-			return config.Name
-		}
-	}
-	return ""
-}
-
-func (m *Manager) checkPluginOwnershipLocked(plugin *artifactv1alpha1.Plugin) error {
-	owner := pluginOwner(plugin)
-	name := ResolveConfigName(plugin)
-	for _, config := range m.pluginsConfig.Configs {
-		existing := m.pluginConfigOwners[config.Name]
-		if existing != owner && (config.Name == name || (existing.Namespace == owner.Namespace && existing.Name == owner.Name)) {
-			return fmt.Errorf("installed plugin %q belongs to %s/%s (UID %s)", config.Name, existing.Namespace, existing.Name, existing.UID)
-		}
-		if existing == owner && config.Name != name {
-			if blocked := m.blockedByOthersLocked(config.Name); blocked != nil {
-				return blocked
-			}
-		}
-	}
-	return nil
-}
-
-func pluginOwner(plugin *artifactv1alpha1.Plugin) corev1.ObjectReference {
-	return corev1.ObjectReference{Namespace: plugin.Namespace, Name: plugin.Name, UID: plugin.UID}
 }
 
 func (m *Manager) publishPluginConfigLocked(config *pluginsConfig, owners map[string]corev1.ObjectReference) {
