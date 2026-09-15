@@ -1,0 +1,943 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-rulesfile-dep-survives-sidecar-restart
+spec:
+  description: |
+    Restart only the artifact-operator container with valid current Rulesfile and
+    Plugin specifications, preserving the Pod and its installed files. A successful
+    priority update and restoration prove that the new process has reconciled the
+    current rules before dependency-sensitive operations are exercised.
+
+    Then reject an OCI update with an unmet engine requirement and no container
+    dependency. In this same process, installed rules must keep container protected,
+    while the unrelated json plugin remains removable. Check rules and binary
+    checksums, plugin configuration and Falco's loaded plugins throughout cleanup.
+
+    This tests current-desired convergence followed by in-process protection.
+    It does not promise historical dependency recovery after an invalid desired
+    update followed by restart, nor inject a crash during a write.
+
+  bindings:
+    - name: falco_name
+      value: falco-dep-survives-sidecar-restart-test
+    - name: rulesfile_name
+      value: rulesfile-dep-survives-sidecar-restart-test
+    - name: plugin_name
+      value: container
+    - name: unrelated_plugin_name
+      value: json
+    - name: test_name
+      value: plugin-rulesfile-dep-survives-sidecar-restart
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: |
+        Real Falco in enforce mode. Use one Deployment Pod and restart only its
+        artifact-operator container, preserving its emptyDir files.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-plugin"
+      description: |
+        Install container from the local OCI registry and verify Plugin programming,
+        installed-file metadata and ConfigProgrammed=True on the ArtifactNode.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Install-unrelated-plugin"
+      description: |
+        Install json, which is not required by the Rulesfile. After recovery it must
+        remain removable while the required container plugin is protected.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($unrelated_plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Wait-plugins-loaded-in-falco"
+      description: |
+        Verify both container and json are loaded by Falco before testing recovery.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($unrelated_plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 05: Create-rulesfile"
+      description: |
+        OCI rulesfile (falco-test/rulesfile-official) that declares a container
+        plugin dependency, created after the plugin is already loaded.
+        Note: ($oci_registry) must appear directly in the resource spec, not inside a
+        binding value object: chainsaw does not recursively expand ($expr) strings
+        embedded within complex binding values.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 06: Assert-rulesfile-programmed"
+      description: |
+        With the container plugin already loaded, the dependency is met immediately.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (length(artifactMeta.dependencies || `[]`)): 1
+                artifactMeta:
+                  dependencies:
+                    - name: container
+                      (length(alternatives || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 07: Restart-only-artifact-operator-container"
+      description: |
+        Restart only the artifact-operator container, preserving the original Pod UID
+        and emptyDir volumes. Rules, plugin binary and shared configuration must remain
+        unchanged while the desired Rulesfile is still valid. Container readiness alone
+        does not prove a new reconciliation; the next step requires fresh generations.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+              - name: original_pod_name
+                value: (json_parse($stdout).pod)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            outputs:
+              - name: original_pod_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/restart_artifact_operator_container.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).uid == $original_pod_uid): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+
+    - name: "Step 08: Reconcile-current-rules-after-restart"
+      description: |
+        Change priority and restore it, waiting for each new generation on the
+        ArtifactNode and the corresponding installed path. This proves a successful
+        reconciliation in the restarted process, not a surviving Programmed=True.
+        The rule bytes stay unchanged, and the final path matches the original.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                priority: 51
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (installedArtifacts[0].medium): oci
+                (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/51-01-', $rulesfile_name, '-oci.yaml']))
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 2
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 2
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/51-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                priority: 50
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (installedArtifacts[0].medium): oci
+                (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 3
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 3
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: (join('', ['51-01-', $rulesfile_name, '-oci.yaml']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 09: Verify-installed-state-after-restart"
+      description: |
+        Confirm installed rules and binary are still present, the shared configuration
+        contains container, and Falco /versions reports it in plugin_versions.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($unrelated_plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 10: Reject-rulesfile-update-without-container-dependency"
+      description: |
+        After current rules have reconciled in the new process, reject desired rules
+        with an unmet engine requirement and no container dependency.
+        Installed rules, plugin binary and shared configuration must remain byte-for-byte unchanged.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-unmet
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                observedGeneration: 4
+                (length(artifactMeta.dependencies || `[]`)): 0
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    observedGeneration: 4
+                    reason: DependenciesNotSatisfiedUpdateRejected
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+
+    - name: "Step 11: Delete-plugin-blocked-by-installed-rules"
+      description: |
+        Request Plugin deletion without waiting. The installed Rulesfile dependency
+        must keep its finalizer present even though desired rules no longer require it.
+        The instance aggregator must surface DeletionBlocked=True on the parent;
+        a hold and re-assert check condition stability. Files and Falco runtime remain intact.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_deletion_blocked.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 12: Delete-unrelated-plugin"
+      description: |
+        Remove json while the installed Rulesfile still blocks container deletion.
+        A blanket deletion block after restart must not make the required-plugin
+        check pass: this unrelated deletion must complete in the same process.
+        The installed rules and required plugin binary must remain unchanged.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($unrelated_plugin_name)
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $unrelated_plugin_name]))
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            namespace: ($namespace)
+            name: ($unrelated_plugin_name)
+            for:
+              deletion: {}
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+
+    - name: "Step 13: Assert-only-required-plugin-remains"
+      description: |
+        Verify json is absent from disk, both configuration lists and Falco runtime.
+        Container remains loaded and its deletion remains blocked by installed rules.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /usr/share/falco/plugins
+              - name: EXPECTED_FILE
+                value: (join('', [$unrelated_plugin_name, '.so']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($unrelated_plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (length(json_parse($stdout).config.plugins)): 1
+              (length(json_parse($stdout).config.load_plugins)): 1
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: ABSENT_PLUGINS
+                value: (to_string(to_array($unrelated_plugin_name)))
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+
+    - name: "Step 14: Delete-rulesfile"
+      description: |
+        Delete the Rulesfile. Its removal drops the installed dependency, so the
+        per-node artifact operator can remove the plugin config and release its
+        ArtifactNode finalizer. Request deletion without waiting; the ArtifactNode
+        wait is the completion signal, avoiding an implicit parent-object wait
+        while Rulesfile cleanup is still running.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: rulesfiles.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($rulesfile_name)
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 15: Wait-plugin-node-object-deleted"
+      description: |
+        Isolate per-node cleanup from final parent deletion. If this step stalls,
+        the artifact-operator sidecar is not removing its ArtifactNode finalizer;
+        inspect that container's logs, not the instance-operator's.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 16: Wait-plugin-deleted"
+      description: |
+        With the last ArtifactNode already gone, node-objects-in-use must clear
+        on the parent's next reconcile so deletion can finish.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($plugin_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 17: Assert-files-and-plugin-config-removed"
+      description: |
+        Verify the installed rules, plugin binary and both plugin configuration entries
+        are removed after per-node cleanup and parent deletion complete.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: (join('', ['50-01-', $rulesfile_name, '-oci.yaml']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /usr/share/falco/plugins
+              - name: EXPECTED_FILE
+                value: (join('', [$plugin_name, '.so']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+            check:
+              (json_parse($stdout).config.plugins): []
+              (json_parse($stdout).config.load_plugins || `[]`): []
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

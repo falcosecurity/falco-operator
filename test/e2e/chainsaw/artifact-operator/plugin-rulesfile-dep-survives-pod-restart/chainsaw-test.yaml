@@ -4,20 +4,11 @@ metadata:
   name: plugin-rulesfile-dep-survives-pod-restart
 spec:
   description: |
-    Regression test for the artifact-operator sidecar's warm sync: the per-node
-    nodeartifacts.Manager's dependency registry (which blocks a Plugin's on-disk
-    config from being removed while a Rulesfile on that node still depends on
-    it) must be re-established from durable ArtifactNode status immediately
-    after a sidecar restart, before the Plugin/Rulesfile controllers process a
-    single event, not just organically as new reconciles happen to occur.
-
-    This is exactly "Scenario B" of plugin-rulesfile-dep-finalizer-scenarios
-    (install plugin, satisfy the Rulesfile's dependency on it, attempt deletion,
-    confirm it's blocked), with a Falco/artifact-operator pod restart inserted
-    between "dependency satisfied" and "attempt deletion". If the sidecar's
-    warm sync were skipped, broken, or lost its race against the first
-    reconcile after restart, the dependency registry would come back empty and
-    this deletion would incorrectly succeed instead of being blocked.
+    Plugin deletion remains blocked by its Rulesfile dependency after a DaemonSet
+    rolling restart replaces the Falco Pods. Removing the Rulesfile then allows
+    ArtifactNode and parent Plugin cleanup to complete.
+    The replacement Pods reinstall artifacts on new volumes; same-Pod recovery
+    is covered separately by plugin-rulesfile-dep-survives-sidecar-restart.
 
   bindings:
     - name: falco_name
@@ -34,10 +25,8 @@ spec:
   steps:
     - name: "Step 01: Create-falco"
       description: |
-        Real Falco in enforce mode. maxSurge:1/maxUnavailable:0 so Step 06's
-        restart never leaves a node without a Running Falco pod: see
-        apply-assert-falco.yaml's update_strategy binding comment for why that
-        matters here specifically.
+        Real Falco in enforce mode. Keep maxSurge:1/maxUnavailable:0 so the
+        rolling restart brings up each replacement before removing the old Pod.
       use:
         template: ../../common/_step_templates/apply-assert-falco.yaml
         with:
@@ -55,8 +44,8 @@ spec:
 
     - name: "Step 02: Install-plugin"
       description: |
-        Install the container plugin from the local OCI registry and wait for
-        Programmed=True on both the Plugin and the ArtifactNode.
+        Install container from the local OCI registry and verify Plugin programming,
+        installed-file metadata and ConfigProgrammed=True on the ArtifactNode.
       use:
         template: ../../common/_step_templates/apply-assert-plugin.yaml
         with:
@@ -130,23 +119,8 @@ spec:
 
     - name: "Step 06: Rollout-restart-falco"
       description: |
-        Force the exact restart window this test exists to cover (a fresh
-        artifact-operator sidecar process taking over) without a plain
-        `kubectl delete pod`. A raw delete always creates a real window where
-        the node has zero Running Falco pods; the instance operator can't
-        tell "restarting" from "gone for good" during that window, so it
-        deliberately clears the node's per-node artifact state (ArtifactNode,
-        including the finalizer this test is about) rather than leaving it to
-        rot. That's correct behavior, not a bug, but it means a plain pod
-        delete destroys the very durable state this test wants warm sync to
-        recover from, and confirms nothing about warm sync at all.
-
-        `kubectl rollout restart` instead triggers a genuine DaemonSet
-        rolling update: with Step 01's maxSurge:1/maxUnavailable:0, the
-        replacement pod on each node comes up and is Ready before the old one
-        is torn down, so the node is never observed without a Running Falco
-        pod, the durable ArtifactNode is never cleared, and the new sidecar's
-        warm sync has real state to recover.
+        Replace the Falco Pods through a DaemonSet rolling restart and wait for
+        rollout completion. Unlike a sidecar restart, this creates new artifact volumes.
       try:
         - script:
             env:
@@ -159,19 +133,8 @@ spec:
 
     - name: "Step 07: Wait-artifact-operator-sidecar-ready"
       description: |
-        Wait for the replacement Pod's artifact-operator container specifically
-        to report ready, rather than the whole Pod's aggregate Ready condition.
-        This only confirms the new sidecar process is up, nothing more: its
-        /readyz is wired to a plain, unconditional healthz.Ping (cmd/artifact/
-        main.go), served by an HTTP-server runnable that controller-runtime
-        starts before caches sync or Warmup even begins, so it is not gated on
-        warm sync completing. The actual guarantee this test relies on is that
-        controllers (which is what processes Step 08's delete) don't start
-        until after Warmup returns (controller-runtime's own Caches -> Warmup
-        -> Controllers startup ordering), not that /readyz reflects it. Step 09's
-        10s hold-and-reassert is what catches a warm sync that raced and lost;
-        this step just avoids hammering Step 08 against a pod that isn't even
-        listening yet.
+        Wait for the replacement Pods' artifact-operator containers to report ready.
+        The following deletion checks verify that installed dependencies are protected.
       try:
         - assert:
             resource:
@@ -186,10 +149,8 @@ spec:
 
     - name: "Step 08: Delete-plugin-blocked"
       description: |
-        Request Plugin deletion without waiting. The Rulesfile still depends on
-        it, so the (just-restarted) per-node artifact operator must refuse to
-        remove the plugin config, proving its dependency registry was
-        correctly warm-synced immediately after the restart, not left empty.
+        Request Plugin deletion without waiting. The Rulesfile still depends on it,
+        so removal must remain blocked after the Pod replacement.
       try:
         - script:
             env:
@@ -202,14 +163,8 @@ spec:
 
     - name: "Step 09: Assert-deletion-blocked-condition-surfaced"
       description: |
-        The instance aggregator must have propagated the per-node block onto
-        the parent Plugin: DeletionBlocked=True with reason
-        PluginConfigStillRequired. A 10s hold + re-assert guards against a
-        flapping or transiently-correct condition.
-
-        This is the assertion that would fail if the fix regressed: if the
-        post-restart sidecar's dependency registry came back empty, this
-        Plugin would already be gone by now instead of blocked.
+        Verify DeletionBlocked=True with reason PluginConfigStillRequired on the
+        parent Plugin. Hold and re-assert to detect a transiently correct condition.
       try:
         - assert:
             resource:
@@ -251,11 +206,11 @@ spec:
             env:
               - name: NAMESPACE
                 value: ($namespace)
-              - name: RULESFILE_NAME
+              - name: RESOURCE
+                value: rulesfiles.artifact.falcosecurity.dev
+              - name: NAME
                 value: ($rulesfile_name)
-            content: |
-              kubectl delete rulesfiles.artifact.falcosecurity.dev \
-                "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
         - wait:
             apiVersion: artifact.falcosecurity.dev/v1alpha1
             kind: ArtifactNode

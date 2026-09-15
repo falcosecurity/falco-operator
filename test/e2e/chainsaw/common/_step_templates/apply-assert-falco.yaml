@@ -24,15 +24,9 @@
 #   - update_strategy:         DaemonSet updateStrategy override (appsv1.DaemonSetUpdateStrategy
 #                              shape). Default: {type: RollingUpdate}, matching the operator's own
 #                              default (internal/pkg/resources/falco.go's FalcoDefaults) exactly,
-#                              so this default is a no-op for every other test using this
-#                              template. Set maxSurge:1/maxUnavailable:0 for a test that needs to
-#                              restart Falco without a window where a node has zero Running Falco
-#                              pods; see plugin-rulesfile-dep-survives-pod-restart, which relies
-#                              on this: the instance operator deliberately clears a node's
-#                              per-node artifact state whenever it can't see a Running Falco pod
-#                              there (it can't tell "restarting" from "gone for good", so it
-#                              doesn't try), so any test that wants durable per-node state to
-#                              survive a restart must avoid ever creating that window.
+#                              so this default is a no-op for other tests using this template.
+#                              To test on-disk recovery, restart only the artifact-operator
+#                              container; a Pod replacement creates new artifact volumes.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: StepTemplate
 metadata:

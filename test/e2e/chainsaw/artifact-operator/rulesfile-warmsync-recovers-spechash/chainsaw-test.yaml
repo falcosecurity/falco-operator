@@ -4,27 +4,21 @@ metadata:
   name: rulesfile-warmsync-recovers-spechash
 spec:
   description: |
-    Regression test for the artifact-operator sidecar's WarmSync: when it seeds the
-    installed-artifact cache from disk at startup, it must recover each entry's SpecHash
-    from the ArtifactNode's still-accurate status (matched by ContentHash) rather than
-    leaving it blank. If it didn't, the reconcile right after every sidecar restart would
-    see current.SpecHash == "" != parentSpecHash and force a needless re-fetch from the OCI
-    artifact server for every installed artifact, even though nothing changed.
+    WarmSync observes installed files without importing SpecHash from Kubernetes
+    status. The restarted process fetches the current pinned OCI artifact through
+    the central cache and rebuilds its in-memory identity during reconciliation.
+    Already-correct file contents must not be physically rewritten.
 
-    "Restart" here specifically means the artifact-operator CONTAINER crashing and coming
-    back (e.g. an OOM kill or a panic), not the Pod being replaced: the directories it
-    writes into (falco-configs/falco-rulesfiles/falco-plugins, see
-    internal/pkg/resources/falco.go) are EmptyDir volumes, torn down and recreated empty
-    whenever the Pod itself is replaced. A Pod-level restart would legitimately find nothing
-    on disk and have to re-fetch regardless of this fix, proving nothing about it either
-    way. So this kills only the artifact-operator process in place (see
-    restart_artifact_operator_container.sh), leaving the Pod, its UID, and its EmptyDir
-    volumes untouched, which is the actual scenario WarmSync's disk-seeded cache exists for.
+    Restart only the artifact-operator container, preserving the Pod UID and its
+    emptyDir files. Then make a valid transport-only OCI spec change (empty auth,
+    still anonymous) and require a fresh generation with matching parent and
+    installed SpecHash. This proves current reconciliation rather than accepting
+    the pre-restart Programmed=True status. The file checksum must remain unchanged.
 
-    Expected outcome: after the container restarts, the new process's first reconcile of the
-    Rulesfile does not write anything to disk again (no "Rulesfile OCI artifact written to
-    disk" log line appears in its own logs, which only ever contain what it logged since it
-    started), and the file and Programmed=True condition are unaffected.
+    The new process must emit no "Rulesfile OCI artifact written to disk" log.
+    This is a no-rewrite assertion, not a no-fetch assertion. The historical test
+    name is retained; recovering installed identity from status is no longer part
+    of the contract.
 
   bindings:
     - name: falco_name
@@ -38,6 +32,7 @@ spec:
 
   steps:
     - name: "Step 01: Create-falco"
+      description: Create Falco with the artifact-operator sidecar and shared emptyDir files.
       use:
         template: ../../common/_step_templates/apply-assert-falco.yaml
         with:
@@ -81,6 +76,7 @@ spec:
                   - status: 'True'
 
     - name: "Step 03: Assert-file-on-disk"
+      description: Confirm the initial current OCI Rulesfile is present before restarting the sidecar.
       try:
         - script:
             env:
@@ -97,10 +93,11 @@ spec:
 
     - name: "Step 04: Restart-artifact-operator-container-in-place"
       description: |
-        Kills and waits for the artifact-operator process to come back inside the SAME Pod
-        (see the script's own doc comment for why this must never be a Pod-level restart).
-        The ArtifactNode's durable status is untouched throughout, so the new process's
-        WarmSync has the SpecHash to recover.
+        Capture the file checksum and Pod UID, restart only the sidecar, and verify
+        both are unchanged. An anonymous auth object then changes the OCI SpecHash
+        without changing the artifact bytes. Require generation 2 on both parent
+        and ArtifactNode, with the freshly observed installed SpecHash matching
+        the current parent metadata. No status from before restart can satisfy this.
       try:
         - script:
             env:
@@ -108,17 +105,143 @@ spec:
                 value: ($namespace)
               - name: FALCO_NAME
                 value: ($falco_name)
-            content: |
-              bash ../../common/scripts/restart_artifact_operator_container.sh
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_rules_checksum
+                value: (json_parse($stdout).checksum)
+              - name: original_pod_name
+                value: (json_parse($stdout).pod)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            outputs:
+              - name: original_pod_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/restart_artifact_operator_container.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).uid == $original_pod_uid): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  registry:
+                    auth: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 2
+              status:
+                observedGeneration: 2
+                (length(artifactMeta.specHash || '')): 64
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 2
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 2
+        - command:
+            entrypoint: kubectl
+            env:
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: NAMESPACE
+                value: ($namespace)
+            args:
+              - get
+              - rulesfile
+              - $RULESFILE_NAME
+              - --namespace
+              - $NAMESPACE
+              - --output=json
+            check:
+              (length(json_parse($stdout).status.artifactMeta.specHash || '')): 64
+            outputs:
+              - name: current_spec_hash
+                value: (json_parse($stdout).status.artifactMeta.specHash)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+                  artifact.falcosecurity.dev/kind: rulesfile
+              status:
+                (installedArtifacts[0].medium): oci
+                (installedArtifacts[0].specHash): ($current_spec_hash)
+                (installedArtifacts[0].contentHash): ($installed_rules_checksum)
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 2
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 2
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_rules_checksum): true
 
-    - name: "Step 05: Assert-no-refetch-after-restart"
+    - name: "Step 05: Assert-no-rewrite-after-restart"
       description: |
-        The restarted process's own logs only ever contain what it logged since it started,
-        so any occurrence at all of the "written to disk" success log for this Rulesfile
-        means a needless re-fetch+rewrite happened on the very first reconcile after
-        restart: the regression this test guards against. Polls for a settle window rather
-        than checking once, since the first reconcile may take a moment after the container
-        reports ready.
+        The restarted process's own logs cover both its startup reconciliation and
+        the confirmed generation-2 update. Fetching current OCI content is expected;
+        writing identical content again is not. Poll for the absence of the physical
+        write success log rather than claiming that no fetch happened.
       try:
         - script:
             env:
@@ -136,7 +259,7 @@ spec:
               bash ../../common/scripts/check_log_absent_on_pod.sh
 
     - name: "Step 06: Assert-still-programmed-and-file-present"
-      description: Sanity check that the artifact itself is unaffected by the restart.
+      description: Verify the freshly reconciled Rulesfile remains programmed and its file is present.
       try:
         - assert:
             resource:
@@ -148,8 +271,10 @@ spec:
               status:
                 (conditions[?type == 'OCIArtifactProgrammed']):
                   - status: 'True'
+                    observedGeneration: 2
                 (conditions[?type == 'Programmed']):
                   - status: 'True'
+                    observedGeneration: 2
         - script:
             env:
               - name: NAMESPACE
