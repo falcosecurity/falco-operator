@@ -55,6 +55,6 @@ func (w *WarmSyncRunnable) Warmup(ctx context.Context) error {
 	if err := WarmSync(ctx, w.client, w.manager, w.namespace, w.nodeName); err != nil {
 		return fmt.Errorf("warm-sync node artifact manager: %w", err)
 	}
-	ctrllog.FromContext(ctx).Info("Node artifact manager warm-synced from existing ArtifactNode status")
+	ctrllog.FromContext(ctx).Info("Node artifact manager observed installed files and current plugin assignments")
 	return nil
 }

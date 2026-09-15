@@ -56,6 +56,7 @@ import (
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 const testPluginName = "test-plugin"
@@ -66,6 +67,17 @@ func pluginNodeName(pluginName string) string {
 
 func testPluginNodeName() string {
 	return pluginNodeName(testPluginName)
+}
+
+func installRequiringRulesfile(t *testing.T, r *PluginReconciler, key nodeartifacts.Key) {
+	t.Helper()
+	content, err := r.fetcher.FetchInline(t.Context(), []byte("test rules"))
+	require.NoError(t, err)
+	_, _, err = r.store.StoreRulesfile(t.Context(), key.Namespace, key.Name, 50, artifact.MediumOCI, content,
+		&commonv1alpha1.ArtifactMeta{
+			Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: testPluginName, Version: "1.0.0"}},
+		}, false)
+	require.NoError(t, err)
 }
 
 // testFetcher implements artifact.ArtifactFetcher for controller unit tests.
@@ -130,6 +142,7 @@ func withPluginOwnerRef() func(*artifactv1alpha1.ArtifactNode) {
 			APIVersion: artifactv1alpha1.GroupVersion.String(),
 			Kind:       "Plugin",
 			Name:       testPluginName,
+			Controller: new(true),
 		}}
 	}
 }
@@ -795,6 +808,22 @@ func TestEnsurePlugin(t *testing.T) {
 			wantInstalledOCISpecHash: "stable-hash",
 		},
 		{
+			name: "OCI: empty spec hashes do not prove the installed revision is current",
+			prePlugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
+					Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/plugin", Tag: "latest"},
+				}},
+			},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
+					Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/plugin", Tag: "latest"},
+				}},
+			},
+			wantOCIFetchCount: new(1),
+		},
+		{
 			name:        "OCI: re-fetches when specHash changes",
 			preSpecHash: "old-hash",
 			prePlugin: &artifactv1alpha1.Plugin{
@@ -861,6 +890,95 @@ func TestEnsurePlugin(t *testing.T) {
 					"expected OCIArtifactProgrammed condition to be removed, not set True, after stale cleanup")
 			}
 		})
+	}
+}
+
+func TestEnsurePlugin_RemovedOCIWithoutBinaryCleansRecoveredConfig(t *testing.T) {
+	ctx := t.Context()
+	r, _ := newTestReconciler(t)
+	fs := fsfake.NewMockFileSystem()
+	store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+	versions := compatfake.NewMockVersionsFetcher(nil)
+	r.store = nodeartifacts.NewManager(store, versions)
+	plugin := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: "installed-uid"},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "old"}},
+			Config:      &artifactv1alpha1.PluginConfig{Name: "installed-name"},
+		},
+	}
+	node := newTestPluginNodeObj()
+	node.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(plugin, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}
+	require.NoError(t, r.ensurePlugin(ctx, plugin, node))
+	require.NoError(t, r.ensurePluginConfig(ctx, plugin, node))
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+	binary := r.store.FindInstalled(key, artifact.MediumOCI)
+	sharedFile := r.store.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline)
+	require.NotNil(t, binary)
+	require.NotNil(t, sharedFile)
+	require.NoError(t, fs.Remove(binary.Path))
+	cl := fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(plugin, node).
+		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
+	r.store = nodeartifacts.NewManager(store, versions)
+	require.NoError(t, nodeartifacts.WarmSync(ctx, cl, r.store, plugin.Namespace, node.Spec.NodeName))
+	require.Nil(t, r.store.FindInstalled(key, artifact.MediumOCI))
+	assert.Contains(t, string(fs.Files[sharedFile.Path]), "installed-name")
+	ociFetches := r.fetcher.(*testFetcher).ociCallCount
+	plugin.Spec.OCIArtifact = nil
+	plugin.Spec.Config.Name = "never-installed"
+
+	require.NoError(t, r.ensurePlugin(ctx, plugin, node))
+	require.NoError(t, r.ensurePluginConfig(ctx, plugin, node))
+
+	assert.Contains(t, string(fs.Files[sharedFile.Path]), "plugins: []")
+	assert.NotContains(t, string(fs.Files[sharedFile.Path]), "installed-name")
+	assert.NotContains(t, string(fs.Files[sharedFile.Path]), "never-installed")
+	assert.NotContains(t, fs.Files, binary.Path)
+	assert.Nil(t, apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String()))
+	assert.Nil(t, apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String()))
+	assert.Equal(t, ociFetches, r.fetcher.(*testFetcher).ociCallCount)
+	writes := len(fs.WriteCalls)
+	require.NoError(t, r.ensurePlugin(ctx, plugin, node))
+	assert.Len(t, fs.WriteCalls, writes, "repeated cleanup must not rewrite the empty aggregate")
+}
+
+func TestEnsurePlugin_RecreatedOwnerCannotReplaceInstalledBinary(t *testing.T) {
+	ctx := t.Context()
+	r, _ := newTestReconciler(t)
+	plugin := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: "original-uid"},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "old"}},
+			Config:      &artifactv1alpha1.PluginConfig{Name: "installed-name"},
+		},
+		Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "old-spec"}},
+	}
+	node := newTestPluginNodeObj()
+	require.NoError(t, r.ensurePlugin(ctx, plugin, node))
+	require.NoError(t, r.ensurePluginConfig(ctx, plugin, node))
+	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+	binary := r.store.FindInstalled(key, artifact.MediumOCI)
+	config := r.store.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline)
+	require.NotNil(t, binary)
+	require.NotNil(t, config)
+	previous := node.DeepCopy().Status.InstalledArtifacts
+
+	// The CR name is reused while the previous incarnation's config is still installed.
+	candidate := plugin.DeepCopy()
+	candidate.UID = "replacement-uid"
+	candidate.Spec.Config.Name = "replacement-name"
+	candidate.Spec.OCIArtifact.Image.Tag = "replacement-tag"
+	candidate.Status.ArtifactMeta.SpecHash = "new-spec"
+	r.fetcher.(*testFetcher).ociBytes = []byte("replacement binary")
+
+	err := r.ensurePlugin(ctx, candidate, node)
+
+	require.Error(t, err, "ownership must be checked before writing the downloaded binary")
+	assert.Equal(t, previous, node.Status.InstalledArtifacts)
+	for _, file := range []*artifact.File{binary, config} {
+		intact, verifyErr := r.store.Verify(ctx, file)
+		require.NoError(t, verifyErr)
+		assert.True(t, intact)
 	}
 }
 
@@ -985,7 +1103,9 @@ func TestEnsurePluginConfig(t *testing.T) {
 
 			if tt.writeErr != nil {
 				mockFS := fsfake.NewMockFileSystem()
-				mockFS.WriteErr = tt.writeErr
+				path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), "plugins-config",
+					priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig)
+				mockFS.WriteErrFor = map[string]error{path + ".tmp": tt.writeErr}
 				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			}
 
@@ -1489,15 +1609,15 @@ func TestEnsurePluginConfig_RegistersProvidesWithNodeArtifactManager(t *testing.
 
 	require.NoError(t, r.ensurePluginConfig(context.Background(), pl, nodeObj))
 
-	err := r.store.RemovePluginConfigByName(context.Background(), r.fetcher, testPluginName, testPluginName)
+	err := r.store.RemovePluginConfig(context.Background(), r.fetcher, pl)
 	require.NoError(t, err, "nothing requires it yet, so this proves the name was registered as provided")
 
 	require.NoError(t, r.ensurePluginConfig(context.Background(), pl, nodeObj))
 
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "some-rulesfile"}
-	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
+	installRequiringRulesfile(t, r, rfKey)
 
-	err = r.store.RemovePluginConfigByName(context.Background(), r.fetcher, testPluginName, testPluginName)
+	err = r.store.RemovePluginConfig(context.Background(), r.fetcher, pl)
 	require.Error(t, err)
 	blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err)
 	require.True(t, ok)
@@ -1517,7 +1637,7 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 	_, _, err := r.store.AddPluginConfig(context.Background(), pl, r.fetcher)
 	require.NoError(t, err)
 	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "some-rulesfile"}
-	r.store.Sync(rfKey, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
+	installRequiringRulesfile(t, r, rfKey)
 
 	require.NoError(t, cl.Delete(context.Background(), nodeObj))
 	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))
@@ -1540,8 +1660,8 @@ func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *tes
 	require.NotNil(t, persistedCond, "DeletionBlocked condition must be patched to the ArtifactNode status")
 	assert.Equal(t, metav1.ConditionTrue, persistedCond.Status)
 
-	// Now clear the requirement and confirm cleanup proceeds.
-	r.store.Sync(rfKey, nil)
+	// Remove the dependent file and confirm cleanup proceeds.
+	require.NoError(t, r.store.Remove(t.Context(), rfKey))
 	handled, err = r.handleDeletion(context.Background(), nodeObj)
 	require.NoError(t, err)
 	assert.True(t, handled)
@@ -1565,14 +1685,14 @@ func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
 			require.NoError(t, err)
 			result, err := r.fetcher.FetchInline(ctx, []byte("installed binary"))
 			require.NoError(t, err)
-			action, binaryFile, err := r.store.Store(ctx, parent.Namespace, parent.Name, 0, artifact.TypePlugin, artifact.MediumOCI, result)
+			action, binaryFile, err := r.store.StorePlugin(ctx, parent, result)
 			require.NoError(t, err)
 			artifact.UpdateInstalledStatus(&node.Status.InstalledArtifacts, action, artifact.MediumOCI, binaryFile)
 			artifact.UpdateInstalledSpecHash(&node.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
 			require.NoError(t, cl.Status().Update(ctx, node))
 			installed := node.Status.InstalledArtifacts
 			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "installed-rules"}
-			r.store.Sync(key, []nodeartifacts.RequirementGroup{{{Name: testPluginName, Version: "1.0.0"}}})
+			installRequiringRulesfile(t, r, key)
 			require.NoError(t, cl.Delete(ctx, node))
 			if failPatch {
 				watchClient, ok := cl.(client.WithWatch)
@@ -1607,7 +1727,7 @@ func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
 
 			// Once the dependent rules are removed, normal cleanup can finish without installing.
 			r.Client = cl
-			r.store.Sync(key, nil)
+			require.NoError(t, r.store.Remove(ctx, key))
 			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
 			err = cl.Get(ctx, request.NamespacedName, node)

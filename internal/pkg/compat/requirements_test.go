@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
 func TestSemverAtLeast(t *testing.T) {
@@ -140,7 +140,7 @@ func TestParseRulesRequirements(t *testing.T) {
 		data         []byte
 		wantEng      string
 		wantEngIsInt bool
-		wantPlugins  []RulesPluginRequirement
+		wantPlugins  []commonv1alpha1.ArtifactMetaDependency
 		wantErr      bool
 	}{
 		{
@@ -176,18 +176,18 @@ func TestParseRulesRequirements(t *testing.T) {
 		{
 			name: "plugin without alternatives",
 			data: []byte("- required_plugin_versions:\n    - name: container\n      version: 0.4.0\n"),
-			wantPlugins: []RulesPluginRequirement{
+			wantPlugins: []commonv1alpha1.ArtifactMetaDependency{
 				{Name: "container", Version: "0.4.0"},
 			},
 		},
 		{
 			name: "plugin with alternatives",
 			data: []byte("- required_plugin_versions:\n    - name: container\n      version: 0.4.0\n      alternatives:\n        - name: k8smeta\n          version: 0.1.0\n"),
-			wantPlugins: []RulesPluginRequirement{
+			wantPlugins: []commonv1alpha1.ArtifactMetaDependency{
 				{
 					Name:    "container",
 					Version: "0.4.0",
-					Alternatives: []puller.Dependency{
+					Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
 						{Name: "k8smeta", Version: "0.1.0"},
 					},
 				},
@@ -197,11 +197,11 @@ func TestParseRulesRequirements(t *testing.T) {
 			name:    "mixed engine version and plugin with alternatives",
 			data:    []byte("- required_engine_version: 0.57.0\n- required_plugin_versions:\n    - name: container\n      version: 0.4.0\n      alternatives:\n        - name: k8smeta\n          version: 0.1.0\n- rule: foo\n  desc: d\n  condition: always_true\n  output: o\n  priority: WARNING\n"),
 			wantEng: "0.57.0",
-			wantPlugins: []RulesPluginRequirement{
+			wantPlugins: []commonv1alpha1.ArtifactMetaDependency{
 				{
 					Name:    "container",
 					Version: "0.4.0",
-					Alternatives: []puller.Dependency{
+					Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
 						{Name: "k8smeta", Version: "0.1.0"},
 					},
 				},

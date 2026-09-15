@@ -296,11 +296,9 @@ func main() {
 	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
 	// keeping a plugin's config entry until no rules file on this node still requires it. It also
 	// caches Falco's reported capabilities and plugin versions so compatibility checks never
-	// require a live HTTP call. Warm-syncing provides/requires state from durable ArtifactNode
-	// status happens in a WarmSyncRunnable (mgr.Add below), which controller-runtime runs after
-	// the manager's cache syncs and before any reconciler starts; it uses the manager's own
-	// cache-backed client (mgr.GetClient()) to avoid a fleet-wide direct-apiserver request storm
-	// when every node's sidecar restarts at once.
+	// require a live HTTP call. WarmSync observes installed files and current assignments after
+	// the manager's cache syncs, before reconcilers start. Dependency metadata is rebuilt during
+	// reconciliation, without restoring historical state from disk or ArtifactNode status.
 	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL)
 	if err := mgr.Add(reloadCoordinator); err != nil {
 		setupLog.Error(err, "unable to add reload coordinator to manager")

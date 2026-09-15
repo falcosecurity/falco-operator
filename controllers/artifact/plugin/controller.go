@@ -24,7 +24,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,7 +48,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
-	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 const (
@@ -241,33 +239,31 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 
 	logger.Info("PluginNode marked for deletion, cleaning up")
 
-	// Resolves the config name: tries the parent Plugin for a Config.Name override, falling
-	// back to the ownerRef name when the Plugin has already been deleted. Config cleanup does
-	// not depend on the Plugin still existing.
+	// Installed ownership survives a missing parent or a rejected config-name update.
 	var pluginName string
-	configName := ""
 	plugin := &artifactv1alpha1.Plugin{}
 	for _, ref := range nodeObj.OwnerReferences {
-		if ref.Kind == controllerhelper.KindPlugin {
-			pluginName = ref.Name
-			configName = ref.Name // fallback: default config name == plugin name
-			if err := r.Get(ctx, client.ObjectKey{Namespace: nodeObj.Namespace, Name: ref.Name}, plugin); err != nil {
-				if !k8serrors.IsNotFound(err) {
-					return false, err
-				}
-			} else {
-				configName = nodeartifacts.ResolveConfigName(plugin)
-			}
-			break
+		if ref.Kind != controllerhelper.KindPlugin || ref.Controller == nil || !*ref.Controller {
+			continue
 		}
+		pluginName = ref.Name
+		parent, err := r.getParentPlugin(ctx, nodeObj)
+		if err != nil {
+			return false, err
+		}
+		plugin.ObjectMeta = metav1.ObjectMeta{Namespace: nodeObj.Namespace, Name: ref.Name, UID: ref.UID}
+		if parent != nil {
+			plugin.Generation = parent.Generation
+		}
+		break
 	}
 
 	// Removes this plugin's entry from the shared config YAML before removing the binary.
 	if pluginName != "" {
-		if err := r.store.RemovePluginConfigByName(ctx, r.fetcher, pluginName, configName); err != nil {
+		if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
 			if blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err); ok {
 				logger.Info("PluginNode deletion blocked: plugin config still required by a Rulesfile on this node",
-					"configName", configName, "blockedBy", blocked.BlockedBy)
+					"configName", blocked.Name, "blockedBy", blocked.BlockedBy)
 				artifact.RecordWarning(r.recorder, nodeObj, artifact.ReasonDependenciesNotSatisfied, "%s", blocked.Error())
 				// Sets a DeletionBlocked condition so the instance-level aggregator can propagate
 				// the block onto the parent Plugin's status.
@@ -288,7 +284,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 	// Binary second: remove the plugin binary from disk. OwnerReferences never carry a
 	// namespace; nodeObj's own namespace is the plugin's.
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: nodeObj.Namespace, Name: pluginName}
-	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
+	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed plugin artifacts from disk")
 		return false, err
 	}
@@ -303,7 +299,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 }
 
 // SetupWithManager registers the controller with the Manager.
-// versionEvents is the channel produced by compat.VersionsWatcher; a GenericEvent on this
+// versionEvents is the channel produced by nodeartifacts.Manager; a GenericEvent on this
 // channel re-enqueues all PluginNodes on this node to re-evaluate their compatibility
 // requirements against the updated Falco capability set.
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
@@ -321,7 +317,7 @@ func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-ch
 	})
 
 	// Re-enqueues every PluginNode on this node when any RulesfileNode on this node changes, so
-	// a Plugin config removal blocked by nodeartifacts.Manager.RemovePluginConfigByName is
+	// a Plugin config removal blocked by nodeartifacts.Manager.RemovePluginConfig is
 	// re-evaluated once the blocking Rulesfile's requirement changes or the RulesfileNode is
 	// removed.
 	rulesfileNodeFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
@@ -416,18 +412,16 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	if plugin.Spec.OCIArtifact == nil {
 		// OCI spec removed while the Plugin CR still exists: removes the config entry, then the
 		// binary.
-		if r.store.FindInstalled(key, artifact.MediumOCI) != nil {
-			if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
-				logger.Error(err, "unable to remove plugin config during OCI spec removal")
-				return err
-			}
-			if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumOCI); err != nil {
-				logger.Error(err, "unable to remove stale plugin binary")
-				return err
-			} else if removed {
-				artifact.RecordStoreEvent(r.recorder, plugin, artifact.StoreActionRemoved, artifact.MediumOCI)
-				artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
-			}
+		if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
+			logger.Error(err, "unable to remove plugin config during OCI spec removal")
+			return err
+		}
+		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumOCI); err != nil {
+			logger.Error(err, "unable to remove stale plugin binary")
+			return err
+		} else if removed {
+			artifact.RecordStoreEvent(r.recorder, plugin, artifact.StoreActionRemoved, artifact.MediumOCI)
+			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
 		}
 		// Removes the OCIArtifactProgrammed condition instead of leaving it stale. Mirrors
 		// ensureRulesfile's per-medium stale-cleanup behavior.
@@ -445,7 +439,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 
 	// Fetches from the artifact server unless the spec hash is unchanged and the disk file is
 	// intact.
-	needFetch := current == nil || current.SpecHash != parentSpecHash
+	needFetch := current == nil || parentSpecHash == "" || current.SpecHash != parentSpecHash
 	if !needFetch {
 		if ok, err := r.store.Verify(ctx, current); err != nil {
 			logger.V(3).Info("plugin artifact disk verify failed; re-fetching", "err", err)
@@ -474,8 +468,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		))
 		return err
 	}
-	ociAction, _, err := r.store.Store(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority,
-		artifact.TypePlugin, artifact.MediumOCI, result)
+	ociAction, _, err := r.store.StorePlugin(ctx, plugin, result)
 	if err != nil {
 		logger.Error(err, "unable to store plugin artifact")
 		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())

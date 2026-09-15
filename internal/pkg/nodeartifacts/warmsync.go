@@ -19,7 +19,9 @@ package nodeartifacts
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -27,23 +29,18 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// WarmSync populates mgr's dependency registry from durable ArtifactNode status before the
-// artifact-operator sidecar's controller-runtime manager starts serving reconciles, so a Plugin
-// removal reconciled immediately after a sidecar restart is evaluated against accurate
-// dependency data instead of an empty registry.
+// WarmSync observes installed files before controllers start. Current Plugin assignments
+// determine which observed aggregate entries remain owned; historical rule dependencies
+// are not recovered and must be registered by normal source reconciliation.
 //
 // cl is expected to be the manager's own cache-backed client (mgr.GetClient()): WarmSync is
 // only ever called from WarmSyncRunnable.Warmup, which controller-runtime guarantees runs after
 // the manager's cache has synced (see WarmSyncRunnable's doc comment); so the
 // index.ArtifactNodeNodeName field index below is safe to use, giving a real cached indexed
 // lookup instead of a label-selector List.
-//
-// Parent Plugins/Rulesfiles are fetched with at most one List each (rather than one Get per
-// ArtifactNode) so this issues a constant number of requests regardless of how many artifacts
-// are installed on this node; even served from cache, this keeps memory/CPU use bounded
-// rather than fanning out one Get per artifact.
 func WarmSync(ctx context.Context, cl client.Client, mgr *Manager, namespace, nodeName string) error {
 	nodeList := &artifactv1alpha1.ArtifactNodeList{}
 	if err := cl.List(ctx, nodeList,
@@ -52,90 +49,42 @@ func WarmSync(ctx context.Context, cl client.Client, mgr *Manager, namespace, no
 	); err != nil {
 		return fmt.Errorf("listing ArtifactNodes for warm sync: %w", err)
 	}
-
-	type ownedNode struct {
-		ownerKind string
-		ownerName string
+	pluginList := &artifactv1alpha1.PluginList{}
+	if err := cl.List(ctx, pluginList, client.InNamespace(namespace)); err != nil {
+		return fmt.Errorf("listing current Plugins for warm sync: %w", err)
 	}
-	var owned []ownedNode
-	needPlugins, needRulesfiles := false, false
-
+	byName := make(map[string]*artifactv1alpha1.Plugin, len(pluginList.Items))
+	for i := range pluginList.Items {
+		plugin := &pluginList.Items[i]
+		byName[plugin.Name] = plugin
+	}
+	var plugins []*artifactv1alpha1.Plugin
 	for i := range nodeList.Items {
-		n := &nodeList.Items[i]
-		if !n.DeletionTimestamp.IsZero() || len(n.Status.InstalledArtifacts) == 0 {
+		node := &nodeList.Items[i]
+		ref := metav1.GetControllerOf(node)
+		if !node.DeletionTimestamp.IsZero() || ref == nil || ref.Kind != controllerhelper.KindPlugin {
 			continue
 		}
-
-		ownerKind, ownerName := "", ""
-		for _, ref := range n.OwnerReferences {
-			if ref.Controller != nil && *ref.Controller {
-				ownerKind, ownerName = ref.Kind, ref.Name
-				break
-			}
-		}
-
-		switch ownerKind {
-		case controllerhelper.KindPlugin:
-			needPlugins = true
-		case controllerhelper.KindRulesfile:
-			needRulesfiles = true
-		default:
+		plugin := byName[ref.Name]
+		if plugin == nil || plugin.UID != ref.UID || !plugin.DeletionTimestamp.IsZero() || plugin.Spec.OCIArtifact == nil {
 			continue
 		}
-		owned = append(owned, ownedNode{ownerKind, ownerName})
+		plugins = append(plugins, plugin)
+		delete(byName, plugin.Name) // Multiple assignments for the same owner are not alias collisions.
 	}
 
-	plugins := map[string]*artifactv1alpha1.Plugin{}
-	if needPlugins {
-		list := &artifactv1alpha1.PluginList{}
-		if err := cl.List(ctx, list, client.InNamespace(namespace)); err != nil {
-			return fmt.Errorf("listing Plugins for warm sync: %w", err)
-		}
-		for i := range list.Items {
-			plugins[list.Items[i].Name] = &list.Items[i]
-		}
+	orphans, err := seedInstalledCacheFromDisk(ctx, mgr, nodeList, namespace)
+	if err != nil {
+		return err
 	}
-
-	rulesfiles := map[string]*artifactv1alpha1.Rulesfile{}
-	if needRulesfiles {
-		list := &artifactv1alpha1.RulesfileList{}
-		if err := cl.List(ctx, list, client.InNamespace(namespace)); err != nil {
-			return fmt.Errorf("listing Rulesfiles for warm sync: %w", err)
-		}
-		for i := range list.Items {
-			rulesfiles[list.Items[i].Name] = &list.Items[i]
-		}
+	if err := mgr.restorePluginsConfig(ctx, plugins); err != nil {
+		return err
 	}
-
-	for _, o := range owned {
-		switch o.ownerKind {
-		case controllerhelper.KindPlugin:
-			plugin, ok := plugins[o.ownerName]
-			if !ok {
-				continue // parent deleted concurrently with this warm sync
-			}
-			configName := o.ownerName
-			if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
-				configName = plugin.Spec.Config.Name
-			}
-			mgr.SyncProvides(PluginConfigKey, configName)
-
-		case controllerhelper.KindRulesfile:
-			rulesfile, ok := rulesfiles[o.ownerName]
-			if !ok || rulesfile.Status.ArtifactMeta == nil {
-				continue
-			}
-			mgr.Sync(Key{Kind: KindRulesfile, Namespace: namespace, Name: o.ownerName},
-				RequirementGroupsFromDependencies(rulesfile.Status.ArtifactMeta.Dependencies))
-		}
-	}
-
-	return seedInstalledCacheFromDisk(ctx, mgr, nodeList, namespace)
+	return mgr.removeOrphanedArtifacts(ctx, orphans)
 }
 
-// seedInstalledCacheFromDisk populates mgr's installed-artifact cache from disk ground truth for
-// every artifact still known to this node, and removes any file whose artifact name has no
-// ArtifactNode at all on this node.
+// seedInstalledCacheFromDisk recovers files from disk and identifies orphaned names.
+// Cleanup waits until the observed shared config has been reconciled with current owners.
 //
 // The cache, not any ArtifactNode's status, is what every filesystem decision (skip vs. rewrite,
 // what to remove) is based on from here on; status is a write-through mirror for observability
@@ -143,25 +92,20 @@ func WarmSync(ctx context.Context, cl client.Client, mgr *Manager, namespace, no
 // patching status recording it (or any other way status drifted from reality while this process
 // wasn't running) can never leave a file invisible to cleanup: the cache reflects what's actually
 // there, not what a possibly-stale status object last said.
-//
-// A name with files on disk but no ArtifactNode for this node at all (its parent CR was deleted
-// and fully garbage collected while nothing else was ever going to ask about it again) is removed
-// immediately, mirroring the removal cleanupStaleMedium already performs during normal reconciles.
-func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *artifactv1alpha1.ArtifactNodeList, namespace string) error {
-	logger := log.FromContext(ctx)
+func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *artifactv1alpha1.ArtifactNodeList, namespace string) ([]Key, error) {
+	var orphans []Key
 
 	kinds := []struct {
 		ownerKind    string
 		cacheKind    Kind
 		artifactType artifact.Type
 	}{
-		{controllerhelper.KindPlugin, KindPlugin, artifact.TypePlugin},
 		{controllerhelper.KindRulesfile, KindRulesfile, artifact.TypeRulesfile},
 		{controllerhelper.KindConfig, KindConfig, artifact.TypeConfig},
+		{controllerhelper.KindPlugin, KindPlugin, artifact.TypePlugin},
 	}
 
 	liveNames := map[string]map[string]bool{}
-	statusByName := map[string]map[string][]artifactv1alpha1.InstalledArtifact{}
 	for i := range nodeList.Items {
 		n := &nodeList.Items[i]
 		for _, ref := range n.OwnerReferences {
@@ -172,10 +116,6 @@ func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *art
 				liveNames[ref.Kind] = map[string]bool{}
 			}
 			liveNames[ref.Kind][ref.Name] = true
-			if statusByName[ref.Kind] == nil {
-				statusByName[ref.Kind] = map[string][]artifactv1alpha1.InstalledArtifact{}
-			}
-			statusByName[ref.Kind][ref.Name] = n.Status.InstalledArtifacts
 			break
 		}
 	}
@@ -183,7 +123,7 @@ func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *art
 	for _, kt := range kinds {
 		disk, err := mgr.ScanAll(ctx, kt.artifactType)
 		if err != nil {
-			return fmt.Errorf("warm sync: scan installed %s artifacts from disk: %w", kt.ownerKind, err)
+			return nil, fmt.Errorf("warm sync: scan installed %s artifacts from disk: %w", kt.ownerKind, err)
 		}
 
 		// The shared plugins-config aggregate lives in the same directory as Config CRs' own
@@ -191,44 +131,49 @@ func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *art
 		// Config ArtifactNode, and must never be treated as orphaned.
 		if kt.ownerKind == controllerhelper.KindConfig {
 			if files, ok := disk[pluginConfigFileName]; ok {
-				mgr.SeedInstalled(PluginConfigKey, files)
-				delete(disk, pluginConfigFileName)
+				sharedName := filepath.Base(artifact.ArtifactPath(artifact.DefaultArtifactDirs(), pluginConfigFileName,
+					priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig))
+				var ordinary []artifactv1alpha1.InstalledArtifact
+				for _, file := range files {
+					if filepath.Base(file.Path) == sharedName {
+						mgr.SeedInstalled(PluginConfigKey, []artifactv1alpha1.InstalledArtifact{file})
+					} else {
+						ordinary = append(ordinary, file)
+					}
+				}
+				if len(ordinary) == 0 {
+					delete(disk, pluginConfigFileName)
+				} else {
+					disk[pluginConfigFileName] = ordinary
+				}
 			}
 		}
 
 		live := liveNames[kt.ownerKind]
-		statusForKind := statusByName[kt.ownerKind]
 		for name, files := range disk {
 			key := Key{Kind: kt.cacheKind, Namespace: namespace, Name: name}
 			if !live[name] {
-				logger.Info("Removing orphaned artifact files with no ArtifactNode on this node",
-					"kind", kt.ownerKind, "name", name)
-				if err := mgr.Remove(ctx, key, files); err != nil {
-					logger.Error(err, "warm sync: unable to remove orphaned artifact files",
-						"kind", kt.ownerKind, "name", name)
-				}
-				continue
+				orphans = append(orphans, key)
 			}
-			recoverSpecHashFromStatus(files, statusForKind[name])
 			mgr.SeedInstalled(key, files)
 		}
 	}
-	return nil
+	return orphans, nil
 }
 
-// recoverSpecHashFromStatus backfills SpecHash on disk-derived entries from status, for any
-// medium where status still describes the exact same on-disk content (matching ContentHash).
-// ScanAll can only recover ContentHash from file bytes; SpecHash reflects the parent spec, which
-// isn't recoverable from content alone. Without this, every OCI/inline artifact would look like
-// its parent spec had changed on the very first reconcile after a sidecar restart, forcing a
-// needless re-fetch from the OCI artifact server even though nothing actually changed.
-func recoverSpecHashFromStatus(files, status []artifactv1alpha1.InstalledArtifact) {
-	for i := range files {
-		for _, s := range status {
-			if s.Medium == files[i].Medium && s.ContentHash == files[i].ContentHash && s.SpecHash != "" {
-				files[i].SpecHash = s.SpecHash
-				break
-			}
+// Cleanup follows recovery so a plugin library still referenced by the aggregate is retained.
+func (m *Manager) removeOrphanedArtifacts(ctx context.Context, orphans []Key) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, key := range orphans {
+		files := m.installed[key]
+		if key.Kind == KindPlugin && m.pluginFilesReferencedLocked(files) {
+			continue
+		}
+		log.FromContext(ctx).Info("Removing orphaned artifact files with no ArtifactNode on this node", "kind", key.Kind, "name", key.Name)
+		if err := m.removeLocked(ctx, key, files); err != nil {
+			return fmt.Errorf("warm sync: remove orphaned %s %q: %w", key.Kind, key.Name, err)
 		}
 	}
+	return nil
 }

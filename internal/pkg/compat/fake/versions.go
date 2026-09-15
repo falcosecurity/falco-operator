@@ -19,7 +19,6 @@ package fake
 
 import (
 	"context"
-	"maps"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 )
@@ -39,9 +38,7 @@ func NewMockVersionsFetcher(caps map[string]string) *MockVersionsFetcher {
 // as loaded plugins — flattened into capabilities too, matching HTTPVersionsFetcher's real behavior —
 // for tests that need PluginVersions() populated, not just Capability()/All().
 func NewMockVersionsFetcherWithPlugins(pluginVersions map[string]string) *MockVersionsFetcher {
-	caps := make(map[string]string, len(pluginVersions))
-	maps.Copy(caps, pluginVersions)
-	return &MockVersionsFetcher{Result: compat.NewVersions(caps, pluginVersions)}
+	return &MockVersionsFetcher{Result: compat.NewVersions(nil, pluginVersions)}
 }
 
 // Fetch returns the preset result or error.

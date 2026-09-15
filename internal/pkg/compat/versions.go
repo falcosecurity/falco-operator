@@ -51,11 +51,13 @@ type Versions struct {
 	pluginVersions map[string]string // keys that came from the nested plugin_versions object
 }
 
-// NewVersions constructs a Versions value from the given capabilities and plugin versions.
-// Used by HTTPVersionsFetcher.Fetch and by packages outside compat (e.g. its fake test double)
-// that need to build Versions values despite their fields being unexported.
+// NewVersions copies and combines capabilities and plugin versions into one snapshot.
+// Plugin versions take precedence on name collisions in the combined view.
 func NewVersions(capabilities, pluginVersions map[string]string) *Versions {
-	return &Versions{capabilities: capabilities, pluginVersions: pluginVersions}
+	combined := make(map[string]string, len(capabilities)+len(pluginVersions))
+	maps.Copy(combined, capabilities)
+	maps.Copy(combined, pluginVersions)
+	return &Versions{capabilities: combined, pluginVersions: maps.Clone(pluginVersions)}
 }
 
 // Capability returns the version string for a named capability, and whether it was present.
@@ -137,10 +139,8 @@ func (f *HTTPVersionsFetcher) Fetch(ctx context.Context) (*Versions, error) {
 		case map[string]any:
 			// Falco reports loaded plugin versions as a nested object:
 			//   "plugin_versions": {"container": "0.7.1"}
-			// Flatten into the top-level capability map and also record them separately in pluginCaps.
 			for nk, nv := range t {
 				if s, ok := nv.(string); ok {
-					caps[nk] = s
 					pluginCaps[nk] = s
 				}
 			}

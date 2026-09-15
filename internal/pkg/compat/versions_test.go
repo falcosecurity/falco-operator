@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -96,6 +97,12 @@ func TestHTTPVersionsFetcher_Fetch(t *testing.T) {
 				"container": "0.7.1",
 				"k8smeta":   "0.2.0",
 			},
+		},
+		{
+			name:               "plugin version takes precedence over a top-level name collision",
+			body:               `{"container": "0.6.0", "plugin_versions": {"container": "0.7.1"}}`,
+			wantCaps:           map[string]string{"container": "0.7.1"},
+			wantPluginVersions: map[string]string{"container": "0.7.1"},
 		},
 		{
 			name: "full real-world response",
@@ -197,6 +204,57 @@ func TestHTTPVersionsFetcher_Fetch_Errors(t *testing.T) {
 		_, err := f.Fetch(context.Background())
 		require.Error(t, err)
 	})
+}
+
+func TestNewVersions(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		capabilities map[string]string
+		plugins      map[string]string
+		want         map[string]string
+	}{
+		{name: "empty", want: map[string]string{}},
+		{name: "empty maps", capabilities: map[string]string{}, plugins: map[string]string{}, want: map[string]string{}},
+		{name: "capabilities only", capabilities: map[string]string{"engine_version": "62"}, want: map[string]string{"engine_version": "62"}},
+		{name: "plugins only", plugins: map[string]string{"container": "0.7.1"}, want: map[string]string{"container": "0.7.1"}},
+		{
+			name: "combined", capabilities: map[string]string{"engine_version": "62"}, plugins: map[string]string{"container": "0.7.1"},
+			want: map[string]string{"engine_version": "62", "container": "0.7.1"},
+		},
+		{
+			name: "plugin version takes precedence", capabilities: map[string]string{"container": "0.6.0"}, plugins: map[string]string{"container": "0.7.1"},
+			want: map[string]string{"container": "0.7.1"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capabilities, plugins := maps.Clone(tc.capabilities), maps.Clone(tc.plugins)
+			v := NewVersions(tc.capabilities, tc.plugins)
+
+			assert.Equal(t, tc.want, v.All())
+			assert.True(t, maps.Equal(tc.plugins, v.PluginVersions()))
+			for name, version := range tc.want {
+				got, found := v.Capability(name)
+				assert.True(t, found)
+				assert.Equal(t, version, got)
+			}
+			assert.Equal(t, capabilities, tc.capabilities)
+			assert.Equal(t, plugins, tc.plugins)
+		})
+	}
+}
+
+func TestNewVersions_OwnsMaps(t *testing.T) {
+	capabilities := map[string]string{"engine_version": "62"}
+	plugins := map[string]string{"container": "0.7.1"}
+	v := NewVersions(capabilities, plugins)
+
+	delete(capabilities, "engine_version")
+	plugins["container"] = "1.0.0"
+	clear(v.All())
+	clear(v.PluginVersions())
+
+	assert.Equal(t, map[string]string{"engine_version": "62", "container": "0.7.1"}, v.All())
+	assert.Equal(t, map[string]string{"container": "0.7.1"}, v.PluginVersions())
 }
 
 func TestVersions_Capability(t *testing.T) {
