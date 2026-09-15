@@ -1,0 +1,805 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-config-warmsync-recovers-installed-state
+spec:
+  description: |
+    Restore the observed shared plugin configuration after restarting only the
+    artifact-operator container with valid current Plugin specifications.
+    Removing json must preserve container's installed entry and original initConfig,
+    before any new desired update is submitted for container.
+
+    Successful json cleanup proves that the new process has reconciled an operation;
+    the old Programmed=True status alone is not used as a recovery signal.
+    The container CR name differs from its configured Falco name. After recovery,
+    reject its image and config-name update, then exercise dependency protection
+    and config-before-binary removal in the same process.
+
+    Flow:
+    1. Install container and json; assert both binaries and configuration entries.
+    2. Restart the sidecar with valid desired configuration and unchanged Pod UID.
+    3. Delete json and verify container's binary, initConfig and runtime remain intact.
+    4. Reject a container update without changing its installed bytes or config name.
+    5. Install rules requiring container and verify deletion remains blocked.
+    6. Remove the rules, then verify complete plugin cleanup.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-config-warmsync-test
+    - name: container_plugin
+      value: container-recovery
+    - name: container_config_name
+      value: container
+    - name: rulesfile_name
+      value: plugin-config-recovery-rules
+    - name: json_plugin
+      value: json
+    - name: test_name
+      value: plugin-config-warmsync-recovers-installed-state
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: plugin_config_file
+      value: 99-03-plugins-config-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: |
+        Real Falco in a single Deployment Pod; restarting only the sidecar preserves its files.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-container-plugin"
+      description: |
+        Install container and verify Plugin programming and per-node configuration.
+        Its CR name differs from its installed Falco name.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($container_plugin)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container
+                initConfig:
+                  label_max_len: 100
+                  with_size: false
+
+    - name: "Step 03: Install-json-plugin"
+      description: |
+        Install json alongside container so deletion must rewrite the shared configuration.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($json_plugin)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Assert-both-binaries-on-filesystem"
+      description: |
+        Both plugins must have their binaries installed before exercising update,
+        restart and deletion.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $json_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 05: Assert-container-in-plugin-config"
+      description: |
+        The container entry must contain its installed Falco name and original initConfig.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len":100,"with_size":false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 06: Assert-json-in-plugin-config"
+      description: |
+        The json entry must also be present in the shared plugin configuration.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($json_plugin)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 07: Restart-artifact-operator-container"
+      description: |
+        Restart only the artifact-operator container while both desired Plugins are valid.
+        The Pod UID, both plugin binaries and shared configuration must remain unchanged.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+              - name: original_pod_name
+                value: (json_parse($stdout).pod)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $json_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_json_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            outputs:
+              - name: original_pod_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              bash ../../common/scripts/restart_artifact_operator_container.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).uid == $original_pod_uid): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $json_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_json_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+
+    - name: "Step 08: Assert-both-plugins-loaded-after-restart"
+      description: |
+        Observe the recovered container and json plugins loaded before requesting json deletion.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($json_plugin)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 09: Delete-json-plugin"
+      description: |
+        Delete the json Plugin CR. No Rulesfile references it, so no dependency blocks
+        deletion. Wait for its ArtifactNode cleanup and verify container's binary is unchanged.
+        This is the first post-restart mutation: do not re-add container first, which
+        could hide a truncated shared configuration.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($json_plugin)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $json_plugin]))
+            for:
+              deletion: {}
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+
+    - name: "Step 10: Assert-json-binary-absent"
+      description: |
+        The deleted json plugin's binary must be absent from the node filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$json_plugin, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 11: Assert-container-binary-still-present"
+      description: |
+        Removing json must leave the remaining container plugin binary installed.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 12: Assert-plugin-config-file-still-exists"
+      description: |
+        File must NOT be deleted; container still has an entry.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: ($plugin_config_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 13: Assert-container-still-in-plugin-config"
+      description: |
+        Container's entry and initConfig must remain intact as the only configured plugin.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len":100,"with_size":false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (length(json_parse($stdout).config.plugins)): 1
+              (length(json_parse($stdout).config.load_plugins)): 1
+
+    - name: "Step 14: Assert-json-absent-from-plugin-config"
+      description: |
+        After json deletion, its entries must be absent from both load_plugins and plugins.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($json_plugin)
+            content: |
+              bash ../../common/scripts/check_plugin_config_entry_absent.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 15: Assert-only-container-loaded-in-falco"
+      description: |
+        Poll Falco /versions until container is loaded and json is absent.
+        The not-yet-requested name container-rejected must also remain absent.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+              - name: ABSENT_PLUGINS
+                value: '["json", "container-rejected"]'
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 16: Reject-container-update"
+      description: |
+        After json cleanup has demonstrated post-restart reconciliation, reject an
+        incompatible image and a different config name. The installed
+        container binary and shared configuration must remain byte-for-byte unchanged.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($container_plugin)
+                namespace: ($namespace)
+              spec:
+                config:
+                  name: container-rejected
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-api-unmet
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($container_plugin)
+                namespace: ($namespace)
+              status:
+                observedGeneration: 2
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    observedGeneration: 2
+                    reason: DependenciesNotSatisfiedUpdateRejected
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+
+    - name: "Step 17: Install-rules-requiring-installed-container-name"
+      description: |
+        Install OCI rules that require the installed name container; the rejected desired
+        name must not change which plugin satisfies their dependency.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 18: Deletion-uses-installed-name-after-rejected-rename"
+      description: |
+        Request deletion without waiting. Rules requiring the installed name container
+        must keep the Plugin present, despite its rejected desired rename. The parent
+        must surface that block, and binary bytes, configuration and Falco runtime must remain intact.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_plugin_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: installed_config_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: PLUGIN_NAME
+                value: ($container_plugin)
+            content: bash ../../common/scripts/check_plugin_deletion_blocked.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($container_plugin)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+                    (contains(message, '"container"')): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $container_plugin, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_plugin_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+              (json_parse($stdout).checksum == $installed_config_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len":100,"with_size":false}'
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+              - name: ABSENT_PLUGINS
+                value: '["json", "container-rejected"]'
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 19: Delete-rulesfile"
+      description: |
+        Delete the Rulesfile. Its removal drops the installed dependency, so the
+        per-node artifact operator can remove the plugin config and release its
+        ArtifactNode finalizer. Request deletion without waiting; the ArtifactNode
+        wait is the completion signal, avoiding an implicit parent-object wait
+        while Rulesfile cleanup is still running.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: rulesfiles.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($rulesfile_name)
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 20: Wait-plugin-node-object-deleted"
+      description: |
+        Isolate per-node cleanup from final parent deletion. If this step stalls,
+        the artifact-operator sidecar is not removing its ArtifactNode finalizer;
+        inspect that container's logs, not the instance-operator's.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $container_plugin]))
+            for:
+              deletion: {}
+
+    - name: "Step 21: Wait-plugin-deleted"
+      description: |
+        With the last ArtifactNode already gone, node-objects-in-use must clear
+        on the parent's next reconcile so deletion can finish.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Plugin
+            name: ($container_plugin)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 22: Assert-installed-plugin-and-rules-removed"
+      description: |
+        Verify cleanup removed the rules and binary, and left no plugin configuration entries.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /usr/share/falco/plugins
+              - name: EXPECTED_FILE
+                value: (join('', [$container_plugin, '.so']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: (join('', ['50-01-', $rulesfile_name, '-oci.yaml']))
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($container_config_name)
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+            check:
+              (json_parse($stdout).config.plugins): []
+              (json_parse($stdout).config.load_plugins || `[]`): []
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

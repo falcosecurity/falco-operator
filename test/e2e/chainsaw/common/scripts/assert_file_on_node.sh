@@ -29,12 +29,21 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
     continue
   fi
 
-  if kubectl exec -n "$NAMESPACE" "$POD" -c falco -- \
-      sh -c "[ -e '$DIR/$EXPECTED_FILE' ]" >/dev/null 2>&1; then
-    FILE_EXISTS="true"
-  else
-    FILE_EXISTS="false"
+  # Explicit output distinguishes a missing file from a failed exec.
+  if ! FILE_EXISTS=$(kubectl exec -n "$NAMESPACE" "$POD" -c falco -- \
+      sh -c 'if [ -e "$1" ]; then printf true; else printf false; fi' sh "$DIR/$EXPECTED_FILE" 2>&1); then
+    LAST_ERROR="kubectl exec failed: $FILE_EXISTS"
+    sleep "$RETRY_DELAY"
+    continue
   fi
+  case "$FILE_EXISTS" in
+    true|false) ;;
+    *)
+      LAST_ERROR="unexpected file check result: $FILE_EXISTS"
+      sleep "$RETRY_DELAY"
+      continue
+      ;;
+  esac
 
   if [ "$FILE_EXISTS" = "$SHOULD_EXIST" ]; then
     if [ "$SHOULD_EXIST" = "true" ]; then
@@ -42,15 +51,9 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
     else
       MSG="file absent as expected"
     fi
-    cat <<EOF
-{
-  "status": "success",
-  "message": "$MSG",
-  "file": "$DIR/$EXPECTED_FILE",
-  "pod": "$POD",
-  "attempt": $ATTEMPT
-}
-EOF
+    jq -n --arg message "$MSG" --arg file "$DIR/$EXPECTED_FILE" --arg pod "$POD" \
+      --argjson attempt "$ATTEMPT" \
+      '{status: "success", message: $message, file: $file, pod: $pod, attempt: $attempt}'
     exit 0
   fi
 
@@ -62,12 +65,7 @@ EOF
   sleep "$RETRY_DELAY"
 done
 
-cat <<EOF
-{
-  "status": "failure",
-  "message": "$LAST_ERROR after $MAX_RETRIES attempts",
-  "file": "$DIR/$EXPECTED_FILE",
-  "pod": "$POD"
-}
-EOF
+jq -n --arg message "$LAST_ERROR after $MAX_RETRIES attempts" \
+  --arg file "$DIR/$EXPECTED_FILE" --arg pod "$POD" \
+  '{status: "failure", message: $message, file: $file, pod: $pod}'
 exit 1

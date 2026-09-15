@@ -29,9 +29,12 @@ if [ -z "$POD" ]; then
 fi
 
 for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
-  if MATCH=$(kubectl logs -n "$NAMESPACE" "$POD" -c "$CONTAINER" 2>/dev/null | grep -F "$PATTERN" || true); then
-    if [ -n "$MATCH" ]; then
-      cat <<EOF
+  if ! LOGS=$(kubectl logs -n "$NAMESPACE" "$POD" -c "$CONTAINER"); then
+    echo "cannot verify absent pattern: logs unavailable for $NAMESPACE/$POD ($CONTAINER)" >&2
+    exit 1
+  fi
+  if MATCH=$(printf '%s\n' "$LOGS" | grep -F -- "$PATTERN"); then
+    cat <<EOF
 {
   "status": "failure",
   "message": "Pattern found in pod logs (expected absent)",
@@ -44,6 +47,11 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
   "max_retries": $MAX_RETRIES
 }
 EOF
+    exit 1
+  else
+    MATCH_STATUS=$?
+    if [ "$MATCH_STATUS" -ne 1 ]; then
+      echo "cannot verify absent pattern: grep failed with status $MATCH_STATUS" >&2
       exit 1
     fi
   fi
