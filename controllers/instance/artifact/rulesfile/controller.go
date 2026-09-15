@@ -376,15 +376,7 @@ func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) e
 			Name: capName, Version: rulesReqs.EngineVersion,
 		})
 	}
-	for _, pv := range rulesReqs.PluginVersions {
-		d := commonv1alpha1.ArtifactMetaDependency{Name: pv.Name, Version: pv.Version}
-		for _, alt := range pv.Alternatives {
-			d.Alternatives = append(d.Alternatives, commonv1alpha1.ArtifactMetaDependencyVariant{
-				Name: alt.Name, Version: alt.Version,
-			})
-		}
-		meta.Dependencies = append(meta.Dependencies, d)
-	}
+	meta.Dependencies = append(meta.Dependencies, rulesReqs.PluginVersions...)
 	return nil
 }
 

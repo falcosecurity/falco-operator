@@ -20,7 +20,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -45,12 +47,19 @@ func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
 	return &LocalStore{FS: mockFS, Dirs: dirs}, mockFS
 }
 
-// TestSetInstalled_PreservesExistingConfigSubEntry reproduces a real regression: SetInstalled
-// used to overwrite the whole InstalledArtifact struct when updating an existing medium entry,
-// silently dropping its Config sub-field (set separately by UpdateInstalledConfig, e.g. for a
-// Plugin's shared config-file linkage) because File has no Config field to carry it forward.
-// Any caller that re-syncs a medium's main fields from a source that only knows about File (like
-// Manager's installed-artifact cache) must never destroy a Config sub-entry nothing else tracks.
+func TestLocalStore_Read(t *testing.T) {
+	store, fs := newTestStore()
+	path := "/configs/plugins.yaml"
+	fs.Files[path] = []byte("plugins: []")
+	data, err := store.Read(t.Context(), path)
+	require.NoError(t, err)
+	assert.Equal(t, "plugins: []", string(data))
+	_, err = store.Read(t.Context(), "/configs/missing.yaml")
+	require.ErrorIs(t, err, os.ErrNotExist)
+	fs.ReadErrFor = map[string]error{path: assert.AnError}
+	_, err = store.Read(t.Context(), path)
+	require.ErrorIs(t, err, assert.AnError)
+}
 func TestSetInstalled_PreservesExistingConfigSubEntry(t *testing.T) {
 	artifacts := []artifactv1alpha1.InstalledArtifact{
 		{
@@ -135,6 +144,26 @@ func TestLocalStore_Store_ContentAndPriorityChangeTogether(t *testing.T) {
 	_, oldExists := mockFS.Files[oldPath]
 	assert.False(t, oldExists, "old path should have been removed")
 	assert.Equal(t, newContent, mockFS.Files[newPath])
+}
+
+func TestLocalStore_Store_PriorityChangeDoesNotLeaveOldPath(t *testing.T) {
+	for _, artifactType := range []Type{TypeRulesfile, TypeConfig} {
+		t.Run(string(artifactType), func(t *testing.T) {
+			store, mockFS := newTestStore()
+			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: 0o644}
+			updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: 0o644}
+			_, current, err := store.Store(t.Context(), nil, "test", 50, artifactType, MediumInline, old)
+			require.NoError(t, err)
+			mockFS.RemoveErrFor = map[string]error{current.Path: errors.New("cannot unlink old file")}
+
+			_, file, err := store.Store(t.Context(), current, "test", 20, artifactType, MediumInline, updated)
+
+			require.NoError(t, err)
+			require.NotNil(t, file)
+			assert.NotContains(t, mockFS.Files, current.Path, "a successful replacement must not leave the old rules/config active")
+			assert.Equal(t, updated.Content, mockFS.Files[file.Path])
+		})
+	}
 }
 
 func TestLocalStore_StoreRepairsTrackedContent(t *testing.T) {

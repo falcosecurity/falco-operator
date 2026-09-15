@@ -19,11 +19,15 @@ package nodeartifacts
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"maps"
 	"reflect"
 	"slices"
 
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -36,15 +40,9 @@ import (
 // this node contributes an entry to.
 const pluginConfigFileName = "plugins-config"
 
-// ResolveConfigName returns the canonical plugin name used by Falco and referenced in a
-// Rulesfile's dependency list. Prefers spec.config.name (explicit override) over the CR's
-// metadata.name, which may be an arbitrary Kubernetes identifier.
-func ResolveConfigName(plugin *artifactv1alpha1.Plugin) string {
-	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
-		return plugin.Spec.Config.Name
-	}
-	return plugin.Name
-}
+// PluginConfigKey identifies this manager's shared plugin configuration, not a parent CR.
+// Each Falco pod has its own manager and files; instances in different namespaces do not share them.
+var PluginConfigKey = Key{Kind: KindPluginConfig, Name: "plugins-config"}
 
 // pluginConfig is a single plugin's entry in the shared plugins-config file.
 type pluginConfig struct {
@@ -57,6 +55,254 @@ type pluginConfig struct {
 // initConfig wraps apiextensionsv1.JSON to provide proper YAML marshaling.
 type initConfig struct {
 	*apiextensionsv1.JSON
+}
+
+// pluginsConfig is the shared plugins-config aggregate: every Plugin CR on this node contributes
+// one entry, serialized together into a single YAML file Falco loads.
+type pluginsConfig struct {
+	Configs     []pluginConfig `yaml:"plugins"`
+	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
+}
+
+// ResolveConfigName returns the canonical plugin name used by Falco and referenced in a
+// Rulesfile's dependency list. Prefers spec.config.name (explicit override) over the CR's
+// metadata.name, which may be an arbitrary Kubernetes identifier.
+func ResolveConfigName(plugin *artifactv1alpha1.Plugin) string {
+	if plugin.Spec.Config != nil && plugin.Spec.Config.Name != "" {
+		return plugin.Spec.Config.Name
+	}
+	return plugin.Name
+}
+
+// AddPluginConfig ensures plugin's entry is present and current in the shared plugins-config
+// aggregate file, then registers the resulting config name as provided.
+//
+// Handles a config-name rename (plugin.Spec.Config.Name differing from the name last seen for
+// this CR) by removing the old entry first; if the old name is still required elsewhere, returns
+// *BlockedError and leaves both the in-memory aggregate and disk untouched, so the rename can be
+// retried on the next reconcile without having lost the old entry in the interim.
+//
+// The file this aggregate is written to is a single shared, node-level singleton (keyed by
+// PluginConfigKey in the installed-artifact cache), not per-Plugin-CR; whether the write can be
+// skipped as unchanged is decided from that cache entry, not from anything the caller passes in.
+// fetcher prepares the serialized aggregate into a FetchResult (content hash, perm).
+func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin,
+	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
+	m.mu.Lock()
+	action, file, err := m.addPluginConfigLocked(ctx, plugin, fetcher)
+	m.mu.Unlock()
+	if err != nil {
+		return action, file, err
+	}
+	// Best-effort: try to learn Falco's loaded versions sooner than the next periodic poll.
+	// The response may still describe the runtime before this write; the periodic sink path
+	// (see compat.VersionsWatcher.SetSink, wired in cmd/artifact/main.go) refreshes it later.
+	// Must run after, never inside,
+	// the locked section above: sync.Mutex isn't reentrant, and RefreshFalcoVersions locks too.
+	if _, refreshErr := m.RefreshFalcoVersions(ctx); refreshErr != nil {
+		log.FromContext(ctx).V(1).Info("post-install Falco versions refresh failed; will retry on next periodic poll", "err", refreshErr)
+	}
+	return action, file, nil
+}
+
+// StorePlugin checks installed ownership before replacing a plugin's binary.
+func (m *Manager) StorePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin,
+	result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.checkPluginOwnershipLocked(plugin); err != nil {
+		return artifact.StoreActionNone, nil, err
+	}
+	return m.storeLocked(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, artifact.MediumOCI, result)
+}
+
+// RemovePluginConfig removes the installed entry by CR identity, never by desired spec.
+func (m *Manager) RemovePluginConfig(ctx context.Context, fetcher artifact.ArtifactFetcher, plugin *artifactv1alpha1.Plugin) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.removePluginConfigLocked(ctx, fetcher, plugin)
+}
+
+func (m *Manager) removePluginConfigLocked(ctx context.Context, fetcher artifact.ArtifactFetcher, plugin *artifactv1alpha1.Plugin) error {
+	configName := m.installedPluginNameLocked(plugin)
+	if configName == "" {
+		return nil
+	}
+	if blocked := m.blockedByOthersLocked(configName); blocked != nil {
+		return blocked
+	}
+	updated := m.pluginsConfig.clone()
+	updated.removeByName(configName)
+	owners := maps.Clone(m.pluginConfigOwners)
+	delete(owners, configName)
+	_, _, err := m.writePluginsConfigLocked(ctx, fetcher, updated, owners)
+	return err
+}
+
+// addPluginConfigLocked updates the aggregate and provider registry. Caller holds m.mu.
+func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1alpha1.Plugin,
+	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
+	configName := ResolveConfigName(plugin)
+	if err := m.checkPluginOwnershipLocked(plugin); err != nil {
+		return artifact.StoreActionNone, nil, err
+	}
+	oldName := m.installedPluginNameLocked(plugin)
+	updated := m.pluginsConfig.clone()
+	if oldName != "" && oldName != configName {
+		updated.removeByName(oldName)
+	}
+	updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
+	owners := maps.Clone(m.pluginConfigOwners)
+	if oldName != configName {
+		delete(owners, oldName)
+	}
+	owners[configName] = pluginOwner(plugin)
+	return m.writePluginsConfigLocked(ctx, fetcher, updated, owners)
+}
+
+// writePluginsConfigLocked publishes the in-memory aggregate only after its file is installed.
+func (m *Manager) writePluginsConfigLocked(ctx context.Context, fetcher artifact.ArtifactFetcher,
+	config *pluginsConfig, owners map[string]corev1.ObjectReference) (artifact.StoreAction, *artifact.File, error) {
+	pluginConfigString, err := config.toString()
+	if err != nil {
+		return artifact.StoreActionNone, nil, fmt.Errorf("convert plugin config to string: %w", err)
+	}
+	result, err := fetcher.FetchInline(ctx, []byte(pluginConfigString))
+	if err != nil {
+		return artifact.StoreActionNone, nil, fmt.Errorf("prepare plugin config content: %w", err)
+	}
+	current := artifact.FindInstalled(m.installed[PluginConfigKey], artifact.MediumInline)
+	action, file, err := m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.TypeConfig, artifact.MediumInline, result)
+	if file != nil || err == nil {
+		m.upsertInstalledLocked(PluginConfigKey, action, artifact.MediumInline, file)
+	}
+	if err != nil {
+		if file != nil && file.ContentHash == result.ContentHash {
+			m.publishPluginConfigLocked(config, owners)
+		}
+		return action, file, err
+	}
+	m.publishPluginConfigLocked(config, owners)
+	return action, file, nil
+}
+
+func (m *Manager) installedPluginNameLocked(plugin *artifactv1alpha1.Plugin) string {
+	owner := pluginOwner(plugin)
+	for _, config := range m.pluginsConfig.Configs {
+		if m.pluginConfigOwners[config.Name] == owner {
+			return config.Name
+		}
+	}
+	return ""
+}
+
+func (m *Manager) checkPluginOwnershipLocked(plugin *artifactv1alpha1.Plugin) error {
+	owner := pluginOwner(plugin)
+	name := ResolveConfigName(plugin)
+	for _, config := range m.pluginsConfig.Configs {
+		existing := m.pluginConfigOwners[config.Name]
+		if existing != owner && (config.Name == name || (existing.Namespace == owner.Namespace && existing.Name == owner.Name)) {
+			return fmt.Errorf("installed plugin %q belongs to %s/%s (UID %s)", config.Name, existing.Namespace, existing.Name, existing.UID)
+		}
+		if existing == owner && config.Name != name {
+			if blocked := m.blockedByOthersLocked(config.Name); blocked != nil {
+				return blocked
+			}
+		}
+	}
+	return nil
+}
+
+func pluginOwner(plugin *artifactv1alpha1.Plugin) corev1.ObjectReference {
+	return corev1.ObjectReference{Namespace: plugin.Namespace, Name: plugin.Name, UID: plugin.UID}
+}
+
+func (m *Manager) publishPluginConfigLocked(config *pluginsConfig, owners map[string]corev1.ObjectReference) {
+	changed := false
+	for _, name := range m.pluginsConfig.LoadPlugins {
+		if !slices.Contains(config.LoadPlugins, name) {
+			value := provided{Key: PluginConfigKey, Removed: true}
+			changed = changed || m.provides[name] != value
+			m.provides[name] = value
+		}
+	}
+	for _, name := range config.LoadPlugins {
+		previous := m.provides[name]
+		value := provided{Key: PluginConfigKey, Version: previous.Version}
+		m.provides[name] = value
+		changed = changed || previous != value
+	}
+	m.pluginsConfig, m.pluginConfigOwners = config, owners
+	if changed {
+		m.notifySubscribersLocked()
+	}
+}
+
+// restorePluginsConfig retains observed entries owned by the current assigned Plugins.
+// New or changed settings are applied only by the normal plugin reconciler.
+func (m *Manager) restorePluginsConfig(ctx context.Context, plugins []*artifactv1alpha1.Plugin) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	file := artifact.FindInstalled(m.installed[PluginConfigKey], artifact.MediumInline)
+	if file == nil {
+		return nil
+	}
+	data, err := m.store.Read(ctx, file.Path)
+	if errors.Is(err, fs.ErrNotExist) {
+		delete(m.installed, PluginConfigKey)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read installed plugin configuration: %w", err)
+	}
+	observed := &pluginsConfig{}
+	if err := yaml.Unmarshal(data, observed); err != nil {
+		log.FromContext(ctx).Error(err, "Invalid installed plugin configuration; rebuilding from current Plugins")
+		observed = &pluginsConfig{}
+	}
+	owners := make(map[string]corev1.ObjectReference, len(plugins))
+	ambiguous := make(map[string]bool)
+	for _, plugin := range plugins {
+		name, owner := ResolveConfigName(plugin), pluginOwner(plugin)
+		if existing, ok := owners[name]; ok && existing != owner {
+			ambiguous[name] = true
+			log.FromContext(ctx).Info("Multiple Plugins request the same config name; deferring ownership to reconciliation", "name", name)
+		}
+		owners[name] = owner
+	}
+	retained := &pluginsConfig{}
+	retainedOwners := make(map[string]corev1.ObjectReference)
+	for _, config := range observed.Configs {
+		owner, wanted := owners[config.Name]
+		if !wanted || ambiguous[config.Name] || !slices.Contains(observed.LoadPlugins, config.Name) {
+			continue
+		}
+		if _, duplicate := retainedOwners[config.Name]; duplicate {
+			continue
+		}
+		retained.Configs = append(retained.Configs, config)
+		retained.LoadPlugins = append(retained.LoadPlugins, config.Name)
+		retainedOwners[config.Name] = owner
+	}
+	// Seed the observed output before publishing its replacement, so pruned names
+	// cannot be resurrected by a delayed Falco versions response.
+	m.pluginsConfig = observed
+	_, _, err = m.writePluginsConfigLocked(ctx, &artifact.Fetcher{}, retained, retainedOwners)
+	return err
+}
+
+// UnmarshalYAML reads an installed init_config using the same JSON model as the CR.
+func (c *initConfig) UnmarshalYAML(node *yaml.Node) error {
+	var value any
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	c.JSON = &apiextensionsv1.JSON{Raw: data}
+	return nil
 }
 
 // MarshalYAML implements yaml.Marshaler to serialize the JSON content as nested YAML.
@@ -87,13 +333,6 @@ func (p *pluginConfig) isSame(other *pluginConfig) bool {
 	return reflect.DeepEqual(p.InitConfig.JSON, other.InitConfig.JSON)
 }
 
-// pluginsConfig is the shared plugins-config aggregate: every Plugin CR on this node contributes
-// one entry, serialized together into a single YAML file Falco loads.
-type pluginsConfig struct {
-	Configs     []pluginConfig `yaml:"plugins"`
-	LoadPlugins []string       `yaml:"load_plugins,omitempty"`
-}
-
 // clone isolates slice mutations while a proposed configuration is being written.
 // Entries' nested init configs are only read, never modified by addConfig/removeByName.
 func (pc *pluginsConfig) clone() *pluginsConfig {
@@ -111,7 +350,7 @@ func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Pl
 
 	if plugin.Spec.Config != nil {
 		if plugin.Spec.Config.InitConfig != nil && len(plugin.Spec.Config.InitConfig.Raw) > 0 {
-			config.InitConfig = &initConfig{JSON: plugin.Spec.Config.InitConfig}
+			config.InitConfig = &initConfig{JSON: plugin.Spec.Config.InitConfig.DeepCopy()}
 		}
 		if plugin.Spec.Config.LibraryPath != "" {
 			config.LibraryPath = plugin.Spec.Config.LibraryPath
@@ -131,8 +370,8 @@ func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Pl
 			if c.isSame(&config) {
 				return
 			}
-			pc.Configs = append(pc.Configs[:i], pc.Configs[i+1:]...)
-			break
+			pc.Configs[i] = config
+			return
 		}
 	}
 	pc.Configs = append(pc.Configs, config)
@@ -166,148 +405,4 @@ func (pc *pluginsConfig) toString() (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-// AddPluginConfig ensures plugin's entry is present and current in the shared plugins-config
-// aggregate file, then registers the resulting config name as provided.
-//
-// Handles a config-name rename (plugin.Spec.Config.Name differing from the name last seen for
-// this CR) by removing the old entry first; if the old name is still required elsewhere, returns
-// *BlockedError and leaves both the in-memory aggregate and disk untouched, so the rename can be
-// retried on the next reconcile without having lost the old entry in the interim.
-//
-// The file this aggregate is written to is a single shared, node-level singleton (keyed by
-// PluginConfigKey in the installed-artifact cache), not per-Plugin-CR; whether the write can be
-// skipped as unchanged is decided from that cache entry, not from anything the caller passes in.
-// fetcher prepares the serialized aggregate into a FetchResult (content hash, perm).
-func (m *Manager) AddPluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin,
-	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
-	action, file, err := m.addPluginConfigLocked(ctx, plugin, fetcher)
-	if err != nil {
-		return action, file, err
-	}
-	// Best-effort: try to learn Falco's loaded versions sooner than the next periodic poll.
-	// The response may still describe the runtime before this write; the periodic sink path
-	// (see compat.VersionsWatcher.SetSink, wired in cmd/artifact/main.go) refreshes it later.
-	// Must run after, never inside,
-	// the locked section above: sync.Mutex isn't reentrant, and RefreshFalcoVersions locks too.
-	if _, refreshErr := m.RefreshFalcoVersions(ctx); refreshErr != nil {
-		log.FromContext(ctx).V(1).Info("post-install Falco versions refresh failed; will retry on next periodic poll", "err", refreshErr)
-	}
-	return action, file, nil
-}
-
-func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1alpha1.Plugin,
-	fetcher artifact.ArtifactFetcher) (artifact.StoreAction, *artifact.File, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	configName := ResolveConfigName(plugin)
-	oldName, hadConfig := m.crToConfigName[plugin.Name]
-	rename := hadConfig && oldName != configName
-	if rename {
-		if blockedBy := m.blockedByOthers(oldName); len(blockedBy) > 0 {
-			return artifact.StoreActionNone, nil, &BlockedError{Name: oldName, BlockedBy: blockedBy}
-		}
-	}
-	updated := m.pluginsConfig.clone()
-	if rename {
-		updated.removeByName(oldName)
-	}
-	updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
-
-	action, file, err := m.writePluginsConfig(ctx, fetcher, updated, false)
-	if err != nil {
-		return artifact.StoreActionNone, nil, err
-	}
-	// Publish only a successfully written configuration, including its dependency state.
-	m.pluginsConfig = updated
-	m.crToConfigName[plugin.Name] = configName
-	if rename {
-		m.provides[oldName] = provided{Key: PluginConfigKey, Removed: true}
-		m.notifySubscribers()
-	}
-	version := m.provides[configName].Version
-	m.provides[configName] = provided{Key: PluginConfigKey, Version: version}
-	return action, file, nil
-}
-
-// RemovePluginConfig removes plugin's entry from the shared config file, resolved from its
-// current spec, and forgets its rename tracking. Equivalent to calling RemovePluginConfigByName
-// with plugin.Name and ResolveConfigName(plugin); provided for callers that still have the
-// Plugin object.
-func (m *Manager) RemovePluginConfig(ctx context.Context, fetcher artifact.ArtifactFetcher, plugin *artifactv1alpha1.Plugin) error {
-	return m.RemovePluginConfigByName(ctx, fetcher, plugin.Name, ResolveConfigName(plugin))
-}
-
-// RemovePluginConfigByName removes a plugin's config entry (identified by its resolved config
-// name, in case Spec.Config.Name differs from pluginCRName or the parent Plugin object no longer
-// exists) from the shared YAML file, and forgets rename tracking for pluginCRName.
-//
-// The file itself is always rewritten (even down to an explicitly-empty "plugins: []"), never
-// deleted, even when this was the last configured plugin. Falco's own file-watch on this path
-// does not reliably survive the underlying file being removed and later recreated (observed in
-// practice: a plugin removed and re-added to the same running Falco pod never got picked back up;
-// the config directory reload that dropped the file never fired again for a subsequently
-// recreated one). Keeping the file present for the node's entire lifetime, and only ever changing
-// its content via the same atomic rename-based write Store already uses for every other update
-// (which Falco does reliably pick up), avoids that class of missed reload entirely.
-//
-// Refused, atomically with the check, when a Rulesfile on this node still declares configName as
-// a dependency; see BlockedError.
-func (m *Manager) RemovePluginConfigByName(ctx context.Context, fetcher artifact.ArtifactFetcher, pluginCRName, configName string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	wasRemoved := m.provides[configName].Removed
-	if !wasRemoved {
-		if blockedBy := m.blockedByOthers(configName); len(blockedBy) > 0 {
-			return &BlockedError{Name: configName, BlockedBy: blockedBy}
-		}
-	}
-
-	updated := m.pluginsConfig.clone()
-	updated.removeByName(configName)
-
-	// Always rewritten (even down to an explicitly-empty "plugins: []"), bypassing the dedup
-	// check: see this function's doc comment for why the file is never left un-rewritten.
-	if _, _, err := m.writePluginsConfig(ctx, fetcher, updated, true); err != nil {
-		return err
-	}
-
-	m.pluginsConfig = updated
-	m.provides[configName] = provided{Key: PluginConfigKey, Removed: true}
-	delete(m.crToConfigName, pluginCRName)
-	if !wasRemoved {
-		m.notifySubscribers()
-	}
-	return nil
-}
-
-// writePluginsConfig serializes the current in-memory aggregate and stores it. Unless force is
-// set, the write is skipped when the installed cache's tracked current content hash already
-// matches what's on disk; force bypasses that check entirely (see RemovePluginConfigByName's doc
-// comment for why it needs this). Caller must hold m.mu.
-func (m *Manager) writePluginsConfig(ctx context.Context, fetcher artifact.ArtifactFetcher,
-	config *pluginsConfig, force bool) (artifact.StoreAction, *artifact.File, error) {
-	pluginConfigString, err := config.toString()
-	if err != nil {
-		return artifact.StoreActionNone, nil, fmt.Errorf("convert plugin config to string: %w", err)
-	}
-	result, err := fetcher.FetchInline(ctx, []byte(pluginConfigString))
-	if err != nil {
-		return artifact.StoreActionNone, nil, fmt.Errorf("prepare plugin config content: %w", err)
-	}
-	current := artifact.FindInstalled(m.installed[PluginConfigKey], artifact.MediumInline)
-	if !force && current != nil {
-		if ok, verifyErr := m.store.Verify(ctx, &artifact.File{Path: current.Path, ContentHash: result.ContentHash}); verifyErr == nil && ok {
-			return artifact.StoreActionUnchanged, nil, nil
-		}
-	}
-	action, file, err := m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.TypeConfig, artifact.MediumInline, result)
-	if err != nil {
-		return action, file, err
-	}
-	m.upsertInstalledLocked(PluginConfigKey, action, artifact.MediumInline, file)
-	return action, file, nil
 }

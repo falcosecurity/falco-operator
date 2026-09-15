@@ -33,10 +33,14 @@ type MockFileSystem struct {
 	Files        map[string][]byte
 	StatErr      error
 	ReadErr      error
+	ReadErrFor   map[string]error
+	MkdirErr     error
 	WriteErr     error
+	WriteErrFor  map[string]error
 	RemoveErr    error
 	RemoveErrFor map[string]error
 	RenameErr    error
+	RenameErrFor map[string]error
 	OpenErr      error
 	statCalls    []string
 	readCalls    []string
@@ -79,6 +83,9 @@ func (m *MockFileSystem) Stat(name string) (fs.FileInfo, error) {
 // ReadFile reads and returns the contents of the named file.
 func (m *MockFileSystem) ReadFile(name string) ([]byte, error) {
 	m.readCalls = append(m.readCalls, name)
+	if err := m.ReadErrFor[name]; err != nil {
+		return nil, err
+	}
 	if m.ReadErr != nil {
 		return nil, m.ReadErr
 	}
@@ -89,9 +96,17 @@ func (m *MockFileSystem) ReadFile(name string) ([]byte, error) {
 	return data, nil
 }
 
+// MkdirAll returns the configured error; mock writes do not require parent directories.
+func (m *MockFileSystem) MkdirAll(_ string, _ fs.FileMode) error {
+	return m.MkdirErr
+}
+
 // WriteFile writes data to the named file with the given permissions.
 func (m *MockFileSystem) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	m.WriteCalls = append(m.WriteCalls, writeCall{name: name, data: data, perm: perm})
+	if err := m.WriteErrFor[name]; err != nil {
+		return err
+	}
 	if m.WriteErr != nil {
 		return m.WriteErr
 	}
@@ -115,6 +130,9 @@ func (m *MockFileSystem) Remove(name string) error {
 // Rename renames (moves) oldpath to newpath in the mock filesystem.
 func (m *MockFileSystem) Rename(oldpath, newpath string) error {
 	m.RenameCalls = append(m.RenameCalls, renameCall{oldpath: oldpath, newpath: newpath})
+	if err, ok := m.RenameErrFor[oldpath]; ok {
+		return err
+	}
 	if m.RenameErr != nil {
 		return m.RenameErr
 	}

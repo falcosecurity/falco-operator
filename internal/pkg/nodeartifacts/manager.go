@@ -24,9 +24,11 @@ package nodeartifacts
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sync"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
@@ -34,7 +36,7 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 // Kind identifies which artifact type a registry Key belongs to.
@@ -64,42 +66,6 @@ type Key struct {
 	Name      string
 }
 
-// KeyFromObj builds the Key for kind identifying obj, the Plugin/Rulesfile/Config CR that owns
-// it. Not applicable during deletion handling, where the parent object may already be gone and
-// only its owner-reference name (never its namespace) survives: those call sites build a Key
-// literal from the ArtifactNode's own namespace directly instead.
-func KeyFromObj(kind Kind, obj metav1.Object) Key {
-	return Key{Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
-}
-
-// PluginConfigKey is the single registry key for the shared plugins-config aggregate file. Its
-// Namespace is deliberately left empty: the file itself is a per-node singleton (Falco is one
-// process per node with one config file location) that aggregates every Plugin CR's entry
-// regardless of namespace, so it doesn't belong to any one namespace the way a per-CR Key does.
-var PluginConfigKey = Key{Kind: KindPluginConfig, Name: "plugins-config"}
-
-// RequirementGroup is an ordered plugin dependency: the primary followed by its alternatives.
-// Like Falco, both installation and removal checks use the first observed candidate and require
-// a compatible version; an incompatible candidate cannot be bypassed by a later alternative.
-type RequirementGroup []Requirement
-
-// Requirement is a plugin name and its required version. Compatible versions must have the
-// same major and be at least as recent as the requirement.
-type Requirement = puller.Dependency
-
-// BlockedError is returned by RemovePluginConfigByName when removing a name would leave some
-// other artifact's dependency unsatisfied. It is an expected, retriable condition: callers
-// should log, record an event, and return without erroring, relying on a watch to re-trigger
-// once unblocked.
-type BlockedError struct {
-	Name      string
-	BlockedBy []Key
-}
-
-func (e *BlockedError) Error() string {
-	return fmt.Sprintf("%q is still required by %v", e.Name, e.BlockedBy)
-}
-
 // provided is what's currently known about a capability/plugin name: which Key registered it
 // (informational only, kept for observability) and its version once confirmed by Falco. Version
 // is "" until Falco has reported it.
@@ -113,28 +79,28 @@ type provided struct {
 
 // Manager coordinates disk writes across the artifact-operator sidecar's per-node reconcilers.
 // It delegates file I/O to the wrapped artifact.ArtifactStore and owns everything needed to
-// decide and perform those writes: a mutex, the provides/requires dependency registry, Falco's
+// decide and perform those writes: a mutex, installed dependencies and providers, Falco's
 // reported capabilities (kept fresh by a background poller and refreshed after a plugin
 // install, see RefreshFalcoVersions), and the shared plugins-config aggregate with its
-// CR-name-to-config-name rename tracking for Plugin CRs (see pluginconfig.go). The zero value
+// installed ownership for Plugin CRs (see pluginconfig.go). The zero value
 // is not usable; construct with NewManager.
 type Manager struct {
 	mu           sync.Mutex
 	store        artifact.ArtifactStore
 	falcoFetcher compat.VersionsFetcher
 	provides     map[string]provided
-	requires     map[Key][]RequirementGroup
-	// installed tracks the on-disk files for each artifact (keyed by Kind+Name): the
-	// authoritative source Store/Remove/FindInstalled read and write, and the only thing a
+	rulesfiles   map[rulesfileSourceKey][]rulesfileRevision
+	// installed tracks the on-disk files for each artifact (keyed by Kind+Namespace+Name): the
+	// authoritative source all store methods, Remove and FindInstalled use, and the only thing a
 	// filesystem decision (skip vs. rewrite, what to remove) is ever based on. A controller's
 	// own ArtifactNode status is a write-through mirror of this for observability only; it is
 	// never read back to make a decision, since the informer-cached status a reconcile sees can
 	// lag behind what's actually happened. Seeded from disk by WarmSync at startup (see
-	// reconcileDiskState); updated on every Store/Remove call thereafter.
-	installed      map[Key][]artifactv1alpha1.InstalledArtifact
-	pluginsConfig  *pluginsConfig
-	crToConfigName map[string]string
-	subscribers    []chan event.GenericEvent
+	// seedInstalledCacheFromDisk); updated on every write/removal thereafter.
+	installed          map[Key][]artifactv1alpha1.InstalledArtifact
+	pluginsConfig      *pluginsConfig
+	pluginConfigOwners map[string]corev1.ObjectReference
+	subscribers        []chan event.GenericEvent
 }
 
 // NewManager returns a Manager wrapping store. store performs the actual file I/O; falcoFetcher
@@ -143,75 +109,41 @@ type Manager struct {
 // the same underlying fetcher from the caller.
 func NewManager(store artifact.ArtifactStore, falcoFetcher compat.VersionsFetcher) *Manager {
 	return &Manager{
-		store:          store,
-		falcoFetcher:   falcoFetcher,
-		provides:       make(map[string]provided),
-		requires:       make(map[Key][]RequirementGroup),
-		installed:      make(map[Key][]artifactv1alpha1.InstalledArtifact),
-		pluginsConfig:  &pluginsConfig{},
-		crToConfigName: make(map[string]string),
+		store:              store,
+		falcoFetcher:       falcoFetcher,
+		provides:           make(map[string]provided),
+		rulesfiles:         make(map[rulesfileSourceKey][]rulesfileRevision),
+		installed:          make(map[Key][]artifactv1alpha1.InstalledArtifact),
+		pluginsConfig:      &pluginsConfig{},
+		pluginConfigOwners: make(map[string]corev1.ObjectReference),
 	}
 }
 
-// kindForArtifactType maps an artifact.Type to the Kind its installed-cache entries use.
-func kindForArtifactType(t artifact.Type) Kind {
-	switch t {
-	case artifact.TypePlugin:
-		return KindPlugin
-	case artifact.TypeConfig:
-		return KindConfig
-	default:
-		return KindRulesfile
-	}
+// KeyFromObj builds the Key for kind identifying obj, the Plugin/Rulesfile/Config CR that owns
+// it. Not applicable during deletion handling, where the parent object may already be gone and
+// only its owner-reference name (never its namespace) survives: those call sites build a Key
+// literal from the ArtifactNode's own namespace directly instead.
+func KeyFromObj(kind Kind, obj metav1.Object) Key {
+	return Key{Kind: kind, Namespace: obj.GetNamespace(), Name: obj.GetName()}
 }
 
-// Store is a lock-wrapped wrapper around the underlying ArtifactStore.Store. It derives "current"
-// from the installed cache itself (keyed by namespace+artifactType+name) rather than accepting it
-// from the caller, so there is exactly one place a Store decision can come from; on success it
-// updates the cache with the result. Use for writes that don't affect the cross-artifact
-// dependency graph (plugin binaries, rulesfile media files, config files). The lock keeps these
-// writes mutually exclusive with RemovePluginConfigByName's check-then-write critical section.
-func (m *Manager) Store(ctx context.Context, namespace, name string, artifactPriority int32,
-	artifactType artifact.Type, medium artifact.Medium, result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
+// StoreConfig writes one Config source using the installed cache as the current state.
+// The shared plugin configuration is managed separately by AddPluginConfig.
+func (m *Manager) StoreConfig(ctx context.Context, namespace, name string, artifactPriority int32,
+	medium artifact.Medium, result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
+	if name == pluginConfigFileName && artifactPriority == priority.MaxPriority && medium == artifact.MediumInline {
+		return artifact.StoreActionNone, nil, fmt.Errorf("config path is reserved for the shared plugin configuration")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	key := Key{Kind: kindForArtifactType(artifactType), Namespace: namespace, Name: name}
-	current := artifact.FindInstalled(m.installed[key], medium)
-	action, file, err := m.store.Store(ctx, current, name, artifactPriority, artifactType, medium, result)
-	if err != nil {
-		return action, file, err
-	}
-	m.upsertInstalledLocked(key, action, medium, file)
-	return action, file, nil
+	return m.storeLocked(ctx, namespace, name, artifactPriority, artifact.TypeConfig, medium, result)
 }
 
-// Remove is a lock-wrapped wrapper around the underlying ArtifactStore.Remove. key identifies
-// which cache entry installed's mediums belong to; on success, each removed medium is cleared
-// from that entry. Use for removals that don't themselves affect the dependency graph (see
-// RemovePluginConfigByName for the one that does).
-func (m *Manager) Remove(ctx context.Context, key Key, installed []artifactv1alpha1.InstalledArtifact) error {
+// Remove deletes the installed files and releases their dependencies on success.
+func (m *Manager) Remove(ctx context.Context, key Key) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.store.Remove(ctx, installed); err != nil {
-		return err
-	}
-	entry := m.installed[key]
-	for _, a := range installed {
-		artifact.ClearInstalled(&entry, artifact.Medium(a.Medium))
-	}
-	if len(entry) == 0 {
-		delete(m.installed, key)
-	} else {
-		m.installed[key] = entry
-	}
-	return nil
-}
-
-// upsertInstalledLocked applies a Store result to key's cache entry. Caller must hold m.mu.
-func (m *Manager) upsertInstalledLocked(key Key, action artifact.StoreAction, medium artifact.Medium, file *artifact.File) {
-	entry := m.installed[key]
-	artifact.UpdateInstalledStatus(&entry, action, medium, file)
-	m.installed[key] = entry
+	return m.removeLocked(ctx, key, slices.Clone(m.installed[key]))
 }
 
 // FindInstalled returns the cached File for key's medium, or nil if none is known. This is the
@@ -226,11 +158,24 @@ func (m *Manager) FindInstalled(key Key, medium artifact.Medium) *artifact.File 
 // installed for it, returning the removed file's path (removed=true), or a no-op
 // (removed=false) when nothing is installed for medium.
 func (m *Manager) RemoveIfInstalled(ctx context.Context, key Key, medium artifact.Medium) (path string, removed bool, err error) {
-	existing := m.FindInstalled(key, medium)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	existing := artifact.FindInstalled(m.installed[key], medium)
 	if existing == nil {
+		if key.Kind != KindRulesfile {
+			return "", false, nil
+		}
+		slot := rulesfileSourceKey{Key: key, Medium: medium}
+		delete(m.rulesfiles, slot)
 		return "", false, nil
 	}
-	if err := m.Remove(ctx, key, []artifactv1alpha1.InstalledArtifact{{Path: existing.Path, Medium: string(medium)}}); err != nil {
+	var installed []artifactv1alpha1.InstalledArtifact
+	for _, file := range m.installed[key] {
+		if file.Medium == string(medium) {
+			installed = append(installed, file)
+		}
+	}
+	if err := m.removeLocked(ctx, key, installed); err != nil {
 		return "", false, err
 	}
 	return existing.Path, true, nil
@@ -254,8 +199,8 @@ func (m *Manager) UpdateInstalledSpecHash(key Key, medium artifact.Medium, specH
 // controller makes for a medium (including a "verified on disk, nothing to do" shortcut that
 // never called Store), not only after a Store call that actually changed something.
 //
-// This exists because the cache — not status — is the source of a Store decision (see Store's
-// doc comment): a decision can conclude "already correct" from cache state a previous reconcile
+// This exists because the cache — not status — is the source of a write decision (see
+// storeLocked): a decision can conclude "already correct" from cache state a previous reconcile
 // established, even if that reconcile's own status patch never landed (an SSA conflict, or the
 // cache being seeded straight from disk by WarmSync with no ArtifactNode status write at all).
 // Gating a status write on the StoreAction (e.g. skipping it for StoreActionUnchanged, as the old
@@ -283,7 +228,7 @@ func (m *Manager) SyncAllInstalledStatus(key Key, mediums []artifact.Medium, sta
 }
 
 // GetInstalled returns a copy of the cached installed artifacts for key, or nil if none are
-// known. Used to obtain the full list to pass to Remove (e.g. on deletion) and by WarmSync.
+// known. Mutating the returned list does not update the installed cache.
 func (m *Manager) GetInstalled(key Key) []artifactv1alpha1.InstalledArtifact {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -292,13 +237,15 @@ func (m *Manager) GetInstalled(key Key) []artifactv1alpha1.InstalledArtifact {
 		return nil
 	}
 	out := make([]artifactv1alpha1.InstalledArtifact, len(src))
-	copy(out, src)
+	for i := range src {
+		src[i].DeepCopyInto(&out[i])
+	}
 	return out
 }
 
 // SeedInstalled bulk-sets the installed cache for key, replacing any existing entry. Used only
 // by WarmSync at startup to populate the cache from disk ground truth before the manager starts
-// serving reconciles; every update after that goes through Store/Remove.
+// serving reconciles; every update after that goes through the store/removal methods.
 func (m *Manager) SeedInstalled(key Key, artifacts []artifactv1alpha1.InstalledArtifact) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -321,32 +268,6 @@ func (m *Manager) ScanAll(ctx context.Context, artifactType artifact.Type) (map[
 	return m.store.ScanAll(ctx, artifactType)
 }
 
-// Sync replaces key's registered requirement groups. A nil or empty requires clears the entry.
-// Used to register/refresh what a Rulesfile currently depends on; call it on every reconcile
-// with a resolved ArtifactMeta, since dependencies can change independently of rendered file
-// content. Also used by WarmSync at startup.
-func (m *Manager) Sync(key Key, requires []RequirementGroup) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if len(requires) == 0 {
-		delete(m.requires, key)
-		return
-	}
-	m.requires[key] = requires
-}
-
-// SyncProvides registers that key currently provides name (e.g. the shared plugin-config file
-// now has an entry loading a plugin under this name). Used incrementally: the shared
-// plugins-config aggregate is built up across every Plugin CR's own reconcile, each
-// contributing one name to the same PluginConfigKey.
-func (m *Manager) SyncProvides(key Key, name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	// Preserves any version already confirmed for this name.
-	version := m.provides[name].Version
-	m.provides[name] = provided{Key: key, Version: version}
-}
-
 // CheckRequirement reports whether name is currently provided at a version satisfying
 // minVersion. found=false means name isn't known to be provided yet, covering both "Falco
 // hasn't been observed" and "this capability was never reported." Callers should treat this as
@@ -356,7 +277,7 @@ func (m *Manager) CheckRequirement(name, minVersion string) (providedVersion str
 	m.mu.Lock()
 	p, ok := m.provides[name]
 	m.mu.Unlock()
-	// A structural entry with no confirmed version (e.g. registered via SyncProvides/WarmSync
+	// A structural entry with no confirmed version (e.g. registered via AddPluginConfig/WarmSync
 	// before Falco reports anything for it) is treated the same as not found.
 	if !ok || p.Version == "" {
 		return "", false, false, nil
@@ -368,54 +289,13 @@ func (m *Manager) CheckRequirement(name, minVersion string) (providedVersion str
 // CheckDependency checks primary then alternatives against one locked provider snapshot.
 // The first observed candidate determines the result, even when its version is incompatible.
 // A configured candidate awaiting observation blocks fallback until its version is known.
-func (m *Manager) CheckDependency(primary Requirement, alternatives []Requirement) (matchedName, providedVersion string, satisfied bool, err error) {
+func (m *Manager) CheckDependency(dependency commonv1alpha1.ArtifactMetaDependency) (matchedName, providedVersion string, satisfied bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.checkDependencyLocked(append(RequirementGroup{primary}, alternatives...), "")
+	return m.checkDependencyLocked(dependency, "")
 }
 
-// checkDependencyLocked follows Falco's candidate order and major-version compatibility.
-// excludedName simulates a plugin removal without changing the registry. Caller holds m.mu.
-func (m *Manager) checkDependencyLocked(group RequirementGroup, excludedName string) (
-	matchedName, providedVersion string, satisfied bool, err error,
-) {
-	if err := compat.ValidatePluginDependency(group); err != nil {
-		return "", "", false, err
-	}
-	for _, req := range group {
-		if req.Name == excludedName {
-			continue
-		}
-		p, found := m.provides[req.Name]
-		if !found || p.Removed {
-			continue
-		}
-		if p.Version == "" {
-			// Configured is not absent: Falco may already have loaded this candidate since
-			// our last observation. Do not install rules (or allow removal) via a later
-			// alternative while the earlier candidate's compatibility is still unknown.
-			return req.Name, "", false, nil
-		}
-		satisfied, err = compat.PluginVersionCompatible(p.Version, req.Version)
-		return req.Name, p.Version, satisfied, err
-	}
-	return "", "", false, nil
-}
-
-// versionSatisfies applies one special case: plugin_api_version compares by major-version
-// compatibility; other capabilities require at-least. Plugin dependencies are checked
-// separately by checkDependencyLocked.
-func versionSatisfies(name, available, required string) (bool, error) {
-	if name == compat.CapabilityPluginAPIVersion {
-		return compat.SemverMajorCompatible(available, required)
-	}
-	return compat.SemverAtLeast(available, required)
-}
-
-// RefreshFalcoVersions fetches Falco's current /versions snapshot and reconciles it with the
-// provides registry (see OnFalcoVersionsObserved). Returns the fetched snapshot so callers that
-// also want to inspect it directly (e.g. compat.VersionsWatcher, for its own change-diffing) can
-// do so without a second fetch.
+// RefreshFalcoVersions fetches Falco's current /versions snapshot and updates the provider registry.
 func (m *Manager) RefreshFalcoVersions(ctx context.Context) (*compat.Versions, error) {
 	versions, err := m.falcoFetcher.Fetch(ctx)
 	if err != nil {
@@ -430,10 +310,8 @@ func (m *Manager) RefreshFalcoVersions(ctx context.Context) (*compat.Versions, e
 // not-yet-confirmed to confirmed, a version bumping, or a confirmed name disappearing. Each call returns an
 // independent channel, so every subscriber sees every event.
 //
-// Events reacts to the Manager's own bookkeeping rather than compat.VersionsWatcher's diff of
-// Falco's raw /versions response, which is not a reliable proxy for this: a plugin's config can
-// be removed and re-added, clearing then repopulating this Manager's provides entry, while
-// Falco's reported version for that name never changes and the watcher's diff never fires.
+// Notifications reflect the effective registry, including explicit plugin removal, rather than
+// only differences between Falco observations.
 func (m *Manager) Events() <-chan event.GenericEvent {
 	ch := make(chan event.GenericEvent, 100)
 	m.mu.Lock()
@@ -442,21 +320,9 @@ func (m *Manager) Events() <-chan event.GenericEvent {
 	return ch
 }
 
-// notifySubscribers sends a non-blocking GenericEvent to every subscriber. If a subscriber
-// already has a pending event, the controller will pick it up on its next work cycle, making the
-// duplicate a no-op. Caller must hold m.mu.
-func (m *Manager) notifySubscribers() {
-	for _, ch := range m.subscribers {
-		select {
-		case ch <- event.GenericEvent{}:
-		default:
-		}
-	}
-}
-
 // OnFalcoVersionsObserved reconciles a complete Falco capability snapshot with the provides
 // registry. Existing (operator-tracked) entries (e.g. a plugin already registered via
-// AddPluginConfig/SyncProvides) get their Version filled in or updated, preserving their
+// AddPluginConfig) get their Version filled in or updated, preserving their
 // original Key. Explicitly removed entries stay unavailable until registered again.
 // Names not already tracked (Falco's own engine_version_semver/
 // plugin_api_version, or any plugin name Falco reports that the operator didn't configure) get a
@@ -503,43 +369,179 @@ func (m *Manager) OnFalcoVersionsObserved(v *compat.Versions) {
 		}
 	}
 	if changed {
-		m.notifySubscribers()
+		m.notifySubscribersLocked()
 	}
 }
 
-// blockedByOthers reports which currently-registered RequirementGroups would lose their only
-// satisfier if name stopped being provided. An empty result means it's safe to stop providing
-// name. Caller must hold m.mu.
-func (m *Manager) blockedByOthers(name string) []Key {
-	var blockedBy []Key
-	for key, groups := range m.requires {
-		for _, group := range groups {
-			if !slices.ContainsFunc(group, func(req Requirement) bool { return req.Name == name }) {
+// storeLocked tracks the on-disk result, including partial moves. Caller holds m.mu.
+func (m *Manager) storeLocked(ctx context.Context, namespace, name string, artifactPriority int32,
+	artifactType artifact.Type, medium artifact.Medium, result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
+	key := Key{Kind: kindForArtifactType(artifactType), Namespace: namespace, Name: name}
+	current := artifact.FindInstalled(m.installed[key], medium)
+	action, file, err := m.store.Store(ctx, current, name, artifactPriority, artifactType, medium, result)
+	if file != nil || err == nil {
+		m.upsertInstalledLocked(key, action, medium, file)
+	}
+	return action, file, err
+}
+
+// removeLocked releases dependencies only after the files have been removed. Caller holds m.mu.
+func (m *Manager) removeLocked(ctx context.Context, key Key, installed []artifactv1alpha1.InstalledArtifact) error {
+	if key.Kind == KindPluginConfig {
+		return fmt.Errorf("shared plugin configuration cannot be removed as an artifact")
+	}
+	if key.Kind == KindPlugin && m.pluginFilesReferencedLocked(installed) {
+		return fmt.Errorf("plugin %s/%s still has a configured library", key.Namespace, key.Name)
+	}
+	if err := m.store.Remove(ctx, installed); err != nil {
+		return err
+	}
+	entry := m.installed[key]
+	for _, a := range installed {
+		entry = slices.DeleteFunc(entry, func(file artifactv1alpha1.InstalledArtifact) bool { return file.Path == a.Path })
+	}
+	for slot := range m.rulesfiles {
+		if slot.Key == key && artifact.FindInstalled(entry, slot.Medium) == nil {
+			delete(m.rulesfiles, slot)
+		}
+	}
+	if len(entry) == 0 {
+		delete(m.installed, key)
+	} else {
+		m.installed[key] = entry
+	}
+	return nil
+}
+
+func (m *Manager) pluginFilesReferencedLocked(files []artifactv1alpha1.InstalledArtifact) bool {
+	for _, config := range m.pluginsConfig.Configs {
+		for _, file := range files {
+			if filepath.Clean(config.LibraryPath) == filepath.Clean(file.Path) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// upsertInstalledLocked applies a Store result to key's cache entry. Caller must hold m.mu.
+func (m *Manager) upsertInstalledLocked(key Key, action artifact.StoreAction, medium artifact.Medium, file *artifact.File) {
+	entry := m.installed[key]
+	artifact.UpdateInstalledStatus(&entry, action, medium, file)
+	if file != nil {
+		// A priority move can replace a path already tracked as a legacy duplicate.
+		seen := false
+		entry = slices.DeleteFunc(entry, func(installed artifactv1alpha1.InstalledArtifact) bool {
+			if installed.Path != file.Path {
+				return false
+			}
+			if seen {
+				return true
+			}
+			seen = true
+			return false
+		})
+	}
+	m.installed[key] = entry
+}
+
+// checkDependencyLocked follows Falco's candidate order and major-version compatibility.
+// excludedName simulates a plugin removal without changing the registry. Caller holds m.mu.
+func (m *Manager) checkDependencyLocked(dependency commonv1alpha1.ArtifactMetaDependency, excludedName string) (
+	matchedName, providedVersion string, satisfied bool, err error,
+) {
+	if err := compat.ValidatePluginDependency(dependency); err != nil {
+		return "", "", false, err
+	}
+	for i := 0; i <= len(dependency.Alternatives); i++ {
+		name, version := dependency.Name, dependency.Version
+		if i > 0 {
+			name, version = dependency.Alternatives[i-1].Name, dependency.Alternatives[i-1].Version
+		}
+		if name == excludedName {
+			continue
+		}
+		p, found := m.provides[name]
+		if !found || p.Removed {
+			continue
+		}
+		if p.Version == "" {
+			// Configured is not absent: Falco may already have loaded this candidate since
+			// our last observation. Do not install rules (or allow removal) via a later
+			// alternative while the earlier candidate's compatibility is still unknown.
+			return name, "", false, nil
+		}
+		satisfied, err = compat.PluginVersionCompatible(p.Version, version)
+		return name, p.Version, satisfied, err
+	}
+	return "", "", false, nil
+}
+
+// notifySubscribersLocked sends a non-blocking GenericEvent to every subscriber. If a subscriber
+// already has a pending event, the controller will pick it up on its next work cycle, making the
+// duplicate a no-op. Caller must hold m.mu.
+func (m *Manager) notifySubscribersLocked() {
+	for _, ch := range m.subscribers {
+		select {
+		case ch <- event.GenericEvent{}:
+		default:
+		}
+	}
+}
+
+// blockedByOthersLocked reports installed Rulesfiles with known dependencies that would
+// lose their only satisfier if name stopped being provided. Caller must hold m.mu.
+func (m *Manager) blockedByOthersLocked(name string) *BlockedError {
+	blocked := &BlockedError{Name: name}
+	blockedKeys := make(map[Key]struct{})
+	for slot, revisions := range m.rulesfiles {
+		if _, blocked := blockedKeys[slot.Key]; blocked {
+			continue
+		}
+		for _, revision := range revisions {
+			if revision.Metadata == nil {
 				continue
 			}
-			if _, _, satisfied, err := m.checkDependencyLocked(group, name); err != nil || !satisfied {
-				blockedBy = append(blockedBy, key)
+			for _, dependency := range revision.Metadata.Dependencies {
+				if dependency.Name != name && !slices.ContainsFunc(dependency.Alternatives,
+					func(candidate commonv1alpha1.ArtifactMetaDependencyVariant) bool { return candidate.Name == name }) {
+					continue
+				}
+				if _, _, satisfied, err := m.checkDependencyLocked(dependency, name); err != nil || !satisfied {
+					blocked.BlockedBy = append(blocked.BlockedBy, slot.Key)
+					blockedKeys[slot.Key] = struct{}{}
+					break
+				}
+			}
+			if _, ok := blockedKeys[slot.Key]; ok {
 				break
 			}
 		}
 	}
-	return blockedBy
-}
-
-// RequirementGroupsFromDependencies converts ArtifactMeta.Dependencies (as populated by the
-// instance operator on a Rulesfile's status) into the form Sync expects: each dependency's
-// primary plus its alternatives, retaining versions and order. Returns nil for empty input.
-func RequirementGroupsFromDependencies(deps []commonv1alpha1.ArtifactMetaDependency) []RequirementGroup {
-	if len(deps) == 0 {
+	if len(blocked.BlockedBy) == 0 {
 		return nil
 	}
-	groups := make([]RequirementGroup, 0, len(deps))
-	for _, d := range deps {
-		group := RequirementGroup{{Name: d.Name, Version: d.Version}}
-		for _, alt := range d.Alternatives {
-			group = append(group, Requirement{Name: alt.Name, Version: alt.Version})
-		}
-		groups = append(groups, group)
+	return blocked
+}
+
+// kindForArtifactType maps an artifact.Type to the Kind its installed-cache entries use.
+func kindForArtifactType(t artifact.Type) Kind {
+	switch t {
+	case artifact.TypePlugin:
+		return KindPlugin
+	case artifact.TypeConfig:
+		return KindConfig
+	default:
+		return KindRulesfile
 	}
-	return groups
+}
+
+// versionSatisfies applies one special case: plugin_api_version compares by major-version
+// compatibility; other capabilities require at-least. Plugin dependencies are checked
+// separately by checkDependencyLocked.
+func versionSatisfies(name, available, required string) (bool, error) {
+	if name == compat.CapabilityPluginAPIVersion {
+		return compat.SemverMajorCompatible(available, required)
+	}
+	return compat.SemverAtLeast(available, required)
 }

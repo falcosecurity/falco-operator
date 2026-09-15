@@ -20,14 +20,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -65,6 +69,7 @@ func TestWarmSync_PopulatesFromExistingArtifactNodes(t *testing.T) {
 
 	plugin := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "ns"},
+		Spec:       artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{}},
 	}
 	pluginNode := &artifactv1alpha1.ArtifactNode{
 		ObjectMeta: metav1.ObjectMeta{
@@ -106,14 +111,357 @@ func TestWarmSync_PopulatesFromExistingArtifactNodes(t *testing.T) {
 		Build()
 
 	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	before := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: rulesfile.Namespace, Name: rulesfile.Name}
+	installTestRulesfile(t, before, key, rulesfile.Status.ArtifactMeta.Dependencies)
+	_, _, err := before.AddPluginConfig(t.Context(), plugin, &artifact.Fetcher{})
+	require.NoError(t, err)
 	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
-	require.NoError(t, nodeartifacts.WarmSync(context.Background(), cl, mgr, "ns", "minikube"))
+	require.NoError(t, nodeartifacts.WarmSync(t.Context(), cl, mgr, "ns", "minikube"))
 
-	// After warm sync, removing "container" must be blocked: the Rulesfile's requirement and the
-	// Plugin's provides were both registered from durable status.
-	err := mgr.RemovePluginConfigByName(context.Background(), &artifact.Fetcher{}, "container", "container")
-	require.Error(t, err)
+	// Disk files are observed, but neither previous-process nor parent-status dependencies
+	// are imported. A normal source reconcile must register current checked dependencies.
+	assert.Equal(t, before.GetInstalled(key), mgr.GetInstalled(key))
+	require.NoError(t, mgr.RemovePluginConfig(t.Context(), &artifact.Fetcher{}, plugin))
+	assert.NotEmpty(t, mgr.GetInstalled(key), "dropping historical dependency protection does not remove the rules file")
+}
+
+func TestWarmSync_ConfigNamedPluginsConfigStaysSeparate(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		medium     artifact.Medium
+		priority   int32
+		withPlugin bool
+	}{
+		{name: "inline without aggregate", medium: artifact.MediumInline, priority: 50},
+		{name: "configmap without aggregate", medium: artifact.MediumConfigMap, priority: 99},
+		{name: "inline alongside aggregate", medium: artifact.MediumInline, priority: 50, withPlugin: true},
+		{name: "configmap alongside aggregate", medium: artifact.MediumConfigMap, priority: 99, withPlugin: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+			versions := compatfake.NewMockVersionsFetcher(nil)
+			before := nodeartifacts.NewManager(store, versions)
+			fetcher := &artifact.Fetcher{}
+			key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns", Name: "plugins-config"}
+			content, err := fetcher.FetchInline(ctx, []byte("json_output: true\n"))
+			require.NoError(t, err)
+			_, configFile, err := before.StoreConfig(ctx, key.Namespace, key.Name, scenario.priority, scenario.medium, content)
+			require.NoError(t, err)
+			require.NotNil(t, configFile)
+			var sharedFile *artifact.File
+			var plugin *artifactv1alpha1.Plugin
+			if scenario.withPlugin {
+				plugin = testPlugin("container")
+				plugin.Namespace = key.Namespace
+				plugin.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{}
+				_, sharedFile, err = before.AddPluginConfig(ctx, plugin, fetcher)
+				require.NoError(t, err)
+				require.NotNil(t, sharedFile)
+			}
+			node := &artifactv1alpha1.ArtifactNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "config--plugins-config--node", Namespace: key.Namespace,
+					OwnerReferences: []metav1.OwnerReference{controllerRef("Config", key.Name)}},
+				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node"},
+			}
+			objects := []client.Object{node}
+			if plugin != nil {
+				objects = append(objects, plugin, &artifactv1alpha1.ArtifactNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "plugin--container--node", Namespace: key.Namespace,
+						OwnerReferences: []metav1.OwnerReference{controllerRef("Plugin", plugin.Name)}},
+					Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node"},
+				})
+			}
+			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).WithObjects(objects...).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
+			after := nodeartifacts.NewManager(store, versions)
+
+			require.NoError(t, nodeartifacts.WarmSync(ctx, cl, after, key.Namespace, node.Spec.NodeName))
+
+			assert.Equal(t, configFile, after.FindInstalled(key, scenario.medium))
+			assert.Equal(t, sharedFile, after.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline))
+			assert.Equal(t, content.Content, fs.Files[configFile.Path])
+			require.NoError(t, after.Remove(ctx, key))
+			assert.NotContains(t, fs.Files, configFile.Path)
+			if sharedFile != nil {
+				intact, verifyErr := after.Verify(ctx, sharedFile)
+				require.NoError(t, verifyErr)
+				assert.True(t, intact, "removing the Config CR must not alter the shared plugin aggregate")
+			}
+		})
+	}
+}
+
+func TestWarmSync_PreservesOtherInstalledPluginConfigs(t *testing.T) {
+	const update = "update"
+	for _, operation := range []string{update, "delete"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+			versions := compatfake.NewMockVersionsFetcher(nil)
+			before := nodeartifacts.NewManager(store, versions)
+			fetcher := &artifact.Fetcher{}
+			pluginA := &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "plugin-a", Namespace: "ns", UID: "uid-a"},
+				Spec:       artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{}, Config: &artifactv1alpha1.PluginConfig{Name: "custom-a"}},
+			}
+			pluginB := &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "plugin-b", Namespace: "ns", UID: "uid-b"},
+				Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{}, Config: &artifactv1alpha1.PluginConfig{
+					Name: "custom-b", LibraryPath: "/plugins/installed-b.so", OpenParams: "installed-b",
+					InitConfig: &apiextensionsv1.JSON{Raw: []byte(`{"nested": {"value": "installed"}}`)},
+				}},
+			}
+			objects := make([]client.Object, 0, 5)
+			for _, plugin := range []*artifactv1alpha1.Plugin{pluginA, pluginB} {
+				_, _, err := before.AddPluginConfig(ctx, plugin, fetcher)
+				require.NoError(t, err)
+				objects = append(objects, &artifactv1alpha1.ArtifactNode{
+					ObjectMeta: metav1.ObjectMeta{Name: "plugin--" + plugin.Name + "--node", Namespace: plugin.Namespace,
+						OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(plugin, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}},
+					Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node"},
+				})
+			}
+			rulesKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+			installTestRulesfile(t, before, rulesKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "custom-b", Version: "1.0.0"}})
+			objects = append(objects, &artifactv1alpha1.ArtifactNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "rulesfile--rules--node", Namespace: "ns",
+					OwnerReferences: []metav1.OwnerReference{controllerRef("Rulesfile", rulesKey.Name)}},
+				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node"},
+			})
+			installed := before.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline)
+			require.NotNil(t, installed)
+			readEntries := func() (map[string]any, []any) {
+				t.Helper()
+				var config map[string]any
+				require.NoError(t, yaml.Unmarshal(fs.Files[installed.Path], &config))
+				entries := make(map[string]any)
+				for _, entry := range config["plugins"].([]any) {
+					plugin := entry.(map[string]any)
+					entries[plugin["name"].(string)] = plugin
+				}
+				loads, _ := config["load_plugins"].([]any)
+				return entries, loads
+			}
+			original, _ := readEntries()
+			desiredB := pluginB.DeepCopy()
+			desiredB.Generation = 2
+			desiredB.Spec.Config.OpenParams = "not-installed"
+			desiredB.Spec.Config.InitConfig = &apiextensionsv1.JSON{Raw: []byte(`{"nested":{"value":"not-installed"}}`)}
+			// The current generation has not passed the normal controller's gate. WarmSync
+			// uses its alias only for ownership, never to publish these desired config bytes.
+			objects = append(objects, pluginA, desiredB)
+			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).WithObjects(objects...).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
+			after := nodeartifacts.NewManager(store, versions)
+
+			require.NoError(t, nodeartifacts.WarmSync(ctx, cl, after, "ns", "node"))
+			afterRejection, _ := readEntries()
+			assert.Equal(t, original, afterRejection, "the unapplied desired config must not alter any installed entry")
+			if operation == update {
+				updatedA := pluginA.DeepCopy()
+				updatedA.Spec.Config.OpenParams = "updated-a"
+				_, _, err := after.AddPluginConfig(ctx, updatedA, fetcher)
+				require.NoError(t, err)
+			} else {
+				identity := &artifactv1alpha1.Plugin{ObjectMeta: *pluginA.ObjectMeta.DeepCopy()}
+				require.NoError(t, after.RemovePluginConfig(ctx, fetcher, identity), "deletion must resolve the installed custom name without spec")
+			}
+
+			entries, loads := readEntries()
+			assert.Equal(t, original["custom-b"], entries["custom-b"], "B's complete installed config must survive an unrelated write")
+			assert.Contains(t, loads, "custom-b")
+			if operation == update {
+				require.Contains(t, entries, "custom-a")
+				assert.Equal(t, "updated-a", entries["custom-a"].(map[string]any)["open_params"])
+			} else {
+				assert.NotContains(t, entries, "custom-a")
+				assert.NotContains(t, loads, "custom-a")
+			}
+		})
+	}
+}
+
+func TestWarmSync_PluginConfigUsesOnlyCurrentAssignments(t *testing.T) {
+	const unchanged = "unchanged"
+	const renamed, aliasCollision, otherPluginName = "renamed", "alias collision", "plugin-b"
+	const otherPluginUID = "uid-b"
+	for _, scenario := range []string{unchanged, renamed, "missing parent", "stale UID", "deleting assignment",
+		"deleting parent", "OCI removed", "other node", "non-controller owner", aliasCollision, "duplicate assignment"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+			versions := compatfake.NewMockVersionsFetcher(nil)
+			before := nodeartifacts.NewManager(store, versions)
+			plugin := &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "plugin-a", Namespace: "ns", UID: "uid-a"},
+				Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{},
+					Config: &artifactv1alpha1.PluginConfig{Name: "installed-alias", OpenParams: "installed"}},
+			}
+			_, configFile, err := before.AddPluginConfig(ctx, plugin, &artifact.Fetcher{})
+			require.NoError(t, err)
+			require.NotNil(t, configFile)
+			node := &artifactv1alpha1.ArtifactNode{
+				ObjectMeta: metav1.ObjectMeta{Name: "plugin-a-node", Namespace: "ns",
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(plugin, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}},
+				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node"},
+			}
+			objects := make([]client.Object, 0, 4)
+			objects = append(objects, node, plugin)
+			keep := false
+			switch scenario {
+			case unchanged:
+				keep = true
+			case renamed:
+				plugin.Spec.Config.Name = "current-alias"
+			case "missing parent":
+				objects = objects[:1]
+			case "stale UID":
+				plugin.UID = "new-uid"
+			case "deleting assignment":
+				now := metav1.Now()
+				node.DeletionTimestamp, node.Finalizers = &now, []string{"test/finalizer"}
+			case "deleting parent":
+				now := metav1.Now()
+				plugin.DeletionTimestamp, plugin.Finalizers = &now, []string{"test/finalizer"}
+			case "OCI removed":
+				plugin.Spec.OCIArtifact = nil
+			case "other node":
+				node.Spec.NodeName = "other"
+			case "non-controller owner":
+				node.OwnerReferences[0].Controller = new(false)
+			case aliasCollision:
+				other := plugin.DeepCopy()
+				other.Name, other.UID = otherPluginName, otherPluginUID
+				otherNode := node.DeepCopy()
+				otherNode.Name = "plugin-b-node"
+				otherNode.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(other, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}
+				objects = append(objects, other, otherNode)
+			case "duplicate assignment":
+				otherNode := node.DeepCopy()
+				otherNode.Name = "duplicate-node"
+				objects = append(objects, otherNode)
+				keep = true
+			}
+			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).WithObjects(objects...).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
+			after := nodeartifacts.NewManager(store, versions)
+			writes := len(fs.WriteCalls)
+
+			require.NoError(t, nodeartifacts.WarmSync(ctx, cl, after, "ns", "node"), "a user alias collision must not prevent controller startup")
+			var content map[string]any
+			require.NoError(t, yaml.Unmarshal(fs.Files[configFile.Path], &content))
+			if keep {
+				assert.Equal(t, []any{"installed-alias"}, content["load_plugins"])
+				assert.Len(t, fs.WriteCalls, writes, "unchanged observed config must not be rewritten")
+			} else {
+				assert.Empty(t, content["load_plugins"])
+				assert.Empty(t, content["plugins"])
+			}
+			if scenario == renamed {
+				_, _, err = after.AddPluginConfig(ctx, plugin, &artifact.Fetcher{})
+				require.NoError(t, err)
+				assert.NotContains(t, string(fs.Files[configFile.Path]), "installed-alias")
+				assert.Contains(t, string(fs.Files[configFile.Path]), "current-alias")
+			}
+			if scenario == aliasCollision {
+				_, _, err = after.AddPluginConfig(ctx, plugin, &artifact.Fetcher{})
+				require.NoError(t, err, "normal reconciliation can claim an unassigned current alias")
+				other := plugin.DeepCopy()
+				other.Name, other.UID = otherPluginName, otherPluginUID
+				_, _, err = after.AddPluginConfig(ctx, other, &artifact.Fetcher{})
+				require.Error(t, err, "the competing current owner must not overwrite the first installation")
+			}
+			for path := range fs.Files {
+				assert.False(t, strings.HasSuffix(path, ".json"), "no journal is created: %s", path)
+			}
+		})
+	}
+}
+
+func TestWarmSync_PluginConfigRepairPrecedesOrphanRemoval(t *testing.T) {
+	const namespace = "ns"
+	for _, corrupt := range []bool{false, true} {
+		name := "valid orphan config"
+		if corrupt {
+			name = "corrupt config"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+			versions := compatfake.NewMockVersionsFetcher(nil)
+			before := nodeartifacts.NewManager(store, versions)
+			fetcher := &artifact.Fetcher{}
+			plugin := testPlugin("orphan")
+			plugin.Namespace, plugin.UID = namespace, "old-uid"
+			plugin.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{}
+			result, err := fetcher.FetchInline(ctx, []byte("orphan binary"))
+			require.NoError(t, err)
+			_, binary, err := before.StorePlugin(ctx, plugin, result)
+			require.NoError(t, err)
+			_, config, err := before.AddPluginConfig(ctx, plugin, fetcher)
+			require.NoError(t, err)
+			if corrupt {
+				fs.Files[config.Path] = []byte("plugins: [")
+			}
+			original := string(fs.Files[config.Path])
+			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
+			fs.WriteErrFor = map[string]error{config.Path + ".tmp": assert.AnError}
+			after := nodeartifacts.NewManager(store, versions)
+
+			require.Error(t, nodeartifacts.WarmSync(ctx, cl, after, plugin.Namespace, "node"))
+			assert.Equal(t, original, string(fs.Files[config.Path]), "failed atomic replacement preserves the observed bytes")
+			assert.Contains(t, fs.Files, binary.Path, "never delete a binary before its config was removed successfully")
+			assert.NotContains(t, fs.RemoveCalls, binary.Path)
+
+			fs.WriteErrFor = nil
+			after = nodeartifacts.NewManager(store, versions)
+			require.NoError(t, nodeartifacts.WarmSync(ctx, cl, after, plugin.Namespace, "node"))
+			assert.NotContains(t, fs.Files, binary.Path)
+			var repaired map[string]any
+			require.NoError(t, yaml.Unmarshal(fs.Files[config.Path], &repaired))
+			assert.Empty(t, repaired["plugins"])
+			assert.Empty(t, repaired["load_plugins"])
+			writes := len(fs.WriteCalls)
+			require.NoError(t, nodeartifacts.WarmSync(ctx, cl, nodeartifacts.NewManager(store, versions), plugin.Namespace, "node"))
+			assert.Len(t, fs.WriteCalls, writes, "a repaired aggregate is a no-op at the following restart")
+		})
+	}
+}
+
+func TestWarmSync_CurrentPluginListFailure(t *testing.T) {
+	for _, failPlugins := range []bool{false, true} {
+		name := "ArtifactNodes"
+		if failPlugins {
+			name = "Plugins"
+		}
+		t.Run(name, func(t *testing.T) {
+			fs := fsfake.NewMockFileSystem()
+			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
+			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						_, plugins := list.(*artifactv1alpha1.PluginList)
+						if plugins == failPlugins {
+							return assert.AnError
+						}
+						return cl.List(ctx, list, opts...)
+					},
+				}).Build()
+			err := nodeartifacts.WarmSync(t.Context(), cl, nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil)), "ns", "node")
+			require.ErrorIs(t, err, assert.AnError)
+			assert.Empty(t, fs.WriteCalls)
+			assert.Empty(t, fs.RemoveCalls)
+		})
+	}
 }
 
 // TestWarmSync_IgnoresOtherNodes verifies ArtifactNodes that exist only on a different node are
@@ -170,7 +518,7 @@ func TestWarmSync_IgnoresOtherNodes(t *testing.T) {
 	// "other-node"'s entries.
 	require.NoError(t, nodeartifacts.WarmSync(context.Background(), cl, mgr, "ns", "minikube"))
 
-	require.NoError(t, mgr.RemovePluginConfigByName(context.Background(), &artifact.Fetcher{}, "container", "container"))
+	require.NoError(t, mgr.RemovePluginConfig(context.Background(), &artifact.Fetcher{}, plugin))
 }
 
 // TestWarmSync_SeedsInstalledCacheFromDiskEvenWhenStatusDoesNotKnowAboutIt simulates the crash
@@ -299,13 +647,9 @@ func TestWarmSync_NeverPatchesStatus(t *testing.T) {
 	assert.Equal(t, beforeRV, got.ResourceVersion, "no patch should be issued when disk already agrees with status")
 }
 
-// TestWarmSync_RecoversSpecHashFromStatusWhenContentMatches reproduces a real regression: cache
-// entries seeded from disk never carried SpecHash (ScanAll can only recover ContentHash from file
-// bytes), so every OCI-sourced artifact looked like its parent spec had changed on the first
-// reconcile after every sidecar restart, forcing a needless re-fetch from the OCI artifact server.
-// When status still describes the exact same on-disk content (matching ContentHash), WarmSync
-// must recover SpecHash from it instead of leaving the seeded entry blank.
-func TestWarmSync_RecoversSpecHashFromStatusWhenContentMatches(t *testing.T) {
+// Status does not establish the installed OCI identity; reconciliation must fetch
+// the current pinned artifact before recording its spec hash again.
+func TestWarmSync_DoesNotRecoverSpecHashFromStatus(t *testing.T) {
 	sch := newWarmSyncTestScheme(t)
 
 	rulesfile := &artifactv1alpha1.Rulesfile{
@@ -344,8 +688,8 @@ func TestWarmSync_RecoversSpecHashFromStatusWhenContentMatches(t *testing.T) {
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
 	ociEntry := mgr.FindInstalled(key, artifact.MediumOCI)
 	require.NotNil(t, ociEntry)
-	assert.Equal(t, "spec-abc", ociEntry.SpecHash,
-		"SpecHash must be recovered from status when content on disk still matches it")
+	assert.Empty(t, ociEntry.SpecHash,
+		"even matching content does not make status a source of installed spec identity")
 }
 
 // TestWarmSync_FailsWhenScanAllErrors reproduces a real bug: a ScanAll error for one artifact
@@ -365,7 +709,7 @@ func TestWarmSync_FailsWhenScanAllErrors(t *testing.T) {
 
 	fsys := fsfake.NewMockFileSystem()
 	fsys.Files["/plugins/json.so"] = []byte("plugin content")
-	fsys.ReadErr = assert.AnError
+	fsys.ReadErrFor = map[string]error{"/plugins/json.so": assert.AnError}
 	store := &artifact.LocalStore{FS: fsys, Dirs: artifact.ArtifactDirs{Rulesfile: "/rulesfiles", Plugin: "/plugins", Config: "/configs"}}
 	mgr := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 
@@ -374,7 +718,7 @@ func TestWarmSync_FailsWhenScanAllErrors(t *testing.T) {
 	require.Error(t, err, "a ScanAll failure must fail WarmSync instead of leaving that Kind's cache silently unseeded")
 }
 
-func TestWarmSync_SkipsNodesBeingDeleted(t *testing.T) {
+func TestWarmSync_DeletingNodesWithoutFilesDoNotBlockRemoval(t *testing.T) {
 	sch := newWarmSyncTestScheme(t)
 	now := metav1.Now()
 	plugin := &artifactv1alpha1.Plugin{
@@ -425,7 +769,6 @@ func TestWarmSync_SkipsNodesBeingDeleted(t *testing.T) {
 
 	require.NoError(t, nodeartifacts.WarmSync(context.Background(), cl, mgr, "ns", "minikube"))
 
-	// Both nodes are being deleted, so neither the Plugin's provides nor the Rulesfile's
-	// requires should have been registered; removal must be allowed.
-	require.NoError(t, mgr.RemovePluginConfigByName(context.Background(), &artifact.Fetcher{}, "container", "container"))
+	// Neither obsolete status path exists; terminating objects do not invent installed dependencies.
+	require.NoError(t, mgr.RemovePluginConfig(context.Background(), &artifact.Fetcher{}, plugin))
 }

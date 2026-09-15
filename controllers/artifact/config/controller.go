@@ -192,7 +192,7 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 	// OwnerReferences never carry a namespace; nodeObj's own namespace is the config's.
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: nodeObj.Namespace, Name: configName}
 
-	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
+	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed config artifacts from disk")
 		return false, err
 	}
@@ -329,7 +329,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 				))
 				return err
 			}
-			inlineAction, _, err := r.store.Store(ctx, config.Namespace, config.Name, p, artifact.TypeConfig, artifact.MediumInline, result)
+			inlineAction, _, err := r.store.StoreConfig(ctx, config.Namespace, config.Name, p, artifact.MediumInline, result)
 			if err != nil {
 				logger.Error(err, "unable to store inline config")
 				artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
@@ -360,7 +360,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 			))
 			return err
 		}
-		cmAction, _, err := r.store.Store(ctx, config.Namespace, config.Name, p, artifact.TypeConfig, artifact.MediumConfigMap, result)
+		cmAction, _, err := r.store.StoreConfig(ctx, config.Namespace, config.Name, p, artifact.MediumConfigMap, result)
 		if err != nil {
 			logger.Error(err, "unable to store config from ConfigMap reference")
 			artifact.RecordWarning(r.recorder, config,

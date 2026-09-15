@@ -41,6 +41,11 @@ func (OS) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(name) //nolint:gosec // This is intentional - the filesystem abstraction needs to accept variable paths
 }
 
+// MkdirAll creates a directory and any missing parents.
+func (OS) MkdirAll(path string, perm fs.FileMode) error {
+	return os.MkdirAll(path, perm)
+}
+
 // WriteFile writes data to the file at the given path.
 func (OS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(name, data, perm)

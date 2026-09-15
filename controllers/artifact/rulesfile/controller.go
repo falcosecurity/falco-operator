@@ -18,9 +18,11 @@ package rulesfile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
@@ -181,10 +183,14 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	metadata, err := verifiedRulesfileMetadata(rulesfile, sources)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Enforce rulesfile compatibility (OCI requirements and plugin dependencies). A blocked
 	// reconcile does not touch disk, so any previously installed rulesfile stays in place.
-	skip, compatErr := r.enforceRulesfileCompatibility(ctx, rulesfile, nodeObj, sources)
+	skip, compatErr := r.enforceRulesfileCompatibility(ctx, rulesfile, nodeObj, metadata)
 	if compatErr != nil {
 		return ctrl.Result{}, compatErr
 	}
@@ -215,17 +221,19 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	// Register this rulesfile's current dependencies with the shared node artifact manager
-	// before writing anything, so a concurrent Plugin removal's blocked-by check can see them
-	// (avoids a race with ensureRulesfile's own write).
-	r.store.Sync(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
-		nodeartifacts.RequirementGroupsFromDependencies(dependenciesOf(rulesfile)))
-
 	// Ensure the rulesfile artifacts are on the local filesystem. A transient OCI-fetch failure
 	// (the artifact server hasn't cached this yet, or a network blip) requeues via RequeueAfter
 	// instead of returning a reconcile error, avoiding tying up the worker for controller-runtime's
 	// own retry backoff.
-	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj, sources); err != nil {
+	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj, sources, metadata); err != nil {
+		if dependencyErr, ok := errors.AsType[*nodeartifacts.DependencyError](err); ok {
+			installed := len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) > 0
+			_, reason, message := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, installed, dependencyErr.Error())
+			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
+				metav1.ConditionFalse, reason, message, rulesfile.Generation,
+			))
+			return ctrl.Result{}, nil // Provider changes will requeue this node.
+		}
 		return controllerhelper.ResultForEnsureError(logger, err)
 	}
 
@@ -245,8 +253,7 @@ func (r *RulesfileReconciler) handleDeletion(ctx context.Context, nodeObj *artif
 
 	logger.Info("RulesfileNode marked for deletion, cleaning up")
 
-	// Resolves the rulesfile name from the ownerRef: needed both to key the installed-cache
-	// lookup below and, unchanged from before, to forget its dependency registration.
+	// Resolve the owner name to clean up its installed files and dependency registrations.
 	var rulesfileName string
 	for _, ref := range nodeObj.OwnerReferences {
 		if ref.Kind == controllerhelper.KindRulesfile {
@@ -258,14 +265,9 @@ func (r *RulesfileReconciler) handleDeletion(ctx context.Context, nodeObj *artif
 	// nodeObj's own namespace is the rulesfile's.
 	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: nodeObj.Namespace, Name: rulesfileName}
 
-	if err := r.store.Remove(ctx, key, r.store.GetInstalled(key)); err != nil {
+	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed rulesfile artifacts from disk")
 		return false, err
-	}
-
-	// Forget this rulesfile's dependencies so a Plugin removal blocked on them can proceed.
-	if rulesfileName != "" {
-		r.store.Sync(key, nil)
 	}
 
 	patch := client.MergeFrom(nodeObj.DeepCopy())
@@ -288,17 +290,35 @@ func (r *RulesfileReconciler) getParentRulesfile(ctx context.Context, nodeObj *a
 	return rulesfile, nil
 }
 
-// dependenciesOf returns rulesfile's declared plugin dependencies, or nil if ArtifactMeta
-// hasn't been populated yet (instance operator hasn't fetched it).
-func dependenciesOf(rulesfile *artifactv1alpha1.Rulesfile) []commonv1alpha1.ArtifactMetaDependency {
-	if rulesfile.Status.ArtifactMeta == nil {
-		return nil
+// verifiedRulesfileMetadata returns metadata only when it describes this source snapshot.
+// A nil result means unknown, not a verified absence of dependencies.
+func verifiedRulesfileMetadata(rulesfile *artifactv1alpha1.Rulesfile, sources *artifact.RulesfileSources) (*commonv1alpha1.ArtifactMeta, error) {
+	metadata := rulesfile.Status.ArtifactMeta
+	if metadata == nil {
+		return nil, nil
 	}
-	return rulesfile.Status.ArtifactMeta.Dependencies
+	sourcesHash, err := sources.Hash()
+	if err != nil {
+		return nil, err
+	}
+	if rulesfile.Status.ArtifactMetaSourcesHash != sourcesHash {
+		return nil, nil
+	}
+	if sources.OCIArtifact != nil {
+		specHash, err := sources.OCISpecHash()
+		if err != nil {
+			return nil, err
+		}
+		validDigest := digest.Digest(metadata.Digest).Validate() == nil
+		if !artifact.ArtifactMetaCacheHit(metadata, specHash) || !validDigest {
+			return nil, nil
+		}
+	}
+	return metadata, nil
 }
 
 // SetupWithManager registers the controller with the Manager.
-// versionEvents is the channel produced by compat.VersionsWatcher; a GenericEvent on this
+// versionEvents is the channel produced by nodeartifacts.Manager; a GenericEvent on this
 // channel causes all RulesfileNodes on this node to be re-enqueued so they re-evaluate
 // their plugin/engine dependencies against the updated Falco capability set.
 func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
@@ -407,7 +427,7 @@ func (r *RulesfileReconciler) findNodeObjectsForSecret(ctx context.Context, secr
 }
 
 // findAllNodeObjectsOnVersionChange enqueues every RulesfileNode on this node when
-// the VersionsWatcher detects a change in Falco's capability set.
+// the manager detects a change in the effective provider registry.
 func (r *RulesfileReconciler) findAllNodeObjectsOnVersionChange(ctx context.Context, _ client.Object) []reconcile.Request {
 	logger := log.FromContext(ctx)
 	nodeList := &artifactv1alpha1.ArtifactNodeList{}
@@ -426,12 +446,20 @@ func (r *RulesfileReconciler) findAllNodeObjectsOnVersionChange(ctx context.Cont
 	return reqs
 }
 
+// storeRulesfile commits one source together with the checked bundle's dependencies.
+func (r *RulesfileReconciler) storeRulesfile(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile,
+	medium artifact.Medium, result artifact.FetchResult, metadata *commonv1alpha1.ArtifactMeta,
+) (artifact.StoreAction, *artifact.File, error) {
+	return r.store.StoreRulesfile(ctx, rulesfile.Namespace, rulesfile.Name, rulesfile.Spec.Priority, medium, result,
+		metadata, r.enforceRequirements)
+}
+
 // ensureRulesfile ensures the rulesfile artifacts are stored on the filesystem.
 // For each source medium (oci, inline, configmap), stale files are cleaned up first
 // if the medium is no longer active in the spec, then the active mediums are fetched/stored.
 func (r *RulesfileReconciler) ensureRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
-	sources *artifact.RulesfileSources,
+	sources *artifact.RulesfileSources, metadata *commonv1alpha1.ArtifactMeta,
 ) error {
 	if err := r.cleanupStaleMedium(ctx, rulesfile, nodeObj, sources.OCIArtifact != nil,
 		artifact.MediumOCI, commonv1alpha1.ConditionOCIArtifactProgrammed.String()); err != nil {
@@ -447,17 +475,17 @@ func (r *RulesfileReconciler) ensureRulesfile(
 	}
 
 	if sources.OCIArtifact != nil {
-		if err := r.ensureOCIRulesfile(ctx, rulesfile, nodeObj); err != nil {
+		if err := r.ensureOCIRulesfile(ctx, rulesfile, nodeObj, metadata); err != nil {
 			return err
 		}
 	}
 	if sources.InlineRules != nil {
-		if err := r.ensureInlineRulesfile(ctx, rulesfile, nodeObj, sources.InlineRules); err != nil {
+		if err := r.ensureInlineRulesfile(ctx, rulesfile, nodeObj, sources.InlineRules, metadata); err != nil {
 			return err
 		}
 	}
 	if sources.ConfigMap != nil {
-		if err := r.ensureConfigMapRulesfile(ctx, rulesfile, nodeObj, *sources.ConfigMap); err != nil {
+		if err := r.ensureConfigMapRulesfile(ctx, rulesfile, nodeObj, *sources.ConfigMap, metadata); err != nil {
 			return err
 		}
 	}
@@ -496,36 +524,33 @@ func (r *RulesfileReconciler) cleanupStaleMedium(
 // OCIArtifactProgrammed condition. Skips the fetch when the disk copy is already known-good.
 func (r *RulesfileReconciler) ensureOCIRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
+	metadata *commonv1alpha1.ArtifactMeta,
 ) error {
 	logger := log.FromContext(ctx)
 	gen := rulesfile.GetGeneration()
-	p := rulesfile.Spec.Priority
 
-	parentSpecHash := ""
+	parentSpecHash, err := artifact.ComputeOCIArtifactSpecHash(rulesfile.Spec.OCIArtifact)
+	if err != nil {
+		return err
+	}
 	expectedDigest := ""
-	if rulesfile.Status.ArtifactMeta != nil {
-		parentSpecHash = rulesfile.Status.ArtifactMeta.SpecHash
+	// Local source changes may leave aggregate metadata stale without changing the OCI pin.
+	if artifact.ArtifactMetaCacheHit(rulesfile.Status.ArtifactMeta, parentSpecHash) {
 		expectedDigest = rulesfile.Status.ArtifactMeta.Digest
 	}
 	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
 	current := r.store.FindInstalled(key, artifact.MediumOCI)
 
-	// Decide whether to hit the artifact server.
-	// Skip only when the spec hash is unchanged AND the disk file is intact.
-	needFetch := current == nil || current.SpecHash != parentSpecHash
-	if !needFetch {
-		if ok, err := r.store.Verify(ctx, current); err != nil {
-			logger.V(3).Info("OCI artifact disk verify failed; re-fetching", "err", err)
-			needFetch = true
-		} else if !ok {
-			logger.V(4).Info("OCI artifact missing or corrupted on disk; re-fetching")
-			needFetch = true
-		} else {
-			logger.V(4).Info("OCI artifact verified on disk; skipping fetch")
+	// Spec equality alone cannot identify the resolved revision of a floating tag.
+	synced := false
+	if current != nil && current.SpecHash == parentSpecHash && current.Priority == rulesfile.Spec.Priority {
+		synced, err = r.store.SyncRulesfileDependencies(ctx, key, artifact.MediumOCI, metadata, r.enforceRequirements)
+		if err != nil {
+			return err
 		}
 	}
 
-	if needFetch {
+	if !synced {
 		result, err := r.fetcher.FetchOCI(ctx, rulesfile.Namespace, rulesfile.Name, artifact.TypeRulesfile, expectedDigest)
 		if err != nil {
 			logger.Error(err, "unable to fetch Rulesfile OCI artifact")
@@ -536,7 +561,7 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 			))
 			return err
 		}
-		ociAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumOCI, result)
+		ociAction, newFile, err := r.storeRulesfile(ctx, rulesfile, artifact.MediumOCI, result, metadata)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile OCI artifact")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
@@ -567,11 +592,10 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 // the InlineArtifactProgrammed condition.
 func (r *RulesfileReconciler) ensureInlineRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
-	inlineRules *apiextensionsv1.JSON,
+	inlineRules *apiextensionsv1.JSON, metadata *commonv1alpha1.ArtifactMeta,
 ) error {
 	logger := log.FromContext(ctx)
 	gen := rulesfile.GetGeneration()
-	p := rulesfile.Spec.Priority
 
 	inlineRulesData, err := common.JSONRawToYAML(inlineRules)
 	if err != nil {
@@ -594,7 +618,7 @@ func (r *RulesfileReconciler) ensureInlineRulesfile(
 			))
 			return err
 		}
-		inlineAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumInline, result)
+		inlineAction, newFile, err := r.storeRulesfile(ctx, rulesfile, artifact.MediumInline, result, metadata)
 		if err != nil {
 			logger.Error(err, "unable to store Rulesfile inline rules")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonInlineRulesStoreFailed, artifact.MessageFormatInlineRulesStoreFailed, err.Error())
@@ -645,12 +669,11 @@ func (r *RulesfileReconciler) resolveRulesfileSources(
 // ConfigMapArtifactProgrammed condition.
 func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
-	result artifact.FetchResult,
+	result artifact.FetchResult, metadata *commonv1alpha1.ArtifactMeta,
 ) error {
 	logger := log.FromContext(ctx)
 	gen := rulesfile.GetGeneration()
-	p := rulesfile.Spec.Priority
-	cmAction, newFile, err := r.store.Store(ctx, rulesfile.Namespace, rulesfile.Name, p, artifact.TypeRulesfile, artifact.MediumConfigMap, result)
+	cmAction, newFile, err := r.storeRulesfile(ctx, rulesfile, artifact.MediumConfigMap, result, metadata)
 	if err != nil {
 		logger.Error(err, "unable to store Rulesfile from ConfigMap reference")
 		artifact.RecordWarning(r.recorder, rulesfile,
@@ -693,70 +716,35 @@ func (r *RulesfileReconciler) enforceReferenceResolution(
 // enforceRulesfileCompatibility checks requirements and plugin dependencies against the running
 // Falco instance before allowing any source to be installed.
 //
-// All requirements are collected by the instance operator and stored in parent.Status.ArtifactMeta
-// (both OCI config layer and YAML content requirements). This controller only reads from that
-// field and checks the union against the local Falco capabilities.
+// The instance operator collects OCI and YAML requirements; metadata must match the resolved sources.
 //
 // In enforce mode (r.enforceRequirements=true): unreachable Falco versions block installation.
-// In advise mode: nil ArtifactMeta is treated as no requirements; Falco version
-// fetch failures result in DependenciesSatisfied=Unknown without blocking install.
+// In advise mode, unknown metadata does not block installation but remains unknown in the registry.
 func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, nodeObj *artifactv1alpha1.ArtifactNode,
-	sources *artifact.RulesfileSources,
+	metadata *commonv1alpha1.ArtifactMeta,
 ) (bool, error) {
 	gen := rulesfile.GetGeneration()
 	logger := log.FromContext(ctx)
 
 	if rulesfile.Spec.OCIArtifact == nil && rulesfile.Spec.ConfigMapRef == nil && rulesfile.Spec.InlineRules == nil {
-		// Returns skip=false so cleanupStaleMedium and store.Sync still run when no source is
-		// configured, removing stale files, conditions, and dependency registrations (skip=true
-		// here would leave them behind indefinitely).
+		// Run cleanupStaleMedium even without sources: removing an installed file also releases
+		// its dependencies. Skipping here would leave files and registrations behind.
 		logger.Info("Skipping compatibility check: no artifact sources configured")
 		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 		return false, nil
 	}
 
-	// ConfigMap edits do not change the parent generation. Requirements must describe
-	// the same source snapshot that ensureRulesfile will install.
-	if r.enforceRequirements && sources.ConfigMap != nil {
-		sourcesHash, err := sources.Hash()
-		if err != nil {
-			return false, err
-		}
-		if rulesfile.Status.ArtifactMeta == nil || rulesfile.Status.ArtifactMetaSourcesHash != sourcesHash {
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionUnknown, artifact.ReasonArtifactMetaNotReady,
-				"Waiting for artifact metadata matching the current ConfigMap content", gen,
-			))
-			return true, nil
-		}
-	}
-
-	// All requirements come from parent.Status.ArtifactMeta (populated by the instance operator).
-	if rulesfile.Status.ArtifactMeta == nil {
-		var msg string
-		if rulesfile.Spec.OCIArtifact != nil {
-			// OCI source present but meta is nil: instance operator has not fetched the config layer yet.
-			msg = "OCI artifact metadata not yet available; instance operator has not fetched it"
-		} else {
-			// Inline or ConfigMap only: instance operator parsed the YAML content and found no requirements.
-			msg = "artifact declares no requirements; installation blocked in enforce mode"
-		}
-		if r.enforceRequirements {
-			logger.Info(msg)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionUnknown, artifact.ReasonDependenciesUnknown, msg, gen,
-			))
-			return true, nil
-		}
-		logger.Info("ArtifactMeta not yet available; proceeding without compatibility check in advise mode")
+	// Missing or stale metadata is unknown in both modes; advise only changes whether we wait.
+	if metadata == nil {
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-			metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, gen,
+			metav1.ConditionUnknown, artifact.ReasonArtifactMetaNotReady,
+			"Waiting for artifact metadata matching the current sources", gen,
 		))
-		return false, nil
+		return r.enforceRequirements, nil
 	}
 
-	if len(rulesfile.Status.ArtifactMeta.Requirements) == 0 && len(rulesfile.Status.ArtifactMeta.Dependencies) == 0 {
+	if len(metadata.Requirements) == 0 && len(metadata.Dependencies) == 0 {
 		if r.enforceRequirements {
 			baseMsg := "artifact metadata declares no requirements; installation blocked in enforce mode"
 			reason, msg := artifact.ReasonDependenciesUnknown, baseMsg
@@ -781,7 +769,7 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	// condition with True at the end. In advise mode checkEngineRequirement returns skip=false
 	// and the loop continues instead of returning early.
 	anyUnsatisfied := false
-	for _, req := range rulesfile.Status.ArtifactMeta.Requirements {
+	for _, req := range metadata.Requirements {
 		skip, satisfied, err := r.checkEngineRequirement(ctx, rulesfile, nodeObj, req.Name, req.Version, gen)
 		if err != nil || skip {
 			return skip, err
@@ -792,7 +780,7 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	}
 
 	var unsatisfied []string
-	for _, dep := range rulesfile.Status.ArtifactMeta.Dependencies {
+	for _, dep := range metadata.Dependencies {
 		satisfied, failMsg, err := r.checkDependency(ctx, dep)
 		if err != nil {
 			msg := fmt.Sprintf("Unable to compare plugin versions: %s", err.Error())
@@ -881,13 +869,7 @@ func (r *RulesfileReconciler) checkDependency(
 ) (satisfied bool, failMsg string, err error) {
 	logger := log.FromContext(ctx)
 
-	primary := nodeartifacts.Requirement{Name: dep.Name, Version: dep.Version}
-	alternatives := make([]nodeartifacts.Requirement, len(dep.Alternatives))
-	for i, alt := range dep.Alternatives {
-		alternatives[i] = nodeartifacts.Requirement{Name: alt.Name, Version: alt.Version}
-	}
-
-	matchedName, provided, ok, err := r.store.CheckDependency(primary, alternatives)
+	matchedName, provided, ok, err := r.store.CheckDependency(dep)
 	if err != nil {
 		return false, "", fmt.Errorf("compare %s: %w", dep.Name, err)
 	}

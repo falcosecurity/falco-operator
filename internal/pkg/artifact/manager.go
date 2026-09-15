@@ -33,27 +33,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
-// Type represents different types of artifacts.
-type Type string
-
-const (
-	// TypeRulesfile represents a rulesFile artifact.
-	TypeRulesfile Type = "rulesfile"
-	// TypePlugin represents a plugin artifact.
-	TypePlugin Type = "plugin"
-	// TypeConfig represents a config artifact.
-	TypeConfig Type = "config"
-)
-
-// PermFor returns the deterministic filesystem permission for the given artifact type.
-// Plugins need the execute bit for dlopen; rules and config files are read-only for Falco.
-func PermFor(t Type) fs.FileMode {
-	if t == TypePlugin {
-		return 0o755
-	}
-	return 0o644
-}
-
 // Manager provides OCI registry operations for the aggregator (instance) controllers.
 // It does NOT manage on-disk artifact state; that is handled by LocalStore on the sidecar side.
 type Manager struct {

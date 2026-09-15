@@ -16,6 +16,20 @@
 
 package artifact
 
+import "io/fs"
+
+// Type represents different types of artifacts.
+type Type string
+
+const (
+	// TypeRulesfile represents a rulesFile artifact.
+	TypeRulesfile Type = "rulesfile"
+	// TypePlugin represents a plugin artifact.
+	TypePlugin Type = "plugin"
+	// TypeConfig represents a config artifact.
+	TypeConfig Type = "config"
+)
+
 // Medium represents how the artifact is distributed.
 type Medium string
 
@@ -54,4 +68,13 @@ type File struct {
 	Priority    int32  // Load-order priority encoded in the filename
 	ContentHash string // SHA-256 hex digest of the bytes written to disk
 	SpecHash    string // SHA-256 of the parent OCI artifact spec; only meaningful for MediumOCI
+}
+
+// PermFor returns the deterministic filesystem permission for the given artifact type.
+// Plugins need the execute bit for dlopen; rules and config files are read-only for Falco.
+func PermFor(t Type) fs.FileMode {
+	if t == TypePlugin {
+		return 0o755
+	}
+	return 0o644
 }

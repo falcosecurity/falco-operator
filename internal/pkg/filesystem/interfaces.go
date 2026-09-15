@@ -25,6 +25,7 @@ import (
 type FileSystem interface {
 	Stat(name string) (fs.FileInfo, error)
 	ReadFile(name string) ([]byte, error)
+	MkdirAll(path string, perm fs.FileMode) error
 	WriteFile(name string, data []byte, perm fs.FileMode) error
 	Remove(name string) error
 	Rename(oldpath, newpath string) error

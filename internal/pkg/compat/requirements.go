@@ -23,7 +23,7 @@ import (
 	semver "github.com/blang/semver/v4"
 	"gopkg.in/yaml.v3"
 
-	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
 // CapabilityPluginAPIVersion is the Falco capability name for the plugin API version.
@@ -96,7 +96,8 @@ func parsePluginVersion(value string) ([3]uint32, error) {
 // ValidatePluginDependency checks every candidate before selecting a loaded plugin,
 // including unused alternatives. Falco rejects missing names/versions and repeated
 // names within a dependency group, even when the first candidate is compatible.
-func ValidatePluginDependency(candidates []puller.Dependency) error {
+func ValidatePluginDependency(dependency commonv1alpha1.ArtifactMetaDependency) error {
+	candidates := append([]commonv1alpha1.ArtifactMetaDependencyVariant{{Name: dependency.Name, Version: dependency.Version}}, dependency.Alternatives...)
 	seen := make(map[string]struct{}, len(candidates))
 	for _, candidate := range candidates {
 		if candidate.Name == "" {
@@ -123,14 +124,7 @@ type RulesRequirements struct {
 	// strings against "engine_version_semver".
 	EngineVersionIsInt bool
 	// PluginVersions holds all required_plugin_versions entries.
-	PluginVersions []RulesPluginRequirement
-}
-
-// RulesPluginRequirement mirrors one entry in required_plugin_versions, including alternatives.
-type RulesPluginRequirement struct {
-	Name         string
-	Version      string
-	Alternatives []puller.Dependency
+	PluginVersions []commonv1alpha1.ArtifactMetaDependency
 }
 
 // ParseRulesRequirements scans a Falco rules YAML document for required_engine_version
@@ -141,19 +135,10 @@ func ParseRulesRequirements(data []byte) (*RulesRequirements, error) {
 		return &RulesRequirements{}, nil
 	}
 
-	type altVersion struct {
-		Name    string `yaml:"name"`
-		Version string `yaml:"version"`
-	}
-	type pluginVersion struct {
-		Name         string       `yaml:"name"`
-		Version      string       `yaml:"version"`
-		Alternatives []altVersion `yaml:"alternatives"`
-	}
 	type rulesItem struct {
 		// any handles both string ("0.57.0") and integer (26) YAML values.
-		RequiredEngineVersion  any             `yaml:"required_engine_version"`
-		RequiredPluginVersions []pluginVersion `yaml:"required_plugin_versions"`
+		RequiredEngineVersion  any                                     `yaml:"required_engine_version"`
+		RequiredPluginVersions []commonv1alpha1.ArtifactMetaDependency `yaml:"required_plugin_versions"`
 	}
 
 	var items []rulesItem
@@ -176,16 +161,11 @@ func ParseRulesRequirements(data []byte) (*RulesRequirements, error) {
 				result.EngineVersion = fmt.Sprintf("%v", v)
 			}
 		}
-		for _, pv := range item.RequiredPluginVersions {
-			req := RulesPluginRequirement{Name: pv.Name, Version: pv.Version}
-			for _, alt := range pv.Alternatives {
-				req.Alternatives = append(req.Alternatives, puller.Dependency(alt))
-			}
-			candidates := append([]puller.Dependency{{Name: req.Name, Version: req.Version}}, req.Alternatives...)
-			if err := ValidatePluginDependency(candidates); err != nil {
+		for _, dependency := range item.RequiredPluginVersions {
+			if err := ValidatePluginDependency(dependency); err != nil {
 				return nil, err
 			}
-			result.PluginVersions = append(result.PluginVersions, req)
+			result.PluginVersions = append(result.PluginVersions, dependency)
 		}
 	}
 	return &result, nil

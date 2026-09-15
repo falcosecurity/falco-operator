@@ -57,8 +57,8 @@ type ArtifactStore interface {
 	Verify(ctx context.Context, f *File) (bool, error)
 
 	// Store idempotently ensures content is on disk at the correct path for (name, priority, type, medium).
-	// current is the previously installed file from status (nil = nothing tracked for this medium).
-	// Returns the newly written File on Add/Update, or nil on Unchanged/error.
+	// current is the previously installed file (nil = nothing tracked for this medium).
+	// A non-nil File describes installed state, even on error after a priority move.
 	Store(ctx context.Context, current *File, name string, artifactPriority int32,
 		artifactType Type, medium Medium, result FetchResult) (StoreAction, *File, error)
 
@@ -68,6 +68,9 @@ type ArtifactStore interface {
 	// ScanAll discovers every artifact file on disk for artifactType, grouped by artifact name,
 	// by listing the type's directory and parsing each filename. See scan.go's doc comment.
 	ScanAll(ctx context.Context, artifactType Type) (map[string][]artifactv1alpha1.InstalledArtifact, error)
+
+	// Read returns the installed bytes at path, including not-found and I/O errors.
+	Read(ctx context.Context, path string) ([]byte, error)
 }
 
 // LocalStore implements ArtifactStore against the local filesystem.
@@ -120,17 +123,24 @@ func (s *LocalStore) Store(ctx context.Context, current *File, name string, arti
 		_ = s.FS.Remove(tmpPath)
 		return StoreActionNone, nil, err
 	}
+	// Move the existing file first to avoid leaving two active copies.
+	var relocated *File
+	if current != nil && current.Path != newPath {
+		if err := s.FS.Rename(current.Path, newPath); err != nil {
+			_ = s.FS.Remove(tmpPath)
+			return StoreActionNone, nil, fmt.Errorf("move existing artifact to new priority: %w", err)
+		}
+		moved := *current
+		moved.Path, moved.Priority = newPath, artifactPriority
+		relocated = &moved
+	}
 	if err := s.FS.Rename(tmpPath, newPath); err != nil {
 		logger.Error(err, "unable to rename artifact to final path", "tmp", tmpPath, "final", newPath)
 		_ = s.FS.Remove(tmpPath)
-		return StoreActionNone, nil, err
-	}
-
-	// Remove the old file if it was at a different path (priority change).
-	if current != nil && current.Path != newPath {
-		if err := s.FS.Remove(current.Path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			logger.Error(err, "unable to remove old artifact path", "oldPath", current.Path)
+		if relocated != nil {
+			return StoreActionPriorityChanged, relocated, err
 		}
+		return StoreActionNone, nil, err
 	}
 
 	newFile := &File{
@@ -167,6 +177,11 @@ func (s *LocalStore) Verify(_ context.Context, f *File) (bool, error) {
 	}
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:]) == f.ContentHash, nil
+}
+
+// Read reads an installed artifact without interpreting its content.
+func (s *LocalStore) Read(_ context.Context, path string) ([]byte, error) {
+	return s.FS.ReadFile(path)
 }
 
 // Remove deletes every installed artifact path from disk, ignoring not-found errors.
@@ -218,9 +233,7 @@ func ArtifactPath(dirs ArtifactDirs, name string, artifactPriority int32, medium
 	}
 }
 
-// StatusHelpers: small helpers used by controllers to read/write InstalledArtifacts in status.
-
-// FindInstalled returns the *File from status for the given medium, or nil.
+// FindInstalled returns a File copy for the given medium, or nil.
 func FindInstalled(artifacts []artifactv1alpha1.InstalledArtifact, medium Medium) *File {
 	for _, a := range artifacts {
 		if a.Medium == string(medium) {
