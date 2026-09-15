@@ -328,9 +328,9 @@ permissions in its [RBAC template](../chart/falco-operator/templates/rbac.yaml).
 
 | API group | Resources | Verbs |
 |-----------|-----------|-------|
-| core | configmaps, pods, serviceaccounts, services | get, list, watch, create, update, patch, delete |
+| core | configmaps, serviceaccounts, services | get, list, watch, create, update, patch, delete |
 | core | endpoints, namespaces, nodes, replicationcontrollers | get, list, watch |
-| core | secrets | get, list, watch, patch |
+| core | pods, secrets | get, list, watch, patch |
 | core | events | create, patch |
 | `events.k8s.io` | events | create, patch, update |
 | `apps` | daemonsets, deployments | get, list, watch, create, update, patch, delete |

@@ -44,6 +44,8 @@ type podRouting struct {
 	exclusive bool
 }
 
+// +kubebuilder:rbac:groups="",resources=pods,verbs=patch
+
 // WithPodRouting publishes this server through its Service. The client must read
 // directly from the API server; exclusive is true when leader election is enabled.
 func WithPodRouting(cl client.Client, pod *corev1.ObjectReference, service string, exclusive bool) Option {

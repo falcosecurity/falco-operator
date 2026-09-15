@@ -89,7 +89,7 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 }
 
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=components;components/status,verbs=create;delete;get;list;patch;update;watch
-// +kubebuilder:rbac:groups="",resources=endpoints;namespaces;replicationcontrollers,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=endpoints;namespaces;pods;replicationcontrollers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
 
