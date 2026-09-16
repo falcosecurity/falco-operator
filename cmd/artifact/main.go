@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -75,6 +76,7 @@ func main() {
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var falcoBaseURL string
+	var falcoReloadCooldown time.Duration
 	var enforceRequirements bool
 	var tlsOpts []func(*tls.Config)
 	var opts zap.Options
@@ -98,6 +100,9 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&falcoBaseURL, "falco-url", compat.DefaultBaseURL,
 		"Base URL for the Falco REST API used to verify plugin compatibility")
+	flag.DurationVar(&falcoReloadCooldown, "falco-reload-cooldown", nodeartifacts.DefaultReloadCooldown,
+		"Minimum pause after SIGHUP before checking Falco's HTTP endpoint or sending another signal. "+
+			"Must be positive. Reloads are best effort; this delay does not guarantee reload completion.")
 	flag.BoolVar(&enforceRequirements, "enforce-requirements", true,
 		"Block artifact installation when OCI-declared requirements are not satisfied by the running "+
 			"Falco instance, or when they cannot be verified. When false, the operator installs the "+
@@ -131,6 +136,11 @@ func main() {
 	}
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
+
+	if falcoReloadCooldown <= 0 {
+		setupLog.Error(nil, "falco reload cooldown must be positive; configure --falco-reload-cooldown or FALCO_RELOAD_COOLDOWN")
+		os.Exit(1)
+	}
 
 	if strings.TrimSpace(artifactServerURL) == "" {
 		setupLog.Error(nil, "artifact server URL is required; configure --artifact-server-url or ARTIFACT_SERVER_URL")
@@ -297,7 +307,7 @@ func main() {
 	// require a live HTTP call. WarmSync observes installed files and current assignments after
 	// the manager's cache syncs, before reconcilers start. Dependency metadata is rebuilt during
 	// reconciliation, without restoring historical state from disk or ArtifactNode status.
-	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL)
+	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
 	if err := mgr.Add(reloadCoordinator); err != nil {
 		setupLog.Error(err, "unable to add reload coordinator to manager")
 		os.Exit(1)

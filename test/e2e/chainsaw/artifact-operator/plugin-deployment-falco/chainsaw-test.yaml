@@ -15,6 +15,13 @@ spec:
     This test mirrors plugin-basic but with falco_type=Deployment to confirm there is
     no regression specific to the Deployment type.
 
+    A second lifecycle uses a CR named custom-container, configured alias container-alias,
+    and ABI name container, alongside a rules file outside the operator-managed directory.
+    Falco's metrics must report that external file's actual hash. A Config update must
+    change the reload epoch without replacing the Pod; after settling, the epoch must
+    remain unchanged for 130 seconds, spanning two periodic verification ticks.
+    This observes real reloads, not which watcher initiated them or a controlled reload race.
+
   bindings:
     - name: falco_name
       value: falco-plugin-deployment-test
@@ -24,9 +31,14 @@ spec:
       value: plugin-deployment-falco
     - name: oci_registry
       value: registry.oci-registry.svc.cluster.local:5000
+    - name: custom_plugin_name
+      value: custom-container
+    - name: config_name
+      value: reload-observation
 
   steps:
     - name: "Step 01: Create-falco-deployment"
+      description: Create the single-replica Falco Deployment used for both plugin lifecycles.
       use:
         template: ../../common/_step_templates/apply-assert-falco.yaml
         with:
@@ -39,6 +51,7 @@ spec:
               value: Deployment
 
     - name: "Step 02: Install-container-plugin"
+      description: Install the ordinary container Plugin and assert its per-node installed metadata.
       use:
         template: ../../common/_step_templates/apply-assert-plugin.yaml
         with:
@@ -57,6 +70,7 @@ spec:
               value: true
 
     - name: "Step 03: Assert-binary-on-filesystem"
+      description: The installed container.so must exist in the Falco Pod.
       use:
         template: ../../common/_step_templates/assert-file-on-node.yaml
         with:
@@ -73,6 +87,7 @@ spec:
               value: "true"
 
     - name: "Step 04: Assert-plugin-config-present"
+      description: The shared plugin configuration must exist alongside the installed binary.
       use:
         template: ../../common/_step_templates/assert-file-on-node.yaml
         with:
@@ -89,6 +104,7 @@ spec:
               value: "true"
 
     - name: "Step 05: Delete-plugin"
+      description: Delete container and wait for its per-node ArtifactNode cleanup.
       try:
         - delete:
             ref:
@@ -105,6 +121,7 @@ spec:
               deletion: {}
 
     - name: "Step 06: Assert-binary-absent"
+      description: Verify the first lifecycle removed container.so from the real filesystem.
       use:
         template: ../../common/_step_templates/assert-file-on-node.yaml
         with:
@@ -119,6 +136,369 @@ spec:
               value: (join('', [$plugin_name, '.so']))
             - name: should_exist
               value: "false"
+
+    - name: "Step 07: Mount-external-rules"
+      description: |
+        Add a ConfigMap-backed rules file outside /etc/falco/rules.d for the second
+        lifecycle. This setup changes the Pod template; it is not a Falco reload assertion.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: external-rules
+                namespace: ($namespace)
+              data:
+                external-rules.yaml: |
+                  - rule: Chainsaw external rules
+                    desc: A valid rules file outside the operator-managed directory.
+                    condition: evt.type = execve
+                    output: external-rule event=%evt.type
+                    priority: DEBUG
+                    enabled: false
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: (env('CHAINSAW_FALCO_IMAGE'))
+                        tty: true
+                        volumeMounts:
+                          - name: external-rules
+                            mountPath: /etc/falco/external-rules.yaml
+                            subPath: external-rules.yaml
+                            readOnly: true
+                      - name: artifact-operator
+                        image: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
+                        imagePullPolicy: Never
+                        args: ["--enforce-requirements=true"]
+                      - name: netshoot
+                        image: nicolaka/netshoot
+                        command: ["sleep", "infinity"]
+                        stdin: true
+                        tty: true
+                    volumes:
+                      - name: external-rules
+                        configMap:
+                          name: external-rules
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (volumes[?name == 'external-rules']):
+                      - name: external-rules
+                        configMap:
+                          name: external-rules
+                    (containers[?name == 'falco']):
+                      - name: falco
+                        (volumeMounts[?name == 'external-rules']):
+                          - name: external-rules
+                            mountPath: /etc/falco/external-rules.yaml
+                            subPath: external-rules.yaml
+                            readOnly: true
+
+    - name: "Step 08: Wait-for-mounted-rules-pod"
+      description: Finish the setup rollout before taking any reload-epoch or Pod-identity snapshots.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              (status.observedGeneration == metadata.generation): true
+              status:
+                replicas: 1
+                updatedReplicas: 1
+                availableReplicas: 1
+                readyReplicas: 1
+
+    - name: "Step 09: Configure-external-rules"
+      description: Load the external file in addition to the normal directory, with metrics enabled.
+      use:
+        template: ../../common/_step_templates/apply-assert-config.yaml
+        with:
+          bindings:
+            - name: config_spec
+              value:
+                config:
+                  rules_files:
+                    - /etc/falco/rules.d
+                    - /etc/falco/external-rules.yaml
+                  log_level: info
+
+    - name: "Step 10: Install-custom-named-plugin"
+      description: Install custom-container.so using alias container-alias; the library's ABI name remains container.
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($custom_plugin_name)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container-alias
+
+    - name: "Step 11: Assert-custom-binary-on-filesystem"
+      description: The second installation must publish the CR-named binary, not recreate container.so.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$custom_plugin_name, '.so']))
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 12: Assert-configured-name-and-runtime"
+      description: |
+        Check the shared configuration points container-alias at custom-container.so;
+        Falco reports the ABI name container, neither the alias nor the CR name.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: container-alias
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (json_parse($stdout).plugin_entry.library_path): (join('', ['/usr/share/falco/plugins/', $custom_plugin_name, '.so']))
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: container
+              - name: ABSENT_PLUGINS
+                value: '["custom-container", "container-alias"]'
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 13: Observe-real-reload-after-config-update"
+      description: |
+        Confirm the external rule's actual hash is loaded, then change only log_level.
+        A new reload epoch on the same Pod proves a new Falco run, not merely HTTP availability.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/external-rules.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: external_rules_hash
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: external-rules.yaml
+              - name: RULE_SHA256
+                value: ($external_rules_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+            outputs:
+              - name: previous_epoch
+                value: (json_parse($stdout).epoch)
+              - name: original_pod_uid
+                value: (json_parse($stdout).pod_uid)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                config:
+                  rules_files:
+                    - /etc/falco/rules.d
+                    - /etc/falco/external-rules.yaml
+                  log_level: debug
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 2
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: MODE
+                value: wait
+              - name: BASELINE_EPOCH
+                value: ($previous_epoch)
+              - name: POD_UID
+                value: ($original_pod_uid)
+              - name: RULE_FILE_NAME
+                value: external-rules.yaml
+              - name: RULE_SHA256
+                value: ($external_rules_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+
+    - name: "Step 14: Assert-updated-config-content"
+      description: The Config update must also replace the intended file's bytes at the same path.
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /etc/falco/config.d
+            - name: file_pattern
+              value: 50-03-reload-observation-inline.yaml
+            - name: content_pattern
+              value: "log_level: debug"
+
+    - name: "Step 15: Assert-no-repeated-reload-without-writes"
+      description: |
+        Allow 75 seconds for setup and its one periodic backstop reload, then hold one
+        epoch for 130 seconds with the aliased plugin and external rules loaded.
+        Two more periodic checks must not create false reloads without new writes.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/external-rules.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: external_rules_hash
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: MODE
+                value: hold
+              - name: SETTLE_SECONDS
+                value: "75"
+              - name: HOLD_SECONDS
+                value: "130"
+              - name: RULE_FILE_NAME
+                value: external-rules.yaml
+              - name: RULE_SHA256
+                value: ($external_rules_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: container
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_no_pod_restarts.sh
+
+    - name: "Step 16: Delete-custom-plugin"
+      description: Remove the second Plugin and wait for its per-node cleanup to finish.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($custom_plugin_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $custom_plugin_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 17: Assert-custom-binary-absent"
+      description: Cleanup must remove custom-container.so from the actual filesystem.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$custom_plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 18: Assert-configured-entry-absent"
+      description: The installed container-alias entry must be removed despite the CR having a different name.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: container-alias
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+
+    - name: "Step 19: Delete-observation-config"
+      description: Remove the extra Config after both plugin lifecycles have completed.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($config_name)
+              namespace: ($namespace)
 
   catch:
     - description: Capture debug snapshot on failure

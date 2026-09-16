@@ -172,7 +172,8 @@ LAST_ERROR="no attempts made"
 LAST_STATUS=""
 
 for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
-  if ! LAST_STATUS=$(curl -sS -m 5 "${CURL_TLS_OPTS[@]}" -o /dev/null -w '%{http_code}' "$URL" 2>&1); then
+  # Bash 3.2 treats an empty array as unset under nounset; preserve nonempty arguments verbatim.
+  if ! LAST_STATUS=$(curl -sS -m 5 ${CURL_TLS_OPTS[@]+"${CURL_TLS_OPTS[@]}"} -o /dev/null -w '%{http_code}' "$URL" 2>&1); then
     LAST_ERROR="curl failed: $LAST_STATUS"
     sleep "$RETRY_DELAY"
     continue

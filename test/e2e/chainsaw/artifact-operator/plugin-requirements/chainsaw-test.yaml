@@ -8,7 +8,7 @@ spec:
     artifact-operator a fully mocked Falco /versions response instead of relying on the real
     Falco build's actual capabilities:
     1. Create a ConfigMap with a mocked /versions response reporting plugin_api_version=2.99.0
-       (wrong major: the real container plugin (0.7.1) requires plugin_api_version 3.10.0).
+       (wrong major: the real container plugin (0.7.4) requires plugin_api_version 3.10.0).
     2. Create a Falco DaemonSet whose artifact-operator sidecar is pointed (--falco-url) at a
        3rd "mock-falco-versions" container (busybox httpd) instead of the real Falco process's
        own /versions endpoint. An init container seeds the mock content from the ConfigMap into

@@ -45,7 +45,7 @@ spec:
 
     - name: "Step 02: Install-container-plugin"
       description: |
-        The container plugin (real version 0.7.1) is the one dependency knob ConfigMap and
+        The container plugin (real version 0.7.4) is the one dependency knob ConfigMap and
         inline toggle between unmet (>=999.0.0) and met (>=0.4.0) throughout this test; install
         it once up front so their initial "met" states are genuinely met from the start.
       use:

@@ -4,7 +4,7 @@ metadata:
   name: rulesfile-inline-plugin-dep-alternatives
 spec:
   description: |
-    Uses real json 0.7.4 and container 0.7.1 plugins to check ordered dependencies.
+    Uses real json 0.7.4 and container 0.7.4 plugins to check ordered dependencies.
     An invalid unused alternative must preserve the installed rules byte-for-byte.
     A loaded but incompatible alternative must block deletion of the required plugin;
     correcting that requirement must allow cleanup without removing the Rulesfile.
@@ -93,7 +93,7 @@ spec:
                 value: container
             content: bash ../../common/scripts/check_falco_plugin_loaded.sh
             check:
-              (json_parse($stdout).plugin_version): "0.7.1"
+              (json_parse($stdout).plugin_version): "0.7.4"
 
     - name: "Step 05: Install-rules-satisfied-by-primary"
       use:
@@ -301,7 +301,7 @@ spec:
               - name: PLUGIN_NAME
                 value: container
               - name: EXPECTED_PLUGIN_VERSION
-                value: "0.7.1"
+                value: "0.7.4"
               - name: ABSENT_PLUGINS
                 value: '["json"]'
             content: bash ../../common/scripts/check_falco_plugin_loaded.sh
