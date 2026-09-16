@@ -14,6 +14,10 @@ spec:
     - InlineArtifactProgrammed=True, Programmed=True remain True.
     - The disk file at the SAME path now contains "log_level: debug".
 
+    Then repeat create/update/delete for a Config whose valid Kubernetes name exceeds
+    the label-value limit. Its ArtifactNode must retain the full owner identity while
+    using a valid searchable label. Removing it must leave the original Config intact.
+
   bindings:
     - name: falco_name
       value: falco-config-update-inline-test
@@ -21,9 +25,15 @@ spec:
       value: config-update-inline-test
     - name: test_name
       value: config-update-inline
+    - name: long_config_name
+      value: config-update-inline-name-longer-than-sixty-three-characters-regression
+    - name: long_config_label
+      # First 63 hexadecimal characters of SHA256(long_config_name).
+      value: eb3188f87c92351cbcce42cbc112dde2408eb198ba8ad9aeb40eaf6b3dd8f00
 
   steps:
     - name: "Step 01: Create-falco"
+      description: Create the Falco instance used to reconcile and store the inline Config.
       use:
         template: ../../common/_step_templates/apply-assert-falco.yaml
         with:
@@ -34,6 +44,7 @@ spec:
               value: ($namespace)
 
     - name: "Step 02: Create-config-inline-v1"
+      description: Create an inline Config with info logging and JSON output disabled.
       use:
         template: ../../common/_step_templates/apply-config.yaml
         with:
@@ -49,6 +60,7 @@ spec:
                   log_level: info
 
     - name: "Step 03: Assert-initial-conditions"
+      description: Check that inline installation and overall programming report success.
       try:
         - assert:
             resource:
@@ -64,6 +76,7 @@ spec:
                   - status: 'True'
 
     - name: "Step 04: Assert-initial-content-on-filesystem"
+      description: Verify that the configuration directory contains the initial info log-level setting.
       use:
         template: ../../common/_step_templates/assert-content-on-node.yaml
         with:
@@ -78,6 +91,7 @@ spec:
               value: "log_level: info"
 
     - name: "Step 05: Patch-config-inline-v2"
+      description: Change the inline log level to debug while keeping JSON output disabled.
       try:
         - patch:
             resource:
@@ -92,6 +106,7 @@ spec:
                   log_level: debug
 
     - name: "Step 06: Assert-updated-conditions"
+      description: Check the inline-installation and overall programming conditions after the update.
       try:
         - assert:
             resource:
@@ -107,6 +122,7 @@ spec:
                   - status: 'True'
 
     - name: "Step 07: Assert-file-still-present"
+      description: Verify that the inline Config remains installed at its original path.
       use:
         template: ../../common/_step_templates/assert-file-on-node.yaml
         with:
@@ -123,6 +139,7 @@ spec:
               value: "true"
 
     - name: "Step 08: Assert-updated-content-on-filesystem"
+      description: Verify that the configuration directory contains the updated debug log-level setting.
       use:
         template: ../../common/_step_templates/assert-content-on-node.yaml
         with:
@@ -133,6 +150,159 @@ spec:
               value: ($namespace)
             - name: dir
               value: /etc/falco/config.d
+            - name: content_pattern
+              value: "log_level: debug"
+
+    - name: "Step 09: Create-config-with-long-name"
+      description: A valid Config name longer than 63 characters must not prevent ArtifactNode creation.
+      use:
+        template: ../../common/_step_templates/apply-assert-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($long_config_name)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                priority: 60
+                config:
+                  log_level: info
+
+    - name: "Step 10: Assert-long-config-owner-and-installed-file"
+      description: The searchable label is valid while the owner reference preserves the complete Config name.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($long_config_label)
+                  artifact.falcosecurity.dev/kind: config
+                ownerReferences:
+                  - kind: Config
+                    name: ($long_config_name)
+                    controller: true
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (installedArtifacts[?medium == 'inline']):
+                  - path: (join('', ['/etc/falco/config.d/60-03-', $long_config_name, '-inline.yaml']))
+                    priority: 60
+
+    - name: "Step 11: Assert-long-config-initial-content"
+      description: Match this exact Config's filename so the original Config cannot satisfy the content assertion.
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: file_pattern
+              value: (join('', ['60-03-', $long_config_name, '-inline.yaml']))
+            - name: content_pattern
+              value: "log_level: info"
+
+    - name: "Step 12: Update-long-config"
+      description: Parent events must still reach the assignment when its label no longer equals the parent name.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($long_config_name)
+                namespace: ($namespace)
+              spec:
+                config:
+                  log_level: debug
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($long_config_name)
+                namespace: ($namespace)
+              status:
+                observedGeneration: 2
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 2
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    observedGeneration: 2
+
+    - name: "Step 13: Assert-long-config-updated-content"
+      description: The same long-named file must contain the replacement configuration.
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: file_pattern
+              value: (join('', ['60-03-', $long_config_name, '-inline.yaml']))
+            - name: content_pattern
+              value: "log_level: debug"
+
+    - name: "Step 14: Delete-long-config"
+      description: Encoded parent-label lookup must find and remove the owned ArtifactNode during cleanup.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($long_config_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $long_config_label]))
+            for:
+              deletion: {}
+
+    - name: "Step 15: Assert-long-config-file-removed"
+      description: Kubernetes deletion is not sufficient; the real node file must also be absent.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: (join('', ['60-03-', $long_config_name, '-inline.yaml']))
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 16: Assert-original-config-preserved"
+      description: Removing the long-named Config must not remove the unrelated original file or its updated content.
+      use:
+        template: ../../common/_step_templates/assert-content-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: file_pattern
+              value: 50-03-config-update-inline-test-inline.yaml
             - name: content_pattern
               value: "log_level: debug"
 

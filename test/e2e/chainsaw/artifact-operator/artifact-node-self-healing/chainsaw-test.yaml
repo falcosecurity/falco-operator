@@ -7,13 +7,14 @@ spec:
     Exercises the instance operators' self-healing of an ArtifactNode that's mutated
     out-of-band, not via a Node or CR selector change (that's artifact-node-lifecycle's
     scope), but via direct manipulation of the ArtifactNode object itself, simulating a
-    crash, bug, or stray manual kubectl action. Uses one KWOK-simulated fake Node with a
-    minimal Falco CR and pod so that ListMatchingFalcoNodes includes the fake node.
+    crash, bug, or stray manual kubectl action. Starts with one KWOK-simulated fake Node
+    and adds a second for the identity-collision scenario. Minimal Falco CR/pod stubs make
+    ListMatchingFalcoNodes include these nodes.
 
-    Only Plugin is exercised, not all three kinds: both scenarios below prove a generic,
+    Plugin exercises the first two scenarios below, which prove a generic,
     kind-agnostic mechanism (the ArtifactNode watch's owner-routing via
     EnqueueRequestForOwner, and EnforceNodeObjectMeta's restoration logic in
-    internal/pkg/controllerhelper/nodeobject.go:106-171); artifact-node-lifecycle already
+    internal/pkg/controllerhelper/nodeobject.go); artifact-node-lifecycle already
     proves EnsureNodeObject is called correctly per-kind for Rulesfile/Config, so duplicating
     that here for a mechanism that doesn't vary by kind would add steps without adding signal.
 
@@ -31,6 +32,9 @@ spec:
        owner reference would break the very signal EnqueueRequestForOwner needs to route the
        watch event to the right parent, which is the mechanism this scenario is trying to
        observe self-healing through, not the one under test.
+    3. Create two Config/node assignments whose old concatenated names collide. Verify
+       distinct ArtifactNode names and UIDs, then remove one parent without changing the
+       other assignment. These KWOK assertions cover Kubernetes identity, not Falco runtime.
 
   bindings:
     - name: plugin_name
@@ -47,9 +51,16 @@ spec:
       value: (join('-', ['falco-pod', $namespace]))
     - name: artifact_node_name
       value: (join('--', ['plugin', $plugin_name, $node_name]))
+    - name: collision_node_name
+      value: (join('--', ['branch', $node_name]))
+    - name: collision_config_a
+      value: collision-config--branch
+    - name: collision_config_b
+      value: collision-config
 
   steps:
     - name: "Step 01: Create-fake-node"
+      description: Create the KWOK-managed node selected by this test.
       use:
         template: ../../common/_step_templates/apply-fake-node.yaml
         with:
@@ -227,6 +238,7 @@ spec:
                   artifact.falcosecurity.dev/kind: plugin
 
     - name: "Step 07: Delete-plugin"
+      description: Delete the Plugin parent to start cleanup of its node assignment.
       try:
         - delete:
             ref:
@@ -236,6 +248,7 @@ spec:
               namespace: ($namespace)
 
     - name: "Step 08: Wait-for-artifactnode-cleanup"
+      description: Wait until the Plugin's ArtifactNode has been removed.
       try:
         - wait:
             apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -245,13 +258,209 @@ spec:
             for:
               deletion: {}
 
+    - name: "Step 08b: Create-collision-node"
+      description: The second node name moves the same delimiter-containing segment from the parent name to the node name.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($collision_node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 08c: Create-falco-pod-on-collision-node"
+      description: A second KWOK pod makes the second node eligible without introducing a real Falco process.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: (join('-', ['collision-pod', $namespace]))
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($collision_node_name)
+
+    - name: "Step 08d: Create-first-colliding-config"
+      description: Assign the delimiter-containing parent name only to the original node.
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($collision_config_a)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                config:
+                  log_level: info
+                selector:
+                  matchLabels:
+                    kubernetes.io/hostname: ($node_name)
+
+    - name: "Step 08e: Create-second-colliding-config"
+      description: Its old ArtifactNode name would equal the first assignment's name, despite a different parent and node.
+      use:
+        template: ../../common/_step_templates/apply-config.yaml
+        with:
+          bindings:
+            - name: config_name
+              value: ($collision_config_b)
+            - name: namespace
+              value: ($namespace)
+            - name: config_spec
+              value:
+                config:
+                  log_level: debug
+                selector:
+                  matchLabels:
+                    kubernetes.io/hostname: ($collision_node_name)
+
+    - name: "Step 08f: Assert-distinct-assignment-identities"
+      description: |
+        Check complete owner/node assignments and compare actual names and UIDs within
+        this step. Sequential label assertions alone could pass if one broken object
+        repeatedly switched between the two parents.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($collision_config_a)
+                  artifact.falcosecurity.dev/kind: config
+                ownerReferences:
+                  - kind: Config
+                    name: ($collision_config_a)
+                    controller: true
+              spec:
+                nodeName: ($node_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($collision_config_b)
+                  artifact.falcosecurity.dev/kind: config
+                ownerReferences:
+                  - kind: Config
+                    name: ($collision_config_b)
+                    controller: true
+              spec:
+                nodeName: ($collision_node_name)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: SELECTOR
+                value: (join('', ['artifact.falcosecurity.dev/kind=config,artifact.falcosecurity.dev/parent=', $collision_config_a]))
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+            outputs:
+              - name: first_assignment_name
+                value: (json_parse($stdout).name)
+              - name: first_assignment_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: SELECTOR
+                value: (join('', ['artifact.falcosecurity.dev/kind=config,artifact.falcosecurity.dev/parent=', $collision_config_b]))
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+              (json_parse($stdout).name != $first_assignment_name): true
+              (json_parse($stdout).uid != $first_assignment_uid): true
+
+    - name: "Step 08g: Remove-first-config-and-preserve-second-assignment"
+      description: Deleting one parent must not steal, delete or recreate the other parent's ArtifactNode.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: SELECTOR
+                value: (join('', ['artifact.falcosecurity.dev/kind=config,artifact.falcosecurity.dev/parent=', $collision_config_b]))
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            outputs:
+              - name: remaining_assignment_uid
+                value: (json_parse($stdout).uid)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($collision_config_a)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $collision_config_a]))
+            for:
+              deletion: {}
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: SELECTOR
+                value: (join('', ['artifact.falcosecurity.dev/kind=config,artifact.falcosecurity.dev/parent=', $collision_config_b]))
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+              (json_parse($stdout).uid == $remaining_assignment_uid): true
+
+    - name: "Step 08h: Remove-second-config"
+      description: The remaining assignment must still complete its own ordinary parent cleanup.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($collision_config_b)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $collision_config_b]))
+            for:
+              deletion: {}
+
     - name: "Step 09: Delete-fake-node-and-falco-cr"
+      description: Delete both fake Nodes and the Falco CR created by this test.
       try:
         - delete:
             ref:
               apiVersion: v1
               kind: Node
               name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($collision_node_name)
         - delete:
             ref:
               apiVersion: instance.falcosecurity.dev/v1alpha1
@@ -279,3 +488,9 @@ spec:
           apiVersion: v1
           kind: Node
           name: ($node_name)
+    - description: Remove the second cluster-scoped collision-test Node after a failure.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($collision_node_name)

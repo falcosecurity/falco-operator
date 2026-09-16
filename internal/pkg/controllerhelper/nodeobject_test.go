@@ -27,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -43,11 +44,11 @@ func TestNodeObjectName_ShortNameNoTruncation(t *testing.T) {
 func TestNodeObjectName_TruncatesLongArtifactName(t *testing.T) {
 	longName := strings.Repeat("a", 300)
 	got := controllerhelper.NodeObjectName("plugin", longName, "node-1")
-	// Format is kind--<truncated-artifact-name>--nodeName--hash: the node name is preserved
-	// verbatim in the middle, with a content hash appended at the end for uniqueness.
+	// Long tuples use a compact hash; the full names remain in ownerReference/spec.
 	assert.LessOrEqual(t, len(got), 253)
-	assert.True(t, strings.HasPrefix(got, "plugin--"))
-	assert.Contains(t, got, "--node-1--")
+	assert.True(t, strings.HasPrefix(got, "plugin-"))
+	assert.Empty(t, validation.IsDNS1123Subdomain(got))
+	assert.NotEqual(t, got, controllerhelper.NodeObjectName("plugin", longName, "node-2"))
 }
 
 func TestNodeObjectName_ExtremeEdgeVeryLongNodeName(t *testing.T) {
@@ -55,13 +56,54 @@ func TestNodeObjectName_ExtremeEdgeVeryLongNodeName(t *testing.T) {
 	longNode := strings.Repeat("n", 300)
 	got := controllerhelper.NodeObjectName("rulesfile", strings.Repeat("a", 300), longNode)
 	assert.LessOrEqual(t, len(got), 253)
-	assert.True(t, strings.HasPrefix(got, "rulesfile--"))
+	assert.True(t, strings.HasPrefix(got, "rulesfile-"))
+	assert.Empty(t, validation.IsDNS1123Subdomain(got))
+	for _, boundary := range []string{"-", "."} {
+		t.Run(boundary, func(t *testing.T) {
+			// The previous length budget cut valid node names after character 232.
+			nodeName := strings.Repeat("n", 231) + boundary + strings.Repeat("n", 21)
+			require.Empty(t, validation.IsDNS1123Subdomain(nodeName))
+			name := controllerhelper.NodeObjectName("rulesfile", "a", nodeName)
+			assert.LessOrEqual(t, len(name), 253)
+			assert.Empty(t, validation.IsDNS1123Subdomain(name))
+		})
+	}
 }
 
 func TestNodeObjectName_DeterministicAndStable(t *testing.T) {
 	a := controllerhelper.NodeObjectName("config", "my-config", "node-1")
 	b := controllerhelper.NodeObjectName("config", "my-config", "node-1")
 	assert.Equal(t, a, b)
+}
+
+func TestNodeObjectName_AmbiguousTuplesHaveDistinctValidNames(t *testing.T) {
+	first := controllerhelper.NodeObjectName("config", "a--b", "c")
+	second := controllerhelper.NodeObjectName("config", "a", "b--c")
+	assert.NotEqual(t, first, second)
+	for _, name := range []string{first, second} {
+		assert.Empty(t, validation.IsDNS1123Subdomain(name))
+		assert.NotContains(t, name, "--", "hashed names must not overlap the legacy naming domain")
+	}
+	assert.Equal(t, first, controllerhelper.NodeObjectName("config", "a--b", "c"))
+}
+
+func TestNodeObjectLabels_LongNamesRemainValid(t *testing.T) {
+	for _, length := range []int{63, 64, 253} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			parent, node := strings.Repeat("a", length), strings.Repeat("n", length)
+			labels := controllerhelper.NodeObjectLabels("config", parent, node)
+			for _, value := range labels {
+				assert.Empty(t, validation.IsValidLabelValue(value))
+			}
+			if length == 63 {
+				assert.Equal(t, parent, labels[controllerhelper.LabelArtifactParent])
+				assert.Equal(t, node, labels[controllerhelper.LabelArtifactNode])
+			}
+			assert.NotEqual(t, labels[controllerhelper.LabelArtifactParent], labels[controllerhelper.LabelArtifactNode])
+			assert.Equal(t, labels, controllerhelper.NodeObjectLabels("config", parent, node))
+			assert.Empty(t, validation.IsDNS1123Subdomain(controllerhelper.NodeObjectName("config", parent, node)))
+		})
+	}
 }
 
 func TestNodeObjectLabels(t *testing.T) {
@@ -318,4 +360,103 @@ func TestEnsureNodeObject_GetError(t *testing.T) {
 	gvk := artifactv1alpha1.GroupVersion.WithKind("Plugin")
 	err := controllerhelper.EnsureNodeObject(context.Background(), cl, plugin, gvk, "plugin", "node-1")
 	require.Error(t, err)
+}
+
+func TestEnsureNodeObject_SeparatesCollidingAssignments(t *testing.T) {
+	owner := &artifactv1alpha1.Config{ObjectMeta: metav1.ObjectMeta{Name: "a--b", Namespace: "default", UID: "first-owner"}}
+	other := &artifactv1alpha1.Config{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default", UID: "second-owner"}}
+	gvk := artifactv1alpha1.GroupVersion.WithKind("Config")
+	existing := &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: controllerhelper.NodeObjectName("config", owner.Name, "c"), Namespace: "default", UID: "existing-node",
+			Labels:          controllerhelper.NodeObjectLabels("config", owner.Name, "c"),
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(owner, gvk)},
+			Finalizers:      []string{"test.example/cleanup"},
+		},
+		Spec:   artifactv1alpha1.ArtifactNodeSpec{NodeName: "c"},
+		Status: artifactv1alpha1.ArtifactNodeStatus{Conditions: []metav1.Condition{{Type: "Programmed", Status: metav1.ConditionTrue}}},
+	}
+	cl := fake.NewClientBuilder().WithScheme(newArtifactScheme(t)).WithObjects(owner, other, existing).Build()
+	before := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(existing), before))
+
+	require.NoError(t, controllerhelper.EnsureNodeObject(t.Context(), cl, other, gvk, "config", "b--c"))
+	list := &artifactv1alpha1.ArtifactNodeList{}
+	require.NoError(t, cl.List(t.Context(), list))
+	require.Len(t, list.Items, 2)
+	after := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(existing), after))
+	assert.Equal(t, before, after, "the colliding assignment must not change the installed owner's state")
+	created := &artifactv1alpha1.ArtifactNode{}
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKey{Namespace: other.Namespace,
+		Name: controllerhelper.NodeObjectName("config", other.Name, "b--c")}, created))
+	assert.Equal(t, "b--c", created.Spec.NodeName)
+	assert.Equal(t, other.UID, metav1.GetControllerOf(created).UID)
+
+	require.NoError(t, controllerhelper.EnsureNodeObject(t.Context(), cl, owner, gvk, "config", "c"))
+	require.NoError(t, cl.List(t.Context(), list))
+	assert.Len(t, list.Items, 2, "the existing assignment must be reused")
+}
+
+func TestEnsureNodeObject_RejectsForeignCanonicalAssignment(t *testing.T) {
+	for _, conflict := range []string{"owner name", "owner kind", "node"} {
+		t.Run(conflict, func(t *testing.T) {
+			owner := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default", UID: "owner"}}
+			gvk := artifactv1alpha1.GroupVersion.WithKind("Plugin")
+			existing := &artifactv1alpha1.ArtifactNode{
+				ObjectMeta: metav1.ObjectMeta{Name: controllerhelper.NodeObjectName("plugin", owner.Name, "node-1"), Namespace: owner.Namespace,
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(owner, gvk)}},
+				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node-1"},
+			}
+			switch conflict {
+			case "owner name":
+				existing.OwnerReferences[0].Name = "other"
+			case "owner kind":
+				existing.OwnerReferences[0].Kind = controllerhelper.KindRulesfile
+			case "node":
+				existing.Spec.NodeName = "node-2"
+			}
+			cl := fake.NewClientBuilder().WithScheme(newArtifactScheme(t)).WithObjects(owner, existing).Build()
+			before := &artifactv1alpha1.ArtifactNode{}
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(existing), before))
+			require.Error(t, controllerhelper.EnsureNodeObject(t.Context(), cl, owner, gvk, "plugin", "node-1"))
+			after := &artifactv1alpha1.ArtifactNode{}
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(existing), after))
+			assert.Equal(t, before, after)
+		})
+	}
+}
+
+func TestEnsureNodeObject_ExistingAssignmentRetainsIdentityAndDeletion(t *testing.T) {
+	for _, terminating := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminating), func(t *testing.T) {
+			owner := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "test--plugin", Namespace: "default", UID: "current-owner"}}
+			gvk := artifactv1alpha1.GroupVersion.WithKind("Plugin")
+			ref := *metav1.NewControllerRef(owner, gvk)
+			ref.UID = "previous-owner"
+			existing := &artifactv1alpha1.ArtifactNode{
+				ObjectMeta: metav1.ObjectMeta{Name: controllerhelper.NodeObjectName("plugin", owner.Name, "node-1"), Namespace: owner.Namespace, UID: "node-uid",
+					OwnerReferences: []metav1.OwnerReference{ref}, Finalizers: []string{"test.example/cleanup"}},
+				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: "node-1"},
+			}
+			if terminating {
+				existing.DeletionTimestamp = new(metav1.Now())
+			}
+			cl := fake.NewClientBuilder().WithScheme(newArtifactScheme(t)).WithObjects(owner, existing).Build()
+			require.NoError(t, controllerhelper.EnsureNodeObject(t.Context(), cl, owner, gvk, "plugin", "node-1"))
+			list := &artifactv1alpha1.ArtifactNodeList{}
+			require.NoError(t, cl.List(t.Context(), list))
+			require.Len(t, list.Items, 1)
+			got := &list.Items[0]
+			assert.Equal(t, existing.Name, got.Name)
+			assert.Equal(t, existing.UID, got.UID)
+			assert.Equal(t, existing.Finalizers, got.Finalizers)
+			if terminating {
+				assert.Equal(t, ref.UID, metav1.GetControllerOf(got).UID)
+				assert.False(t, got.DeletionTimestamp.IsZero())
+			} else {
+				assert.Equal(t, owner.UID, metav1.GetControllerOf(got).UID, "same-tuple UID adoption policy is unchanged")
+			}
+		})
+	}
 }

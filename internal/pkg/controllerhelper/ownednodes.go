@@ -19,8 +19,10 @@ package controllerhelper
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -66,17 +68,22 @@ func GetVerifiedOwner(ctx context.Context, cl client.Client, nodeObj *artifactv1
 
 // ListOwnedNodes returns all ArtifactNode objects labeled as belonging to parentName and
 // indexed under ownerKind (the controlling owner's Kind, e.g. "Plugin", "Rulesfile", "Config").
+// Long names use an encoded label; candidates are verified against the owner's Kind and Name.
 // Shared by the three aggregator controllers (Plugin, Rulesfile, Config), which otherwise
 // each reimplement this identical List call.
 func ListOwnedNodes(ctx context.Context, cl client.Client, namespace, parentName, ownerKind string) (*artifactv1alpha1.ArtifactNodeList, error) {
 	list := &artifactv1alpha1.ArtifactNodeList{}
 	if err := cl.List(ctx, list,
 		client.InNamespace(namespace),
-		client.MatchingLabels{LabelArtifactParent: parentName},
+		client.MatchingLabels{LabelArtifactParent: nodeObjectLabelValue(parentName)},
 		client.MatchingFields{index.ArtifactNodeOwnerKind: ownerKind},
 	); err != nil {
 		return nil, fmt.Errorf("listing ArtifactNodes owned by %s %s/%s: %w", ownerKind, namespace, parentName, err)
 	}
+	list.Items = slices.DeleteFunc(list.Items, func(node artifactv1alpha1.ArtifactNode) bool {
+		ref := metav1.GetControllerOf(&node)
+		return ref == nil || ref.Kind != ownerKind || ref.Name != parentName
+	})
 	return list, nil
 }
 

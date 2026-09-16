@@ -362,8 +362,7 @@ func (r *PluginReconciler) findAllNodeObjectsOnVersionChange(ctx context.Context
 	nodeList := &artifactv1alpha1.ArtifactNodeList{}
 	if err := r.List(ctx, nodeList,
 		client.InNamespace(r.namespace),
-		client.MatchingLabels{controllerhelper.LabelArtifactNode: r.nodeName},
-		client.MatchingFields{index.ArtifactNodeOwnerKind: controllerhelper.KindPlugin},
+		client.MatchingFields{index.ArtifactNodeOwnerKind: controllerhelper.KindPlugin, index.ArtifactNodeNodeName: r.nodeName},
 	); err != nil {
 		logger.Error(err, "unable to list ArtifactNodes (plugin) on Falco versions change")
 		return nil

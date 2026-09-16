@@ -913,6 +913,32 @@ func TestFindNodeObjectForConfig(t *testing.T) {
 	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
 }
 
+func TestFindNodeObjects_UsesCanonicalNameWithoutLookup(t *testing.T) {
+	parent := &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Name: "test--config", Namespace: testutil.TestNamespace, UID: "owner"},
+		Spec:       artifactv1alpha1.ConfigSpec{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "source"}},
+	}
+	want := client.ObjectKey{
+		Namespace: parent.Namespace,
+		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, parent.Name, testutil.TestNodeName),
+	}
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(parent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				t.Fatal("event mapping must not fetch ArtifactNodes")
+				return nil
+			},
+		}).
+		WithIndex(&artifactv1alpha1.Config{}, index.ConfigMapOnConfig, index.ConfigByConfigMapRef).Build()
+	r := &ConfigReconciler{Client: cl, nodeName: testutil.TestNodeName}
+	requests := r.findNodeObjectForConfig(t.Context(), parent)
+	require.Len(t, requests, 1)
+	assert.Equal(t, want, requests[0].NamespacedName)
+	requests = r.findNodeObjectsForConfigMap(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
+	require.Len(t, requests, 1)
+	assert.Equal(t, want, requests[0].NamespacedName)
+}
+
 func TestHandleDeletion(t *testing.T) {
 	tests := []struct {
 		name    string

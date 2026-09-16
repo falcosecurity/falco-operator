@@ -433,8 +433,7 @@ func (r *RulesfileReconciler) findAllNodeObjectsOnVersionChange(ctx context.Cont
 	nodeList := &artifactv1alpha1.ArtifactNodeList{}
 	if err := r.List(ctx, nodeList,
 		client.InNamespace(r.namespace),
-		client.MatchingLabels{controllerhelper.LabelArtifactNode: r.nodeName},
-		client.MatchingFields{index.ArtifactNodeOwnerKind: controllerhelper.KindRulesfile},
+		client.MatchingFields{index.ArtifactNodeOwnerKind: controllerhelper.KindRulesfile, index.ArtifactNodeNodeName: r.nodeName},
 	); err != nil {
 		logger.Error(err, "unable to list ArtifactNodes (rulesfile) on Falco versions change")
 		return nil

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"strings"
 
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,9 +33,9 @@ import (
 )
 
 const (
-	// LabelArtifactParent is the label key storing the parent artifact name on node objects.
+	// LabelArtifactParent is the label key storing the parent artifact name, or its hash if too long.
 	LabelArtifactParent = "artifact.falcosecurity.dev/parent"
-	// LabelArtifactNode is the label key storing the node name on node objects.
+	// LabelArtifactNode is the label key storing the node name, or its hash if too long.
 	LabelArtifactNode = "artifact.falcosecurity.dev/node"
 	// LabelArtifactKind is the label key storing the artifact kind (plugin, rulesfile, config)
 	// on ArtifactNode objects. Useful for user-facing filtering with kubectl.
@@ -66,41 +67,39 @@ const (
 
 	// maxK8sNameLen is the maximum length of a Kubernetes object name.
 	maxK8sNameLen = 253
+	// maxLabelValueLen is the maximum length of a Kubernetes label value.
+	maxLabelValueLen = 63
 	// nodeObjectSeparator separates segments in node object names.
 	nodeObjectSeparator = "--"
 )
 
 // NodeObjectName returns the deterministic name for a per-node artifact object.
-// Format: "<kind>--<artifactName>--<nodeName>", truncated to 253 chars when needed.
-// When truncation is required the artifact name is shortened and a short hash of
-// the full name is appended so the result stays unique and stable.
-// Kind is always preserved (max 9 chars for "rulesfile").
+// Ordinary names retain "<kind>--<artifactName>--<nodeName>". Ambiguous or long
+// tuples use a hash in a separate naming domain, without the legacy separator.
 func NodeObjectName(kind, artifactName, nodeName string) string {
 	full := kind + nodeObjectSeparator + artifactName + nodeObjectSeparator + nodeName
-	if len(full) <= maxK8sNameLen {
+	if len(full) <= maxK8sNameLen && !strings.Contains(artifactName, nodeObjectSeparator) && !strings.Contains(nodeName, nodeObjectSeparator) {
 		return full
 	}
-
-	hash := fmt.Sprintf("%x", sha256.Sum256([]byte(full)))[:8]
-	suffix := nodeObjectSeparator + hash
-	kindPart := kind + nodeObjectSeparator
-	nodePartLen := len(nodeObjectSeparator) + len(nodeName)
-	available := maxK8sNameLen - len(kindPart) - nodePartLen - len(suffix)
-	if available < 1 {
-		// Extreme edge: nodeName alone is very long.
-		return kind + nodeObjectSeparator + hash + nodeObjectSeparator +
-			nodeName[:maxK8sNameLen-len(kind)-len(hash)-2*len(nodeObjectSeparator)]
-	}
-	return kindPart + artifactName[:available] + nodeObjectSeparator + nodeName + suffix
+	// Kubernetes names cannot contain NUL, so different tuples have different hash inputs.
+	return fmt.Sprintf("%s-%x", kind, sha256.Sum256([]byte(kind+"\x00"+artifactName+"\x00"+nodeName)))
 }
 
-// NodeObjectLabels returns the standard labels to set on a per-node artifact object.
+// NodeObjectLabels returns searchable labels. Full identities remain in the owner
+// reference and spec.nodeName when their names are too long for label values.
 func NodeObjectLabels(kind, artifactName, nodeName string) map[string]string {
 	return map[string]string{
-		LabelArtifactParent: artifactName,
-		LabelArtifactNode:   nodeName,
+		LabelArtifactParent: nodeObjectLabelValue(artifactName),
+		LabelArtifactNode:   nodeObjectLabelValue(nodeName),
 		LabelArtifactKind:   kind,
 	}
+}
+
+func nodeObjectLabelValue(name string) string {
+	if len(name) <= maxLabelValueLen {
+		return name
+	}
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(name)))[:maxLabelValueLen]
 }
 
 // EnforceNodeObjectMeta restores any missing or incorrect labels and the controlling
@@ -191,6 +190,13 @@ func EnsureNodeObject(
 	existing := &artifactv1alpha1.ArtifactNode{}
 	err := cl.Get(ctx, client.ObjectKey{Namespace: owner.GetNamespace(), Name: name}, existing)
 	if err == nil {
+		ref := metav1.GetControllerOf(existing)
+		if existing.Spec.NodeName != nodeName || (ref != nil && (ref.Kind != ownerGVK.Kind || ref.Name != owner.GetName())) {
+			return fmt.Errorf("ArtifactNode %s/%s belongs to a different artifact or node", existing.Namespace, existing.Name)
+		}
+		if !existing.DeletionTimestamp.IsZero() {
+			return nil
+		}
 		if err := EnforceNodeObjectMeta(ctx, cl, existing, desiredLabels, &desiredOwnerRef); err != nil {
 			logger.Error(err, "unable to enforce ArtifactNode metadata", "node", nodeName, "artifactNode", name)
 			return err
