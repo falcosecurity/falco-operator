@@ -166,6 +166,19 @@ func TestFetcher_FetchOCI_RequestError(t *testing.T) {
 	assert.NotErrorAs(t, err, &retryErr, "a build-request failure must not be retryable")
 }
 
+func TestFetcher_FetchOCI_MissingServerURL(t *testing.T) {
+	for _, artifactType := range []Type{TypePlugin, TypeRulesfile} {
+		t.Run(string(artifactType), func(t *testing.T) {
+			fetcher := &Fetcher{HTTPClient: http.DefaultClient}
+			result, err := fetcher.FetchOCI(t.Context(), "ns", "name", artifactType, testFetchDigest)
+			require.EqualError(t, err, "OCI artifacts require an artifact server URL; configure --artifact-server-url or ARTIFACT_SERVER_URL")
+			require.Empty(t, result)
+			var retryErr *RetryableError
+			require.NotErrorAs(t, err, &retryErr)
+		})
+	}
+}
+
 func TestFetcher_FetchOCI_ClientDoError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	srv.Close() // closed before use: any request against it fails at the transport level

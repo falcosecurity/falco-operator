@@ -130,6 +130,15 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 		opt(cfg)
 	}
 
+	if cfg.podTemplateSpec != nil && defs.SidecarContainerName != "" {
+		for i := range cfg.podTemplateSpec.Spec.InitContainers {
+			container := &cfg.podTemplateSpec.Spec.InitContainers[i]
+			if container.Name == defs.SidecarContainerName {
+				return nil, fmt.Errorf("sidecar %q must be configured in spec.podTemplateSpec.spec.containers, not initContainers", container.Name)
+			}
+		}
+	}
+
 	selectorLabels := forgeSelectorLabels(name)
 
 	var userResource any

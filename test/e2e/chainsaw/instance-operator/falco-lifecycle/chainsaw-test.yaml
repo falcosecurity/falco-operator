@@ -11,9 +11,13 @@ spec:
        conditions, are all correct.
     2. Re-apply the identical spec; assert the reconcile is a no-op (no pod restart), proving
        ensureDeployment/ensureDaemonSet compares before writing rather than always updating.
-    3. Patch spec.type to Deployment; assert the DaemonSet is torn down, a Deployment takes
+    3. Reject a legacy artifact-operator override in initContainers without changing the
+       existing DaemonSet or restarting its running Pod.
+    4. Move the override to containers; assert fresh successful reconciliation and the env
+       override on the updated DaemonSet and ready Pods.
+    5. Patch spec.type to Deployment; assert the DaemonSet is torn down, a Deployment takes
        its place and becomes ready, and the Falco CR reflects the new resourceType.
-    4. Delete the Falco CR; assert every owned namespaced (Deployment, ServiceAccount, Role,
+    6. Delete the Falco CR; assert every owned namespaced (Deployment, ServiceAccount, Role,
        RoleBinding) and cluster-scoped (ClusterRole, ClusterRoleBinding) resource is gone.
 
   bindings:
@@ -24,6 +28,7 @@ spec:
 
   steps:
     - name: Create-falco-as-daemonset
+      description: Create a Falco instance with the DaemonSet workload type.
       use:
         template: ../../common/_step_templates/apply-assert-falco.yaml
         with:
@@ -32,6 +37,7 @@ spec:
               value: DaemonSet
 
     - name: Wait-for-falco-pod-ready
+      description: Wait for the Falco Pod to become ready before testing its lifecycle.
       use:
         template: ../../common/_step_templates/wait-falco-pod-ready.yaml
 
@@ -52,6 +58,7 @@ spec:
                 (numberReady == desiredNumberScheduled): true
 
     - name: Assert-falco-status-as-daemonset
+      description: Verify the Falco CR reports the DaemonSet workload type and expected version.
       use:
         template: ../../common/_step_templates/assert-falco-status.yaml
         with:
@@ -75,6 +82,7 @@ spec:
               value: DaemonSet
 
     - name: Assert-no-pod-restart-after-reapply
+      description: Verify container restart counts remain zero after reapplying the identical spec.
       try:
         - script:
             env:
@@ -87,7 +95,213 @@ spec:
             check:
               (to_string(json_parse($stdout).status) == 'success'): true
 
+    - name: Reject-legacy-artifact-operator-init-container-override
+      description: |
+        An artifact-operator override in initContainers must report the placement error
+        for the current Falco generation. The existing DaemonSet keeps its regular
+        sidecar without the rejected env; the captured ready Pod keeps its UID and
+        zero restart counts. Capture and compare identities within this step.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: daemonsets.apps
+              - name: NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+            outputs:
+              - name: original_daemonset_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_no_pod_restarts.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+            outputs:
+              - name: original_pod_name
+                value: (json_parse($stdout).pod)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: pods
+              - name: NAME
+                value: ($original_pod_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+            outputs:
+              - name: original_pod_uid
+                value: (json_parse($stdout).uid)
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    initContainers:
+                      - name: artifact-operator
+                        restartPolicy: Always
+                        env:
+                          - name: SIDECAR_OVERRIDE_TEST
+                            value: configured
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'Reconciled'].observedGeneration == [metadata.generation]): true
+              status:
+                resourceType: DaemonSet
+                (conditions[?type == 'Reconciled']):
+                  - status: 'False'
+                    reason: ApplyConfigurationError
+                    message: 'Unable to generate apply configuration: sidecar "artifact-operator" must be configured in spec.podTemplateSpec.spec.containers, not initContainers'
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+                uid: ($original_daemonset_uid)
+              spec:
+                template:
+                  spec:
+                    (length(initContainers[?name == 'artifact-operator'] || `[]`)): 0
+                    (containers[?name == 'artifact-operator']):
+                      - (length(env[?name == 'SIDECAR_OVERRIDE_TEST'] || `[]`)): 0
+              status:
+                (desiredNumberScheduled >= `1`): true
+                (numberReady == desiredNumberScheduled): true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($original_pod_name)
+                namespace: ($namespace)
+                uid: ($original_pod_uid)
+              spec:
+                (length(initContainers[?name == 'artifact-operator'] || `[]`)): 0
+                (containers[?name == 'artifact-operator']):
+                  - (length(env[?name == 'SIDECAR_OVERRIDE_TEST'] || `[]`)): 0
+              status:
+                (conditions[?type == 'Ready']):
+                  - status: 'True'
+                (length(containerStatuses[?to_string(restartCount) != '0'])): 0
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_no_pod_restarts.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+              (json_parse($stdout).pod == $original_pod_name): true
+
+    - name: Move-artifact-operator-override-to-regular-container
+      description: |
+        Correct the rejected override without automatic migration: remove the legacy
+        initContainers entry and put its env on the regular sidecar. Preserve all three
+        original container definitions, including images, sidecar args and netshoot.
+        Require current-generation status, a completed DaemonSet rollout and ready Pods
+        carrying the env before continuing the original DaemonSet-to-Deployment lifecycle.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    initContainers: null
+                    containers:
+                      - name: falco
+                        image: (env('CHAINSAW_FALCO_IMAGE'))
+                        tty: true
+                      - name: artifact-operator
+                        image: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
+                        imagePullPolicy: Never
+                        args:
+                          - --enforce-requirements=true
+                        env:
+                          - name: SIDECAR_OVERRIDE_TEST
+                            value: configured
+                      - name: netshoot
+                        image: nicolaka/netshoot
+                        command: ["sleep", "infinity"]
+                        stdin: true
+                        tty: true
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'Reconciled'].observedGeneration == [metadata.generation]): true
+              status:
+                resourceType: DaemonSet
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              (status.observedGeneration == metadata.generation): true
+              spec:
+                template:
+                  spec:
+                    (length(initContainers[?name == 'artifact-operator'] || `[]`)): 0
+                    (containers[?name == 'artifact-operator']):
+                      - (env[?name == 'SIDECAR_OVERRIDE_TEST']):
+                          - value: configured
+              status:
+                (desiredNumberScheduled >= `1`): true
+                (updatedNumberScheduled == desiredNumberScheduled): true
+                (numberReady == desiredNumberScheduled): true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/name: ($falco_name)
+              spec:
+                (length(initContainers[?name == 'artifact-operator'] || `[]`)): 0
+                (containers[?name == 'artifact-operator']):
+                  - (env[?name == 'SIDECAR_OVERRIDE_TEST']):
+                      - value: configured
+              status:
+                (conditions[?type == 'Ready']):
+                  - status: 'True'
+
     - name: Switch-falco-type-to-deployment
+      description: Request a Deployment with one replica for the existing Falco instance.
       try:
         - patch:
             resource:
@@ -101,6 +315,7 @@ spec:
                 replicas: 1
 
     - name: Assert-daemonset-torn-down
+      description: Verify the previous DaemonSet is removed after the workload-type change.
       try:
         - error:
             resource:
@@ -111,6 +326,7 @@ spec:
                 namespace: ($namespace)
 
     - name: Assert-deployment-ready
+      description: Wait for the replacement Deployment to have one ready and available replica.
       try:
         - assert:
             resource:
@@ -124,6 +340,7 @@ spec:
                 readyReplicas: 1
 
     - name: Assert-falco-status-as-deployment
+      description: Verify the Falco CR reports the Deployment workload type and expected version.
       use:
         template: ../../common/_step_templates/assert-falco-status.yaml
         with:
@@ -138,6 +355,7 @@ spec:
               value: "0.44.1"
 
     - name: Delete-falco
+      description: Delete the Falco CR to trigger cleanup of its managed resources.
       try:
         - delete:
             ref:
@@ -147,6 +365,7 @@ spec:
               namespace: ($namespace)
 
     - name: Assert-namespaced-resources-gone
+      description: Verify the Deployment, ServiceAccount, Role and RoleBinding are removed.
       try:
         - error:
             resource:

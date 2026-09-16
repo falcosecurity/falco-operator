@@ -197,6 +197,27 @@ func main() {
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 
+	// Resolve the required URL before starting clients or reconcilers. An explicit
+	// flag or environment variable takes precedence over the in-cluster Service.
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
+	if artifactServerURL == "" && operatorNamespace != "" {
+		serviceName := os.Getenv("OPERATOR_SERVICE_NAME")
+		if serviceName == "" {
+			serviceName = "falco-operator"
+		}
+		scheme := "http"
+		if artifactServerCertPath != "" {
+			scheme = "https"
+		}
+		artifactServerURL = fmt.Sprintf("%s://%s.%s.svc.cluster.local%s", scheme, serviceName, operatorNamespace, artifactServeAddr)
+	}
+	if strings.TrimSpace(artifactServerURL) == "" {
+		setupLog.Error(nil, "artifact server URL is required; configure --artifact-server-url or ARTIFACT_SERVER_URL")
+		os.Exit(1)
+	}
+	setupLog.Info("Artifact server URL configured for sidecar injection", "url", artifactServerURL)
+	resources.SetArtifactServerURL(artifactServerURL)
+
 	setupLog.Info("Starting instance operator", "version", version.SemVersion, "commit", version.GitCommit,
 		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform,
 		"artifactOperatorImage", version.ArtifactOperatorImage)
@@ -472,7 +493,6 @@ func main() {
 	if artifactServerMaxConcurrentRequests > 0 {
 		artifactOpts = append(artifactOpts, artifactserver.WithMaxConcurrentRequests(artifactServerMaxConcurrentRequests))
 	}
-	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
 	artifactSrv := artifactserver.New(artifactCache, artifactOpts...)
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		return artifactSrv.Start(ctx, artifactServeAddr)
@@ -484,23 +504,6 @@ func main() {
 	if err := mgr.Add(artifactcache.NewSweeper(artifactCache, artifactcache.DefaultSweepInterval)); err != nil {
 		setupLog.Error(err, "unable to add artifact cache sweep to manager")
 		os.Exit(1)
-	}
-
-	// Resolve the artifact server URL to advertise to sidecar containers.
-	// Explicit flag takes priority; falls back to the in-cluster Service URL derived
-	// from OPERATOR_NAMESPACE when running inside the cluster.
-	if artifactServerURL == "" && operatorNamespace != "" {
-		scheme := "http"
-		if artifactServerCertPath != "" {
-			scheme = "https"
-		}
-		artifactServerURL = fmt.Sprintf("%s://falco-operator.%s.svc.cluster.local%s", scheme, operatorNamespace, artifactServeAddr)
-	}
-	if artifactServerURL != "" {
-		setupLog.Info("Artifact server URL configured for sidecar injection", "url", artifactServerURL)
-		resources.SetArtifactServerURL(artifactServerURL)
-	} else {
-		setupLog.Info("No artifact server URL available; artifact-operator sidecars will pull OCI artifacts directly from the registry")
 	}
 
 	if artifactClientCertIssuerName != "" {
