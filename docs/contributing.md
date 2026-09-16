@@ -222,12 +222,15 @@ Deploy the operator to a local cluster for testing:
 # Install CRDs
 make install
 
-# Run the operator locally (outside the cluster)
-make run
+# Run locally with an artifact server URL reachable from Falco pods
+ARTIFACT_SERVER_URL="http://<operator-host>:8082" make run
 
 # Or deploy to the cluster
 make deploy IMG=falcosecurity/falco-operator:dev
 ```
+
+The central artifact server is required. Helm configures its in-cluster URL
+automatically; local runs must advertise a host and port reachable from the pods.
 
 > `make deploy` and `make undeploy` use the local Helm chart in [`chart/falco-operator/`](../chart/falco-operator/) under the hood (via `helm upgrade --install` and `helm uninstall`). This is the same chart that gets published to `falcosecurity/charts` — see [Helm chart publishing and versioning](#helm-chart-publishing-and-versioning).
 

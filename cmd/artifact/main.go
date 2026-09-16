@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -111,8 +112,7 @@ func main() {
 	var artifactClientCertPath, artifactClientCertName, artifactClientCertKey string
 	var artifactServerCAFile string
 	flag.StringVar(&artifactServerURL, "artifact-server-url", "",
-		"URL of the central artifact HTTP server to fetch OCI artifacts from, instead of pulling "+
-			"directly from the registry.")
+		"Required URL of the central artifact HTTP server.")
 	flag.StringVar(&artifactClientCertPath, "artifact-client-cert-path", "",
 		"The directory that contains the client certificate used to authenticate to the central "+
 			"artifact server via mTLS. Only meaningful when the artifact server requires client certs.")
@@ -132,11 +132,9 @@ func main() {
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 
-	if artifactServerURL != "" {
-		setupLog.Info("Artifact server mode enabled; OCI artifacts will be fetched from the central cache",
-			"artifactServer", artifactServerURL)
-	} else {
-		setupLog.Info("Artifact server mode disabled; OCI artifacts will be pulled directly from the registry")
+	if strings.TrimSpace(artifactServerURL) == "" {
+		setupLog.Error(nil, "artifact server URL is required; configure --artifact-server-url or ARTIFACT_SERVER_URL")
+		os.Exit(1)
 	}
 
 	setupLog.Info("Starting artifact operator", "version", version.SemVersion, "commit", version.GitCommit,

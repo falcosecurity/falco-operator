@@ -26,10 +26,63 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 )
+
+func TestGenerateUserOverlaySidecarPlacement(t *testing.T) {
+	for _, kind := range []string{ResourceTypeDeployment, ResourceTypeDaemonSet} {
+		for _, tc := range []struct {
+			name    string
+			spec    corev1.PodSpec
+			wantErr bool
+		}{
+			{
+				name:    "legacy init container override",
+				spec:    corev1.PodSpec{InitContainers: []corev1.Container{{Name: FalcoDefaults.SidecarContainerName}}},
+				wantErr: true,
+			},
+			{
+				name: "sidecar override in both lists",
+				spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: FalcoDefaults.SidecarContainerName}},
+					Containers:     []corev1.Container{{Name: FalcoDefaults.SidecarContainerName}},
+				},
+				wantErr: true,
+			},
+			{
+				name: "regular sidecar override and unrelated init container",
+				spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{{Name: "prepare", Image: "busybox"}},
+					Containers: []corev1.Container{{Name: FalcoDefaults.SidecarContainerName,
+						Env: []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}}},
+				},
+			},
+		} {
+			t.Run(kind+"/"+tc.name, func(t *testing.T) {
+				template := &corev1.PodTemplateSpec{Spec: tc.spec}
+				before := template.DeepCopy()
+				overlay, err := GenerateUserOverlay(kind, "falco", FalcoDefaults, WithOverlayPodTemplateSpec(template))
+				require.Equal(t, before, template)
+				if tc.wantErr {
+					require.EqualError(t, err, "sidecar \"artifact-operator\" must be configured in spec.podTemplateSpec.spec.containers, not initContainers")
+					require.Nil(t, overlay)
+					return
+				}
+				require.NoError(t, err)
+				podSpec, found, err := unstructured.NestedMap(overlay.Object, "spec", "template", "spec")
+				require.NoError(t, err)
+				require.True(t, found)
+				var got corev1.PodSpec
+				require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(podSpec, &got))
+				require.Equal(t, tc.spec.InitContainers, got.InitContainers)
+				require.Equal(t, tc.spec.Containers, got.Containers)
+			})
+		}
+	}
+}
 
 func TestGenerateOverlayOptions(t *testing.T) {
 	tests := []struct {

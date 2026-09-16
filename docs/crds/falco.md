@@ -113,5 +113,5 @@ spec:
 
 - When `type` is omitted, the operator defaults to `DaemonSet` mode.
 - When `version` is omitted, the operator resolves the version from the Falco container image tag in `podTemplateSpec` when provided, otherwise it uses the built-in default pinned in this operator release.
-- The `podTemplateSpec` allows full customization of the Falco pod, including the Artifact Operator sidecar (init container named `artifact-operator`) and the Falco container (named `falco`).
+- The `podTemplateSpec` allows full customization of the Falco pod, including the Artifact Operator sidecar (`containers` entry named `artifact-operator`) and the Falco container (named `falco`).
 - Only one Falco CR should be created per namespace to avoid conflicts.

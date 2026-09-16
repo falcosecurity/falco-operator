@@ -155,6 +155,9 @@ func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifact
 	if err := digest.Digest(expectedDigest).Validate(); err != nil {
 		return FetchResult{}, fmt.Errorf("invalid expected OCI digest for %s/%s: %w", namespace, name, err)
 	}
+	if f.ServerURL == "" {
+		return FetchResult{}, errors.New("OCI artifacts require an artifact server URL; configure --artifact-server-url or ARTIFACT_SERVER_URL")
+	}
 	rawURL += "?" + query.Encode()
 
 	result, retryAfter, retryable, err := f.fetchOCIOnce(ctx, rawURL, namespace, name, expectedDigest)
