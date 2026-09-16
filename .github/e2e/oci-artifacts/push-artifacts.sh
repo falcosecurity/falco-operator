@@ -53,7 +53,8 @@ make_rulesfile_tar() {
     local workdir
     workdir=$(mktemp -d "${TMPDIR}/rules-XXXXXX")
     printf '%s\n' "${content}" > "${workdir}/rules.yaml"
-    tar -czf "${tarfile}" -C "${workdir}" rules.yaml
+    # Exclude macOS metadata from the single-file archive.
+    COPYFILE_DISABLE=1 tar -czf "${tarfile}" -C "${workdir}" rules.yaml
 }
 
 RULE_CONTENT=$(cat "${FIXTURES_DIR}/rule-basic.yaml")
@@ -148,7 +149,7 @@ for ARCH in x86_64 aarch64; do
         "https://download.falco.org/plugins/stable/json-0.7.4-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-json-${ARCH}.tar.gz"
     curl -fsSL -L \
-        "https://download.falco.org/plugins/stable/container-0.7.1-linux-${ARCH}.tar.gz" \
+        "https://download.falco.org/plugins/stable/container-0.7.4-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-container-${ARCH}.tar.gz"
     curl -fsSL -L \
         "https://download.falco.org/plugins/stable/k8smeta-0.4.0-linux-${ARCH}.tar.gz" \
@@ -167,7 +168,7 @@ K8S_AUDIT_RULES_VERSION=0.18.0
 curl -fsSL -L \
     "https://raw.githubusercontent.com/falcosecurity/plugins/plugins/k8saudit/v${K8S_AUDIT_RULES_VERSION}/plugins/k8saudit/rules/k8s_audit_rules.yaml" \
     -o "${TMPDIR}/k8s_audit_rules.yaml"
-tar -czf "${TMPDIR}/rulesfile-k8s-audit-rules.tar.gz" -C "${TMPDIR}" k8s_audit_rules.yaml
+COPYFILE_DISABLE=1 tar -czf "${TMPDIR}/rulesfile-k8s-audit-rules.tar.gz" -C "${TMPDIR}" k8s_audit_rules.yaml
 
 # push_plugin <tag> <version> <tarball_base> [extra falcoctl flags...]
 # Pushes linux/amd64 and linux/arm64 in a single call, producing a multi-arch manifest index.
@@ -217,8 +218,8 @@ push_plugin "falco-test/plugin-json:latest" "0.7.4" "plugin-json" \
     --requires plugin_api_version:3.11.0
 
 echo ""
-echo "Pushing plugin-container (real container 0.7.1 binary, requires plugin_api_version 3.10.0)..."
-push_plugin "falco-test/plugin-container:latest" "0.7.1" "plugin-container" \
+echo "Pushing plugin-container (real container 0.7.4 binary, requires plugin_api_version 3.10.0)..."
+push_plugin "falco-test/plugin-container:latest" "0.7.4" "plugin-container" \
     --requires plugin_api_version:3.10.0
 
 echo ""

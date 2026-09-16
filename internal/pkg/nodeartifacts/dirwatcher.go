@@ -17,12 +17,12 @@
 package nodeartifacts
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,33 +35,36 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// DefaultVerifyInterval is how often DirWatcher compares on-disk state against what Falco
-// reports as loaded, as a backstop for events missed by fsnotify.
+// DefaultVerifyInterval is how often DirWatcher checks rules loaded by Falco and local plugin
+// file changes, as a backstop for events missed by fsnotify.
 const DefaultVerifyInterval = 60 * time.Second
 
 // DirWatcher watches Falco's config directories with fsnotify and calls notifyFn on any file
 // Create or Remove event, driving ReloadCoordinator without coupling Manager to reload concerns.
 //
-// It also runs a periodic verification pass that compares on-disk artifact hashes/names against
-// what Falco actually reports as loaded (via /metrics for rules files and /versions for plugins).
-// A detected mismatch calls notifyFn to trigger a SIGHUP, replacing the deleted PluginConfigRetrier
-// and extending the same backstop to rules files.
+// Its periodic pass compares rules files against Falco's /metrics and detects changes to the
+// shared plugin configuration and managed .so files. Plugin aliases cannot be matched to the ABI
+// names in /versions, so this backstop detects missed file events, not plugin runtime drift.
+// A plugin file change can cause one extra reload after its fsnotify event was already handled.
 //
 // DirWatcher registers its filesystem watches at construction time (not in Start), avoiding the
 // TOCTOU window between New and Start where a write could otherwise go unobserved.
 //
 // DirWatcher implements manager.Runnable.
 type DirWatcher struct {
-	dirs            artifact.ArtifactDirs
-	falcoBaseURL    string
-	notifyFn        func()
-	watcher         *fsnotify.Watcher
-	verifyInterval  time.Duration
-	versionsFetcher compat.VersionsFetcher // reused across verify ticks; avoids per-tick TCP setup
-	metricsClient   *http.Client           // reused across verify ticks; field so tests can inject a custom transport
+	dirs           artifact.ArtifactDirs
+	falcoBaseURL   string
+	notifyFn       func()
+	watcher        *fsnotify.Watcher
+	verifyInterval time.Duration
+	metricsClient  *http.Client // reused across verify ticks; field so tests can inject a custom transport
+	// Only the verification goroutine updates these maps after construction. Removed rules
+	// remain tracked until unloaded; pluginFiles is the last complete local snapshot, nil if unknown.
+	trackedRules map[string]map[string]struct{}
+	pluginFiles  map[string]string
 }
 
 // NewDirWatcher creates a DirWatcher watching dirs. Watches are registered immediately so no
@@ -78,15 +81,28 @@ func NewDirWatcher(dirs artifact.ArtifactDirs, falcoBaseURL string, notifyFn fun
 			return nil, fmt.Errorf("watch dir %s: %w", dir, err)
 		}
 	}
-	return &DirWatcher{
-		dirs:            dirs,
-		falcoBaseURL:    falcoBaseURL,
-		notifyFn:        notifyFn,
-		watcher:         fw,
-		verifyInterval:  DefaultVerifyInterval,
-		versionsFetcher: compat.NewHTTPVersionsFetcher(falcoBaseURL),
-		metricsClient:   &http.Client{Timeout: 5 * time.Second},
-	}, nil
+	d := &DirWatcher{
+		dirs:           dirs,
+		falcoBaseURL:   falcoBaseURL,
+		notifyFn:       notifyFn,
+		watcher:        fw,
+		verifyInterval: DefaultVerifyInterval,
+		metricsClient:  &http.Client{Timeout: 5 * time.Second},
+		trackedRules:   make(map[string]map[string]struct{}),
+	}
+	rules, err := rulesFilesHashes(dirs.Rulesfile)
+	if err != nil {
+		ctrllog.Log.Error(err, "could not read initial rules files; verification will retry")
+	} else {
+		d.rememberRules(rules)
+	}
+	plugins, err := pluginFilesHashes(dirs)
+	if err != nil {
+		ctrllog.Log.Error(err, "could not read initial plugin files; verification will retry")
+	} else {
+		d.pluginFiles = plugins
+	}
+	return d, nil
 }
 
 // WithVerifyInterval overrides the default verification interval. Follows the same pattern as
@@ -110,6 +126,8 @@ func (d *DirWatcher) Start(ctx context.Context) error {
 	defer ticker.Stop()
 
 	logger.Info("Starting Falco dir watcher", "dirs", []string{d.dirs.Config, d.dirs.Rulesfile, d.dirs.Plugin}, "verifyInterval", d.verifyInterval)
+	// A startup reload also covers removals made while this sidecar was not running.
+	d.notifyFn()
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,9 +185,8 @@ func (d *DirWatcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 	d.notifyFn()
 }
 
-// verify runs the periodic backstop: compares what's on disk against what Falco reports loaded.
-// Calls notifyFn once if any mismatch is found (rules files or plugins), then returns so the
-// resulting reload coalesces all mismatches into a single SIGHUP.
+// verify requests a reload for mismatched runtime rules or changed local plugin files.
+// Calls notifyFn once per pass; ReloadCoordinator coalesces requests and retries failed signals.
 func (d *DirWatcher) verify(ctx context.Context) {
 	logger := ctrllog.FromContext(ctx)
 	if d.checkRulesFilesMismatch(ctx) {
@@ -177,15 +194,14 @@ func (d *DirWatcher) verify(ctx context.Context) {
 		d.notifyFn()
 		return
 	}
-	if d.checkPluginsMismatch(ctx) {
-		logger.V(1).Info("plugins mismatch detected; triggering reload")
+	if d.checkPluginFilesChanged(ctx) {
+		logger.V(1).Info("plugin files changed; triggering reload")
 		d.notifyFn()
 	}
 }
 
-// checkRulesFilesMismatch returns true when the set of sha256 hashes for .yaml files in the
-// rules directory differs from the set Falco reports via the
-// falcosecurity_falco_sha256_rules_files_info Prometheus metric.
+// checkRulesFilesMismatch compares managed filenames and hashes, including pending removals.
+// Falco exposes basenames only: identical name/hash pairs in different directories cannot be distinguished.
 func (d *DirWatcher) checkRulesFilesMismatch(ctx context.Context) bool {
 	logger := ctrllog.FromContext(ctx)
 	diskHashes, err := rulesFilesHashes(d.dirs.Rulesfile)
@@ -193,85 +209,88 @@ func (d *DirWatcher) checkRulesFilesMismatch(ctx context.Context) bool {
 		logger.Error(err, "failed to hash rules files on disk; skipping verify tick")
 		return false
 	}
+	d.rememberRules(diskHashes)
 	falcoHashes := d.fetchRulesHashes(ctx)
 	if falcoHashes == nil {
 		return false // Falco not reachable or metrics disabled: skip this tick
 	}
-	if len(diskHashes) != len(falcoHashes) {
-		return true
-	}
-	for h := range diskHashes {
-		if _, ok := falcoHashes[h]; !ok {
+	for name, hash := range diskHashes {
+		if _, ok := falcoHashes[name][hash]; !ok {
 			return true
+		}
+	}
+	for name, hashes := range d.trackedRules {
+		for hash := range hashes {
+			if diskHashes[name] == hash {
+				continue
+			}
+			if _, loaded := falcoHashes[name][hash]; loaded {
+				return true
+			}
+			delete(hashes, hash)
+		}
+		if len(hashes) == 0 {
+			delete(d.trackedRules, name)
 		}
 	}
 	return false
 }
 
-// fetchRulesHashes scrapes Falco's /metrics endpoint and returns the set of sha256 values from
-// falcosecurity_falco_sha256_rules_files_info lines. Returns nil if the endpoint is unreachable,
-// returns a non-200 status (e.g. metrics disabled in Falco config), or the response times out.
-func (d *DirWatcher) fetchRulesHashes(ctx context.Context) map[string]struct{} {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.falcoBaseURL+"/metrics", http.NoBody)
-	if err != nil {
-		return nil
+func (d *DirWatcher) rememberRules(files map[string]string) {
+	for name, hash := range files {
+		if d.trackedRules[name] == nil {
+			d.trackedRules[name] = make(map[string]struct{})
+		}
+		d.trackedRules[name][hash] = struct{}{}
 	}
-	resp, err := d.metricsClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil // metrics disabled or endpoint unavailable - skip this tick
-	}
+}
 
-	const metricPrefix = "falcosecurity_falco_sha256_rules_files_info{"
-	const sha256Key = `sha256="`
-	hashes := make(map[string]struct{})
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, metricPrefix) {
-			continue
-		}
-		// line looks like: falcosecurity_falco_sha256_rules_files_info{sha256="<hex>",path="..."} 1
-		_, afterKey, ok := strings.Cut(line, sha256Key)
-		if !ok {
-			continue
-		}
-		value, _, ok := strings.Cut(afterKey, `"`)
-		if !ok {
-			continue
-		}
-		hashes[strings.ToLower(value)] = struct{}{}
-	}
-	if err := scanner.Err(); err != nil {
+// fetchRulesHashes retains filename/hash pairs; a failed observation is not an empty runtime.
+// Returns nil if the endpoint is unreachable, times out, or responds unsuccessfully.
+func (d *DirWatcher) fetchRulesHashes(ctx context.Context) map[string]map[string]struct{} {
+	metrics, err := fetchFalcoMetrics(ctx, d.metricsClient, d.falcoBaseURL)
+	if err != nil {
+		ctrllog.FromContext(ctx).V(1).Info("rules verification unavailable", "err", err)
 		return nil
+	}
+	if metrics["falcosecurity_falco_sha256_rules_files_info"] == nil {
+		// An empty or unrelated HTTP body is not proof that Falco unloaded every rule.
+		if _, err := reloadTimestamp(metrics); err != nil {
+			return nil
+		}
+	}
+	hashes := make(map[string]map[string]struct{})
+	for _, metric := range metrics["falcosecurity_falco_sha256_rules_files_info"].GetMetric() {
+		var name, hash string
+		for _, label := range metric.GetLabel() {
+			switch label.GetName() {
+			case "file_name":
+				name = label.GetValue()
+			case "sha256":
+				hash = strings.ToLower(label.GetValue())
+			}
+		}
+		if name == "" || hash == "" {
+			return nil
+		}
+		if hashes[name] == nil {
+			hashes[name] = make(map[string]struct{})
+		}
+		hashes[name][hash] = struct{}{}
 	}
 	return hashes
 }
 
-// checkPluginsMismatch returns true when the set of plugin names derived from .so files in the
-// plugins directory differs from the set Falco reports via /versions plugin_versions.
-func (d *DirWatcher) checkPluginsMismatch(ctx context.Context) bool {
-	diskPlugins, err := pluginNames(d.dirs.Plugin)
+// checkPluginFilesChanged advances the local baseline only after a complete successful read.
+func (d *DirWatcher) checkPluginFilesChanged(ctx context.Context) bool {
+	files, err := pluginFilesHashes(d.dirs)
 	if err != nil {
+		ctrllog.FromContext(ctx).Error(err, "failed to read plugin files; skipping verify tick")
 		return false
 	}
-	versions, err := d.versionsFetcher.Fetch(ctx)
-	if err != nil {
-		return false // Falco not reachable: skip this tick
-	}
-	loaded := versions.PluginVersions()
-	if len(diskPlugins) != len(loaded) {
-		return true
-	}
-	for name := range diskPlugins {
-		if _, ok := loaded[name]; !ok {
-			return true
-		}
-	}
-	return false
+	changed := d.pluginFiles == nil || !maps.Equal(d.pluginFiles, files)
+	d.pluginFiles = files
+	return changed
 }
 
 // NeedLeaderElection reports that the DirWatcher runs on every pod replica, not just the leader.
@@ -285,12 +304,12 @@ func (d *DirWatcher) allDirs() []string {
 // rulesFilesHashes returns the sha256 hex digest of each .yaml file in dir. Returns an error if
 // any file cannot be read so that the caller skips the verify tick rather than producing a false
 // mismatch (Falco's /metrics may still report the hash of a transiently unreadable file).
-func rulesFilesHashes(dir string) (map[string]struct{}, error) {
+func rulesFilesHashes(dir string) (map[string]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
-	hashes := make(map[string]struct{})
+	hashes := make(map[string]string)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
 			continue
@@ -299,25 +318,40 @@ func rulesFilesHashes(dir string) (map[string]struct{}, error) {
 		if err != nil {
 			return nil, err
 		}
-		hashes[h] = struct{}{}
+		hashes[e.Name()] = h
 	}
 	return hashes, nil
 }
 
-// pluginNames returns the set of plugin names (basename without .so) for every .so file in dir.
-func pluginNames(dir string) (map[string]struct{}, error) {
-	entries, err := os.ReadDir(dir)
+// pluginFilesHashes includes the shared config and every managed .so, keyed by full path.
+// Hash binary contents too: a library update need not change the shared configuration.
+func pluginFilesHashes(dirs artifact.ArtifactDirs) (map[string]string, error) {
+	entries, err := os.ReadDir(dirs.Plugin)
 	if err != nil {
 		return nil, err
 	}
-	names := make(map[string]struct{})
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".so") {
+	hashes := make(map[string]string)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".so") {
 			continue
 		}
-		names[strings.TrimSuffix(e.Name(), ".so")] = struct{}{}
+		path := filepath.Join(dirs.Plugin, entry.Name())
+		hash, err := fileSHA256(path)
+		if err != nil {
+			return nil, err
+		}
+		hashes[path] = hash
 	}
-	return names, nil
+	path := artifact.ArtifactPath(dirs, pluginConfigFileName, priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig)
+	hash, err := fileSHA256(path)
+	if os.IsNotExist(err) {
+		return hashes, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	hashes[path] = hash
+	return hashes, nil
 }
 
 // fileSHA256 computes the lowercase sha256 hex digest of the file at path.

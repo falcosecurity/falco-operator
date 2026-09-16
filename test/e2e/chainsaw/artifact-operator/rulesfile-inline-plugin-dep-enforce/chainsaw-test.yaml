@@ -128,7 +128,7 @@ spec:
     - name: "Step 06: Assert-dep-met-programmed"
       description: |
         Container plugin Programmed=True triggers Rulesfile re-reconcile.
-        appendYAMLRequirements finds container dep, checks version ≥ 0.1.0 (met by 0.7.1).
+        appendYAMLRequirements finds container dep, checks version ≥ 0.1.0 (met by 0.7.4).
         DependenciesSatisfied=True, InlineArtifactProgrammed=True, Programmed=True.
       try:
         - assert:

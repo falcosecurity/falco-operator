@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Verify the Falco pod's containers have not restarted. A point-in-time check, not a
-# retry-until-true wait: the caller is expected to have already waited for the pod to be
+# Verify every matching Falco pod's containers have not restarted.
+# A point-in-time check, not a retry-until-true wait: callers must first wait for all pods to be
 # Ready (see wait-falco-pod-ready.yaml), so a restart count above 0 here means something
-# actually crashed and recovered, not that the pod hasn't come up yet.
+# actually restarted. Missing or incomplete status is not evidence of zero restarts.
 # Env vars:
 #   NAMESPACE:  Namespace of the Falco pod.
 #   FALCO_NAME: Value of app.kubernetes.io/name label on the Falco pod.
@@ -13,45 +13,44 @@ set -o pipefail
 NAMESPACE="${NAMESPACE}"
 FALCO_NAME="${FALCO_NAME}"
 
-if ! POD=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" \
-    -o jsonpath='{.items[0].metadata.name}' 2>&1); then
-  echo "{\"status\": \"failure\", \"message\": \"kubectl get pods failed\", \"error\": $(printf '%s' "$POD" | jq -Rs .)}"
-  exit 1
-fi
-if [ -z "$POD" ]; then
-  echo "{\"status\": \"failure\", \"message\": \"no pod found for app.kubernetes.io/name=$FALCO_NAME in $NAMESPACE\"}"
+if ! PODS=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" -o json 2>&1); then
+  jq -n --arg error "$PODS" --arg namespace "$NAMESPACE" --arg falco_name "$FALCO_NAME" \
+    '{status: "failure", message: "kubectl get pods failed", error: $error,
+      namespace: $namespace, falco_name: $falco_name}'
   exit 1
 fi
 
-if ! RESTARTS=$(kubectl get pod -n "$NAMESPACE" "$POD" \
-    -o jsonpath='{.status.containerStatuses[*].restartCount}' 2>&1); then
-  echo "{\"status\": \"failure\", \"message\": \"kubectl get pod failed\", \"pod\": \"$POD\", \"error\": $(printf '%s' "$RESTARTS" | jq -Rs .)}"
+if ! PODS=$(printf '%s' "$PODS" | jq -ce '
+  if (.items | length) == 0 then
+    error("expected a nonempty pod list")
+  else
+    [.items[] |
+      if (.status.containerStatuses | length) == 0 or
+         ([.spec.containers[].name] | sort) != ([.status.containerStatuses[].name] | sort) then
+        error("missing or incomplete container statuses for pod \(.metadata.name)")
+      else
+        {pod: .metadata.name,
+         restart_counts: [.status.containerStatuses[].restartCount]}
+      end]
+  end
+' 2>&1); then
+  jq -n --arg error "$PODS" --arg namespace "$NAMESPACE" --arg falco_name "$FALCO_NAME" \
+    '{status: "failure", message: "invalid or incomplete pod status", error: $error,
+      namespace: $namespace, falco_name: $falco_name}'
   exit 1
 fi
 
-for count in $RESTARTS; do
-  if [ "$count" != "0" ]; then
-    cat <<EOF
-{
-  "status": "failure",
-  "message": "pod container restarted",
-  "namespace": "$NAMESPACE",
-  "falco_name": "$FALCO_NAME",
-  "pod": "$POD",
-  "restart_counts": "$RESTARTS"
-}
-EOF
-    exit 1
-  fi
-done
+STATUS=success
+MESSAGE="no container restarts"
+if ! printf '%s' "$PODS" | jq -e 'all(.[]; all(.restart_counts[]; . == 0))' >/dev/null; then
+  STATUS=failure
+  MESSAGE="pod container restarted"
+fi
 
-cat <<EOF
-{
-  "status": "success",
-  "message": "no container restarts",
-  "namespace": "$NAMESPACE",
-  "falco_name": "$FALCO_NAME",
-  "pod": "$POD",
-  "restart_counts": "$RESTARTS"
-}
-EOF
+# Preserve the original single-pod fields for callers, with details for every checked pod.
+jq -n --arg status "$STATUS" --arg message "$MESSAGE" --arg namespace "$NAMESPACE" \
+  --arg falco_name "$FALCO_NAME" --argjson pods "$PODS" \
+  '{status: $status, message: $message, namespace: $namespace, falco_name: $falco_name,
+    pod: $pods[0].pod, restart_counts: ($pods[0].restart_counts | map(tostring) | join(" ")),
+    pods: $pods}'
+[ "$STATUS" = success ]

@@ -20,6 +20,7 @@ import (
 	"flag"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFlagNameToEnvName(t *testing.T) {
@@ -109,4 +110,44 @@ func TestBindFlagEnv(t *testing.T) {
 			t.Errorf("error %q should mention both env var and flag name", err.Error())
 		}
 	})
+}
+
+func TestBindFlagEnv_Duration(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     string
+		args    []string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "environment override", env: "7s", want: 7 * time.Second},
+		{name: "fractional duration", env: "500ms", want: 500 * time.Millisecond},
+		{name: "explicit flag wins", env: "7s", args: []string{"--falco-reload-cooldown=4s"}, want: 4 * time.Second},
+		{name: "explicit flag ignores invalid environment", env: "invalid", args: []string{"--falco-reload-cooldown=4s"}, want: 4 * time.Second},
+		{name: "invalid environment duration", env: "invalid", wantErr: true},
+		{name: "empty environment duration", env: "", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("test", flag.ContinueOnError)
+			val := fs.Duration("falco-reload-cooldown", 5*time.Second, "usage")
+			if err := fs.Parse(tt.args); err != nil {
+				t.Fatalf("unexpected parse error: %v", err)
+			}
+			t.Setenv("FALCO_RELOAD_COOLDOWN", tt.env)
+			err := BindFlagEnv(fs)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "FALCO_RELOAD_COOLDOWN") {
+					t.Fatalf("expected duration error mentioning the environment variable, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if *val != tt.want {
+				t.Errorf("duration = %s, want %s", *val, tt.want)
+			}
+		})
+	}
 }

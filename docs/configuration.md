@@ -150,6 +150,38 @@ The following container names are reserved by the operator:
 
 You can customize these containers in `podTemplateSpec` by matching their names.
 
+## Artifact Reloads
+
+With Falco versions before 0.45, artifact reloads are **best effort**. By default,
+the Artifact Operator sends SIGHUP and waits at least **5 seconds** before checking Falco's HTTP
+endpoint or sending another signal. This cooldown reduces repeated signals; it
+does not confirm that a reload completed or prevent every conflict with Falco's
+own file watcher. Support for the reload changes planned for Falco 0.45 will be
+validated separately; this setting does not enable a different reload mechanism.
+
+Configure the cooldown per instance on the `artifact-operator` container:
+
+```yaml
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Falco
+metadata:
+  name: falco
+spec:
+  podTemplateSpec:
+    spec:
+      containers:
+        - name: artifact-operator
+          env:
+            - name: FALCO_RELOAD_COOLDOWN
+              value: "5s"
+```
+
+The value must be a positive duration, such as `4s` or `10s`. The equivalent flag
+is `--falco-reload-cooldown`; an explicit flag takes precedence over the environment
+variable. Changing the Pod template follows the workload's update strategy; this
+is not a live adjustment to an already-running sidecar. Falco metrics are not
+required for the cooldown or the HTTP availability check.
+
 ## Artifact Operator Image
 
 The Artifact Operator sidecar image is configurable via the `ARTIFACT_OPERATOR_IMAGE` environment variable on the Falco Operator Deployment:

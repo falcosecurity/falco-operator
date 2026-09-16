@@ -19,6 +19,7 @@ spec:
 
     All 6 permutations (3! = 6) are executed in sequence within this single test.
     Between permutations the Rulesfile is restored to all three sources.
+    Every Falco Pod must finish these updates ready, with no container restarts.
 
     Key observations:
     - After each removal, the remaining sources' requirements are re-merged and re-checked.
@@ -117,6 +118,7 @@ spec:
               bash ../../common/scripts/check_falco_plugin_loaded.sh
 
     - name: "Step 05: Verify-container-loaded-in-falco"
+      description: Verify Falco loaded the fixture version with the container retry shutdown fix.
       try:
         - script:
             env:
@@ -126,6 +128,8 @@ spec:
                 value: ($falco_name)
               - name: PLUGIN_NAME
                 value: container
+              - name: EXPECTED_PLUGIN_VERSION
+                value: "0.7.4"
             content: |
               bash ../../common/scripts/check_falco_plugin_loaded.sh
 
@@ -1707,6 +1711,26 @@ spec:
               value: ($inline_file)
             - name: should_exist
               value: "false"
+
+    - name: "Step 12: Wait-for-Falco-ready"
+      description: Wait for every Falco Pod to be ready after the six source-removal permutations.
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+        with:
+          bindings:
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 13: Assert-no-container-restarts"
+      description: Reject crashes on any node even if the source-removal assertions eventually succeeded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_no_pod_restarts.sh
 
   catch:
     - description: Capture debug snapshot on failure

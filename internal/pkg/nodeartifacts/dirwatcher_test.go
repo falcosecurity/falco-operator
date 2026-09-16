@@ -47,8 +47,11 @@ func startDirWatcher(t *testing.T, dirs artifact.ArtifactDirs, falcoURL string, 
 	dw, err := nodeartifacts.NewDirWatcher(dirs, falcoURL, func() { calls.Add(1) })
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = dw.Start(ctx) }()
-	return cancel
+	done := make(chan struct{})
+	go func() { _ = dw.Start(ctx); close(done) }()
+	waitForCall(t, calls)
+	calls.Store(0) // Test subsequent events separately from the startup reload.
+	return func() { cancel(); <-done }
 }
 
 // waitForCall blocks until calls reaches ≥1 or 3 seconds elapse.
@@ -70,7 +73,7 @@ func falcoVersionsSrvWith(metrics, versions string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/metrics":
-			_, _ = fmt.Fprint(w, metrics)
+			_, _ = fmt.Fprintln(w, metrics)
 		case "/versions":
 			_, _ = fmt.Fprint(w, versions)
 		}
@@ -181,6 +184,24 @@ func TestDirWatcher_Events(t *testing.T) {
 	}
 }
 
+func TestDirWatcher_StartupReload(t *testing.T) {
+	// Empty managed directories cannot identify artifacts removed while the sidecar was offline.
+	srv := falcoVersionsSrvWith("", `{"plugin_versions":{"external":"1.0"}}`)
+	defer srv.Close()
+	var calls atomic.Int32
+	dw, err := nodeartifacts.NewDirWatcher(threeAlike(t.TempDir()), srv.URL, func() { calls.Add(1) })
+	require.NoError(t, err)
+	dw.WithVerifyInterval(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- dw.Start(ctx) }()
+	waitForCall(t, &calls)
+	time.Sleep(150 * time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load(), "startup requests one reload; external artifacts do not cause repeats")
+	cancel()
+	require.NoError(t, <-done)
+}
+
 func TestDirWatcher_Verify(t *testing.T) {
 	startVerifying := func(t *testing.T, dirs artifact.ArtifactDirs, srv *httptest.Server, calls *atomic.Int32) context.CancelFunc {
 		t.Helper()
@@ -188,8 +209,11 @@ func TestDirWatcher_Verify(t *testing.T) {
 		require.NoError(t, err)
 		dw.WithVerifyInterval(50 * time.Millisecond)
 		ctx, cancel := context.WithCancel(context.Background())
-		go func() { _ = dw.Start(ctx) }()
-		return cancel
+		done := make(chan struct{})
+		go func() { _ = dw.Start(ctx); close(done) }()
+		waitForCall(t, calls)
+		calls.Store(0)
+		return func() { cancel(); <-done }
 	}
 
 	tests := []struct {
@@ -206,7 +230,7 @@ func TestDirWatcher_Verify(t *testing.T) {
 				hashHex := hex.EncodeToString(h[:])
 
 				srv := falcoVersionsSrvWith(
-					fmt.Sprintf(`falcosecurity_falco_sha256_rules_files_info{sha256=%q,path="rule.yaml"} 1`, hashHex),
+					fmt.Sprintf(`falcosecurity_falco_sha256_rules_files_info{sha256=%q,file_name="rule.yaml"} 1`, hashHex),
 					`{"engine_version_semver":"0.37.0","plugin_versions":{}}`,
 				)
 				defer srv.Close()
@@ -225,7 +249,7 @@ func TestDirWatcher_Verify(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(rulesDir, "rule.yaml"), []byte("content"), 0o644))
 
 				srv := falcoVersionsSrvWith(
-					`falcosecurity_falco_sha256_rules_files_info{sha256="deadbeef",path="rule.yaml"} 1`,
+					`falcosecurity_falco_sha256_rules_files_info{sha256="deadbeef",file_name="rule.yaml"} 1`,
 					`{"engine_version_semver":"0.37.0","plugin_versions":{}}`,
 				)
 				defer srv.Close()
@@ -248,7 +272,7 @@ func TestDirWatcher_Verify(t *testing.T) {
 
 				// Falco reports only 1 hash; disk has 2.
 				srv := falcoVersionsSrvWith(
-					fmt.Sprintf(`falcosecurity_falco_sha256_rules_files_info{sha256=%q,path="r1.yaml"} 1`, hex.EncodeToString(h[:])),
+					fmt.Sprintf(`falcosecurity_falco_sha256_rules_files_info{sha256=%q,file_name="r1.yaml"} 1`, hex.EncodeToString(h[:])),
 					`{"engine_version_semver":"0.37.0","plugin_versions":{}}`,
 				)
 				defer srv.Close()
@@ -260,10 +284,12 @@ func TestDirWatcher_Verify(t *testing.T) {
 			},
 		},
 		{
-			name: "plugins match - no notify",
+			name: "unchanged plugin files - no notify",
 			fn: func(t *testing.T) {
 				pluginsDir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(pluginsDir, "container.so"), nil, 0o755))
+				configDir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(configDir, "99-03-plugins-config-inline.yaml"), []byte("load_plugins: [container]\n"), 0o644))
 
 				srv := falcoVersionsSrvWith(
 					"",
@@ -272,41 +298,71 @@ func TestDirWatcher_Verify(t *testing.T) {
 				defer srv.Close()
 
 				var calls atomic.Int32
-				cancel := startVerifying(t, artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
+				cancel := startVerifying(t, artifact.ArtifactDirs{Config: configDir, Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
 				defer cancel()
 				time.Sleep(200 * time.Millisecond)
 				assert.Equal(t, int32(0), calls.Load())
 			},
 		},
 		{
-			name: "plugins count mismatch - notifies",
+			name: "runtime-only plugin removal is not observable from the local snapshot",
 			fn: func(t *testing.T) {
 				pluginsDir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(pluginsDir, "container.so"), nil, 0o755))
+				configDir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(configDir, "99-03-plugins-config-inline.yaml"), []byte("load_plugins: [container]\n"), 0o644))
 
 				srv := falcoVersionsSrvWith("", `{"engine_version_semver":"0.37.0","plugin_versions":{}}`)
 				defer srv.Close()
 
 				var calls atomic.Int32
-				cancel := startVerifying(t, artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
+				cancel := startVerifying(t, artifact.ArtifactDirs{Config: configDir, Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
 				defer cancel()
-				waitForCall(t, &calls)
+				assertNoCall(t, &calls)
 			},
 		},
 		{
-			name: "plugins same count different name - notifies",
+			name: "different runtime plugin names do not prove a local mismatch",
 			fn: func(t *testing.T) {
 				pluginsDir := t.TempDir()
 				require.NoError(t, os.WriteFile(filepath.Join(pluginsDir, "container.so"), nil, 0o755))
+				configDir := t.TempDir()
+				require.NoError(t, os.WriteFile(filepath.Join(configDir, "99-03-plugins-config-inline.yaml"), []byte("load_plugins: [container]\n"), 0o644))
 
-				// disk has "container", Falco reports "json" (same count, different name)
+				// Runtime names do not map configuration aliases to library identities.
 				srv := falcoVersionsSrvWith("", `{"engine_version_semver":"0.37.0","plugin_versions":{"json":"1.0"}}`)
 				defer srv.Close()
 
 				var calls atomic.Int32
-				cancel := startVerifying(t, artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
+				cancel := startVerifying(t, artifact.ArtifactDirs{Config: configDir, Rulesfile: t.TempDir(), Plugin: pluginsDir}, srv, &calls)
 				defer cancel()
-				waitForCall(t, &calls)
+				assertNoCall(t, &calls)
+			},
+		},
+		{
+			name: "periodic backstop detects writes ignored by the event handler",
+			fn: func(t *testing.T) {
+				for _, target := range []string{"aggregate", "binary"} {
+					t.Run(target, func(t *testing.T) {
+						dirs := artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: t.TempDir()}
+						configPath := filepath.Join(dirs.Config, "99-03-plugins-config-inline.yaml")
+						pluginPath := filepath.Join(dirs.Plugin, "my-container.so")
+						require.NoError(t, os.WriteFile(configPath, []byte("load_plugins: [custom-alias]\n"), 0o644))
+						require.NoError(t, os.WriteFile(pluginPath, []byte("binary-a"), 0o755))
+						srv := falcoVersionsSrvWith("", `{"plugin_versions":{"container":"0.7.1"}}`)
+						defer srv.Close()
+						var calls atomic.Int32
+						cancel := startVerifying(t, dirs, srv, &calls)
+						defer cancel()
+						// In-place Write events are intentionally ignored; the periodic scan must notice.
+						if target == "aggregate" {
+							require.NoError(t, os.WriteFile(configPath, []byte("load_plugins: []\n"), 0o644))
+						} else {
+							require.NoError(t, os.WriteFile(pluginPath, []byte("binary-b"), 0o755))
+						}
+						waitForCall(t, &calls)
+					})
+				}
 			},
 		},
 	}
