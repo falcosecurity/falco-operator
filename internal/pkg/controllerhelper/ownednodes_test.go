@@ -19,6 +19,7 @@ package controllerhelper_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -188,6 +189,21 @@ func TestListOwnedNodes_EmptyResult(t *testing.T) {
 	list, err := controllerhelper.ListOwnedNodes(context.Background(), cl, "default", "container", "Plugin")
 	require.NoError(t, err)
 	assert.Empty(t, list.Items)
+}
+
+func TestListOwnedNodes_LongParentUsesEncodedLabelAndVerifiedOwner(t *testing.T) {
+	parent := strings.Repeat("a", 80)
+	labels := controllerhelper.NodeObjectLabels("config", parent, "n1")
+	owned := newArtifactNode("owned", parent, controllerRef("Config", parent, "owner"))
+	owned.Labels = labels
+	other := newArtifactNode("other", labels[controllerhelper.LabelArtifactParent],
+		controllerRef("Config", labels[controllerhelper.LabelArtifactParent], "other-owner"))
+	cl := newArtifactNodeClient(t, owned, other)
+
+	list, err := controllerhelper.ListOwnedNodes(t.Context(), cl, "default", parent, "Config")
+	require.NoError(t, err)
+	require.Len(t, list.Items, 1)
+	assert.Equal(t, owned.Name, list.Items[0].Name)
 }
 
 func TestListOwnedNodes_ListError(t *testing.T) {

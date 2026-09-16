@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,6 +176,8 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
+		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
 
@@ -190,6 +193,55 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, 
 		store:    store,
 		nodeName: testutil.TestNodeName,
 	}, cl
+}
+
+func TestFindNodeObjects_UsesCanonicalNameWithoutLookup(t *testing.T) {
+	parent := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: "test--plugin", Namespace: testutil.TestNamespace, UID: "owner"},
+		Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
+			Registry: &commonv1alpha1.RegistryConfig{Auth: &commonv1alpha1.RegistryAuth{SecretRef: &commonv1alpha1.SecretRef{Name: "source"}}}}},
+	}
+	want := client.ObjectKey{
+		Namespace: parent.Namespace,
+		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, parent.Name, testutil.TestNodeName),
+	}
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(parent).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+				t.Fatal("event mapping must not fetch ArtifactNodes")
+				return nil
+			},
+		}).
+		WithIndex(&artifactv1alpha1.Plugin{}, index.SecretOnPlugin, index.PluginBySecretRef).Build()
+	r := &PluginReconciler{Client: cl, nodeName: testutil.TestNodeName}
+	requests := r.findNodeObjectForPlugin(t.Context(), parent)
+	require.Len(t, requests, 1)
+	assert.Equal(t, want, requests[0].NamespacedName)
+	requests = r.findNodeObjectsForSecret(t.Context(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
+	require.Len(t, requests, 1)
+	assert.Equal(t, want, requests[0].NamespacedName)
+}
+
+func TestFindAllNodeObjectsOnVersionChange_UsesFullNodeIdentity(t *testing.T) {
+	nodeName := strings.Repeat("n", 64)
+	parent := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testutil.TestNamespace}}
+	wanted := &artifactv1alpha1.ArtifactNode{
+		ObjectMeta: metav1.ObjectMeta{Name: controllerhelper.NodeObjectName("plugin", parent.Name, nodeName), Namespace: parent.Namespace,
+			Labels:          controllerhelper.NodeObjectLabels("plugin", parent.Name, nodeName),
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}},
+		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: nodeName},
+	}
+	otherNode := wanted.DeepCopy()
+	otherNode.Name = "other-node"
+	otherNode.Spec.NodeName = "another-node"
+	otherNamespace := wanted.DeepCopy()
+	otherNamespace.Namespace = "another-namespace"
+	r, _ := newTestReconciler(t, wanted, otherNode, otherNamespace)
+	r.nodeName = nodeName
+	r.namespace = parent.Namespace
+	requests := r.findAllNodeObjectsOnVersionChange(t.Context(), nil)
+	require.Len(t, requests, 1)
+	assert.Equal(t, client.ObjectKeyFromObject(wanted), requests[0].NamespacedName)
 }
 
 // seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set

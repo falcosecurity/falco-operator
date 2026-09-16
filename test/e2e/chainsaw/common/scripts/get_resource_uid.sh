@@ -7,7 +7,8 @@
 # Env vars:
 #   NAMESPACE: Namespace of the resource. Omit for cluster-scoped resources.
 #   RESOURCE:  Resource type, e.g. "artifactnodes.artifact.falcosecurity.dev".
-#   NAME:      Resource name.
+#   NAME:      Resource name. Use either NAME or SELECTOR, never both.
+#   SELECTOR:  Label selector resolving to exactly one resource. Returns its actual name.
 #   MAX_RETRIES: Default: 200.
 #   RETRY_DELAY: Seconds between polls. Default: 1.
 set -o errexit
@@ -15,10 +16,20 @@ set -o nounset
 set -o pipefail
 
 RESOURCE="${RESOURCE}"
-NAME="${NAME}"
+NAME="${NAME:-}"
+SELECTOR="${SELECTOR:-}"
 NAMESPACE="${NAMESPACE:-}"
 MAX_RETRIES="${MAX_RETRIES:-200}"
 RETRY_DELAY="${RETRY_DELAY:-1}"
+
+if [ -n "$NAME" ] && [ -z "$SELECTOR" ]; then
+  LOOKUP_ARGS=("$NAME")
+elif [ -n "$SELECTOR" ] && [ -z "$NAME" ]; then
+  LOOKUP_ARGS=(-l "$SELECTOR")
+else
+  jq -n '{status: "failure", message: "provide exactly one of NAME or SELECTOR"}'
+  exit 1
+fi
 
 NAMESPACE_ARGS=()
 if [ -n "$NAMESPACE" ]; then
@@ -26,27 +37,33 @@ if [ -n "$NAMESPACE" ]; then
 fi
 
 LAST_ERROR="no attempts made"
-UID_VALUE=""
 
 for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
-  if UID_VALUE=$(kubectl get "$RESOURCE" "$NAME" "${NAMESPACE_ARGS[@]}" -o jsonpath='{.metadata.uid}' 2>&1); then
-    if [ -n "$UID_VALUE" ]; then
-      cat <<EOF
-{
-  "status": "success",
-  "resource": "$RESOURCE",
-  "name": "$NAME",
-  "namespace": "$NAMESPACE",
-  "uid": "$UID_VALUE",
-  "retry_attempt": $ATTEMPT,
-  "max_retries": $MAX_RETRIES
-}
-EOF
+  if RESOURCE_JSON=$(kubectl get "$RESOURCE" "${LOOKUP_ARGS[@]}" "${NAMESPACE_ARGS[@]}" -o json 2>&1); then
+    if [ -n "$SELECTOR" ]; then
+      if ! RESOURCE_JSON=$(printf '%s' "$RESOURCE_JSON" | jq -ce '
+        if (.items | length) == 1 then .items[0]
+        else error("expected exactly one matching resource, got \(.items | length)") end
+      ' 2>&1); then
+        LAST_ERROR="selector lookup failed: $RESOURCE_JSON"
+        sleep "$RETRY_DELAY"
+        continue
+      fi
+    fi
+    if IDENTITY=$(printf '%s' "$RESOURCE_JSON" | jq -ce '
+      {name: .metadata.name, uid: .metadata.uid} |
+      select((.name | type) == "string" and (.name | length) > 0 and
+             (.uid | type) == "string" and (.uid | length) > 0)
+    ' 2>&1); then
+      jq -n --arg resource "$RESOURCE" --arg namespace "$NAMESPACE" --argjson identity "$IDENTITY" \
+        --argjson attempt "$ATTEMPT" --argjson max_retries "$MAX_RETRIES" \
+        '$identity + {status: "success", resource: $resource, namespace: $namespace,
+          retry_attempt: $attempt, max_retries: $max_retries}'
       exit 0
     fi
-    LAST_ERROR="empty UID returned"
+    LAST_ERROR="resource did not contain a valid name and UID: $IDENTITY"
   else
-    LAST_ERROR="kubectl get failed: $UID_VALUE"
+    LAST_ERROR="kubectl get failed: $RESOURCE_JSON"
   fi
   sleep "$RETRY_DELAY"
 done
@@ -57,6 +74,7 @@ cat <<EOF
   "message": "unable to get resource UID after $MAX_RETRIES attempts",
   "resource": "$RESOURCE",
   "name": "$NAME",
+  "selector": $(printf '%s' "$SELECTOR" | jq -Rs .),
   "namespace": "$NAMESPACE",
   "last_error": $(printf '%s' "$LAST_ERROR" | jq -Rs .),
   "retry_attempt": $MAX_RETRIES,
