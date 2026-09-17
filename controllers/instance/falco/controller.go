@@ -234,18 +234,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		return ctrl.Result{}, err
 	}
 
-	// Ensure the configmap is created
-	if err := r.ensureConfigMap(ctx, falco); err != nil {
-		return ctrl.Result{}, err
-	}
-
 	// Ensure the per-instance artifact-client mTLS certificate is created (no-op if disabled).
 	if err := r.ensureArtifactClientCertificate(ctx, falco); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Cleanup dual deployments.
-	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -333,6 +323,22 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, falco *instancev1alph
 		conditionStatus = metav1.ConditionFalse
 		conditionReason = instance.ReasonOwnerReferenceError
 		conditionMessage = fmt.Sprintf(instance.MessageFormatOwnerReferenceError, err.Error())
+		return err
+	}
+
+	// Keep the previous workload's configuration if preparing its replacement fails.
+	if err := r.ensureConfigMap(ctx, falco); err != nil {
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = instance.ReasonResourceApplyError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatResourceApplyError, "ConfigMap", err.Error())
+		return err
+	}
+
+	// Preserve the existing workload if preparing its replacement fails.
+	if err := r.cleanupDualDeployments(ctx, falco); err != nil {
+		conditionStatus = metav1.ConditionFalse
+		conditionReason = instance.ReasonDeletionError
+		conditionMessage = fmt.Sprintf(instance.MessageFormatDeletionError, "previous workload", err.Error())
 		return err
 	}
 

@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -780,6 +781,114 @@ func TestEnsureConfigMapError(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported falco type")
 }
 
+func TestReconcileWorkloadSwitchPreservesPreviousOnInvalidOverlay(t *testing.T) {
+	for _, desiredKind := range []string{resources.ResourceTypeDeployment, resources.ResourceTypeDaemonSet} {
+		t.Run(desiredKind, func(t *testing.T) {
+			scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+			falco := newTestFalcoType(desiredKind)
+			falco.Finalizers = []string{finalizer}
+			falco.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				InitContainers: []corev1.Container{{Name: resources.FalcoDefaults.SidecarContainerName}},
+			}}
+			previousKind := resources.ResourceTypeDaemonSet
+			var previous client.Object = builders.NewDaemonSet().WithName(falco.Name).WithNamespace(falco.Namespace).Build()
+			if desiredKind == resources.ResourceTypeDaemonSet {
+				previousKind = resources.ResourceTypeDeployment
+				previous = builders.NewDeployment().WithName(falco.Name).WithNamespace(falco.Namespace).Build()
+			}
+			previous.SetUID("previous-workload")
+			configMap := builders.NewConfigMap().WithName(falco.Name).WithNamespace(falco.Namespace).
+				WithData(resources.FalcoDefaults.ConfigMapData[previousKind]).Build()
+			previousConfigMap := configMap.DeepCopy()
+			cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco, previous, configMap).
+				WithStatusSubresource(falco).Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(20))
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(falco)}
+
+			_, err := r.Reconcile(t.Context(), req)
+			require.ErrorContains(t, err, "must be configured in spec.podTemplateSpec.spec.containers")
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, previous), "invalid replacement must not delete the running workload")
+			assert.Equal(t, "previous-workload", string(previous.GetUID()))
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, configMap))
+			assert.Equal(t, previousConfigMap.Data, configMap.Data, "replacement Pods must retain the previous workload's configuration")
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, falco))
+			testutil.RequireCondition(t, falco.Status.Conditions, commonv1alpha1.ConditionReconciled.String(),
+				metav1.ConditionFalse, instance.ReasonApplyConfigurationError)
+
+			falco.Spec.PodTemplateSpec = nil
+			require.NoError(t, cl.Update(t.Context(), falco))
+			_, err = r.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			assert.True(t, k8serrors.IsNotFound(cl.Get(t.Context(), req.NamespacedName, previous)))
+			replacement := &unstructured.Unstructured{}
+			replacement.SetAPIVersion(appsv1.SchemeGroupVersion.String())
+			replacement.SetKind(desiredKind)
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, replacement))
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, configMap))
+			assert.Equal(t, resources.FalcoDefaults.ConfigMapData[desiredKind], configMap.Data)
+			require.NoError(t, cl.Get(t.Context(), req.NamespacedName, falco))
+			testutil.RequireCondition(t, falco.Status.Conditions, commonv1alpha1.ConditionReconciled.String(),
+				metav1.ConditionTrue, instance.ReasonResourceCreated)
+		})
+	}
+}
+
+func TestEnsureDeploymentConfigMapError(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newTestFalcoType(resources.ResourceTypeDeployment)
+	previous := builders.NewDaemonSet().WithName(falco.Name).WithNamespace(falco.Namespace).Build()
+	configMapErr := fmt.Errorf("injected ConfigMap apply error")
+	failConfigMap := true
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco, previous).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Apply: func(ctx context.Context, cl client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+				if resource, ok := obj.(runtime.Object); ok && resource.GetObjectKind().GroupVersionKind().Kind == "ConfigMap" && failConfigMap {
+					return configMapErr
+				}
+				return cl.Apply(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
+
+	require.ErrorIs(t, r.ensureDeployment(t.Context(), falco), configMapErr)
+	testutil.RequireCondition(t, falco.Status.Conditions, commonv1alpha1.ConditionReconciled.String(),
+		metav1.ConditionFalse, instance.ReasonResourceApplyError)
+	require.Len(t, falco.Status.Conditions, 1)
+	assert.Contains(t, falco.Status.Conditions[0].Message, "ConfigMap")
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(falco), previous))
+	assert.True(t, k8serrors.IsNotFound(cl.Get(t.Context(), client.ObjectKeyFromObject(falco), &appsv1.Deployment{})))
+
+	failConfigMap = false
+	require.NoError(t, r.ensureDeployment(t.Context(), falco))
+	assert.True(t, k8serrors.IsNotFound(cl.Get(t.Context(), client.ObjectKeyFromObject(falco), previous)))
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(falco), &appsv1.Deployment{}))
+	testutil.RequireCondition(t, falco.Status.Conditions, commonv1alpha1.ConditionReconciled.String(),
+		metav1.ConditionTrue, instance.ReasonResourceCreated)
+}
+
+func TestEnsureDeploymentCleanupError(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	falco := newTestFalcoType(resources.ResourceTypeDeployment)
+	previous := builders.NewDaemonSet().WithName(falco.Name).WithNamespace(falco.Namespace).Build()
+	cleanupErr := fmt.Errorf("injected cleanup error")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(falco, previous).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				if obj.GetObjectKind().GroupVersionKind().Kind == resources.ResourceTypeDaemonSet {
+					return cleanupErr
+				}
+				return cl.Delete(ctx, obj, opts...)
+			},
+		}).Build()
+	r := NewReconciler(cl, scheme, events.NewFakeRecorder(10))
+
+	require.ErrorIs(t, r.ensureDeployment(t.Context(), falco), cleanupErr)
+	testutil.RequireCondition(t, falco.Status.Conditions, commonv1alpha1.ConditionReconciled.String(),
+		metav1.ConditionFalse, instance.ReasonDeletionError)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(falco), previous))
+	assert.True(t, k8serrors.IsNotFound(cl.Get(t.Context(), client.ObjectKeyFromObject(falco), &appsv1.Deployment{})))
+}
+
 func TestEnsureDeploymentApplyConfigError(t *testing.T) {
 	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
 	falco := newTestFalcoType("InvalidType")
@@ -869,7 +978,7 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 			funcs := interceptor.Funcs{}
 			if tt.getErr != nil {
 				funcs.Get = func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, ok := obj.(*unstructured.Unstructured); ok {
+					if _, ok := obj.(*unstructured.Unstructured); ok && obj.GetObjectKind().GroupVersionKind().Kind == resources.ResourceTypeDeployment {
 						return tt.getErr
 					}
 					return cl.Get(ctx, key, obj, opts...)
@@ -877,7 +986,10 @@ func TestEnsureDeploymentErrors(t *testing.T) {
 			}
 			if tt.applyErr != nil {
 				funcs.Apply = func(ctx context.Context, cl client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
-					return tt.applyErr
+					if resource, ok := obj.(runtime.Object); ok && resource.GetObjectKind().GroupVersionKind().Kind == resources.ResourceTypeDeployment {
+						return tt.applyErr
+					}
+					return cl.Apply(ctx, obj, opts...)
 				}
 			}
 			cl := builder.WithInterceptorFuncs(funcs).Build()

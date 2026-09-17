@@ -138,6 +138,9 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 			}
 		}
 	}
+	if cfg.podTemplateSpec != nil {
+		cfg.podTemplateSpec = cfg.podTemplateSpec.DeepCopy()
+	}
 
 	selectorLabels := forgeSelectorLabels(name)
 
