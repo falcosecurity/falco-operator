@@ -588,106 +588,153 @@ func certPool(t *testing.T, certPEM []byte) *x509.CertPool {
 // hot-reload regression case (rotating the trusted CA on disk, as cert-manager renewing the
 // CA Certificate would) is picked up by a *new* connection without restarting the server.
 func TestServer_Start_MTLS(t *testing.T) {
-	dir := t.TempDir()
-	ca := newTestCA(t, "test-root-ca")
+	for _, tc := range []struct {
+		name    string
+		version uint16
+	}{
+		{name: "TLS 1.2", version: tls.VersionTLS12},
+		{name: "TLS 1.3", version: tls.VersionTLS13},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			ca := newTestCA(t, "test-root-ca")
 
-	serverCertPEM, serverKeyPEM := signLeaf(t, ca, "artifact-server", []net.IP{net.ParseIP("127.0.0.1")}, x509.ExtKeyUsageServerAuth)
-	clientCertPEM, clientKeyPEM := signLeaf(t, ca, "artifact-client", nil, x509.ExtKeyUsageClientAuth)
+			serverCertPEM, serverKeyPEM := signLeaf(t, ca, "artifact-server", []net.IP{net.ParseIP("127.0.0.1")}, x509.ExtKeyUsageServerAuth)
+			clientCertPEM, clientKeyPEM := signLeaf(t, ca, "artifact-client", nil, x509.ExtKeyUsageClientAuth)
 
-	caFile := filepath.Join(dir, "ca.crt")
-	require.NoError(t, os.WriteFile(caFile, ca.certPEM, 0o600))
-	serverCertFile := filepath.Join(dir, "tls.crt")
-	serverKeyFile := filepath.Join(dir, "tls.key")
-	require.NoError(t, os.WriteFile(serverCertFile, serverCertPEM, 0o600))
-	require.NoError(t, os.WriteFile(serverKeyFile, serverKeyPEM, 0o600))
+			caFile := filepath.Join(dir, "ca.crt")
+			require.NoError(t, os.WriteFile(caFile, ca.certPEM, 0o600))
+			serverCertFile := filepath.Join(dir, "tls.crt")
+			serverKeyFile := filepath.Join(dir, "tls.key")
+			require.NoError(t, os.WriteFile(serverCertFile, serverCertPEM, 0o600))
+			require.NoError(t, os.WriteFile(serverKeyFile, serverKeyPEM, 0o600))
 
-	certWatcher, err := certwatcher.New(serverCertFile, serverKeyFile)
-	require.NoError(t, err)
-	caWatcher, err := tlsutil.NewCAWatcher(caFile)
-	require.NoError(t, err)
+			certWatcher, err := certwatcher.New(serverCertFile, serverKeyFile)
+			require.NoError(t, err)
+			caWatcher, err := tlsutil.NewCAWatcher(caFile)
+			require.NoError(t, err)
 
-	cache := artifactcache.NewCache(t.TempDir())
-	require.NoError(t, cache.Load())
-	seedRulesfile(t, cache, "secure", []byte("secure content"))
+			cache := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, cache.Load())
+			seedRulesfile(t, cache, "secure", []byte("secure content"))
 
-	addr := reserveAddr(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+			addr := reserveAddr(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-	srv := artifactserver.New(cache, artifactserver.WithTLS(certWatcher), artifactserver.WithClientCAs(caWatcher))
-	errCh := make(chan error, 1)
-	go func() { errCh <- srv.Start(ctx, addr) }()
+			srv := artifactserver.New(cache, artifactserver.WithTLS(certWatcher), artifactserver.WithClientCAs(caWatcher))
+			errCh := make(chan error, 1)
+			go func() { errCh <- srv.Start(ctx, addr) }()
 
-	waitForListening(t, addr)
+			waitForListening(t, addr)
 
-	url := "https://" + addr + "/v1/artifacts/rulesfiles/default/secure"
-	rootCAs := certPool(t, ca.certPEM)
+			url := "https://" + addr + "/v1/artifacts/rulesfiles/default/secure"
+			rootCAs := certPool(t, ca.certPEM)
 
-	t.Run("no client cert is rejected at handshake", func(t *testing.T) {
-		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs}}}
-		resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
-		if resp != nil {
-			defer resp.Body.Close()
-		}
-		require.Error(t, doErr)
-	})
+			t.Run("no client cert is rejected at handshake", func(t *testing.T) {
+				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs, MinVersion: tc.version, MaxVersion: tc.version}}}
+				resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
+				if resp != nil {
+					defer resp.Body.Close()
+				}
+				require.Error(t, doErr)
+			})
 
-	clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
-	require.NoError(t, err)
+			clientCert, err := tls.X509KeyPair(clientCertPEM, clientKeyPEM)
+			require.NoError(t, err)
 
-	t.Run("valid client cert succeeds", func(t *testing.T) {
-		client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-			RootCAs: rootCAs, Certificates: []tls.Certificate{clientCert},
-		}}}
-		resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
-		require.NoError(t, doErr)
-		defer resp.Body.Close()
-		assert.Equal(t, http.StatusOK, resp.StatusCode)
-	})
+			t.Run("valid client cert succeeds", func(t *testing.T) {
+				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+					RootCAs: rootCAs, Certificates: []tls.Certificate{clientCert},
+					MinVersion: tc.version, MaxVersion: tc.version,
+				}}}
+				resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
+				require.NoError(t, doErr)
+				defer resp.Body.Close()
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+			})
 
-	t.Run("CA hot-reload: a cert signed by a rotated CA is accepted without a restart", func(t *testing.T) {
-		caCtx, caCancel := context.WithCancel(context.Background())
-		defer caCancel()
-		caErrCh := make(chan error, 1)
-		// A short poll interval keeps this deterministic: an atomic rename-over-an-existing
-		// path doesn't reliably fire an fsnotify event on every platform, so the test can't
-		// depend on that alone within a short timeout.
-		go func() { caErrCh <- caWatcher.WithWatchInterval(50 * time.Millisecond).Start(caCtx) }()
+			t.Run("CA hot-reload: a cert signed by a rotated CA is accepted without a restart", func(t *testing.T) {
+				caCtx, caCancel := context.WithCancel(context.Background())
+				defer caCancel()
+				caErrCh := make(chan error, 1)
+				// A short poll interval keeps this deterministic: an atomic rename-over-an-existing
+				// path doesn't reliably fire an fsnotify event on every platform, so the test can't
+				// depend on that alone within a short timeout.
+				go func() { caErrCh <- caWatcher.WithWatchInterval(50 * time.Millisecond).Start(caCtx) }()
 
-		newCA := newTestCA(t, "test-root-ca-v2")
-		newClientCertPEM, newClientKeyPEM := signLeaf(t, newCA, "artifact-client-v2", nil, x509.ExtKeyUsageClientAuth)
-		newClientCert, keyErr := tls.X509KeyPair(newClientCertPEM, newClientKeyPEM)
-		require.NoError(t, keyErr)
+				t.Run("CA renewal with the same key preserves existing server and client certificates", func(t *testing.T) {
+					renewed := *ca.cert
+					renewed.SerialNumber = new(big.Int).Add(ca.cert.SerialNumber, big.NewInt(1))
+					renewed.NotAfter = ca.cert.NotAfter.Add(time.Hour)
+					der, renewErr := x509.CreateCertificate(rand.Reader, &renewed, &renewed, &ca.key.PublicKey, ca.key)
+					require.NoError(t, renewErr)
+					renewedPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+					renewedPool := certPool(t, renewedPEM)
+					require.False(t, rootCAs.Equal(renewedPool), "the CA certificate must actually change")
 
-		tmp := caFile + ".tmp"
-		require.NoError(t, os.WriteFile(tmp, newCA.certPEM, 0o600))
-		require.NoError(t, os.Rename(tmp, caFile))
+					tmp := caFile + ".tmp"
+					require.NoError(t, os.WriteFile(tmp, renewedPEM, 0o600))
+					require.NoError(t, os.Rename(tmp, caFile))
+					require.Eventually(t, func() bool {
+						return caWatcher.CertPool().Equal(renewedPool)
+					}, 2*time.Second, 20*time.Millisecond, "server did not load the renewed CA")
 
-		require.Eventually(t, func() bool {
-			// The server's own certificate is unchanged (still signed by the original ca);
-			// only its ClientCAs trust pool is being rotated, so the test client keeps
-			// trusting the server via the original rootCAs and only swaps its own client
-			// certificate to one signed by the new CA.
-			client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
-				RootCAs: rootCAs, Certificates: []tls.Certificate{newClientCert},
-			}}}
-			resp, getErr := client.Get(url) //nolint:noctx // test-only, short-lived
-			if getErr != nil {
-				return false
+					// Both peers trust only the renewed CA, but still present their original leaf certificates.
+					transport := &http.Transport{
+						TLSClientConfig:   &tls.Config{RootCAs: renewedPool, Certificates: []tls.Certificate{clientCert}, MinVersion: tc.version, MaxVersion: tc.version},
+						DisableKeepAlives: true,
+					}
+					t.Cleanup(transport.CloseIdleConnections)
+					client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+					req, reqErr := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
+					require.NoError(t, reqErr)
+					resp, getErr := client.Do(req)
+					require.NoError(t, getErr)
+					defer resp.Body.Close()
+					assert.Equal(t, http.StatusOK, resp.StatusCode)
+					body, readErr := io.ReadAll(resp.Body)
+					require.NoError(t, readErr)
+					assert.Equal(t, "secure content", string(body))
+				})
+
+				newCA := newTestCA(t, "test-root-ca-v2")
+				newClientCertPEM, newClientKeyPEM := signLeaf(t, newCA, "artifact-client-v2", nil, x509.ExtKeyUsageClientAuth)
+				newClientCert, keyErr := tls.X509KeyPair(newClientCertPEM, newClientKeyPEM)
+				require.NoError(t, keyErr)
+
+				tmp := caFile + ".tmp"
+				require.NoError(t, os.WriteFile(tmp, newCA.certPEM, 0o600))
+				require.NoError(t, os.Rename(tmp, caFile))
+
+				require.Eventually(t, func() bool {
+					// The server's own certificate is unchanged (still signed by the original ca);
+					// only its ClientCAs trust pool is being rotated, so the test client keeps
+					// trusting the server via the original rootCAs and only swaps its own client
+					// certificate to one signed by the new CA.
+					client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+						RootCAs: rootCAs, Certificates: []tls.Certificate{newClientCert},
+						MinVersion: tc.version, MaxVersion: tc.version,
+					}}}
+					resp, getErr := client.Get(url) //nolint:noctx // test-only, short-lived
+					if getErr != nil {
+						return false
+					}
+					defer resp.Body.Close()
+					return resp.StatusCode == http.StatusOK
+				}, 2*time.Second, 20*time.Millisecond, "server did not pick up the rotated CA")
+
+				caCancel()
+			})
+
+			cancel()
+			select {
+			case startErr := <-errCh:
+				require.NoError(t, startErr)
+			case <-time.After(2 * time.Second):
+				t.Fatal("Start did not return after context cancellation")
 			}
-			defer resp.Body.Close()
-			return resp.StatusCode == http.StatusOK
-		}, 2*time.Second, 20*time.Millisecond, "server did not pick up the rotated CA")
-
-		caCancel()
-	})
-
-	cancel()
-	select {
-	case startErr := <-errCh:
-		require.NoError(t, startErr)
-	case <-time.After(2 * time.Second):
-		t.Fatal("Start did not return after context cancellation")
+		})
 	}
 }
 
