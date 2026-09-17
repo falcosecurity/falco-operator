@@ -217,6 +217,7 @@ jobs:
         env:
           CHAINSAW_FALCO_IMAGE: docker.io/falcosecurity/falco:${{ env.FALCO_VERSION }}
           CHAINSAW_ARTIFACT_OPERATOR_IMAGE: ${{ env.IMG_ARTIFACT }}
+          CHAINSAW_ENABLE_HA_TEST: ${{ matrix.category.name == 'instance-operator' && 'true' || 'false' }}
         run: |
           chainsaw test ${{ matrix.category.path }} --quiet --config ./test/e2e/chainsaw/.chainsaw.yaml --repeat-count 1
 

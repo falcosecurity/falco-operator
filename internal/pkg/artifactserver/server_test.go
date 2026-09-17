@@ -27,7 +27,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/big"
 	"net"
 	"net/http"
@@ -42,7 +41,11 @@ import (
 	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
@@ -51,10 +54,10 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 )
 
-func seedPlugin(t *testing.T, cache *artifactcache.Cache, ns, name, goos, goarch string, content []byte, perm fs.FileMode) {
+func seedPlugin(t *testing.T, cache *artifactcache.Cache, ns, name, goos, goarch string, content []byte) {
 	t.Helper()
 	blobPath := artifactcache.BlobPath(cache.Dir(), "plugin", ns+"/"+name, "sha256:deadbeef", goos, goarch)
-	require.NoError(t, cache.Store(blobPath, content, perm))
+	require.NoError(t, cache.Store(blobPath, content, 0o755))
 	require.NoError(t, cache.Set("plugin", ns, name, goos+"-"+goarch, blobPath))
 }
 
@@ -127,7 +130,7 @@ func TestServer_ServePlugin(t *testing.T) {
 		{
 			name: "returns the cached binary with its mode header",
 			seed: func(t *testing.T, cache *artifactcache.Cache) {
-				seedPlugin(t, cache, "default", "json", "linux", "amd64", []byte("binary-content"), 0o755)
+				seedPlugin(t, cache, "default", "json", "linux", "amd64", []byte("binary-content"))
 			},
 			path:       "/v1/artifacts/plugins/default/json?os=linux&arch=amd64",
 			wantStatus: http.StatusOK,
@@ -140,10 +143,30 @@ func TestServer_ServePlugin(t *testing.T) {
 		{
 			name: "defaults os/arch to the server's own runtime when the query is omitted",
 			seed: func(t *testing.T, cache *artifactcache.Cache) {
-				seedPlugin(t, cache, "default", "json", runtime.GOOS, runtime.GOARCH, []byte("binary-content"), 0o755)
+				seedPlugin(t, cache, "default", "json", runtime.GOOS, runtime.GOARCH, []byte("binary-content"))
 			},
 			path:       "/v1/artifacts/plugins/default/json",
 			wantStatus: http.StatusOK,
+		},
+		{
+			name: "a binary cached for another OS is not served",
+			seed: func(t *testing.T, cache *artifactcache.Cache) {
+				seedPlugin(t, cache, "default", "json", "darwin", "amd64", []byte("other-os-binary"))
+			},
+			path:           "/v1/artifacts/plugins/default/json?os=linux&arch=amd64",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantHeaders:    map[string]string{"Retry-After": "10"},
+			wantBodyEquals: "artifact not yet available; retry shortly\n",
+		},
+		{
+			name: "a binary cached for another architecture is not served",
+			seed: func(t *testing.T, cache *artifactcache.Cache) {
+				seedPlugin(t, cache, "default", "json", "linux", "arm64", []byte("other-architecture-binary"))
+			},
+			path:           "/v1/artifacts/plugins/default/json?os=linux&arch=amd64",
+			wantStatus:     http.StatusServiceUnavailable,
+			wantHeaders:    map[string]string{"Retry-After": "10"},
+			wantBodyEquals: "artifact not yet available; retry shortly\n",
 		},
 		{
 			name:       "not yet cached returns 503 with a Retry-After hint",
@@ -285,6 +308,87 @@ func TestServer_Start_ListensAndShutsDown(t *testing.T) {
 	}
 }
 
+func TestServer_Start_PodRouting(t *testing.T) {
+	const servingValue = "true"
+	for _, bindFailure := range []bool{false, true} {
+		name := "publishes after bind and withdraws on shutdown"
+		if bindFailure {
+			name = "bind failure never publishes the Pod"
+		}
+		t.Run(name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "operator", Name: "current", UID: "current-uid",
+				Labels: map[string]string{"app": "operator", artifactserver.ServingLabel: servingValue},
+			}}
+			service := &corev1.Service{
+				ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: "artifacts"},
+				Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "operator", artifactserver.ServingLabel: servingValue}},
+			}
+			cl := fake.NewClientBuilder().WithObjects(pod, service).Build()
+			cache := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, cache.Load())
+			seedPlugin(t, cache, "tenant", "routing-plugin", "linux", "amd64", []byte("cached-plugin"))
+			srv := artifactserver.New(cache, artifactserver.WithPodRouting(cl, &corev1.ObjectReference{
+				Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID,
+			}, service.Name, true))
+			require.NoError(t, srv.ResetRouting(t.Context()))
+			require.NoError(t, cl.Get(t.Context(), k8sclient.ObjectKeyFromObject(pod), pod))
+			assert.NotContains(t, pod.Labels, artifactserver.ServingLabel, "restart must clear stale routing before manager startup")
+
+			addr := reserveAddr(t)
+			if bindFailure {
+				listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				defer listener.Close()
+				require.Error(t, srv.Start(t.Context(), listener.Addr().String()))
+				require.NoError(t, cl.Get(t.Context(), k8sclient.ObjectKeyFromObject(pod), pod))
+				assert.NotContains(t, pod.Labels, artifactserver.ServingLabel)
+				return
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- srv.Start(ctx, addr) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(2 * time.Second):
+					t.Error("server did not stop")
+				}
+				require.NoError(t, cl.Get(context.Background(), k8sclient.ObjectKeyFromObject(pod), pod))
+				assert.NotContains(t, pod.Labels, artifactserver.ServingLabel)
+			})
+			require.Eventually(t, func() bool {
+				return cl.Get(ctx, k8sclient.ObjectKeyFromObject(pod), pod) == nil && pod.Labels[artifactserver.ServingLabel] == servingValue
+			}, 2*time.Second, 10*time.Millisecond)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+				fmt.Sprintf("http://%s/v1/artifacts/plugins/tenant/routing-plugin?os=linux&arch=amd64", addr), http.NoBody)
+			require.NoError(t, err)
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			defer resp.Body.Close()
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, "cached-plugin", string(body))
+
+			// Repair a late publication by the former leader without restarting either server.
+			previous := pod.DeepCopy()
+			previous.Name, previous.UID, previous.ResourceVersion = "previous", "previous-uid", ""
+			require.NoError(t, cl.Create(ctx, previous))
+			delete(pod.Labels, artifactserver.ServingLabel)
+			require.NoError(t, cl.Update(ctx, pod))
+			require.Eventually(t, func() bool {
+				return cl.Get(ctx, k8sclient.ObjectKeyFromObject(pod), pod) == nil &&
+					cl.Get(ctx, k8sclient.ObjectKeyFromObject(previous), previous) == nil &&
+					pod.Labels[artifactserver.ServingLabel] == servingValue && previous.Labels[artifactserver.ServingLabel] == ""
+			}, 7*time.Second, 20*time.Millisecond)
+		})
+	}
+}
+
 // recordingSink is a minimal, thread-safe logr.LogSink that records every Info call's
 // accumulated name (from WithName) and key-values (from WithValues plus the call site),
 // so a test can assert on what a request handler actually logged. mu is shared across every
@@ -355,7 +459,7 @@ func valueFor(t *testing.T, keysAndValues []any, key string) any {
 func TestServer_Start_RequestLogsAreNamedAndCarryNodeHeader(t *testing.T) {
 	cache := artifactcache.NewCache(t.TempDir())
 	require.NoError(t, cache.Load())
-	seedPlugin(t, cache, "default", "json", "linux", "amd64", []byte("bin"), 0o755)
+	seedPlugin(t, cache, "default", "json", "linux", "amd64", []byte("bin"))
 
 	addr := reserveAddr(t)
 	logger, records := newRecordingLogger()
@@ -395,9 +499,7 @@ func TestServer_Start_RequestLogsAreNamedAndCarryNodeHeader(t *testing.T) {
 	assert.True(t, found, "expected an 'Artifact request received' log entry")
 }
 
-// TestServer_Start_AddressInUse is Start's one remaining failure mode: cache-dir creation
-// moved to Cache.Load (covered by TestCache_Load_BlobsDirCannotBeCreated), so binding an
-// already-occupied address is the only way left to make Start itself return an error.
+// TestServer_Start_AddressInUse verifies that an occupied port fails startup.
 func TestServer_Start_AddressInUse(t *testing.T) {
 	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	require.NoError(t, err)

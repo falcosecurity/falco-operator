@@ -148,17 +148,26 @@ Uses kubebuilder's `envtest` for integration testing against an in-memory API se
 
 ### E2E tests
 
-> **Note**: E2e tests are currently being migrated to [Chainsaw](https://kyverno.github.io/chainsaw/). The new test suite is under active development and not yet available on `main`. The existing Ginkgo-based e2e tests provide basic operator startup verification.
-
-E2E tests require a running Kubernetes cluster (Kind recommended):
+Chainsaw tests require a test cluster with the operator, KWOK and OCI fixtures
+installed. Use an absolute `KUBECONFIG` path so standalone scripts can find it
+when Chainsaw runs them from each test directory.
 
 ```bash
-# Create a Kind cluster
-kind create cluster
-
-# Run e2e tests
-make test-e2e
+make test.chainsaw
 ```
+
+The HA test temporarily changes the installed operator Deployment and restarts its
+manager container. It is excluded by default. Run it only on a dedicated,
+single-replica test installation, with no concurrent changes to that Deployment:
+
+```bash
+CHAINSAW_ENABLE_HA_TEST=true make test.chainsaw \
+  CHAINSAW_ARGS='--selector test.falcosecurity.dev/disruptive=true'
+```
+
+It restores the original Deployment spec on cleanup, refusing to overwrite
+concurrent changes. CI enables this test for the instance-operator category in
+both HTTP and mTLS modes.
 
 ### Linting
 
