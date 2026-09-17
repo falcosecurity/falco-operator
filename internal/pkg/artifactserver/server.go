@@ -256,6 +256,14 @@ func (s *Server) servePlugin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.authorizer != nil && s.clientCAs != nil {
+		if err := s.authorizer.AuthorizeRequest(r, ns); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusForbidden)).Inc()
+			return
+		}
+	}
+
 	goos := queryDefault(r, "os", runtime.GOOS)
 	goarch := queryDefault(r, "arch", runtime.GOARCH)
 
@@ -310,6 +318,13 @@ func (s *Server) serveRulesfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "path must be /v1/artifacts/rulesfiles/{namespace}/{name}", http.StatusBadRequest)
 		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusBadRequest)).Inc()
 		return
+	}
+	if s.authorizer != nil && s.clientCAs != nil {
+		if err := s.authorizer.AuthorizeRequest(r, ns); err != nil {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusForbidden)).Inc()
+			return
+		}
 	}
 
 	ctx := r.Context()
