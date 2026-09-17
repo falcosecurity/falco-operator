@@ -12,7 +12,7 @@ The Falco Operator can be installed in two ways: via the official Helm chart (re
 
 ## Prerequisites
 
-- **Kubernetes 1.29+** — The Artifact Operator runs as a [native sidecar container](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/), which requires Kubernetes 1.29 or later.
+- **Kubernetes 1.29+**.
 - **kubectl** — Installed and configured to access your cluster.
 - **Cluster admin privileges** — Required for installing CRDs and ClusterRoles.
 - **Helm 3.x** — Only required for the Helm installation method.
@@ -69,22 +69,38 @@ helm install falco-operator falcosecurity/falco-operator \
 
 ### Upgrade
 
-Pull the latest chart metadata, then upgrade the release:
+Review the [migration guide](migration-guide.md) for your target release before upgrading. Helm does not upgrade CRDs from a chart's `crds/` directory, so apply the target chart's CRDs before updating the release.
+
+Choose a **chart version**, which is separate from the operator version in `appVersion`, and review your existing values file against that chart's defaults. Adjust the release name and namespace below if needed.
 
 ```bash
+CHART_VERSION="<target-chart-version>"
+CRD_FILE="$(mktemp)"
 helm repo update
-helm upgrade falco-operator falcosecurity/falco-operator --namespace falco-operator
+helm show chart falcosecurity/falco-operator --version "$CHART_VERSION"
+helm show crds falcosecurity/falco-operator --version "$CHART_VERSION" > "$CRD_FILE"
 ```
 
-To upgrade to a specific chart version:
+After checking that the chart targets the desired operator version, apply the CRDs and wait for every CRD in that file to be established:
+
+```bash
+kubectl apply --server-side -f "$CRD_FILE" &&
+kubectl wait --for=condition=Established --timeout=120s -f "$CRD_FILE"
+```
+
+If either command fails, stop before upgrading. For ownership conflicts, inspect the existing CRD and its field managers; do not add `--force-conflicts` blindly. Do not delete CRDs to resolve an upgrade conflict, because that also deletes their custom resources.
+
+Once the CRD update succeeds, upgrade using your reviewed values file:
 
 ```bash
 helm upgrade falco-operator falcosecurity/falco-operator \
   --namespace falco-operator \
-  --version <chart-version>
+  --version "$CHART_VERSION" \
+  --values my-values.yaml \
+  --wait --timeout 5m
 ```
 
-> **Important**: Before upgrading, always check the [CHANGELOG](../CHANGELOG.md), the [chart CHANGELOG](../chart/falco-operator/CHANGELOG.md), and the [migration guide](migration-guide.md) for your target version. Minor releases may still include breaking API changes that require updating your custom resources before or after the upgrade.
+> **Important**: Also check the [CHANGELOG](../CHANGELOG.md) and [chart CHANGELOG](../chart/falco-operator/CHANGELOG.md). Minor releases may include changes that require updating custom resources. For v0.4.x → v0.5.0, follow the [dedicated migration steps](migrations/v0.4.x-to-v0.5.0.md), including verification of the managed Falco workloads after Helm finishes.
 
 ### Uninstall
 

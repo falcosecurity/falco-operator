@@ -7,7 +7,7 @@ This page is the index of migration chapters for the Falco Operator. Each chapte
 | Chapter | Description |
 |---------|-------------|
 | [v0.1.x → v0.2.0](migrations/v0.1.x-to-v0.2.0.md) | Upgrade from Falco Operator v0.1.x to v0.2.0 — breaking API changes to `Rulesfile`, `Plugin`, `Config`, and `Falco` CRs, plus new conditions and print columns. |
-| [v0.4.x → v0.5.0](migrations/v0.4.x-to-v0.5.0.md) | Update Artifact Operator container overrides for v0.5.0. |
+| [v0.4.x → v0.5.0](migrations/v0.4.x-to-v0.5.0.md) | Update CRDs and Artifact Operator container overrides, then verify existing artifacts after the upgrade. |
 | [YAML manifest → Helm](migrations/manifest-to-helm.md) | Move an existing installation from the bundled YAML manifest (`install.yaml`) to the official Helm chart, keeping CRDs and custom resources intact. |
 
 ## How to pick the right chapter

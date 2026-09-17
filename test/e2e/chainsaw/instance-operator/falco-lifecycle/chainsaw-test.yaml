@@ -12,9 +12,10 @@ spec:
     2. Re-apply the identical spec; assert the reconcile is a no-op (no pod restart), proving
        ensureDeployment/ensureDaemonSet compares before writing rather than always updating.
     3. Reject a legacy artifact-operator override in initContainers without changing the
-       existing DaemonSet or restarting its running Pod.
-    4. Move the override to containers; assert fresh successful reconciliation and the env
-       override on the updated DaemonSet and ready Pods.
+       existing DaemonSet or restarting its running Pod. Requesting a Deployment with
+       that invalid override must also preserve the DaemonSet.
+    4. Restore the DaemonSet type and move the override to containers; assert fresh successful
+       reconciliation and the env override on the updated DaemonSet and ready Pods.
     5. Patch spec.type to Deployment; assert the DaemonSet is torn down, a Deployment takes
        its place and becomes ready, and the Falco CR reflects the new resourceType.
     6. Delete the Falco CR; assert every owned namespaced (Deployment, ServiceAccount, Role,
@@ -216,11 +217,85 @@ spec:
               (json_parse($stdout).status == 'success'): true
               (json_parse($stdout).pod == $original_pod_name): true
 
+    - name: Reject-workload-switch-with-invalid-override
+      description: |
+        Requesting a Deployment while the override is still invalid must not delete the
+        working DaemonSet. Capture its UID within this step and require the error for the
+        new Falco generation before checking that it remains ready with no replacement.
+        Its ConfigMap must retain the DaemonSet engine, including for replacement Pods.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: daemonsets.apps
+              - name: NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status == 'success'): true
+            outputs:
+              - name: original_daemonset_uid
+                value: (json_parse($stdout).uid)
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                type: Deployment
+                replicas: 1
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'Reconciled'].observedGeneration == [metadata.generation]): true
+              status:
+                resourceType: Deployment
+                (conditions[?type == 'Reconciled']):
+                  - status: 'False'
+                    reason: ApplyConfigurationError
+                    message: 'Unable to generate apply configuration: sidecar "artifact-operator" must be configured in spec.podTemplateSpec.spec.containers, not initContainers'
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+                uid: ($original_daemonset_uid)
+                (deletionTimestamp == null): true
+              status:
+                (desiredNumberScheduled >= `1`): true
+                (numberReady == desiredNumberScheduled): true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              "(contains(data.\"falco.yaml\", 'kind: modern_ebpf'))": true
+              "(contains(data.\"falco.yaml\", 'kind: nodriver'))": false
+        - error:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
     - name: Move-artifact-operator-override-to-regular-container
       description: |
-        Correct the rejected override without automatic migration: remove the legacy
-        initContainers entry and put its env on the regular sidecar. Preserve all three
-        original container definitions, including images, sidecar args and netshoot.
+        Restore the DaemonSet type and correct the override without automatic migration:
+        remove the legacy initContainers entry and put its env on the regular sidecar.
+        Preserve all three original container definitions, including images, sidecar args and netshoot.
         Require current-generation status, a completed DaemonSet rollout and ready Pods
         carrying the env before continuing the original DaemonSet-to-Deployment lifecycle.
       try:
@@ -232,6 +307,7 @@ spec:
                 name: ($falco_name)
                 namespace: ($namespace)
               spec:
+                type: DaemonSet
                 podTemplateSpec:
                   spec:
                     initContainers: null

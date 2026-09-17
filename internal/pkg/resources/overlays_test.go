@@ -598,6 +598,45 @@ func TestApplyArtifactClientCertOverlay(t *testing.T) {
 	})
 }
 
+func TestGenerateUserOverlayDoesNotMutateMTLSInput(t *testing.T) {
+	for _, kind := range []string{ResourceTypeDeployment, ResourceTypeDaemonSet} {
+		t.Run(kind, func(t *testing.T) {
+			template := &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name:  FalcoDefaults.SidecarContainerName,
+					Image: "custom-artifact-operator:latest",
+					Env:   []corev1.EnvVar{{Name: "USER_SETTING", Value: "preserve"}},
+				}},
+			}}
+			before := template.DeepCopy()
+			opts := []OverlayOption{WithOverlayPodTemplateSpec(template)}
+			secured, err := GenerateUserOverlay(kind, "test", FalcoDefaults,
+				append(opts, WithArtifactClientCertOverlay("client-tls", "server-trust"))...)
+			require.NoError(t, err)
+			assert.Equal(t, before, template, "mTLS injection must only change the generated workload")
+			containers, _, err := unstructured.NestedSlice(secured.Object, "spec", "template", "spec", "containers")
+			require.NoError(t, err)
+			require.Len(t, containers, 1)
+			container, ok := containers[0].(map[string]any)
+			require.True(t, ok)
+			var sidecar corev1.Container
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(container, &sidecar))
+			assert.Equal(t, before.Spec.Containers[0].Image, sidecar.Image)
+			assert.Contains(t, sidecar.Env, corev1.EnvVar{Name: "USER_SETTING", Value: "preserve"})
+			assert.Contains(t, sidecar.Env, corev1.EnvVar{Name: "ARTIFACT_CLIENT_CERT_PATH", Value: artifactClientCertsMountPath})
+			assert.Len(t, sidecar.VolumeMounts, 2)
+
+			plain, err := GenerateUserOverlay(kind, "test", FalcoDefaults, opts...)
+			require.NoError(t, err)
+			podSpec, _, err := unstructured.NestedMap(plain.Object, "spec", "template", "spec")
+			require.NoError(t, err)
+			var got corev1.PodSpec
+			require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(podSpec, &got))
+			assert.Equal(t, before.Spec, got, "reusing the input without mTLS must not retain injected settings")
+		})
+	}
+}
+
 // TestWithArtifactClientCertOverlay verifies the artifact-operator sidecar appears exactly once
 // in the overlay's containers after GenerateUserOverlay.
 func TestWithArtifactClientCertOverlay(t *testing.T) {
