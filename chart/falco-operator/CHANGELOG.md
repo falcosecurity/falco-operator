@@ -6,6 +6,7 @@ release numbering uses [semantic versioning](http://semver.org).
 ## Unreleased
 
 * Fix the artifact Service selector to target only the active leader when leader election is enabled.
+* Keep the bootstrap CA private key during certificate renewal so existing mTLS certificates remain trusted.
 
 ## v0.4.0-rc2
 

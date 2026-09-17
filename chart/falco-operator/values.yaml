@@ -89,9 +89,9 @@ mtls:
   trustLabel: artifact.falcosecurity.dev/trust
 
   # -- Duration for the bootstrap CA certificate (only used when createIssuer is true).
-  # cert-manager renews it automatically; private-key replacement depends on its rotation
-  # policy and cert-manager version. CA key rotation requires coordinated trust-bundle and
-  # leaf-certificate updates, which this chart does not automate.
+  # cert-manager renews it automatically, reusing its private key (rotationPolicy: Never)
+  # so existing leaf certificates remain trusted. CA key rotation requires coordinated
+  # trust-bundle and leaf-certificate updates, which this chart does not automate.
   caCertDuration: 8760h
 
   server:
