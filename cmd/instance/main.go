@@ -21,17 +21,21 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
@@ -205,11 +209,12 @@ func main() {
 		if serviceName == "" {
 			serviceName = "falco-operator"
 		}
-		scheme := "http"
-		if artifactServerCertPath != "" {
-			scheme = "https"
+		var err error
+		artifactServerURL, err = artifactServiceURL(operatorNamespace, serviceName, artifactServeAddr, artifactServerCertPath != "")
+		if err != nil {
+			setupLog.Error(err, "unable to derive artifact server URL")
+			os.Exit(1)
 		}
-		artifactServerURL = fmt.Sprintf("%s://%s.%s.svc.cluster.local%s", scheme, serviceName, operatorNamespace, artifactServeAddr)
 	}
 	if strings.TrimSpace(artifactServerURL) == "" {
 		setupLog.Error(nil, "artifact server URL is required; configure --artifact-server-url or ARTIFACT_SERVER_URL")
@@ -488,12 +493,25 @@ func main() {
 	}
 
 	// Starts the centralized OCI artifact HTTP server that per-node artifact-operators download
-	// artifacts from. Registered as a manager.Runnable (like the Sweeper below), so it runs on
-	// every replica, not leader-gated.
+	// artifacts from. With leader election enabled, the manager starts it only on the leader.
 	if artifactServerMaxConcurrentRequests > 0 {
 		artifactOpts = append(artifactOpts, artifactserver.WithMaxConcurrentRequests(artifactServerMaxConcurrentRequests))
 	}
+	if podName := os.Getenv("OPERATOR_POD_NAME"); podName != "" {
+		routingClient, err := client.New(mgr.GetConfig(), client.Options{Scheme: mgr.GetScheme(), HTTPClient: mgr.GetHTTPClient()})
+		if err != nil {
+			setupLog.Error(err, "unable to create artifact server routing client")
+			os.Exit(1)
+		}
+		artifactOpts = append(artifactOpts, artifactserver.WithPodRouting(routingClient, &corev1.ObjectReference{
+			Namespace: operatorNamespace, Name: podName, UID: types.UID(os.Getenv("OPERATOR_POD_UID")),
+		}, os.Getenv("OPERATOR_SERVICE_NAME"), enableLeaderElection))
+	}
 	artifactSrv := artifactserver.New(artifactCache, artifactOpts...)
+	if err := artifactSrv.ResetRouting(ctx); err != nil {
+		setupLog.Error(err, "unable to reset artifact server routing before manager startup")
+		os.Exit(1)
+	}
 	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
 		return artifactSrv.Start(ctx, artifactServeAddr)
 	})); err != nil {
@@ -517,4 +535,17 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+func artifactServiceURL(namespace, serviceName, bindAddress string, secure bool) (string, error) {
+	_, port, err := net.SplitHostPort(bindAddress)
+	if err != nil {
+		return "", fmt.Errorf("invalid artifact server bind address: %w", err)
+	}
+	scheme := "http"
+	if secure {
+		scheme = "https"
+	}
+	host := net.JoinHostPort(serviceName+"."+namespace+".svc.cluster.local", port)
+	return scheme + "://" + host, nil
 }

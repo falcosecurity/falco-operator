@@ -194,6 +194,35 @@ env:
 
 Default: `docker.io/falcosecurity/artifact-operator:latest`
 
+## Operator replicas and artifact downloads
+
+When running more than one operator replica, enable leader election in the Helm values:
+
+```yaml
+replicaCount: 2
+extraArgs:
+  - --leader-elect=true
+```
+
+Only the leader runs the artifact server. Standby replicas remain Ready so that
+Deployment rollouts can complete. The artifact Service selects the runtime label
+`artifact.falcosecurity.dev/serving=true`, which the operator publishes after opening
+its listener. Do not set this label in `podLabels`: it is managed by the running server.
+Without leader election, each running server publishes its own label.
+
+The operator clears its retained label on startup, before starting its default health
+endpoint, and reconciles routing every five seconds. In steady state this makes two
+API reads per server, plus one filtered Pod list when leader election is enabled;
+unchanged labels are not patched. Keep the default readiness probe to preserve the
+startup ordering. Election and Service endpoint updates are asynchronous, so failover
+can temporarily interrupt downloads.
+
+Artifact caches are local to each replica. A newly elected leader rebuilds missing
+cache entries from the already-resolved digests, without following floating tags to
+a different revision. It needs access to the registry and the configured credentials;
+sidecars retry while the cache is being populated. Already-installed artifacts are
+not removed because the server is temporarily unavailable.
+
 ## Excluding labels from propagation
 
 The operator copies the labels of a `Falco` (or `Component`) resource onto the resources it generates.

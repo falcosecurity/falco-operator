@@ -46,7 +46,11 @@ capture_container_logs() {
     if kubectl get pod "$pod" -n "$namespace" -o jsonpath='{.spec.containers[*].name}' 2>/dev/null | grep -qw "$container"; then
       {
         echo "--- pod: $pod container: $container ---"
-        kubectl logs -n "$namespace" "$pod" -c "$container"
+        kubectl logs -n "$namespace" "$pod" -c "$container" --timestamps
+      } >>"$file" 2>&1 || true
+      {
+        echo "--- pod: $pod container: $container (previous) ---"
+        kubectl logs -n "$namespace" "$pod" -c "$container" --previous --timestamps
       } >>"$file" 2>&1 || true
     fi
   done

@@ -25,6 +25,7 @@ package artifactserver
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -70,6 +71,7 @@ type Server struct {
 	clientCAs   *tlsutil.CAWatcher       // nil = no client-cert requirement
 	authorizer  *Authorizer              // nil = no additional check beyond CA chain verification
 	maxInflight int                      // 0 = unlimited
+	routing     *podRouting
 }
 
 // Option configures optional Server behavior.
@@ -163,20 +165,47 @@ func (s *Server) Start(ctx context.Context, addr string) error {
 		srv.TLSConfig = tlsConfig
 	}
 
-	go func() { //nolint:gosec // shutdown watcher outlives ctx by design; it must wait for ctx.Done() before acting
-		<-ctx.Done()
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("artifact server: %w", err)
+	}
+	defer listener.Close()
+
+	serveCtx, cancel := context.WithCancel(baseCtx)
+	defer cancel()
+	if s.routing != nil {
+		if err := s.routing.reconcile(serveCtx); err != nil {
+			return fmt.Errorf("publish artifact server: %w", err)
+		}
+		routingDone := make(chan struct{})
+		go func() {
+			defer close(routingDone)
+			s.routing.run(serveCtx)
+		}()
+		defer func() {
+			cancel()
+			<-routingDone
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(baseCtx), routingInterval)
+			defer cleanupCancel()
+			if err := s.ResetRouting(cleanupCtx); err != nil {
+				logger.Error(err, "Unable to withdraw artifact server routing")
+			}
+		}()
+	}
+
+	go func() { //nolint:gosec // Shutdown needs a live context after serving is canceled.
+		<-serveCtx.Done()
 		_ = srv.Shutdown(context.Background()) //nolint:contextcheck // ctx is Done; Shutdown needs a live context to drain requests
 	}()
 
 	logger.Info("Artifact server listening", "addr", addr, "tls", tlsConfig != nil, "mtls", s.clientCAs != nil,
 		"spiffeAuthz", s.authorizer != nil)
-	var err error
 	if tlsConfig != nil {
-		err = srv.ListenAndServeTLS("", "")
+		err = srv.ServeTLS(listener, "", "")
 	} else {
-		err = srv.ListenAndServe()
+		err = srv.Serve(listener)
 	}
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("artifact server: %w", err)
 	}
 	return nil

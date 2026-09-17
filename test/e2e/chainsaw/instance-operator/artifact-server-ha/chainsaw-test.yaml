@@ -1,0 +1,188 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifact-server-ha
+  labels:
+    test.falcosecurity.dev/disruptive: "true"
+spec:
+  description: |
+    Two Ready instance-operator replicas must expose only the elected server through
+    the artifact Service. After failover, the new leader serves the same OCI content
+    and the old leader can restart in the same Pod without becoming an endpoint.
+    This test temporarily changes the installed operator Deployment, so it requires
+    CHAINSAW_ENABLE_HA_TEST=true and runs separately from concurrent Chainsaw tests.
+  concurrent: false
+  timeouts:
+    cleanup: 300s
+  bindings:
+    - name: test_name
+      value: artifact-server-ha
+    - name: falco_name
+      value: artifact-server-ha-client
+    - name: rulesfile_name
+      value: artifact-server-ha-rules
+
+  steps:
+    - name: Check-disruptive-test-opt-in
+      description: Require explicit permission before preparing any part of the HA fixture.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: guard
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+
+    - name: Create-client-identity
+      description: |
+        Create a same-namespace Falco identity for mTLS without scheduling Falco Pods.
+        Certificate provisioning is independent of the Falco workload becoming Ready.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    containers: []
+                    nodeSelector:
+                      artifact-server-ha-client: ($namespace)
+
+    - name: Create-cached-rulesfile
+      description: Cache the existing minimal rules fixture before changing the operator Deployment.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Prepare-authenticated-client
+      description: |
+        Reuse the cache helper's HTTP/mTLS detection and certificate provisioning.
+        The probe mounts that identity and will download through the real Service DNS.
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+            content: |
+              bash ../../common/scripts/check_artifact_cache_status.sh
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: artifact-server-ha-probe
+                namespace: ($namespace)
+              spec:
+                containers:
+                  - name: netshoot
+                    image: nicolaka/netshoot
+                    command: ["sleep", "infinity"]
+                    volumeMounts:
+                      - name: client-certificate
+                        mountPath: /etc/artifact-client
+                        readOnly: true
+                volumes:
+                  - name: client-certificate
+                    secret:
+                      secretName: (join('-', [$falco_name, 'artifact-client-tls']))
+                      optional: true
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: artifact-server-ha-probe
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Ready']):
+                  - status: "True"
+
+    - name: Prepare-two-operator-replicas
+      description: |
+        Save the original Deployment before enabling leader election and two replicas.
+        A shared-process observer permits a controlled same-Pod manager restart.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: prepare
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+      cleanup:
+        - description: Restore only the Deployment revision changed by this test.
+          script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: restore
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+
+    - name: Verify-leader-only-service
+      description: |
+        Both replicas are Ready, but only the Lease holder is a ready Service endpoint.
+        Downloads through Service DNS must match the fixture bytes and resolved digest.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: verify
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+
+    - name: Fail-over-and-restart-old-leader
+      description: |
+        Stop the leader until its follower takes over and removes its stale serving label.
+        Restart the stopped manager in the same Pod and verify it remains a Ready follower.
+        The new leader must serve the original content before and after that restart.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: failover
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+
+  catch:
+    - description: Capture debug snapshot on failure.
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
