@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -36,8 +37,9 @@ import (
 const verifyConnectionTimeout = 5 * time.Second
 
 // Authorizer checks that a client's SPIFFE URI SAN corresponds to a Falco instance that
-// actually exists. Chain verification alone cannot distinguish one instance's identity from
-// another, since every per-instance certificate is signed by the same CA.
+// actually exists and restricts artifact requests to its namespace. Chain verification
+// alone cannot distinguish one instance's identity from another, since every per-instance
+// certificate is signed by the same CA.
 type Authorizer struct {
 	reader client.Reader // cache-backed; the manager's own client
 	logger logr.Logger
@@ -75,6 +77,22 @@ func (a *Authorizer) VerifyConnection(cs tls.ConnectionState) error { //nolint:g
 			namespace, name, err)
 	}
 
+	return nil
+}
+
+// AuthorizeRequest restricts a request to the namespace authenticated during the TLS handshake.
+func (a *Authorizer) AuthorizeRequest(r *http.Request, namespace string) error {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.VerifiedChains[0]) == 0 {
+		return errors.New("artifact server: no verified client certificate chain")
+	}
+
+	clientNamespace, _, err := parseSPIFFEURI(r.TLS.VerifiedChains[0][0].URIs)
+	if err != nil {
+		return fmt.Errorf("artifact server: client certificate missing a valid SPIFFE URI SAN: %w", err)
+	}
+	if namespace != clientNamespace {
+		return fmt.Errorf("artifact server: client namespace %q cannot access namespace %q", clientNamespace, namespace)
+	}
 	return nil
 }
 

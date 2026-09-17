@@ -223,6 +223,21 @@ a different revision. It needs access to the registry and the configured credent
 sidecars retry while the cache is being populated. Already-installed artifacts are
 not removed because the server is temporarily unavailable.
 
+## Artifact server CA renewal
+
+With `mtls.createIssuer: true`, cert-manager automatically renews the bootstrap CA
+certificate. This is separate from rotating its private key. The chart does not set
+a key rotation policy: cert-manager 1.16 defaults to reusing the key, while 1.18
+changed the default to replacing it. See the [cert-manager 1.18 release notes](https://cert-manager.io/docs/releases/release-notes/release-notes-1.18/).
+
+The chart does not automate CA key rotation. Its trust-manager Bundle normally
+contains one CA; replacing that CA does not retain trust in the old one, and a
+CA Secret update does not automatically reissue existing leaf certificates.
+Plan a dual-trust interval, renew the server and all client certificates against
+the new CA, and verify their use before withdrawing the old CA. Review the
+[CA issuer requirements](https://cert-manager.io/v1.16-docs/configuration/ca/)
+before changing the issuer or upgrading cert-manager across a default-policy change.
+
 ## Excluding labels from propagation
 
 The operator copies the labels of a `Falco` (or `Component`) resource onto the resources it generates.
