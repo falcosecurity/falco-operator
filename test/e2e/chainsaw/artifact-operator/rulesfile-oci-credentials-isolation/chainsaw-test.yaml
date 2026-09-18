@@ -1,0 +1,564 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-oci-credentials-isolation
+spec:
+  description: |
+    A successful authenticated OCI pull in one namespace must not authorize another
+    namespace's wrong or absent credentials for the same registry and artifact.
+    Pull the donor first so the original process-global ORAS cache would be warm.
+
+    Check actual authentication errors, uncached artifact responses and absent files,
+    then correct only the receiving namespace's Secret. The existing failed-reconcile
+    retry must install the rules and make their hash observable in Falco, without
+    editing the Rulesfile. Deletion must remove that namespace's file/cache entry
+    while the donor remains installed. The public registry fixture is unchanged.
+
+    The extra namespace explicitly opts into the suite's mTLS trust distribution.
+    Both Falco instances use one-replica Deployments so runtime hash checks also work
+    on multi-node clusters. No operator restart or shared-registry mutation is needed.
+
+  bindings:
+    - name: test_name
+      value: rulesfile-oci-credentials-isolation
+    - name: donor_namespace
+      value: (join('-', [$namespace, 'donor']))
+    - name: falco_name
+      value: falco-oci-credentials
+    - name: rulesfile_name
+      value: oci-credentials
+    - name: anonymous_name
+      value: oci-anonymous
+    - name: secret_name
+      value: oci-credentials
+    - name: oci_registry
+      value: private-registry.oci-registry.svc.cluster.local:5000
+    - name: rules_file
+      value: 50-01-oci-credentials-oci.yaml
+    - name: anonymous_file
+      value: 50-01-oci-anonymous-oci.yaml
+    - name: rule_sha256
+      # rule-basic.yaml is identical in the local and CI OCI artifact fixtures.
+      value: edd70605e934df18ef745bcaec799e624183d0975d09762f73864611b4079f3b
+
+  steps:
+    - name: "Step 01: Create-donor-namespace"
+      description: Use a separate namespace with the same explicit mTLS trust opt-in as the generated test namespace.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($donor_namespace)
+                labels:
+                  artifact.falcosecurity.dev/trust: "true"
+
+    - name: "Step 02: Create-donor-falco"
+      description: The donor must load the authenticated rules before another namespace attempts a pull.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($donor_namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 03: Create-receiving-falco"
+      description: A separate running Falco provides observable file absence and later recovery.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 04: Create-distinct-credentials"
+      description: Same-name Secrets have different passwords; only the donor is initially authorized.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: ($secret_name)
+                namespace: ($donor_namespace)
+              stringData:
+                username: oci-test
+                password: oci-test-password
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: ($secret_name)
+                namespace: ($namespace)
+              stringData:
+                username: oci-test
+                password: wrong-password
+
+    - name: "Step 05: Create-authenticated-donor-rules"
+      description: Use the protected copy of the existing rulesfile-engine-req-met fixture.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($donor_namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                    auth:
+                      secretRef:
+                        name: ($secret_name)
+
+    - name: "Step 06: Assert-donor-installed-and-loaded"
+      description: The registry authentication cache is warm only after an actual successful pull and Falco load.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($donor_namespace)
+                generation: 1
+              status:
+                observedGeneration: 1
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($donor_namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $rules_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $rule_sha256): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($donor_namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($rules_file)
+              - name: RULE_SHA256
+                value: ($rule_sha256)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($donor_namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: "Step 07: Create-rules-with-wrong-credentials"
+      description: Try the identical ref after the donor succeeded, but with the receiving namespace's wrong password.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                    auth:
+                      secretRef:
+                        name: ($secret_name)
+
+    - name: "Step 08: Assert-wrong-credentials-denied"
+      description: A real registry 401, not a missing Secret or transport failure, must prevent programming.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+                    (contains(message, 'response status code 401')): true
+
+    - name: "Step 09: Create-rules-without-credentials"
+      description: An anonymous pull must not inherit the donor's previously successful authentication.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($anonymous_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+
+    - name: "Step 10: Assert-anonymous-pull-denied"
+      description: ORAS must report missing Basic credentials after the authenticated registry challenges it.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($anonymous_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+                    (contains(message, 'basic credential not found')): true
+
+    - name: "Step 11: Assert-no-artifact-nodes"
+      description: Neither failed metadata fetch may create a per-node artifact assignment.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/parent: ($anonymous_name)
+
+    - name: "Step 12: Assert-wrong-credentials-file-absent"
+      description: The receiving Falco must not have the unauthorized rules file; failed exec is not absence.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($rules_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 13: Assert-anonymous-file-absent"
+      description: The anonymous Rulesfile must also leave no installed file.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($anonymous_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 14: Assert-unauthorized-artifacts-not-served"
+      description: The server must return real HTTP 503 responses for both unauthorized identities.
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($anonymous_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: "Step 15: Repair-secret-without-rulesfile-edit"
+      description: Correct only the Secret and require the existing error retry to program the original Rulesfile generation.
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: ($secret_name)
+                namespace: ($namespace)
+              stringData:
+                password: oci-test-password
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                observedGeneration: 1
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 16: Assert-recovered-file-loaded"
+      description: Recovery must install the fixture bytes, load their hash in Falco and serve the artifact.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $rules_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $rule_sha256): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($rules_file)
+              - name: RULE_SHA256
+                value: ($rule_sha256)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: "Step 17: Assert-anonymous-still-denied"
+      description: Successful authentication in the receiving namespace must not authorize its anonymous Rulesfile either.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($anonymous_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: ProgramFailed
+                    (contains(message, 'basic credential not found')): true
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($anonymous_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: "Step 18: Delete-recovered-rules"
+      description: Ordinary deletion must release the recovered Rulesfile and its ArtifactNode.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+
+    - name: "Step 19: Assert-deleted-file-absent"
+      description: Deletion must remove the recovered file from the existing Falco Pod.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($rules_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 20: Assert-deleted-cache-entry-absent"
+      description: Deletion must evict only the receiving namespace's artifact endpoint.
+      try:
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: EXPECTED_STATUS
+                value: "503"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+    - name: "Step 21: Assert-donor-still-usable"
+      description: Denied sibling pulls, repair and deletion must preserve the donor's cached and runtime-loaded rules.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($donor_namespace)
+                generation: 1
+              status:
+                observedGeneration: 1
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($donor_namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $rules_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $rule_sha256): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($donor_namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($rules_file)
+              - name: RULE_SHA256
+                value: ($rule_sha256)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: ARTIFACT_TYPE
+                value: rulesfiles
+              - name: ARTIFACT_NAMESPACE
+                value: ($donor_namespace)
+              - name: ARTIFACT_NAME
+                value: ($rulesfile_name)
+              - name: EXPECTED_STATUS
+                value: "200"
+              - name: MTLS_TEST_FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_artifact_cache_status.sh
+
+  catch:
+    - description: Capture the receiving namespace and operator on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: bash ../../common/scripts/debug_snapshot.sh
+    - description: Capture the donor namespace on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: (join('-', [$test_name, 'donor']))
+          - name: NAMESPACE
+            value: ($donor_namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: bash ../../common/scripts/debug_snapshot.sh

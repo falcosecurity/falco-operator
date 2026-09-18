@@ -29,13 +29,14 @@ const defaultClientID = "falco-artifact-operator"
 type Option func(*auth.Client)
 
 // NewClient creates a new ORAS client with the provided options.
+// Authentication and transport options are isolated from other clients.
 func NewClient(opts ...Option) *auth.Client {
 	client := &auth.Client{
-		Client: retry.DefaultClient,
+		Client: retry.NewClient(),
 		Header: http.Header{
 			"User-Agent": {defaultClientID},
 		},
-		Cache:    auth.DefaultCache,
+		Cache:    auth.NewCache(),
 		ClientID: defaultClientID,
 	}
 

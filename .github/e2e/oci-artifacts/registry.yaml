@@ -39,3 +39,63 @@ spec:
       targetPort: 5000
       nodePort: 30500
   type: NodePort
+---
+# Disposable Basic-auth fixture only. Public registry behavior above is unchanged.
+# A registry-* Service name would inject service-link variables under REGISTRY_*.
+# htpasswd generated with: htpasswd -bnBC 10 oci-test oci-test-password
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: private-registry
+  namespace: oci-registry
+data:
+  htpasswd: |
+    oci-test:$2y$10$.7UkqJte0w4ES9/SzQ7znO5gcS3PkercTew5YS0H0YlGhfgWAa2G.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: private-registry
+  namespace: oci-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: private-registry
+  template:
+    metadata:
+      labels:
+        app: private-registry
+    spec:
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REGISTRY_AUTH
+              value: htpasswd
+            - name: REGISTRY_AUTH_HTPASSWD_REALM
+              value: OCI isolation test
+            - name: REGISTRY_AUTH_HTPASSWD_PATH
+              value: /auth/htpasswd
+          volumeMounts:
+            - name: auth
+              mountPath: /auth
+              readOnly: true
+      volumes:
+        - name: auth
+          configMap:
+            name: private-registry
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: private-registry
+  namespace: oci-registry
+spec:
+  selector:
+    app: private-registry
+  ports:
+    - port: 5000
+      targetPort: 5000
