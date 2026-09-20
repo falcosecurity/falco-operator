@@ -5,6 +5,7 @@ release numbering uses [semantic versioning](http://semver.org).
 
 ## Unreleased
 
+* Require `spec` on Component resources so missing component configuration is rejected at admission.
 * Fix the artifact Service selector to target only the active leader when leader election is enabled.
 
 ## v0.4.0-rc2
