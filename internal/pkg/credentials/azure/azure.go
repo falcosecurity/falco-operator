@@ -23,6 +23,7 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,6 +54,23 @@ const (
 	// https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation), not
 	// configurable per instance.
 	workloadIdentityAudience = "api://AzureADTokenExchange"
+)
+
+// Environment variable names deliberately match the wider Azure SDK ecosystem's own
+// EnvironmentCredential/DefaultAzureCredential conventions (az CLI, other language SDKs), not
+// project-specific names, so operators already familiar with Azure tooling don't have to learn
+// new ones. Read from this process's own environment -- the falco-operator Deployment's -- so
+// they act as a cluster-wide default identity for any AzureAuth that leaves a field unset, not
+// as a per-resource mechanism.
+const (
+	envTenantID              = "AZURE_TENANT_ID"
+	envClientID              = "AZURE_CLIENT_ID"
+	envClientCertificatePath = "AZURE_CLIENT_CERTIFICATE_PATH"
+	//nolint:gosec // G101: variable NAME, not a credential value
+	envClientSecret = "AZURE_CLIENT_SECRET"
+	//nolint:gosec // G101: variable NAME, not a credential value
+	envClientCertificatePassword  = "AZURE_CLIENT_CERTIFICATE_PASSWORD"
+	envClientSendCertificateChain = "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN"
 )
 
 // CredentialFunc returns an ORAS auth.CredentialFunc that authenticates using the Azure
@@ -145,6 +163,57 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 	}
 }
 
+// validateMethod checks that every field cfg.Method requires is present, from config or its
+// environment variable fallback, before resolveCredential does any actual work (a Secret fetch,
+// an IMDS round trip, or minting a ServiceAccount token) -- "validate eagerly, as explicit code"
+// rather than discovering one missing field, fixing it, and hitting the next. tenantID and
+// clientID are passed in already resolved (config-or-environment) so this doesn't recompute
+// them or re-read the environment for values resolveCredential already has.
+//
+// Every problem found is joined into one error via errors.Join, not just the first, so a
+// misconfigured CR reports everything wrong with it in one shot -- fixing them one at a time
+// via repeated apply/observe/fix cycles is exactly the friction this avoids.
+func validateMethod(cfg *commonv1alpha1.AzureAuth, tenantID, clientID string) error {
+	var errs []error
+	require := func(configField, envVar, resolved string) {
+		if err := requireForMethod(cfg.Method, configField, envVar, resolved); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	switch cfg.Method {
+	case commonv1alpha1.AzureMethodClientSecret:
+		require("tenantId", envTenantID, tenantID)
+		require("clientId", envClientID, clientID)
+		if cfg.ClientSecretRef == nil && os.Getenv(envClientSecret) == "" {
+			errs = append(errs, fmt.Errorf("clientSecretRef (config) or %s (environment variable) is required for method clientSecret", envClientSecret))
+		}
+
+	case commonv1alpha1.AzureMethodClientCertificate:
+		require("tenantId", envTenantID, tenantID)
+		require("clientId", envClientID, clientID)
+		if cfg.ClientCertificateRef == nil && os.Getenv(envClientCertificatePath) == "" {
+			errs = append(errs, fmt.Errorf("clientCertificateRef (config) or %s (environment variable) is required for method clientCertificate", envClientCertificatePath))
+		}
+
+	case commonv1alpha1.AzureMethodManagedIdentity:
+		// Nothing required: tenantId is unused (IMDS resolves it), and clientId is genuinely
+		// optional (its absence means system-assigned, not a missing value).
+
+	case commonv1alpha1.AzureMethodWorkloadIdentity:
+		require("tenantId", envTenantID, tenantID)
+		require("clientId", envClientID, clientID)
+		if cfg.ServiceAccountRef == nil {
+			errs = append(errs, fmt.Errorf("serviceAccountRef is required for method workloadIdentity (no environment variable fallback: it identifies which ServiceAccount to federate, not a credential value)"))
+		}
+
+	default:
+		return fmt.Errorf("unsupported azure auth method %q", cfg.Method)
+	}
+
+	return errors.Join(errs...)
+}
+
 // requireForMethod returns a descriptive error, naming both the config field and its
 // environment variable fallback, when a value resolved to empty from both sources.
 func requireForMethod(method, configField, envVar, resolved string) error {
@@ -203,6 +272,27 @@ func resolveClientCertificate(ctx context.Context, c client.Client, namespace st
 		return nil, nil, fmt.Errorf("read certificate file %s (from %s): %w", path, envClientCertificatePath, err)
 	}
 	return data, []byte(os.Getenv(envClientCertificatePassword)), nil
+}
+
+// resolveString returns configValue if non-empty, otherwise the named environment variable
+// (empty if unset). Config always wins when both are set.
+func resolveString(configValue, envVar string) string {
+	if configValue != "" {
+		return configValue
+	}
+	return os.Getenv(envVar)
+}
+
+// resolveBool returns *configValue when configValue is non-nil (an explicit true or false in
+// the CR), otherwise the named environment variable's truthiness ("1" or a case-insensitive
+// "true"). A pointer, not a bare bool: a zero-value "false" CR field would otherwise be
+// indistinguishable from "not set, check the environment.".
+func resolveBool(configValue *bool, envVar string) bool {
+	if configValue != nil {
+		return *configValue
+	}
+	v := os.Getenv(envVar)
+	return v == "1" || strings.EqualFold(v, "true")
 }
 
 // exchangeForRegistryToken exchanges an AAD access token for a registry-scoped refresh token
