@@ -79,7 +79,7 @@ func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
 
 func (am *Manager) fetchOCICredentials(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) (auth.CredentialFunc, error) {
 	if azureCfg := authAzure(ociArtifact); azureCfg != nil {
-		creds, err := azure.CredentialFunc(am.client, am.namespace, azureCfg)
+		creds, err := azure.CredentialFunc(am.client, am.namespace, azureCfg, ResolveRegistryOptions(ociArtifact))
 		if err != nil {
 			return nil, fmt.Errorf("derive azure credentials: %w", err)
 		}

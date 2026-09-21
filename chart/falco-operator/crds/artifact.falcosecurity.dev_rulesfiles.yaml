@@ -201,9 +201,10 @@ spec:
                             - method
                             type: object
                             x-kubernetes-validations:
-                            - message: serviceAccountRef is required when method is
-                                workloadIdentity
-                              rule: self.method != 'workloadIdentity' || has(self.serviceAccountRef)
+                            - message: serviceAccountRef.name is required when method
+                                is workloadIdentity
+                              rule: self.method != 'workloadIdentity' || (has(self.serviceAccountRef)
+                                && self.serviceAccountRef.name != '')
                           secretRef:
                             description: SecretRef references a Secret containing
                               registry credentials.

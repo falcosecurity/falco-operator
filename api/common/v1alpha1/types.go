@@ -207,7 +207,7 @@ const (
 // to federate, not a credential value, so there is nothing meaningful to source from the
 // operator's own environment -- see its own godoc.
 // +kubebuilder:object:generate=true
-// +kubebuilder:validation:XValidation:rule="self.method != 'workloadIdentity' || has(self.serviceAccountRef)",message="serviceAccountRef is required when method is workloadIdentity"
+// +kubebuilder:validation:XValidation:rule="self.method != 'workloadIdentity' || (has(self.serviceAccountRef) && self.serviceAccountRef.name != ”)",message="serviceAccountRef.name is required when method is workloadIdentity"
 type AzureAuth struct {
 	// Method selects how the Azure identity is obtained.
 	// - clientSecret: a Microsoft Entra app registration authenticated with a client secret.

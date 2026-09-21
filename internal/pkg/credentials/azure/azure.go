@@ -22,6 +22,7 @@ package azure
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
 const (
@@ -82,17 +84,38 @@ const (
 // request within a pull -- this keeps the implementation simple rather than adding
 // invalidation-prone caching ahead of evidence it's needed; ORAS's own auth.Client already
 // caches the resulting registry bearer tokens for the lifetime of a single pull.
-func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth) (auth.CredentialFunc, error) {
+//
+// registryOpts carries the same RegistryConfig.PlainHTTP/TLS settings the OCI puller already
+// honors for the actual blob pull (see (*artifact.Manager).ResolveRegistryOptions) -- the AAD/
+// ACR token exchange is a separate HTTP call to the same registry and needs to agree with it,
+// rather than always assuming HTTPS with default TLS regardless of how the registry is
+// configured. nil means "no override": HTTPS, system CA pool.
+func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth, registryOpts *puller.RegistryOptions) (auth.CredentialFunc, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("azure auth configuration is required")
 	}
+	httpClient := exchangeHTTPClient(registryOpts)
+	plainHTTP := registryOpts != nil && registryOpts.PlainHTTP
 	return func(ctx context.Context, registry string) (auth.Credential, error) {
 		cred, err := resolveCredential(ctx, c, namespace, cfg)
 		if err != nil {
 			return auth.EmptyCredential, fmt.Errorf("resolve azure credential (method %s): %w", cfg.Method, err)
 		}
-		return exchangeForRegistryToken(ctx, retry.DefaultClient, cred, registry)
+		return exchangeForRegistryToken(ctx, httpClient, cred, registry, plainHTTP)
 	}, nil
+}
+
+// exchangeHTTPClient builds the *http.Client used for the AAD-to-registry exchange, honoring
+// RegistryConfig.TLS.InsecureSkipVerify when set. Still wrapped in retry.NewTransport either
+// way, for the same retry/backoff behavior retry.DefaultClient gives the common case.
+func exchangeHTTPClient(registryOpts *puller.RegistryOptions) *http.Client {
+	if registryOpts == nil || !registryOpts.InsecureSkipVerify {
+		return retry.DefaultClient
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport in practice
+	//nolint:gosec // G402: explicit opt-in via this OCIArtifact's own RegistryConfig.TLS.InsecureSkipVerify, same field the OCI puller already honors for the blob pull itself
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	return &http.Client{Transport: retry.NewTransport(transport)}
 }
 
 // resolveCredential builds an azcore.TokenCredential for cfg.Method. All four methods converge
@@ -203,8 +226,14 @@ func validateMethod(cfg *commonv1alpha1.AzureAuth, tenantID, clientID string) er
 	case commonv1alpha1.AzureMethodWorkloadIdentity:
 		require("tenantId", envTenantID, tenantID)
 		require("clientId", envClientID, clientID)
-		if cfg.ServiceAccountRef == nil {
-			errs = append(errs, fmt.Errorf("serviceAccountRef is required for method workloadIdentity (no environment variable fallback: it identifies which ServiceAccount to federate, not a credential value)"))
+		// LocalObjectReference.Name is a plain string with no CRD-level "required" marker (K8s
+		// API convention: it's technically optional for backwards compatibility), so a
+		// serviceAccountRef: {} with no name would pass "has(self.serviceAccountRef)" in the
+		// CEL rule and reach here with a non-nil ServiceAccountRef but an empty Name -- checking
+		// only for nil misses that case and would only fail later, confusingly, inside
+		// mintServiceAccountToken's TokenRequest call.
+		if cfg.ServiceAccountRef == nil || cfg.ServiceAccountRef.Name == "" {
+			errs = append(errs, fmt.Errorf("serviceAccountRef.name is required for method workloadIdentity (no environment variable fallback: it identifies which ServiceAccount to federate, not a credential value)"))
 		}
 
 	default:
@@ -301,9 +330,13 @@ func resolveBool(configValue *bool, envVar string) bool {
 // registry-vendor-owned endpoint regardless of which of the four methods produced cred.
 //
 // httpClient is a parameter (rather than always retry.DefaultClient directly) purely so tests
-// can point it at an httptest server instead of a real registry; CredentialFunc always passes
-// retry.DefaultClient in production.
-func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred azcore.TokenCredential, registry string) (auth.Credential, error) {
+// can point it at an httptest server instead of a real registry; CredentialFunc builds the
+// production one via exchangeHTTPClient, honoring RegistryConfig.TLS.InsecureSkipVerify.
+//
+// plainHTTP mirrors RegistryConfig.PlainHTTP (the same field the OCI puller already honors for
+// the blob pull itself, via ResolveRegistryOptions) -- without it this exchange always assumed
+// HTTPS regardless of how the registry was actually configured.
+func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred azcore.TokenCredential, registry string, plainHTTP bool) (auth.Credential, error) {
 	aadToken, err := cred.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{managementScope}})
 	if err != nil {
 		return auth.EmptyCredential, fmt.Errorf("get AAD access token: %w", err)
@@ -314,7 +347,11 @@ func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred
 		"service":      {registry},
 		"access_token": {aadToken.Token},
 	}
-	exchangeURL := "https://" + registry + "/oauth2/exchange"
+	scheme := "https"
+	if plainHTTP {
+		scheme = "http"
+	}
+	exchangeURL := scheme + "://" + registry + "/oauth2/exchange"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, exchangeURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return auth.EmptyCredential, fmt.Errorf("build registry token exchange request: %w", err)

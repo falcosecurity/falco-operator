@@ -24,12 +24,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,9 +41,11 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"oras.land/oras-go/v2/registry/remote/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
 // clearAzureEnv resets every AZURE_* variable this package reads to unset, via t.Setenv (so
@@ -83,6 +87,14 @@ func (t redirectingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	return http.DefaultTransport.RoundTrip(req)
 }
 
+// roundTripFunc adapts a plain function to http.RoundTripper -- used where the test only needs
+// to inspect the request (e.g. its scheme) rather than actually redirect it anywhere.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestExchangeForRegistryToken(t *testing.T) {
 	t.Run("returns a RefreshToken credential on success", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,7 +115,7 @@ func TestExchangeForRegistryToken(t *testing.T) {
 		require.NoError(t, err)
 		httpClient := &http.Client{Transport: redirectingTransport{target: target}}
 
-		cred, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io")
+		cred, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
 		require.NoError(t, err)
 		assert.Equal(t, "acr-refresh-token", cred.RefreshToken)
 		assert.Empty(t, cred.Username)
@@ -112,7 +124,7 @@ func TestExchangeForRegistryToken(t *testing.T) {
 
 	t.Run("returns an error when GetToken fails", func(t *testing.T) {
 		httpClient := &http.Client{}
-		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{err: assert.AnError}, "myregistry.azurecr.io")
+		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{err: assert.AnError}, "myregistry.azurecr.io", false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "get AAD access token")
 	})
@@ -128,7 +140,7 @@ func TestExchangeForRegistryToken(t *testing.T) {
 		require.NoError(t, err)
 		httpClient := &http.Client{Transport: redirectingTransport{target: target}}
 
-		_, err = exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io")
+		_, err = exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "returned 401")
 	})
@@ -144,9 +156,37 @@ func TestExchangeForRegistryToken(t *testing.T) {
 		require.NoError(t, err)
 		httpClient := &http.Client{Transport: redirectingTransport{target: target}}
 
-		_, err = exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io")
+		_, err = exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "did not return a refresh token")
+	})
+
+	t.Run("builds an http:// URL when plainHTTP is true", func(t *testing.T) {
+		var gotScheme string
+		roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotScheme = req.URL.Scheme
+			body := io.NopCloser(strings.NewReader(`{"refresh_token":"acr-refresh-token"}`))
+			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{"Content-Type": {"application/json"}}}, nil
+		})
+		httpClient := &http.Client{Transport: roundTrip}
+
+		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.local:5000", true)
+		require.NoError(t, err)
+		assert.Equal(t, "http", gotScheme)
+	})
+
+	t.Run("builds an https:// URL when plainHTTP is false", func(t *testing.T) {
+		var gotScheme string
+		roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotScheme = req.URL.Scheme
+			body := io.NopCloser(strings.NewReader(`{"refresh_token":"acr-refresh-token"}`))
+			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{"Content-Type": {"application/json"}}}, nil
+		})
+		httpClient := &http.Client{Transport: roundTrip}
+
+		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
+		require.NoError(t, err)
+		assert.Equal(t, "https", gotScheme)
 	})
 }
 
@@ -435,8 +475,23 @@ func TestResolveCredential(t *testing.T) {
 
 		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "serviceAccountRef is required")
+		assert.Contains(t, err.Error(), "serviceAccountRef.name is required")
 		assert.Contains(t, err.Error(), "no environment variable fallback")
+	})
+
+	t.Run("workloadIdentity: a non-nil serviceAccountRef with an empty name is still rejected", func(t *testing.T) {
+		clearAzureEnv(t)
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			TenantID:          "tenant",
+			ClientID:          "client",
+			ServiceAccountRef: &corev1.LocalObjectReference{}, // non-nil, but Name == ""
+		}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serviceAccountRef.name is required")
 	})
 
 	t.Run("workloadIdentity: does not error at construction with a valid config", func(t *testing.T) {
@@ -614,19 +669,41 @@ func TestClientCertificateOptions(t *testing.T) {
 func TestCredentialFunc(t *testing.T) {
 	t.Run("errors when cfg is nil", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
-		_, err := CredentialFunc(fakeClient, "falco", nil)
+		_, err := CredentialFunc(fakeClient, "falco", nil, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "azure auth configuration is required")
 	})
 
 	t.Run("the returned CredentialFunc surfaces a resolveCredential error", func(t *testing.T) {
 		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
-		credFunc, err := CredentialFunc(fakeClient, "falco", &commonv1alpha1.AzureAuth{Method: "bogus"})
+		credFunc, err := CredentialFunc(fakeClient, "falco", &commonv1alpha1.AzureAuth{Method: "bogus"}, nil)
 		require.NoError(t, err)
 
 		_, err = credFunc(context.Background(), "myregistry.azurecr.io")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "resolve azure credential")
+	})
+}
+
+func TestExchangeHTTPClient(t *testing.T) {
+	t.Run("returns retry.DefaultClient when registryOpts is nil", func(t *testing.T) {
+		assert.Same(t, retry.DefaultClient, exchangeHTTPClient(nil))
+	})
+
+	t.Run("returns retry.DefaultClient when InsecureSkipVerify is false", func(t *testing.T) {
+		assert.Same(t, retry.DefaultClient, exchangeHTTPClient(&puller.RegistryOptions{}))
+	})
+
+	t.Run("returns a client with InsecureSkipVerify set in its transport when requested", func(t *testing.T) {
+		c := exchangeHTTPClient(&puller.RegistryOptions{InsecureSkipVerify: true})
+		require.NotSame(t, retry.DefaultClient, c)
+
+		rt, ok := c.Transport.(*retry.Transport)
+		require.True(t, ok, "expected *retry.Transport, got %T", c.Transport)
+		underlying, ok := rt.Base.(*http.Transport)
+		require.True(t, ok, "expected the retry transport's base to be *http.Transport, got %T", rt.Base)
+		require.NotNil(t, underlying.TLSClientConfig)
+		assert.True(t, underlying.TLSClientConfig.InsecureSkipVerify)
 	})
 }
 
@@ -734,7 +811,7 @@ func TestValidateMethod(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "tenantId (config) or AZURE_TENANT_ID (environment variable) is required for method workloadIdentity")
 		assert.Contains(t, err.Error(), "clientId (config) or AZURE_CLIENT_ID (environment variable) is required for method workloadIdentity")
-		assert.Contains(t, err.Error(), "serviceAccountRef is required for method workloadIdentity")
+		assert.Contains(t, err.Error(), "serviceAccountRef.name is required for method workloadIdentity")
 		assert.Contains(t, err.Error(), "no environment variable fallback")
 	})
 
@@ -745,7 +822,18 @@ func TestValidateMethod(t *testing.T) {
 		require.Error(t, err)
 		assert.NotContains(t, err.Error(), "tenantId (config)")
 		assert.NotContains(t, err.Error(), "clientId (config)")
-		assert.Contains(t, err.Error(), "serviceAccountRef is required")
+		assert.Contains(t, err.Error(), "serviceAccountRef.name is required")
+	})
+
+	t.Run("workloadIdentity: a non-nil serviceAccountRef with an empty name is still reported", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			ServiceAccountRef: &corev1.LocalObjectReference{},
+		}
+
+		err := validateMethod(cfg, "tenant", "client")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "serviceAccountRef.name is required")
 	})
 
 	t.Run("unsupported method", func(t *testing.T) {
