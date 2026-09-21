@@ -241,6 +241,18 @@ func TestResolveCredential(t *testing.T) {
 		assert.Contains(t, err.Error(), "get secret falco/missing")
 	})
 
+	t.Run("clientSecret: reports every missing field at once through the full resolution path", func(t *testing.T) {
+		clearAzureEnv(t)
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodClientSecret}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tenantId (config)")
+		assert.Contains(t, err.Error(), "clientId (config)")
+		assert.Contains(t, err.Error(), "clientSecretRef (config)")
+	})
+
 	t.Run("clientSecret: errors naming both sources when tenantId is missing from both", func(t *testing.T) {
 		clearAzureEnv(t)
 		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()

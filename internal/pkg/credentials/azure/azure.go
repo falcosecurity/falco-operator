@@ -85,18 +85,21 @@ func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.Azure
 // per-resource mechanism) when left empty in cfg; config always wins when both are set. The one
 // deliberate exception is workloadIdentity's serviceAccountRef, which has no environment
 // equivalent -- see its godoc on AzureAuth for why.
+//
+// validateMethod runs first and unconditionally: every required field for cfg.Method is checked
+// before any Secret fetch, IMDS round trip, or token mint happens below, so a misconfigured CR
+// fails fast with everything wrong named at once, not one field at a time as each resolution
+// step is reached.
 func resolveCredential(ctx context.Context, c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth) (azcore.TokenCredential, error) {
 	tenantID := resolveString(cfg.TenantID, envTenantID)
 	clientID := resolveString(cfg.ClientID, envClientID)
 
+	if err := validateMethod(cfg, tenantID, clientID); err != nil {
+		return nil, err
+	}
+
 	switch cfg.Method {
 	case commonv1alpha1.AzureMethodClientSecret:
-		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
-			return nil, err
-		}
-		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
-			return nil, err
-		}
 		clientSecret, err := resolveClientSecret(ctx, c, namespace, cfg)
 		if err != nil {
 			return nil, err
@@ -104,12 +107,6 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 		return azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
 
 	case commonv1alpha1.AzureMethodClientCertificate:
-		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
-			return nil, err
-		}
-		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
-			return nil, err
-		}
 		certData, password, err := resolveClientCertificate(ctx, c, namespace, cfg)
 		if err != nil {
 			return nil, err
@@ -130,15 +127,6 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 		return azidentity.NewManagedIdentityCredential(opts)
 
 	case commonv1alpha1.AzureMethodWorkloadIdentity:
-		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
-			return nil, err
-		}
-		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
-			return nil, err
-		}
-		if cfg.ServiceAccountRef == nil {
-			return nil, fmt.Errorf("serviceAccountRef is required for method workloadIdentity (no environment variable fallback: it identifies which ServiceAccount to federate, not a credential value)")
-		}
 		saName := cfg.ServiceAccountRef.Name
 		// NewClientAssertionCredential, not azidentity's own NewWorkloadIdentityCredential:
 		// the latter reads a static token file tied to this process's own pod identity, which
@@ -151,6 +139,8 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 			}, nil)
 
 	default:
+		// Unreachable: validateMethod above already rejects an unsupported method. Kept as a
+		// defensive default rather than a panic, in case the two ever drift.
 		return nil, fmt.Errorf("unsupported azure auth method %q", cfg.Method)
 	}
 }
