@@ -182,6 +182,18 @@ spec:
                                   per resolution, via the Kubernetes TokenRequest API, rather than relying on a
                                   webhook-projected token file tied to one pod's one identity. Those are only relevant to
                                   azidentity's own file-based WorkloadIdentityCredential, which this does not use.
+
+                                  Security note: minting a token for a ServiceAccount is a materially different privilege
+                                  than referencing a Secret (as ClientSecretRef/ClientCertificateRef do) -- a Secret
+                                  reference is bounded by the Kubernetes API server's own RBAC on that specific object,
+                                  while TokenRequest is granted to the operator as a cluster-wide serviceaccounts/token
+                                  ClusterRole (Kubernetes has no finer-grained way to scope it to "only ServiceAccounts
+                                  referenced by a resource in their own namespace"). Anyone able to create a
+                                  Rulesfile/Plugin/Config resource with method: workloadIdentity can cause the operator to
+                                  mint a token for any ServiceAccount they name in that resource's own namespace -- the
+                                  same namespace-scoped trust as SecretRef, enforced by this controller's own code rather
+                                  than by RBAC. See the Reconcile doc comment in controllers/instance/falco/controller.go
+                                  for the full reasoning.
                                 properties:
                                   name:
                                     default: ""

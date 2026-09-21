@@ -163,6 +163,21 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
+//
+// Security note on the serviceaccounts/token RBAC marker above: Kubernetes RBAC has no way to
+// scope a ClusterRole's serviceaccounts/token grant to "only ServiceAccounts in the same
+// namespace as whichever Falco/Rulesfile/Plugin/Config resource is being reconciled" -- the
+// operator watches those resources across every namespace, via a ClusterRole/ClusterRoleBinding
+// like all its other permissions, so the underlying Kubernetes API permission is cluster-wide
+// even though this reconciler's own code only ever calls TokenRequest with a namespace/name
+// pair it derived from an AzureAuth.ServiceAccountRef in the same namespace as the artifact
+// that referenced it (see internal/pkg/credentials/azure). That's an application-level
+// guarantee, not an RBAC-enforced one: it is not equivalent to "can reference a Secret" (also
+// namespace-scoped by this same code, but bounded by the Kubernetes API server itself, not just
+// by this reconciler's logic). Accepted as a cluster-wide trust decision consistent with the
+// rest of this ClusterRole, not a narrower design -- flag any future code path that calls
+// TokenRequest with an operator-supplied (rather than user-CR-supplied) namespace/name as a
+// deliberate widening of this trust boundary, worth its own review.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	falco := &instancev1alpha1.Falco{}
