@@ -64,6 +64,18 @@ const (
 	// https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation), not
 	// configurable per instance.
 	workloadIdentityAudience = "api://AzureADTokenExchange"
+
+	// azureClientIDAnnotation is the ServiceAccount annotation method: workloadIdentity requires,
+	// recording the exact AzureAuth.ClientID that ServiceAccount is opted in to be federated as.
+	// See authorizeServiceAccountForWorkloadIdentity for why this exists: without it, anyone
+	// able to create or edit a Rulesfile/Plugin/Config resource in a namespace could reference
+	// *any* ServiceAccount already federated to *any* Azure identity in that namespace, not just
+	// one their own resource is meant to use -- a materially different privilege than reading a
+	// Secret they still have to be granted access to. Setting this annotation is a deliberate
+	// act by whoever administers ServiceAccounts in the namespace (not necessarily the same
+	// people who can create artifact resources), naming exactly which client ID that
+	// ServiceAccount consents to being minted a token for.
+	azureClientIDAnnotation = "azure.falcosecurity.dev/client-id"
 )
 
 // Environment variable names deliberately match the wider Azure SDK ecosystem's own
@@ -186,6 +198,15 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 
 	case commonv1alpha1.AzureMethodWorkloadIdentity:
 		saName := cfg.ServiceAccountRef.Name
+		// Checked eagerly, here, rather than deferred into the assertion callback below: a CR
+		// author who can create/edit a Rulesfile/Plugin/Config resource in a namespace can name
+		// *any* ServiceAccount in that namespace, not just one meant for their own resource --
+		// without this check, that's enough to get a token minted for any ServiceAccount
+		// already federated to any Azure identity in the namespace. See
+		// authorizeServiceAccountForWorkloadIdentity and azureClientIDAnnotation's doc comment.
+		if err := authorizeServiceAccountForWorkloadIdentity(ctx, c, namespace, saName, clientID); err != nil {
+			return nil, err
+		}
 		// NewClientAssertionCredential, not azidentity's own NewWorkloadIdentityCredential:
 		// the latter reads a static token file tied to this process's own pod identity, which
 		// would limit every workloadIdentity AzureAuth cluster-wide to the one identity the
@@ -424,4 +445,34 @@ func getSecret(ctx context.Context, c client.Client, namespace string, ref *comm
 		return nil, fmt.Errorf("get secret %s/%s: %w", namespace, ref.Name, err)
 	}
 	return secret, nil
+}
+
+// authorizeServiceAccountForWorkloadIdentity is the enforceable half of the workloadIdentity
+// trust model: a Rulesfile/Plugin/Config resource naming a ServiceAccount isn't sufficient on
+// its own to get a token minted for it -- that ServiceAccount must also carry
+// azureClientIDAnnotation, set to exactly the clientID this resolution is for. Fetching it here
+// (rather than trusting a bare name, the way mintServiceAccountToken's own TokenRequest call
+// does) means an artifact resource can't silently ride on whatever other ServiceAccount in the
+// same namespace already happens to be federated to some Azure identity -- setting this
+// annotation is its own deliberate act, ordinarily by whoever administers ServiceAccounts in
+// the namespace, not necessarily the same people who can create artifact resources.
+//
+// This is a namespace-local opt-in, not a full authorization system: anyone who can both create
+// artifact resources *and* edit ServiceAccounts in the same namespace can self-authorize. It
+// narrows the blast radius of the first capability alone; it doesn't replace RBAC on
+// ServiceAccounts, and it's not a substitute for a validating webhook if that stronger guarantee
+// is ever needed.
+func authorizeServiceAccountForWorkloadIdentity(ctx context.Context, c client.Client, namespace, saName, clientID string) error {
+	sa := &corev1.ServiceAccount{}
+	if err := c.Get(ctx, client.ObjectKey{Name: saName, Namespace: namespace}, sa); err != nil {
+		return fmt.Errorf("get serviceaccount %s/%s: %w", namespace, saName, err)
+	}
+	annotated, ok := sa.Annotations[azureClientIDAnnotation]
+	if !ok {
+		return fmt.Errorf("serviceaccount %s/%s is not opted in for Azure workload identity federation: it must carry the %q annotation, set to %q, before the operator will mint a token for it", namespace, saName, azureClientIDAnnotation, clientID)
+	}
+	if annotated != clientID {
+		return fmt.Errorf("serviceaccount %s/%s's %q annotation is %q, which does not match this resource's clientId %q: refusing to mint a token for a federated identity this ServiceAccount was not opted in for", namespace, saName, azureClientIDAnnotation, annotated, clientID)
+	}
+	return nil
 }

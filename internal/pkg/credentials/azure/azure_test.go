@@ -61,6 +61,20 @@ func clearAzureEnv(t *testing.T) {
 	}
 }
 
+// workloadIdentitySA builds a ServiceAccount named "acr-refresher" (the name every workloadIdentity
+// test in this file references) opted in for workloadIdentity federation as clientID, via
+// azureClientIDAnnotation -- the shape authorizeServiceAccountForWorkloadIdentity requires before
+// resolveCredential will mint a token for it.
+func workloadIdentitySA(namespace, clientID string) *corev1.ServiceAccount {
+	return &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "acr-refresher",
+			Namespace:   namespace,
+			Annotations: map[string]string{azureClientIDAnnotation: clientID},
+		},
+	}
+}
+
 // fakeTokenCredential is a minimal azcore.TokenCredential stand-in, avoiding any real
 // AAD/network dependency for exchangeForRegistryToken's own tests.
 type fakeTokenCredential struct {
@@ -611,7 +625,8 @@ func TestResolveCredential(t *testing.T) {
 		// has no place in a unit test. mintServiceAccountToken's own request-shape/error
 		// behavior is covered directly in token_test.go; the end-to-end path (assertion ->
 		// AAD -> ACR) is covered by the kind/AKS verification in the PR description, not here.
-		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		sa := workloadIdentitySA(namespace, "client")
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build()
 		cfg := &commonv1alpha1.AzureAuth{
 			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
 			TenantID:          "tenant",
@@ -628,7 +643,8 @@ func TestResolveCredential(t *testing.T) {
 		clearAzureEnv(t)
 		t.Setenv(envTenantID, "tenant-from-env")
 		t.Setenv(envClientID, "client-from-env")
-		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		sa := workloadIdentitySA(namespace, "client-from-env")
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build()
 		cfg := &commonv1alpha1.AzureAuth{
 			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
 			ServiceAccountRef: &corev1.LocalObjectReference{Name: "acr-refresher"},
@@ -637,6 +653,79 @@ func TestResolveCredential(t *testing.T) {
 		cred, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
 		require.NoError(t, err)
 		assert.NotNil(t, cred)
+	})
+
+	t.Run("workloadIdentity: rejects a ServiceAccount not opted in (missing the annotation)", func(t *testing.T) {
+		clearAzureEnv(t)
+		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "acr-refresher", Namespace: namespace}} // no azureClientIDAnnotation
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			TenantID:          "tenant",
+			ClientID:          "client",
+			ServiceAccountRef: &corev1.LocalObjectReference{Name: "acr-refresher"},
+		}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not opted in for Azure workload identity federation")
+		assert.Contains(t, err.Error(), azureClientIDAnnotation)
+	})
+
+	t.Run("workloadIdentity: rejects a ServiceAccount opted in for a different clientId", func(t *testing.T) {
+		clearAzureEnv(t)
+		sa := workloadIdentitySA(namespace, "some-other-client-id")
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			TenantID:          "tenant",
+			ClientID:          "client",
+			ServiceAccountRef: &corev1.LocalObjectReference{Name: "acr-refresher"},
+		}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not match this resource's clientId")
+	})
+
+	t.Run("workloadIdentity: rejects a nonexistent ServiceAccount", func(t *testing.T) {
+		clearAzureEnv(t)
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			TenantID:          "tenant",
+			ClientID:          "client",
+			ServiceAccountRef: &corev1.LocalObjectReference{Name: "does-not-exist"},
+		}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "get serviceaccount")
+	})
+
+	t.Run("workloadIdentity: a same-named ServiceAccount in a different namespace is never reachable", func(t *testing.T) {
+		// Namespace binding: AzureAuth.ServiceAccountRef (corev1.LocalObjectReference) has no
+		// namespace field at all -- there is no way for a CR to name a ServiceAccount outside
+		// its own namespace. Proven behaviorally here, not just by the type's shape: an
+		// identically-named ServiceAccount opted in (correctly annotated) in a *different*
+		// namespace must never be the one resolveCredential resolves against when called with
+		// this namespace -- only the one actually created in this namespace (deliberately
+		// *not* created here) can ever be reached, so this must fail with a not-found error,
+		// not succeed against the other namespace's ServiceAccount.
+		clearAzureEnv(t)
+		const otherNamespace = "not-falco"
+		otherNamespaceSA := workloadIdentitySA(otherNamespace, "client")
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(otherNamespaceSA).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+			TenantID:          "tenant",
+			ClientID:          "client",
+			ServiceAccountRef: &corev1.LocalObjectReference{Name: "acr-refresher"},
+		}
+
+		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), fmt.Sprintf("get serviceaccount %s/acr-refresher", namespace))
 	})
 
 	t.Run("unsupported method", func(t *testing.T) {

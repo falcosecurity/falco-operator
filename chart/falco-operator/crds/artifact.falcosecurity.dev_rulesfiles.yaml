@@ -181,16 +181,26 @@ spec:
                                   azidentity's own file-based WorkloadIdentityCredential, which this does not use.
 
                                   Security note: minting a token for a ServiceAccount is a materially different privilege
-                                  than referencing a Secret (as ClientSecretRef/ClientCertificateRef do) -- a Secret
-                                  reference is bounded by the Kubernetes API server's own RBAC on that specific object,
-                                  while TokenRequest is granted to the operator as a cluster-wide serviceaccounts/token
-                                  ClusterRole (Kubernetes has no finer-grained way to scope it to "only ServiceAccounts
-                                  referenced by a resource in their own namespace"). Anyone able to create a
-                                  Rulesfile/Plugin/Config resource with method: workloadIdentity can cause the operator to
-                                  mint a token for any ServiceAccount they name in that resource's own namespace -- the
-                                  same namespace-scoped trust as SecretRef, enforced by this controller's own code rather
-                                  than by RBAC. See the Reconcile doc comment in controllers/instance/falco/controller.go
-                                  for the full reasoning.
+                                  than referencing a Secret (as ClientSecretRef/ClientCertificateRef do). A Secret reference
+                                  only exposes whatever credential that Secret already contains; naming a ServiceAccount
+                                  here actively mints a *fresh* identity assertion for it, and the underlying
+                                  serviceaccounts/token permission is granted to the operator as a cluster-wide ClusterRole
+                                  (Kubernetes has no finer-grained way to scope it to "only ServiceAccounts referenced by a
+                                  resource in their own namespace"). Without a further check, that would let anyone able to
+                                  create a Rulesfile/Plugin/Config resource in a namespace get a token minted for *any*
+                                  ServiceAccount in it -- including one some unrelated workload already has federated to an
+                                  Azure identity, not just one meant for their own resource.
+
+                                  To narrow that: the named ServiceAccount must separately carry the annotation
+                                  azure.falcosecurity.dev/client-id, set to exactly this AzureAuth's ClientID, before the
+                                  operator will mint a token for it. Setting that annotation is a deliberate act by whoever
+                                  administers ServiceAccounts in the namespace -- not implied by merely being nameable here.
+                                  This narrows the trust to "any artifact author can use any ServiceAccount that has opted
+                                  in to their specific client ID", still namespace-local and still not a full authorization
+                                  system (someone who can both create artifact resources *and* edit ServiceAccounts in the
+                                  same namespace can self-authorize) but a real reduction from "any ServiceAccount already
+                                  federated to anything, for any reason". See the Reconcile doc comment in
+                                  controllers/instance/falco/controller.go for the full reasoning.
                                 properties:
                                   name:
                                     default: ""

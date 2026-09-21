@@ -39,6 +39,11 @@ func createTestScheme(t *testing.T) *runtime.Scheme {
 	return scheme
 }
 
+// tokenSubResourceName is the "token" SubResourceCreate name mintServiceAccountToken's own
+// TokenRequest call targets -- named once here so the two interceptors below that filter on it
+// don't repeat the literal.
+const tokenSubResourceName = "token"
+
 func TestMintServiceAccountToken(t *testing.T) {
 	const namespace = "falco"
 	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "acr-refresher", Namespace: namespace}}
@@ -75,7 +80,7 @@ func TestMintServiceAccountToken(t *testing.T) {
 			WithObjects(sa).
 			WithInterceptorFuncs(interceptor.Funcs{
 				SubResourceCreate: func(_ context.Context, _ client.Client, subResourceName string, _ client.Object, subResource client.Object, _ ...client.SubResourceCreateOption) error {
-					if subResourceName != "token" {
+					if subResourceName != tokenSubResourceName {
 						return nil
 					}
 					tr := subResource.(*authenticationv1.TokenRequest) //nolint:forcetypeassert // fake test double, shape is controlled by this test
@@ -90,5 +95,39 @@ func TestMintServiceAccountToken(t *testing.T) {
 		assert.Empty(t, token)
 		assert.Contains(t, err.Error(), "empty token")
 		assert.Equal(t, []string{"api://AzureADTokenExchange"}, gotAudiences)
+	})
+
+	t.Run("requests exactly the audience, expiration, and target the caller supplied -- nothing else", func(t *testing.T) {
+		// The full TokenRequest shape, captured via interceptor rather than asserted against
+		// the fake client's own (opaque) default behavior: the audience, a 600-second
+		// (tokenTTL) expiration, and a ServiceAccount name/namespace matching exactly what the
+		// caller passed in -- no other namespace or name can reach this call, since
+		// mintServiceAccountToken takes namespace and name as plain string parameters supplied
+		// by its own callers (see resolveCredential), not sourced from anything on the
+		// TokenRequest object itself that a user-controlled value could redirect.
+		var gotObjKey client.ObjectKey
+		var gotExpirationSeconds *int64
+		fakeClient := fake.NewClientBuilder().
+			WithScheme(createTestScheme(t)).
+			WithObjects(sa).
+			WithInterceptorFuncs(interceptor.Funcs{
+				SubResourceCreate: func(_ context.Context, _ client.Client, subResourceName string, obj client.Object, subResource client.Object, _ ...client.SubResourceCreateOption) error {
+					if subResourceName != tokenSubResourceName {
+						return nil
+					}
+					gotObjKey = client.ObjectKeyFromObject(obj)
+					tr := subResource.(*authenticationv1.TokenRequest) //nolint:forcetypeassert // fake test double, shape is controlled by this test
+					gotExpirationSeconds = tr.Spec.ExpirationSeconds
+					tr.Status.Token = "fake-token"
+					return nil
+				},
+			}).
+			Build()
+
+		_, err := mintServiceAccountToken(context.Background(), fakeClient, namespace, "acr-refresher", "api://AzureADTokenExchange")
+		require.NoError(t, err)
+		assert.Equal(t, client.ObjectKey{Namespace: namespace, Name: "acr-refresher"}, gotObjKey)
+		require.NotNil(t, gotExpirationSeconds)
+		assert.Equal(t, int64(600), *gotExpirationSeconds)
 	})
 }

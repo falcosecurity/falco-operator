@@ -172,12 +172,27 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 // even though this reconciler's own code only ever calls TokenRequest with a namespace/name
 // pair it derived from an AzureAuth.ServiceAccountRef in the same namespace as the artifact
 // that referenced it (see internal/pkg/credentials/azure). That's an application-level
-// guarantee, not an RBAC-enforced one: it is not equivalent to "can reference a Secret" (also
-// namespace-scoped by this same code, but bounded by the Kubernetes API server itself, not just
-// by this reconciler's logic). Accepted as a cluster-wide trust decision consistent with the
-// rest of this ClusterRole, not a narrower design -- flag any future code path that calls
-// TokenRequest with an operator-supplied (rather than user-CR-supplied) namespace/name as a
-// deliberate widening of this trust boundary, worth its own review.
+// guarantee, not an RBAC-enforced one. Accepted as a cluster-wide trust decision consistent
+// with the rest of this ClusterRole, not a narrower design -- flag any future code path that
+// calls TokenRequest with an operator-supplied (rather than user-CR-supplied) namespace/name
+// as a deliberate widening of this trust boundary, worth its own review.
+//
+// This is NOT equivalent to "can reference a Secret", and should not be described that way:
+// referencing a Secret only exposes whatever credential that Secret already contains, itself
+// gated by whatever RBAC controls who could create that Secret in the first place.
+// serviceaccounts/token actively *mints a fresh identity assertion* for whichever ServiceAccount
+// is named -- without a further check, an artifact resource's author could name *any*
+// ServiceAccount in their namespace, including ones some other, unrelated workload already has
+// federated to an Azure identity, and get a token minted for it. That's why
+// internal/pkg/credentials/azure.authorizeServiceAccountForWorkloadIdentity requires the target
+// ServiceAccount to separately carry an annotation naming the exact Azure client ID it consents
+// to being minted a token for (azureClientIDAnnotation) -- a deliberate act by whoever
+// administers ServiceAccounts in the namespace, not implied by merely being nameable in a CR.
+// That check narrows "any artifact author can use any ServiceAccount's federated identity" down
+// to "any artifact author can use any ServiceAccount that has explicitly opted in to their
+// specific clientId" -- still a namespace-local trust decision, not a full authorization
+// system: someone who can both create artifact resources *and* edit ServiceAccounts in the same
+// namespace can still self-authorize.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
 	logger := log.FromContext(ctx)
 	falco := &instancev1alpha1.Falco{}

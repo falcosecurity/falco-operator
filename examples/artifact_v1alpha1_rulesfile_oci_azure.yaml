@@ -13,6 +13,18 @@
 # full list of variable names. serviceAccountRef has no environment equivalent: it names which
 # ServiceAccount to federate, not a credential value, so it must always be set in the CR when
 # method is workloadIdentity.
+# The workloadIdentity example below references the "acr-reader" ServiceAccount, which must
+# itself be annotated (by whoever administers ServiceAccounts in this namespace -- a separate,
+# deliberate act from creating the Rulesfile below) to opt in to this exact clientId:
+#   apiVersion: v1
+#   kind: ServiceAccount
+#   metadata:
+#     name: acr-reader
+#     namespace: default
+#     annotations:
+#       azure.falcosecurity.dev/client-id: "11111111-1111-1111-1111-111111111111"
+# Without that annotation (or with a different clientId on it), the operator refuses to mint a
+# token for it -- see ServiceAccountRef's godoc for why this exists.
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
 metadata:
@@ -31,8 +43,8 @@ spec:
         azure:
           # --- method: workloadIdentity (active in this example) ---
           # Federates the "acr-reader" ServiceAccount (must exist in this resource's own
-          # namespace) to an Entra app/managed identity via OIDC trust. The Azure-side
-          # federated identity credential's subject must be
+          # namespace, and be annotated as shown above) to an Entra app/managed identity via
+          # OIDC trust. The Azure-side federated identity credential's subject must be
           # system:serviceaccount:default:acr-reader, and it needs at least the AcrPull role
           # on this registry. No Secret involved.
           method: workloadIdentity
