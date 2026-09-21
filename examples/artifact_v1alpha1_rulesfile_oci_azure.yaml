@@ -1,0 +1,54 @@
+# Pull an OCI artifact from Azure Container Registry (or any registry supporting the
+# distribution-spec OAuth2 token exchange) authenticated via an Azure identity, instead of a
+# static username/password Secret (see artifact_v1alpha1_rulesfile_oci_private.yaml for that).
+#
+# Exactly one of the four methods below is active per resource, selected by spec.registry.auth.azure.method.
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: falco-operator
+  name: rulesfile-oci-azure
+  namespace: default
+spec:
+  ociArtifact:
+    image:
+      repository: my-org/falco-rules
+      tag: v1.0.0
+    registry:
+      name: myregistry.azurecr.io
+      auth:
+        azure:
+          # --- method: workloadIdentity (active in this example) ---
+          # Federates the "acr-reader" ServiceAccount (must exist in this resource's own
+          # namespace) to an Entra app/managed identity via OIDC trust. The Azure-side
+          # federated identity credential's subject must be
+          # system:serviceaccount:default:acr-reader, and it needs at least the AcrPull role
+          # on this registry. No Secret involved.
+          method: workloadIdentity
+          tenantId: 00000000-0000-0000-0000-000000000000
+          clientId: 11111111-1111-1111-1111-111111111111
+          serviceAccountRef:
+            name: acr-reader
+
+          # --- method: clientSecret ---
+          # method: clientSecret
+          # tenantId: 00000000-0000-0000-0000-000000000000
+          # clientId: 11111111-1111-1111-1111-111111111111
+          # clientSecretRef:
+          #   name: azure-app-credentials # Secret key: clientSecret
+
+          # --- method: clientCertificate ---
+          # method: clientCertificate
+          # tenantId: 00000000-0000-0000-0000-000000000000
+          # clientId: 11111111-1111-1111-1111-111111111111
+          # clientCertificateRef:
+          #   name: azure-app-certificate # Secret keys: certificate (+ optional password)
+
+          # --- method: managedIdentity ---
+          # Authenticates via the node's Azure Instance Metadata Service (IMDS). No
+          # per-namespace/per-artifact isolation -- every AzureAuth using this method resolves
+          # to whichever identity is attached to the node the operator pod is scheduled on.
+          # method: managedIdentity
+          # clientId: 11111111-1111-1111-1111-111111111111 # omit entirely for system-assigned
+  priority: 40

@@ -89,6 +89,61 @@ func TestFetchOCIAuthSecret(t *testing.T) {
 	}
 }
 
+func TestFetchOCICredentials(t *testing.T) {
+	const namespace = "test-namespace"
+
+	t.Run("dispatches to secretRef when azure is not set", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "pull-secret", Namespace: namespace},
+			Data: map[string][]byte{
+				commonv1alpha1.SecretUsernameKey: []byte("user"),
+				commonv1alpha1.SecretPasswordKey: []byte("pass"),
+			},
+		}
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(secret).Build(), namespace)
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"},
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{SecretRef: &commonv1alpha1.SecretRef{Name: "pull-secret"}},
+			},
+		}
+
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err)
+		cred, err := credFunc(context.Background(), "ghcr.io")
+		require.NoError(t, err)
+		assert.Equal(t, "user", cred.Username)
+		assert.Equal(t, "pass", cred.Password)
+	})
+
+	t.Run("dispatches to azure when set, ignoring any secretRef", func(t *testing.T) {
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(), namespace)
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"},
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{
+					// Both set: Azure must win, per fetchOCICredentials checking Azure first
+					// (the CRD's own CEL validation forbids this combination in practice, but
+					// the Go dispatch order is worth pinning down independently of that).
+					SecretRef: &commonv1alpha1.SecretRef{Name: "should-not-be-used"},
+					Azure:     &commonv1alpha1.AzureAuth{Method: "unsupportedForThisTest"},
+				},
+			},
+		}
+
+		// azure.CredentialFunc only validates cfg != nil eagerly; the method-specific
+		// resolution (and its errors) happen when the returned CredentialFunc is actually
+		// invoked, matching how oras-go itself calls it.
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err)
+
+		_, err = credFunc(context.Background(), "myregistry.azurecr.io")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolve azure credential")
+		assert.NotContains(t, err.Error(), "should-not-be-used")
+	})
+}
+
 func TestIsExpectedOCIArtifactType(t *testing.T) {
 	tests := []struct {
 		name     string

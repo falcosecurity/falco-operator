@@ -17,6 +17,10 @@
 // Package v1alpha1 contains common types used across apis.
 package v1alpha1
 
+import (
+	corev1 "k8s.io/api/core/v1"
+)
+
 // ConditionType represents a Falco condition type.
 // +kubebuilder:validation:MinLength=1
 type ConditionType string
@@ -106,6 +110,18 @@ const (
 
 	// SecretPasswordKey is the key used for the password (or token) in authentication Secrets.
 	SecretPasswordKey = "password"
+
+	// AzureClientSecretKey is the key used for the client secret in Secrets referenced by
+	// AzureAuth.ClientSecretRef.
+	AzureClientSecretKey = "clientSecret"
+
+	// AzureClientCertificateKey is the key used for the client certificate (PEM or PKCS#12) in
+	// Secrets referenced by AzureAuth.ClientCertificateRef.
+	AzureClientCertificateKey = "certificate"
+
+	// AzureClientCertificatePasswordKey is the key used for the client certificate's password, if
+	// any, in Secrets referenced by AzureAuth.ClientCertificateRef.
+	AzureClientCertificatePasswordKey = "password"
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
@@ -150,10 +166,93 @@ type TLSConfig struct {
 
 // RegistryAuth defines authentication configuration for an OCI registry.
 // +kubebuilder:object:generate=true
+// +kubebuilder:validation:XValidation:rule="!(has(self.secretRef) && has(self.azure))",message="secretRef and azure are mutually exclusive"
 type RegistryAuth struct {
 	// SecretRef references a Secret containing registry credentials.
 	// +optional
 	SecretRef *SecretRef `json:"secretRef,omitempty"`
+
+	// Azure authenticates to the registry using an Azure identity, exchanged for a
+	// registry-scoped token (e.g. an ACR refresh token). Mutually exclusive with secretRef.
+	// +optional
+	Azure *AzureAuth `json:"azure,omitempty"`
+}
+
+const (
+	// AzureMethodClientSecret authenticates as a Microsoft Entra app registration using a
+	// client secret (AzureAuth.ClientSecretRef).
+	AzureMethodClientSecret = "clientSecret"
+	// AzureMethodClientCertificate authenticates as a Microsoft Entra app registration using a
+	// client certificate (AzureAuth.ClientCertificateRef).
+	AzureMethodClientCertificate = "clientCertificate"
+	// AzureMethodManagedIdentity authenticates via the Azure Instance Metadata Service (IMDS)
+	// using the node's system-assigned identity, or a user-assigned identity when
+	// AzureAuth.ClientID is set.
+	AzureMethodManagedIdentity = "managedIdentity"
+	// AzureMethodWorkloadIdentity authenticates using a Kubernetes ServiceAccount token
+	// (AzureAuth.ServiceAccountRef), federated to an Entra app or managed identity via OIDC
+	// trust.
+	AzureMethodWorkloadIdentity = "workloadIdentity"
+)
+
+// AzureAuth configures registry authentication via an Azure identity. Exactly one method is
+// used, selected by Method; the other method-specific fields are ignored.
+// +kubebuilder:object:generate=true
+// +kubebuilder:validation:XValidation:rule="self.method != 'clientSecret' || has(self.clientSecretRef)",message="clientSecretRef is required when method is clientSecret"
+// +kubebuilder:validation:XValidation:rule="self.method != 'clientCertificate' || has(self.clientCertificateRef)",message="clientCertificateRef is required when method is clientCertificate"
+// +kubebuilder:validation:XValidation:rule="self.method != 'workloadIdentity' || has(self.serviceAccountRef)",message="serviceAccountRef is required when method is workloadIdentity"
+// +kubebuilder:validation:XValidation:rule="self.method == 'managedIdentity' || has(self.tenantId)",message="tenantId is required unless method is managedIdentity"
+// +kubebuilder:validation:XValidation:rule="self.method == 'managedIdentity' || has(self.clientId)",message="clientId is required unless method is managedIdentity"
+type AzureAuth struct {
+	// Method selects how the Azure identity is obtained.
+	// - clientSecret: a Microsoft Entra app registration authenticated with a client secret.
+	// - clientCertificate: the same, authenticated with a certificate instead.
+	// - managedIdentity: the node's system-assigned identity, or a user-assigned identity when
+	//   clientId is set. Authenticates via the Azure Instance Metadata Service (IMDS) -- there is
+	//   no per-namespace or per-artifact isolation with this method, every AzureAuth using it
+	//   resolves to whichever identity is attached to the node the operator pod is scheduled on.
+	// - workloadIdentity: a Kubernetes ServiceAccount token (serviceAccountRef), federated to an
+	//   Entra app or managed identity via OIDC trust.
+	// +kubebuilder:validation:Enum=clientSecret;clientCertificate;managedIdentity;workloadIdentity
+	// +kubebuilder:validation:Required
+	Method string `json:"method"`
+
+	// TenantID is the Microsoft Entra tenant ID. Required for clientSecret, clientCertificate,
+	// and workloadIdentity; unused for managedIdentity (IMDS resolves the tenant from the
+	// attached identity).
+	// +optional
+	TenantID string `json:"tenantId,omitempty"`
+
+	// ClientID is the application (client) ID to authenticate as. Required for clientSecret,
+	// clientCertificate, and workloadIdentity. For managedIdentity, its presence selects a
+	// user-assigned identity by client ID; its absence selects the node's system-assigned
+	// identity.
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+
+	// ClientSecretRef references a Secret containing the app registration's client secret, under
+	// the key "clientSecret". Used when method is clientSecret.
+	// +optional
+	ClientSecretRef *SecretRef `json:"clientSecretRef,omitempty"`
+
+	// ClientCertificateRef references a Secret containing the client certificate (PEM or PKCS#12,
+	// under the key "certificate") and, if the certificate is password-protected, the password
+	// under the key "password". Used when method is clientCertificate.
+	// +optional
+	ClientCertificateRef *SecretRef `json:"clientCertificateRef,omitempty"`
+
+	// ServiceAccountRef names the ServiceAccount, in the same namespace as this resource, whose
+	// federated identity is used. Used when method is workloadIdentity. The Azure-side federated
+	// identity credential must trust the subject
+	// system:serviceaccount:<this resource's namespace>:<name>.
+	//
+	// This ServiceAccount does not need the azure.workload.identity/use pod label or the
+	// Azure Workload Identity mutating webhook installed: the operator mints its token itself,
+	// per resolution, via the Kubernetes TokenRequest API, rather than relying on a
+	// webhook-projected token file tied to one pod's one identity. Those are only relevant to
+	// azidentity's own file-based WorkloadIdentityCredential, which this does not use.
+	// +optional
+	ServiceAccountRef *corev1.LocalObjectReference `json:"serviceAccountRef,omitempty"`
 }
 
 // RegistryConfig defines inline registry configuration for an OCI artifact.

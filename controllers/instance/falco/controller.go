@@ -150,6 +150,7 @@ func NewReconciler(cl client.Client, scheme *runtime.Scheme, recorder events.Eve
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=clusterroles;clusterrolebindings,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=pods;services;configmaps;serviceaccounts,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;patch;watch
+// +kubebuilder:rbac:groups="",resources=serviceaccounts/token,verbs=create
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=create;delete;get;list;patch;update;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;patch;update;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/finalizers,verbs=patch;update
