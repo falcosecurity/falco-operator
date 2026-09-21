@@ -629,3 +629,130 @@ func TestCredentialFunc(t *testing.T) {
 		assert.Contains(t, err.Error(), "resolve azure credential")
 	})
 }
+
+func TestResolveString(t *testing.T) {
+	const envVar = "AZURE_TEST_RESOLVE_STRING"
+
+	t.Run("returns config value when set, ignoring the environment", func(t *testing.T) {
+		t.Setenv(envVar, "from-env")
+		assert.Equal(t, "from-config", resolveString("from-config", envVar))
+	})
+
+	t.Run("falls back to the environment variable when config is empty", func(t *testing.T) {
+		t.Setenv(envVar, "from-env")
+		assert.Equal(t, "from-env", resolveString("", envVar))
+	})
+
+	t.Run("returns empty when neither is set", func(t *testing.T) {
+		t.Setenv(envVar, "")
+		assert.Empty(t, resolveString("", envVar))
+	})
+}
+
+func TestResolveBool(t *testing.T) {
+	const envVar = "AZURE_TEST_RESOLVE_BOOL"
+
+	trueVal := true
+	falseVal := false
+
+	t.Run("an explicit true in config wins over a conflicting env value", func(t *testing.T) {
+		t.Setenv(envVar, "false")
+		assert.True(t, resolveBool(&trueVal, envVar))
+	})
+
+	t.Run("an explicit false in config wins over a conflicting env value", func(t *testing.T) {
+		t.Setenv(envVar, "true")
+		assert.False(t, resolveBool(&falseVal, envVar))
+	})
+
+	t.Run(`falls back to the environment variable "1"`, func(t *testing.T) {
+		t.Setenv(envVar, "1")
+		assert.True(t, resolveBool(nil, envVar))
+	})
+
+	t.Run(`falls back to the environment variable "true", case-insensitive`, func(t *testing.T) {
+		t.Setenv(envVar, "TRUE")
+		assert.True(t, resolveBool(nil, envVar))
+	})
+
+	t.Run("defaults to false when config is nil and the environment variable is unset", func(t *testing.T) {
+		t.Setenv(envVar, "")
+		assert.False(t, resolveBool(nil, envVar))
+	})
+
+	t.Run(`defaults to false for an unrecognized environment value`, func(t *testing.T) {
+		t.Setenv(envVar, "yes")
+		assert.False(t, resolveBool(nil, envVar))
+	})
+}
+
+func TestValidateMethod(t *testing.T) {
+	t.Run("clientSecret: passes when every required field is present", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodClientSecret, ClientSecretRef: &commonv1alpha1.SecretRef{Name: "s"}}
+		assert.NoError(t, validateMethod(cfg, "tenant", "client"))
+	})
+
+	t.Run("clientSecret: reports every missing field at once, not just the first", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodClientSecret}
+
+		err := validateMethod(cfg, "" /* tenantID */, "" /* clientID */)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tenantId (config) or AZURE_TENANT_ID (environment variable) is required for method clientSecret")
+		assert.Contains(t, err.Error(), "clientId (config) or AZURE_CLIENT_ID (environment variable) is required for method clientSecret")
+		assert.Contains(t, err.Error(), "clientSecretRef (config) or AZURE_CLIENT_SECRET (environment variable) is required for method clientSecret")
+	})
+
+	t.Run("clientCertificate: passes when every required field is present", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodClientCertificate, ClientCertificateRef: &commonv1alpha1.SecretRef{Name: "s"}}
+		assert.NoError(t, validateMethod(cfg, "tenant", "client"))
+	})
+
+	t.Run("clientCertificate: reports every missing field at once", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodClientCertificate}
+
+		err := validateMethod(cfg, "", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tenantId (config) or AZURE_TENANT_ID (environment variable) is required for method clientCertificate")
+		assert.Contains(t, err.Error(), "clientId (config) or AZURE_CLIENT_ID (environment variable) is required for method clientCertificate")
+		assert.Contains(t, err.Error(), "clientCertificateRef (config) or AZURE_CLIENT_CERTIFICATE_PATH (environment variable) is required for method clientCertificate")
+	})
+
+	t.Run("managedIdentity: nothing is required, even with empty tenantId/clientId", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodManagedIdentity}
+		assert.NoError(t, validateMethod(cfg, "", ""))
+	})
+
+	t.Run("workloadIdentity: passes when every required field is present", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodWorkloadIdentity, ServiceAccountRef: &corev1.LocalObjectReference{Name: "sa"}}
+		assert.NoError(t, validateMethod(cfg, "tenant", "client"))
+	})
+
+	t.Run("workloadIdentity: reports every missing field at once, serviceAccountRef included", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodWorkloadIdentity}
+
+		err := validateMethod(cfg, "", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tenantId (config) or AZURE_TENANT_ID (environment variable) is required for method workloadIdentity")
+		assert.Contains(t, err.Error(), "clientId (config) or AZURE_CLIENT_ID (environment variable) is required for method workloadIdentity")
+		assert.Contains(t, err.Error(), "serviceAccountRef is required for method workloadIdentity")
+		assert.Contains(t, err.Error(), "no environment variable fallback")
+	})
+
+	t.Run("workloadIdentity: serviceAccountRef alone is still reported when tenantId/clientId are present", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: commonv1alpha1.AzureMethodWorkloadIdentity}
+
+		err := validateMethod(cfg, "tenant", "client")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "tenantId (config)")
+		assert.NotContains(t, err.Error(), "clientId (config)")
+		assert.Contains(t, err.Error(), "serviceAccountRef is required")
+	})
+
+	t.Run("unsupported method", func(t *testing.T) {
+		cfg := &commonv1alpha1.AzureAuth{Method: "somethingElse"}
+
+		err := validateMethod(cfg, "tenant", "client")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `unsupported azure auth method "somethingElse"`)
+	})
+}

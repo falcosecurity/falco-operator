@@ -24,7 +24,6 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -48,7 +47,7 @@ func mintServiceAccountToken(ctx context.Context, c client.Client, namespace, na
 	tr := &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{
 			Audiences:         []string{audience},
-			ExpirationSeconds: ptr.To(int64(tokenTTL.Seconds())),
+			ExpirationSeconds: new(int64(tokenTTL.Seconds())),
 		},
 	}
 	sa := &corev1.ServiceAccount{
