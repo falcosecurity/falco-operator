@@ -107,7 +107,7 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 		if err != nil {
 			return nil, fmt.Errorf("parse client certificate from secret %s/%s: %w", namespace, cfg.ClientCertificateRef.Name, err)
 		}
-		return azidentity.NewClientCertificateCredential(cfg.TenantID, cfg.ClientID, certs, key, nil)
+		return azidentity.NewClientCertificateCredential(cfg.TenantID, cfg.ClientID, certs, key, clientCertificateOptions(cfg))
 
 	case commonv1alpha1.AzureMethodManagedIdentity:
 		opts := &azidentity.ManagedIdentityCredentialOptions{}
@@ -186,6 +186,15 @@ func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred
 	}
 
 	return auth.Credential{RefreshToken: result.RefreshToken}, nil
+}
+
+// clientCertificateOptions builds the azidentity options for the clientCertificate method,
+// split out from resolveCredential so cfg.SendCertificateChain's wiring can be asserted
+// directly in a test without needing to inspect azidentity's own credential internals.
+func clientCertificateOptions(cfg *commonv1alpha1.AzureAuth) *azidentity.ClientCertificateCredentialOptions {
+	return &azidentity.ClientCertificateCredentialOptions{
+		SendCertificateChain: cfg.SendCertificateChain,
+	}
 }
 
 func getSecret(ctx context.Context, c client.Client, namespace string, ref *commonv1alpha1.SecretRef) (*corev1.Secret, error) {

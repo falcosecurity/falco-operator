@@ -241,6 +241,16 @@ type AzureAuth struct {
 	// +optional
 	ClientCertificateRef *SecretRef `json:"clientCertificateRef,omitempty"`
 
+	// SendCertificateChain controls whether the certificate's public chain is sent in the x5c
+	// header of each token request, as required for Subject Name/Issuer (SNI) authentication --
+	// needed when the Microsoft Entra app registration trusts this certificate by subject
+	// name/issuer rather than by exact thumbprint (e.g. because the certificate is reissued
+	// periodically by an intermediate CA without updating the app registration each time).
+	// Only used when method is clientCertificate. Defaults to false, matching azidentity's own
+	// ClientCertificateCredentialOptions.SendCertificateChain default.
+	// +optional
+	SendCertificateChain bool `json:"sendCertificateChain,omitempty"`
+
 	// ServiceAccountRef names the ServiceAccount, in the same namespace as this resource, whose
 	// federated identity is used. Used when method is workloadIdentity. The Azure-side federated
 	// identity credential must trust the subject

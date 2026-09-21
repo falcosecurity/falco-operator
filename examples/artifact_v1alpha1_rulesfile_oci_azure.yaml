@@ -44,6 +44,7 @@ spec:
           # clientId: 11111111-1111-1111-1111-111111111111
           # clientCertificateRef:
           #   name: azure-app-certificate # Secret keys: certificate (+ optional password)
+          # sendCertificateChain: false # true only for Subject Name/Issuer (SNI) trust -- see the field's godoc
 
           # --- method: managedIdentity ---
           # Authenticates via the node's Azure Instance Metadata Service (IMDS). No

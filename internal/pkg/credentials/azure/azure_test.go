@@ -230,6 +230,25 @@ func TestResolveCredential(t *testing.T) {
 		assert.NotNil(t, cred)
 	})
 
+	t.Run("clientCertificate: sendCertificateChain does not break construction", func(t *testing.T) {
+		secret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "app-cert", Namespace: namespace},
+			Data:       map[string][]byte{commonv1alpha1.AzureClientCertificateKey: selfSignedCertPEM(t)},
+		}
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(secret).Build()
+		cfg := &commonv1alpha1.AzureAuth{
+			Method:               commonv1alpha1.AzureMethodClientCertificate,
+			TenantID:             "tenant",
+			ClientID:             "client",
+			ClientCertificateRef: &commonv1alpha1.SecretRef{Name: "app-cert"},
+			SendCertificateChain: true,
+		}
+
+		cred, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
+		require.NoError(t, err)
+		assert.NotNil(t, cred)
+	})
+
 	t.Run("clientCertificate: errors on malformed certificate data", func(t *testing.T) {
 		secret := &corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{Name: "app-cert", Namespace: namespace},
@@ -301,6 +320,20 @@ func TestResolveCredential(t *testing.T) {
 		_, err := resolveCredential(context.Background(), fakeClient, namespace, cfg)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), `unsupported azure auth method "somethingElse"`)
+	})
+}
+
+func TestClientCertificateOptions(t *testing.T) {
+	t.Run("threads SendCertificateChain through when true", func(t *testing.T) {
+		opts := clientCertificateOptions(&commonv1alpha1.AzureAuth{SendCertificateChain: true})
+		require.NotNil(t, opts)
+		assert.True(t, opts.SendCertificateChain)
+	})
+
+	t.Run("defaults to false", func(t *testing.T) {
+		opts := clientCertificateOptions(&commonv1alpha1.AzureAuth{})
+		require.NotNil(t, opts)
+		assert.False(t, opts.SendCertificateChain)
 	})
 }
 
