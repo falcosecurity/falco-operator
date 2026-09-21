@@ -16,17 +16,24 @@
 
 // Package azure resolves OCI registry credentials from an Azure identity (a client
 // secret/certificate, a system- or user-assigned managed identity, or a Kubernetes
-// ServiceAccount federated via Microsoft Entra workload identity), for registries -- Azure
-// Container Registry today -- that support the distribution-spec OAuth2 token exchange.
+// ServiceAccount federated via Microsoft Entra workload identity), specifically for Azure
+// Container Registry (ACR) today. This implements ACR's own documented AAD token exchange
+// (https://github.com/Azure/acr/blob/main/docs/AAD-OAuth.md) -- POSTing an AAD access token
+// scoped to https://management.azure.com/.default to the registry's /oauth2/exchange endpoint
+// for an ACR refresh token. The exchange endpoint *shape* (POST .../oauth2/exchange, form-
+// encoded) happens to be one some other registries also expose, but managementScope below is
+// an Azure AAD resource, not a distribution-spec concept -- a non-ACR registry using the same
+// endpoint shape may require a different AAD resource/scope, a different exchange endpoint, or
+// reject an Azure management-plane token outright. Treat "works with ACR" as the supported
+// claim, not "works with any distribution-spec-compatible registry", until scope/endpoint
+// becomes its own piece of configuration.
 package azure
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,9 +53,10 @@ import (
 
 const (
 	// managementScope is the AAD resource scope requested for the access token that gets
-	// exchanged for a registry refresh token. Not registry-specific -- the registry's own
-	// /oauth2/exchange endpoint determines which registry the resulting token is scoped to via
-	// the "service" form parameter, not the token's own scope.
+	// exchanged for a registry refresh token via ACR's own /oauth2/exchange endpoint. This is
+	// ACR's own documented convention, not a distribution-spec or registry-agnostic value -- see
+	// the package doc comment above. The "service" form parameter (not this scope) is what
+	// determines which registry the resulting refresh token is scoped to.
 	managementScope = "https://management.azure.com/.default"
 
 	// workloadIdentityAudience is the audience Microsoft Entra's workload identity federation
@@ -90,6 +98,14 @@ const (
 // ACR token exchange is a separate HTTP call to the same registry and needs to agree with it,
 // rather than always assuming HTTPS with default TLS regardless of how the registry is
 // configured. nil means "no override": HTTPS, system CA pool.
+//
+// The returned auth.CredentialFunc's registry argument -- supplied by ORAS itself, not by this
+// package -- is used directly and unmodified both as the exchange URL's host (optionally with a
+// port, e.g. "myregistry.local:5000") and as the "service" form parameter ACR's exchange
+// endpoint expects. For ACR this is always correct: ORAS derives that argument from the
+// request's own host, which for an ACR pull is already the registry's login server, the same
+// value ACR's own "service" parameter expects. There's no separate "authentication host" or
+// "service name" concept layered on top of it here.
 func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth, registryOpts *puller.RegistryOptions) (auth.CredentialFunc, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("azure auth configuration is required")
@@ -109,13 +125,14 @@ func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.Azure
 // RegistryConfig.TLS.InsecureSkipVerify when set. Still wrapped in retry.NewTransport either
 // way, for the same retry/backoff behavior retry.DefaultClient gives the common case.
 func exchangeHTTPClient(registryOpts *puller.RegistryOptions) *http.Client {
-	if registryOpts == nil || !registryOpts.InsecureSkipVerify {
-		return retry.DefaultClient
+	// puller.TransportFor builds the exact same InsecureSkipVerify-wrapping RoundTripper
+	// Pull/FetchConfig/ResolveDigest/FetchContent use for the blob pull itself -- one
+	// implementation instead of two that could silently drift apart. nil means "no override
+	// needed" (registryOpts is nil, or InsecureSkipVerify is false).
+	if transport := puller.TransportFor(registryOpts); transport != nil {
+		return &http.Client{Transport: transport}
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport in practice
-	//nolint:gosec // G402: explicit opt-in via this OCIArtifact's own RegistryConfig.TLS.InsecureSkipVerify, same field the OCI puller already honors for the blob pull itself
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	return &http.Client{Transport: retry.NewTransport(transport)}
+	return retry.DefaultClient
 }
 
 // resolveCredential builds an azcore.TokenCredential for cfg.Method. All four methods converge
@@ -325,9 +342,10 @@ func resolveBool(configValue *bool, envVar string) bool {
 }
 
 // exchangeForRegistryToken exchanges an AAD access token for a registry-scoped refresh token
-// via the registry's own OAuth2 distribution-spec exchange endpoint. Documented by Azure
-// Container Registry at https://github.com/Azure/acr/blob/main/docs/AAD-OAuth.md; the same
-// registry-vendor-owned endpoint regardless of which of the four methods produced cred.
+// via ACR's own OAuth2 exchange endpoint, documented at
+// https://github.com/Azure/acr/blob/main/docs/AAD-OAuth.md -- the same ACR-owned endpoint
+// regardless of which of the four methods produced cred. See the package doc comment for why
+// this isn't assumed to be a registry-agnostic distribution-spec mechanism.
 //
 // httpClient is a parameter (rather than always retry.DefaultClient directly) purely so tests
 // can point it at an httptest server instead of a real registry; CredentialFunc builds the
@@ -365,8 +383,14 @@ func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return auth.EmptyCredential, fmt.Errorf("registry %s returned %d exchanging AAD token: %s", registry, resp.StatusCode, body)
+		// Deliberately not including the response body: this error's text is likely to end up
+		// in a Rulesfile/Plugin/Config resource's .status.conditions[].message, readable by
+		// anyone with get/list on that resource -- a wider audience than whoever has log
+		// access. A registry error response isn't guaranteed not to echo back request data
+		// (in the worst case, form parameters from this very request), so surface only the
+		// status code here; the response is still fully available to a debugger attaching to
+		// this process, just not propagated into a resource anyone can read.
+		return auth.EmptyCredential, fmt.Errorf("registry %s returned %d exchanging AAD token", registry, resp.StatusCode)
 	}
 
 	var result struct {

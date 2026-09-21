@@ -24,6 +24,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -41,6 +42,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -188,6 +190,114 @@ func TestExchangeForRegistryToken(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "https", gotScheme)
 	})
+
+	t.Run("a registry host with an explicit port is used unmodified for both the URL host and the service parameter", func(t *testing.T) {
+		var gotHost, gotService string
+		roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotHost = req.URL.Host
+			assert.NoError(t, req.ParseForm())
+			gotService = req.FormValue("service")
+			body := io.NopCloser(strings.NewReader(`{"refresh_token":"acr-refresh-token"}`))
+			return &http.Response{StatusCode: http.StatusOK, Body: body, Header: http.Header{"Content-Type": {"application/json"}}}, nil
+		})
+		httpClient := &http.Client{Transport: roundTrip}
+
+		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.local:5000", true)
+		require.NoError(t, err)
+		assert.Equal(t, "myregistry.local:5000", gotHost)
+		assert.Equal(t, "myregistry.local:5000", gotService)
+	})
+}
+
+// TestExchangeForRegistryTokenWithORASAuthClient exercises exchangeForRegistryToken wired as an
+// oras-go auth.CredentialFunc, driven by ORAS's own auth.Client -- not calling
+// exchangeForRegistryToken directly the way the other tests in this file do. This is the actual
+// integration boundary in question: does ORAS's own bearer-challenge handling correctly consume
+// the auth.Credential{RefreshToken: ...} this package returns, exactly as
+// oras-go/registry/remote/auth.Client.fetchOAuth2Token implements it (verified by reading that
+// function directly, not assumed):
+//
+//  1. ORAS GETs the protected resource with no Authorization header.
+//  2. The registry challenges with 401 + WWW-Authenticate: Bearer realm=...,service=....
+//  3. ORAS calls the CredentialFunc (this package's exchangeForRegistryToken under the hood),
+//     which itself calls the AAD exchange endpoint and returns a RefreshToken.
+//  4. ORAS POSTs grant_type=refresh_token&refresh_token=<that value>&service=... to realm.
+//  5. ORAS retries the original request with the resulting Authorization: Bearer <token>.
+//
+// Uses the httptest server's own real address as the "registry" throughout (rather than a fake
+// hostname behind a rewriting transport, as the other tests in this file use) specifically so
+// ORAS's own origin-matching safety check (comparing the challenged response's request URL
+// against the originally requested URL, see auth.Client.Do / sameHTTPOrigin) sees a consistent
+// origin at every step -- a rewriting transport would make that check see two different origins
+// and reject the exchange before this test could prove anything.
+func TestExchangeForRegistryTokenWithORASAuthClient(t *testing.T) {
+	const (
+		aadToken     = "aad-token"
+		refreshToken = "acr-refresh-token-from-exchange"
+		accessToken  = "final-bearer-token-from-oras-token-endpoint"
+	)
+
+	var exchangeCalled, tokenCalled, resourceAuthedCalled bool
+	mux := http.NewServeMux()
+
+	var registry string // set once the server is up; closed over by the handlers below
+
+	mux.HandleFunc("/v2/test/manifest", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer "+accessToken {
+			resourceAuthedCalled = true
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm=%q,service=%q`, "http://"+registry+"/oauth2/token", registry))
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+
+	mux.HandleFunc("/oauth2/exchange", func(w http.ResponseWriter, r *http.Request) {
+		exchangeCalled = true
+		assert.NoError(t, r.ParseForm())
+		assert.Equal(t, "access_token", r.FormValue("grant_type"))
+		assert.Equal(t, aadToken, r.FormValue("access_token"))
+		assert.Equal(t, registry, r.FormValue("service"))
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"refresh_token": refreshToken}))
+	})
+
+	mux.HandleFunc("/oauth2/token", func(w http.ResponseWriter, r *http.Request) {
+		tokenCalled = true
+		assert.NoError(t, r.ParseForm())
+		// This is ORAS's own request, built by auth.Client.fetchOAuth2Token -- proving it
+		// picked up and correctly used the RefreshToken this package's exchange returned.
+		assert.Equal(t, "refresh_token", r.FormValue("grant_type"))
+		assert.Equal(t, refreshToken, r.FormValue("refresh_token"))
+		assert.Equal(t, registry, r.FormValue("service"))
+
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(map[string]string{"access_token": accessToken}))
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	registry = strings.TrimPrefix(server.URL, "http://")
+
+	authClient := &auth.Client{
+		Client: http.DefaultClient,
+		Credential: func(ctx context.Context, hostport string) (auth.Credential, error) {
+			return exchangeForRegistryToken(ctx, http.DefaultClient, fakeTokenCredential{token: aadToken}, hostport, true)
+		},
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "http://"+registry+"/v2/test/manifest", http.NoBody)
+	require.NoError(t, err)
+
+	resp, err := authClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.True(t, exchangeCalled, "expected the AAD/ACR exchange endpoint to be called")
+	assert.True(t, tokenCalled, "expected ORAS's own oauth2 token endpoint to be called with the refresh token")
+	assert.True(t, resourceAuthedCalled, "expected the original resource to be retried with the resulting bearer token and succeed")
 }
 
 // selfSignedCertPEM generates a throwaway self-signed certificate + unencrypted RSA private

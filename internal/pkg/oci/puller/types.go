@@ -16,7 +16,13 @@
 
 package puller
 
-import "errors"
+import (
+	"crypto/tls"
+	"errors"
+	"net/http"
+
+	"oras.land/oras-go/v2/registry/remote/retry"
+)
 
 // ArtifactType represents a rules file or a plugin. Used to select the right mediaType when interacting with the registry.
 type ArtifactType string
@@ -117,4 +123,25 @@ type ArtifactDependency struct {
 type RegistryOptions struct {
 	PlainHTTP          bool
 	InsecureSkipVerify bool
+}
+
+// TransportFor builds the http.RoundTripper implied by options, wrapped in retry.NewTransport
+// for the same retry/backoff behavior every other OCI-registry-facing HTTP call in this
+// codebase gets. nil options (or InsecureSkipVerify unset) returns nil: the caller should fall
+// back to its own default client/transport in that case (retry.DefaultClient, or letting Pull's
+// own client.NewClient use its zero-value default) rather than constructing an equivalent
+// wrapped http.DefaultTransport here, so a nil options struct costs nothing extra.
+//
+// Exported so any code that needs to talk to the same registry a pull is configured for --
+// besides the pull itself, e.g. an out-of-band token exchange a registry's own auth scheme
+// requires -- builds its RoundTripper the same way Pull/FetchConfig/ResolveDigest/FetchContent
+// do here, instead of a second, independently-maintained copy of this logic that could drift
+// out of sync with it.
+func TransportFor(options *RegistryOptions) http.RoundTripper {
+	if options == nil || !options.InsecureSkipVerify {
+		return nil
+	}
+	tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured, same as Pull's own use of this field
+	httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
+	return retry.NewTransport(httpTransport)
 }

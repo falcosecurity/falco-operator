@@ -1,6 +1,8 @@
-# Pull an OCI artifact from Azure Container Registry (or any registry supporting the
-# distribution-spec OAuth2 token exchange) authenticated via an Azure identity, instead of a
-# static username/password Secret (see artifact_v1alpha1_rulesfile_oci_private.yaml for that).
+# Pull an OCI artifact from Azure Container Registry (ACR) authenticated via an Azure identity,
+# instead of a static username/password Secret (see artifact_v1alpha1_rulesfile_oci_private.yaml
+# for that). This implements ACR's own documented AAD token exchange specifically -- not a
+# registry-agnostic distribution-spec mechanism other registries can assume they support just
+# because they expose a similarly-shaped OAuth2 exchange endpoint.
 #
 # Exactly one of the four methods below is active per resource, selected by spec.registry.auth.azure.method.
 #
