@@ -116,6 +116,11 @@ func (in *AzureAuth) DeepCopyInto(out *AzureAuth) {
 		*out = new(SecretRef)
 		**out = **in
 	}
+	if in.SendCertificateChain != nil {
+		in, out := &in.SendCertificateChain, &out.SendCertificateChain
+		*out = new(bool)
+		**out = **in
+	}
 	if in.ServiceAccountRef != nil {
 		in, out := &in.ServiceAccountRef, &out.ServiceAccountRef
 		*out = new(v1.LocalObjectReference)

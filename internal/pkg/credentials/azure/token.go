@@ -24,6 +24,7 @@ import (
 	authenticationv1 "k8s.io/api/authentication/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -42,16 +43,12 @@ const tokenTTL = 10 * time.Minute
 // for many different ServiceAccounts, one per AzureAuth that uses workloadIdentity, rather than
 // being limited to whichever one identity its own pod happens to carry.
 //
-// azure.go); kept as a parameter rather than inlining the constant because this is the
-// cloud-agnostic half of the design -- an AWS provider (audience "sts.amazonaws.com") or a GCP
-// one would call this exact function with their own audience, not duplicate it.
-//
-//nolint:unparam // audience is always workloadIdentityAudience today (the only caller, in
+//nolint:unparam // audience is always workloadIdentityAudience today; kept generic for a future AWS/GCP provider's own audience
 func mintServiceAccountToken(ctx context.Context, c client.Client, namespace, name, audience string) (string, error) {
 	tr := &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{
 			Audiences:         []string{audience},
-			ExpirationSeconds: new(int64(tokenTTL.Seconds())),
+			ExpirationSeconds: ptr.To(int64(tokenTTL.Seconds())),
 		},
 	}
 	sa := &corev1.ServiceAccount{

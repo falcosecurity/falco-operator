@@ -27,6 +27,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -78,49 +79,65 @@ func CredentialFunc(c client.Client, namespace string, cfg *commonv1alpha1.Azure
 
 // resolveCredential builds an azcore.TokenCredential for cfg.Method. All four methods converge
 // on this one interface, so exchangeForRegistryToken below needs no per-method branching.
+//
+// tenantId and clientId fall back to AZURE_TENANT_ID/AZURE_CLIENT_ID (this process's own
+// environment, i.e. the falco-operator Deployment's -- a cluster-wide default identity, not a
+// per-resource mechanism) when left empty in cfg; config always wins when both are set. The one
+// deliberate exception is workloadIdentity's serviceAccountRef, which has no environment
+// equivalent -- see its godoc on AzureAuth for why.
 func resolveCredential(ctx context.Context, c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth) (azcore.TokenCredential, error) {
+	tenantID := resolveString(cfg.TenantID, envTenantID)
+	clientID := resolveString(cfg.ClientID, envClientID)
+
 	switch cfg.Method {
 	case commonv1alpha1.AzureMethodClientSecret:
-		secret, err := getSecret(ctx, c, namespace, cfg.ClientSecretRef)
+		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
+			return nil, err
+		}
+		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
+			return nil, err
+		}
+		clientSecret, err := resolveClientSecret(ctx, c, namespace, cfg)
 		if err != nil {
 			return nil, err
 		}
-		clientSecret, ok := secret.Data[commonv1alpha1.AzureClientSecretKey]
-		if !ok {
-			return nil, fmt.Errorf("key %q not found in secret %s/%s", commonv1alpha1.AzureClientSecretKey, namespace, cfg.ClientSecretRef.Name)
-		}
-		return azidentity.NewClientSecretCredential(cfg.TenantID, cfg.ClientID, string(clientSecret), nil)
+		return azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
 
 	case commonv1alpha1.AzureMethodClientCertificate:
-		secret, err := getSecret(ctx, c, namespace, cfg.ClientCertificateRef)
+		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
+			return nil, err
+		}
+		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
+			return nil, err
+		}
+		certData, password, err := resolveClientCertificate(ctx, c, namespace, cfg)
 		if err != nil {
 			return nil, err
 		}
-		certData, ok := secret.Data[commonv1alpha1.AzureClientCertificateKey]
-		if !ok {
-			return nil, fmt.Errorf("key %q not found in secret %s/%s", commonv1alpha1.AzureClientCertificateKey, namespace, cfg.ClientCertificateRef.Name)
-		}
-		// Absent password is fine: ParseCertificates accepts a nil/empty password for
-		// certificates that aren't password-protected.
-		password := secret.Data[commonv1alpha1.AzureClientCertificatePasswordKey]
 		certs, key, err := azidentity.ParseCertificates(certData, password)
 		if err != nil {
-			return nil, fmt.Errorf("parse client certificate from secret %s/%s: %w", namespace, cfg.ClientCertificateRef.Name, err)
+			return nil, fmt.Errorf("parse client certificate: %w", err)
 		}
-		return azidentity.NewClientCertificateCredential(cfg.TenantID, cfg.ClientID, certs, key, clientCertificateOptions(cfg))
+		return azidentity.NewClientCertificateCredential(tenantID, clientID, certs, key, clientCertificateOptions(cfg))
 
 	case commonv1alpha1.AzureMethodManagedIdentity:
 		opts := &azidentity.ManagedIdentityCredentialOptions{}
-		if cfg.ClientID != "" {
-			// User-assigned. Absent ClientID leaves opts.ID unset, which selects the node's
+		if clientID != "" {
+			// User-assigned. Absent clientID leaves opts.ID unset, which selects the node's
 			// system-assigned identity -- azidentity's own documented default.
-			opts.ID = azidentity.ClientID(cfg.ClientID)
+			opts.ID = azidentity.ClientID(clientID)
 		}
 		return azidentity.NewManagedIdentityCredential(opts)
 
 	case commonv1alpha1.AzureMethodWorkloadIdentity:
+		if err := requireForMethod(cfg.Method, "tenantId", envTenantID, tenantID); err != nil {
+			return nil, err
+		}
+		if err := requireForMethod(cfg.Method, "clientId", envClientID, clientID); err != nil {
+			return nil, err
+		}
 		if cfg.ServiceAccountRef == nil {
-			return nil, fmt.Errorf("serviceAccountRef is required for method workloadIdentity")
+			return nil, fmt.Errorf("serviceAccountRef is required for method workloadIdentity (no environment variable fallback: it identifies which ServiceAccount to federate, not a credential value)")
 		}
 		saName := cfg.ServiceAccountRef.Name
 		// NewClientAssertionCredential, not azidentity's own NewWorkloadIdentityCredential:
@@ -128,7 +145,7 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 		// would limit every workloadIdentity AzureAuth cluster-wide to the one identity the
 		// operator's own pod happens to carry. Minting per call via mintServiceAccountToken
 		// (token.go) lets each AzureAuth reference its own ServiceAccount/identity instead.
-		return azidentity.NewClientAssertionCredential(cfg.TenantID, cfg.ClientID,
+		return azidentity.NewClientAssertionCredential(tenantID, clientID,
 			func(ctx context.Context) (string, error) {
 				return mintServiceAccountToken(ctx, c, namespace, saName, workloadIdentityAudience)
 			}, nil)
@@ -136,6 +153,66 @@ func resolveCredential(ctx context.Context, c client.Client, namespace string, c
 	default:
 		return nil, fmt.Errorf("unsupported azure auth method %q", cfg.Method)
 	}
+}
+
+// requireForMethod returns a descriptive error, naming both the config field and its
+// environment variable fallback, when a value resolved to empty from both sources.
+func requireForMethod(method, configField, envVar, resolved string) error {
+	if resolved != "" {
+		return nil
+	}
+	return fmt.Errorf("%s (config) or %s (environment variable) is required for method %s", configField, envVar, method)
+}
+
+// resolveClientSecret returns the client secret from cfg.ClientSecretRef if set, otherwise the
+// AZURE_CLIENT_SECRET environment variable.
+func resolveClientSecret(ctx context.Context, c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth) (string, error) {
+	if cfg.ClientSecretRef != nil {
+		secret, err := getSecret(ctx, c, namespace, cfg.ClientSecretRef)
+		if err != nil {
+			return "", err
+		}
+		clientSecret, ok := secret.Data[commonv1alpha1.AzureClientSecretKey]
+		if !ok {
+			return "", fmt.Errorf("key %q not found in secret %s/%s", commonv1alpha1.AzureClientSecretKey, namespace, cfg.ClientSecretRef.Name)
+		}
+		return string(clientSecret), nil
+	}
+	if v := os.Getenv(envClientSecret); v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("clientSecretRef (config) or %s (environment variable) is required for method clientSecret", envClientSecret)
+}
+
+// resolveClientCertificate returns certificate data and (optional) password from
+// cfg.ClientCertificateRef if set, otherwise reads them from AZURE_CLIENT_CERTIFICATE_PATH (a
+// file path on this process's own filesystem) and AZURE_CLIENT_CERTIFICATE_PASSWORD.
+func resolveClientCertificate(ctx context.Context, c client.Client, namespace string, cfg *commonv1alpha1.AzureAuth) (certData, password []byte, err error) {
+	if cfg.ClientCertificateRef != nil {
+		secret, err := getSecret(ctx, c, namespace, cfg.ClientCertificateRef)
+		if err != nil {
+			return nil, nil, err
+		}
+		certData, ok := secret.Data[commonv1alpha1.AzureClientCertificateKey]
+		if !ok {
+			return nil, nil, fmt.Errorf("key %q not found in secret %s/%s", commonv1alpha1.AzureClientCertificateKey, namespace, cfg.ClientCertificateRef.Name)
+		}
+		// Absent password is fine: ParseCertificates accepts a nil/empty password for
+		// certificates that aren't password-protected.
+		return certData, secret.Data[commonv1alpha1.AzureClientCertificatePasswordKey], nil
+	}
+
+	path := os.Getenv(envClientCertificatePath)
+	if path == "" {
+		return nil, nil, fmt.Errorf("clientCertificateRef (config) or %s (environment variable) is required for method clientCertificate", envClientCertificatePath)
+	}
+	//nolint:gosec // G304: path is this process's own environment (the falco-operator
+	// Deployment's, set by whoever configures the operator), not untrusted external input
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read certificate file %s (from %s): %w", path, envClientCertificatePath, err)
+	}
+	return data, []byte(os.Getenv(envClientCertificatePassword)), nil
 }
 
 // exchangeForRegistryToken exchanges an AAD access token for a registry-scoped refresh token
@@ -193,7 +270,7 @@ func exchangeForRegistryToken(ctx context.Context, httpClient *http.Client, cred
 // directly in a test without needing to inspect azidentity's own credential internals.
 func clientCertificateOptions(cfg *commonv1alpha1.AzureAuth) *azidentity.ClientCertificateCredentialOptions {
 	return &azidentity.ClientCertificateCredentialOptions{
-		SendCertificateChain: cfg.SendCertificateChain,
+		SendCertificateChain: resolveBool(cfg.SendCertificateChain, envClientSendCertificateChain),
 	}
 }
 

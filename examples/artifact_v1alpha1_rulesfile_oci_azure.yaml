@@ -3,6 +3,14 @@
 # static username/password Secret (see artifact_v1alpha1_rulesfile_oci_private.yaml for that).
 #
 # Exactly one of the four methods below is active per resource, selected by spec.registry.auth.azure.method.
+#
+# Every field except serviceAccountRef falls back to the matching AZURE_* environment variable
+# (on the falco-operator Deployment itself) when left unset here -- a config value always wins
+# when both are set. This lets one cluster-wide default identity be set once via the operator's
+# own env, with individual resources overriding only what differs; see AzureAuth's godoc for the
+# full list of variable names. serviceAccountRef has no environment equivalent: it names which
+# ServiceAccount to federate, not a credential value, so it must always be set in the CR when
+# method is workloadIdentity.
 apiVersion: artifact.falcosecurity.dev/v1alpha1
 kind: Rulesfile
 metadata:
@@ -52,4 +60,11 @@ spec:
           # to whichever identity is attached to the node the operator pod is scheduled on.
           # method: managedIdentity
           # clientId: 11111111-1111-1111-1111-111111111111 # omit entirely for system-assigned
+
+          # --- method: clientSecret, entirely from the operator's own environment ---
+          # A minimal CR relying on AZURE_TENANT_ID/AZURE_CLIENT_ID/AZURE_CLIENT_SECRET set on
+          # the falco-operator Deployment -- nothing but method here. Useful when every
+          # Rulesfile/Plugin/Config resource in the cluster shares one identity and repeating
+          # tenantId/clientId/clientSecretRef in each CR would just be duplication.
+          # method: clientSecret
   priority: 40

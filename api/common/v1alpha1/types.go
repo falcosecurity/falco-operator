@@ -197,12 +197,17 @@ const (
 
 // AzureAuth configures registry authentication via an Azure identity. Exactly one method is
 // used, selected by Method; the other method-specific fields are ignored.
+//
+// Every field below except Method and ServiceAccountRef is optional in the CR and falls back to
+// the matching AZURE_* environment variable (read from this process's own environment -- the
+// falco-operator Deployment's) when left empty; an explicit CR value always wins when both are
+// set. This lets one cluster-wide default identity be configured once via the operator's
+// Deployment env, with individual AzureAuth resources overriding only what differs. The one
+// field with no environment equivalent is ServiceAccountRef: it identifies which ServiceAccount
+// to federate, not a credential value, so there is nothing meaningful to source from the
+// operator's own environment -- see its own godoc.
 // +kubebuilder:object:generate=true
-// +kubebuilder:validation:XValidation:rule="self.method != 'clientSecret' || has(self.clientSecretRef)",message="clientSecretRef is required when method is clientSecret"
-// +kubebuilder:validation:XValidation:rule="self.method != 'clientCertificate' || has(self.clientCertificateRef)",message="clientCertificateRef is required when method is clientCertificate"
 // +kubebuilder:validation:XValidation:rule="self.method != 'workloadIdentity' || has(self.serviceAccountRef)",message="serviceAccountRef is required when method is workloadIdentity"
-// +kubebuilder:validation:XValidation:rule="self.method == 'managedIdentity' || has(self.tenantId)",message="tenantId is required unless method is managedIdentity"
-// +kubebuilder:validation:XValidation:rule="self.method == 'managedIdentity' || has(self.clientId)",message="clientId is required unless method is managedIdentity"
 type AzureAuth struct {
 	// Method selects how the Azure identity is obtained.
 	// - clientSecret: a Microsoft Entra app registration authenticated with a client secret.
@@ -217,27 +222,30 @@ type AzureAuth struct {
 	// +kubebuilder:validation:Required
 	Method string `json:"method"`
 
-	// TenantID is the Microsoft Entra tenant ID. Required for clientSecret, clientCertificate,
-	// and workloadIdentity; unused for managedIdentity (IMDS resolves the tenant from the
-	// attached identity).
+	// TenantID is the Microsoft Entra tenant ID. Required (from this field or AZURE_TENANT_ID)
+	// for clientSecret, clientCertificate, and workloadIdentity; unused for managedIdentity
+	// (IMDS resolves the tenant from the attached identity).
 	// +optional
 	TenantID string `json:"tenantId,omitempty"`
 
-	// ClientID is the application (client) ID to authenticate as. Required for clientSecret,
-	// clientCertificate, and workloadIdentity. For managedIdentity, its presence selects a
-	// user-assigned identity by client ID; its absence selects the node's system-assigned
-	// identity.
+	// ClientID is the application (client) ID to authenticate as. Required (from this field or
+	// AZURE_CLIENT_ID) for clientSecret, clientCertificate, and workloadIdentity. For
+	// managedIdentity, its presence selects a user-assigned identity by client ID; its absence
+	// selects the node's system-assigned identity.
 	// +optional
 	ClientID string `json:"clientId,omitempty"`
 
 	// ClientSecretRef references a Secret containing the app registration's client secret, under
-	// the key "clientSecret". Used when method is clientSecret.
+	// the key "clientSecret". Used when method is clientSecret; falls back to the
+	// AZURE_CLIENT_SECRET environment variable when unset.
 	// +optional
 	ClientSecretRef *SecretRef `json:"clientSecretRef,omitempty"`
 
 	// ClientCertificateRef references a Secret containing the client certificate (PEM or PKCS#12,
 	// under the key "certificate") and, if the certificate is password-protected, the password
-	// under the key "password". Used when method is clientCertificate.
+	// under the key "password". Used when method is clientCertificate; falls back to reading a
+	// certificate file at the path named by the AZURE_CLIENT_CERTIFICATE_PATH environment
+	// variable (plus AZURE_CLIENT_CERTIFICATE_PASSWORD) when unset.
 	// +optional
 	ClientCertificateRef *SecretRef `json:"clientCertificateRef,omitempty"`
 
@@ -245,15 +253,22 @@ type AzureAuth struct {
 	// header of each token request, as required for Subject Name/Issuer (SNI) authentication --
 	// needed when the Microsoft Entra app registration trusts this certificate by subject
 	// name/issuer rather than by exact thumbprint (e.g. because the certificate is reissued
-	// periodically by an intermediate CA without updating the app registration each time).
-	// Only used when method is clientCertificate. Defaults to false, matching azidentity's own
-	// ClientCertificateCredentialOptions.SendCertificateChain default.
+	// periodically by an intermediate CA without updating the app registration each time). Only
+	// used when method is clientCertificate. A pointer, not a bare bool: nil means "not set,
+	// fall back to the AZURE_CLIENT_SEND_CERTIFICATE_CHAIN environment variable" (itself
+	// defaulting to false), distinct from an explicit false in the CR. Matches azidentity's own
+	// ClientCertificateCredentialOptions.SendCertificateChain default when nothing is set
+	// anywhere.
 	// +optional
-	SendCertificateChain bool `json:"sendCertificateChain,omitempty"`
+	SendCertificateChain *bool `json:"sendCertificateChain,omitempty"`
 
 	// ServiceAccountRef names the ServiceAccount, in the same namespace as this resource, whose
-	// federated identity is used. Used when method is workloadIdentity. The Azure-side federated
-	// identity credential must trust the subject
+	// federated identity is used. Required when method is workloadIdentity -- unlike every other
+	// field on AzureAuth, it has no environment variable fallback, deliberately: it names which
+	// ServiceAccount to federate, not a credential value, so there is nothing meaningful to
+	// source from the operator's own environment (that would collapse every workloadIdentity
+	// AzureAuth cluster-wide onto a single identity, defeating the point of this method). The
+	// Azure-side federated identity credential must trust the subject
 	// system:serviceaccount:<this resource's namespace>:<name>.
 	//
 	// This ServiceAccount does not need the azure.workload.identity/use pod label or the
