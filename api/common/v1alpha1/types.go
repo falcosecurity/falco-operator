@@ -164,15 +164,19 @@ type TLSConfig struct {
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
-// RegistryAuth defines authentication configuration for an OCI registry.
+// RegistryAuth defines authentication configuration for an OCI registry. If both SecretRef and
+// Azure are set, Azure takes precedence and SecretRef is ignored entirely -- not merged, not
+// used as a fallback. Set only one.
 // +kubebuilder:object:generate=true
 type RegistryAuth struct {
-	// SecretRef references a Secret containing registry credentials.
+	// SecretRef references a Secret containing registry credentials. Ignored when Azure is also
+	// set.
 	// +optional
 	SecretRef *SecretRef `json:"secretRef,omitempty"`
 
 	// Azure authenticates using an Azure identity instead of a static Secret. See AzureAuth's
-	// own godoc for the four supported methods and what each requires.
+	// own godoc for the four supported methods and what each requires. Takes precedence over
+	// SecretRef when both are set.
 	// +optional
 	Azure *AzureAuth `json:"azure,omitempty"`
 }
@@ -231,6 +235,18 @@ type AzureAuth struct {
 	// AZURE_CLIENT_ID) for clientSecret, clientCertificate, and workloadIdentity. For
 	// managedIdentity, its presence selects a user-assigned identity by client ID; its absence
 	// selects the node's system-assigned identity.
+	//
+	// Warning for managedIdentity: "its presence" includes the AZURE_CLIENT_ID environment
+	// fallback, not just this field. If the operator Deployment sets AZURE_CLIENT_ID as a
+	// cluster-wide default for clientSecret/clientCertificate/workloadIdentity resources (an
+	// Entra app registration's client ID), every managedIdentity resource that leaves this field
+	// empty inherits that same value and silently stops being system-assigned -- it attempts a
+	// user-assigned IMDS lookup with an Entra app ID instead of a managed identity's client ID,
+	// which fails. A managedIdentity resource that wants the node's system-assigned identity
+	// while AZURE_CLIENT_ID is set for other methods must not rely on leaving this field empty;
+	// there is no way to explicitly override it back to "unset" once the environment provides a
+	// value, since an empty string here is indistinguishable from "not set, check the
+	// environment".
 	// +optional
 	ClientID string `json:"clientId,omitempty"`
 
