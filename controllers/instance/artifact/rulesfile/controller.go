@@ -358,7 +358,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 }
 
 // appendYAMLRequirements parses required_engine_version and required_plugin_versions from
-// a Falco rules YAML document and appends the results to meta.
+// all documents in a Falco rules YAML stream and appends the results to meta.
 func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) error {
 	rulesReqs, err := compat.ParseRulesRequirements(content)
 	if err != nil {
@@ -367,15 +367,7 @@ func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) e
 	if rulesReqs == nil {
 		return nil
 	}
-	if rulesReqs.EngineVersion != "" {
-		capName := "engine_version_semver"
-		if rulesReqs.EngineVersionIsInt {
-			capName = "engine_version"
-		}
-		meta.Requirements = append(meta.Requirements, commonv1alpha1.ArtifactMetaRequirement{
-			Name: capName, Version: rulesReqs.EngineVersion,
-		})
-	}
+	meta.Requirements = append(meta.Requirements, rulesReqs.EngineVersions...)
 	meta.Dependencies = append(meta.Dependencies, rulesReqs.PluginVersions...)
 	return nil
 }

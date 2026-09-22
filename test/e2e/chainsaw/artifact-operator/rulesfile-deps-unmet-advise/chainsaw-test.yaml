@@ -118,6 +118,46 @@ spec:
             - name: should_exist
               value: "true"
 
+    - name: "Step 05: Keep-unmet-diagnostic-with-weaker-following-requirements"
+      description: |
+        Later semver and legacy requirements must not hide the unmet first requirement.
+        Advise mode keeps Programmed=True while retaining the current-generation warning.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_engine_version: "999.0.0"
+                  - required_engine_version: "0.30.0"
+                  - required_engine_version: 0
+                  - rule: Chainsaw deps-unmet-advise inline rule
+                    desc: Later requirements must not hide the unmet engine diagnostic.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=repeated-unmet-advise"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'DependenciesSatisfied'].observedGeneration == [metadata.generation]): true
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedInstalledAnyway
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+
   catch:
     - description: Capture debug snapshot on failure
       script:
