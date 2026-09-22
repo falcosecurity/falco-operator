@@ -17,6 +17,8 @@
 package resources
 
 import (
+	"time"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -327,6 +329,16 @@ func SetArtifactOperatorEnforceRequirements(enforce bool) {
 	sidecar.Env = append(sidecar.Env, corev1.EnvVar{
 		Name:  "ENFORCE_REQUIREMENTS",
 		Value: "false",
+	})
+}
+
+// SetArtifactDownloadTimeout sets the download limit injected into every artifact-operator
+// sidecar. Call this once during falco-operator startup.
+func SetArtifactDownloadTimeout(timeout time.Duration) {
+	sidecar := &FalcoDefaults.SidecarContainers[0]
+	sidecar.Env = append(sidecar.Env, corev1.EnvVar{
+		Name:  "ARTIFACT_DOWNLOAD_TIMEOUT",
+		Value: timeout.String(),
 	})
 }
 

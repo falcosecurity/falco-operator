@@ -52,6 +52,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/instance/falco"
 	configmapctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/configmap"
 	secretctr "github.com/falcosecurity/falco-operator/controllers/instance/reference/secret"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
@@ -125,6 +126,7 @@ func main() {
 	var artifactCacheDir string
 	var artifactCacheEvictionGracePeriod time.Duration
 	var artifactServerURL string
+	var artifactDownloadTimeout time.Duration
 	var artifactServerCertPath, artifactServerCertName, artifactServerCertKey string
 	var artifactServerClientCAFile string
 	var artifactClientCertIssuerName string
@@ -146,6 +148,8 @@ func main() {
 		"URL of the artifact HTTP server to advertise to artifact-operator sidecars. "+
 			"Overrides the default in-cluster URL derived from OPERATOR_NAMESPACE. "+
 			"Useful when running the operator outside the cluster (e.g. during local development).")
+	flag.DurationVar(&artifactDownloadTimeout, "artifact-download-timeout", artifact.DefaultDownloadTimeout,
+		"Maximum duration of one complete download from the artifact server, injected into artifact-operator sidecars. Must be positive.")
 	flag.StringVar(&artifactServerCertPath, "artifact-server-cert-path", "",
 		"The directory that contains the artifact server's TLS certificate. When set, the artifact "+
 			"HTTP server serves over HTTPS instead of plain HTTP.")
@@ -194,10 +198,15 @@ func main() {
 	if artifactOperatorImage != "" {
 		version.ArtifactOperatorImage = artifactOperatorImage
 	}
+	if artifactDownloadTimeout <= 0 {
+		_, _ = fmt.Fprintln(os.Stderr, "artifact download timeout must be positive; configure --artifact-download-timeout or ARTIFACT_DOWNLOAD_TIMEOUT")
+		os.Exit(1)
+	}
 	// Reassigning version.ArtifactOperatorImage above has no effect on FalcoDefaults, which was
 	// already initialized from it at package-init time; this call applies the override directly.
 	resources.SetArtifactOperatorImage(version.ArtifactOperatorImage)
 	resources.SetArtifactOperatorEnforceRequirements(artifactOperatorEnforceRequirements)
+	resources.SetArtifactDownloadTimeout(artifactDownloadTimeout)
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 

@@ -182,6 +182,8 @@ extraArgs: []
 extraEnv: []
   # - name: ARTIFACT_OPERATOR_IMAGE
   #   value: "docker.io/falcosecurity/artifact-operator:latest"
+  # - name: ARTIFACT_DOWNLOAD_TIMEOUT
+  #   value: "2m"
 
 # -- Node selector
 nodeSelector: {}

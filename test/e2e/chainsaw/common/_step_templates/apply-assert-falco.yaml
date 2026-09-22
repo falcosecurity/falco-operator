@@ -21,6 +21,7 @@
 #   - falco_image:             Falco container image. Default: $CHAINSAW_FALCO_IMAGE env var.
 #   - artifact_operator_image: artifact-operator sidecar image. Default: $CHAINSAW_ARTIFACT_OPERATOR_IMAGE env var.
 #   - enforce_requirements:    Full --enforce-requirements flag. Default: "--enforce-requirements=true".
+#   - artifact_operator_env:   Additional artifact-operator environment variables. Default: [].
 #   - update_strategy:         DaemonSet updateStrategy override (appsv1.DaemonSetUpdateStrategy
 #                              shape). Default: {type: RollingUpdate}, matching the operator's own
 #                              default (internal/pkg/resources/falco.go's FalcoDefaults) exactly,
@@ -43,6 +44,8 @@ spec:
       value: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
     - name: enforce_requirements
       value: "--enforce-requirements=true"
+    - name: artifact_operator_env
+      value: []
     - name: update_strategy
       value:
         type: RollingUpdate
@@ -70,6 +73,7 @@ spec:
                     imagePullPolicy: Never
                     args:
                       - ($enforce_requirements)
+                    env: ($artifact_operator_env)
                   - name: netshoot
                     image: nicolaka/netshoot
                     command: ["sleep", "infinity"]

@@ -199,6 +199,44 @@ variable. Changing the Pod template follows the workload's update strategy; this
 is not a live adjustment to an already-running sidecar. Falco metrics are not
 required for the cooldown or the HTTP availability check.
 
+## Artifact Downloads
+
+The Artifact Operator limits each download from the central artifact server to
+**5 minutes** by default. This is the total time for one attempt, including
+connection setup and reading the response, not an inactivity timeout. A failed
+download does not replace the installed OCI file; the controller retries it.
+This setting does not affect registry pulls performed by the instance operator.
+
+Set a global default using the Helm chart's existing `extraEnv`:
+
+```yaml
+extraEnv:
+  - name: ARTIFACT_DOWNLOAD_TIMEOUT
+    value: "2m"
+```
+
+The instance operator injects this value into its Artifact Operator sidecars.
+Override it for one Falco instance through its Pod template:
+
+```yaml
+spec:
+  podTemplateSpec:
+    spec:
+      containers:
+        - name: artifact-operator
+          env:
+            - name: ARTIFACT_DOWNLOAD_TIMEOUT
+              value: "1m"
+```
+
+Both binaries also accept `--artifact-download-timeout`; an explicit flag takes
+precedence over the environment variable. Values must be positive Go durations,
+such as `30s` or `2m`; zero does not disable the timeout. Updating an injected
+value changes the Pod template and follows the workload's update strategy, not
+a live reload. TCP connection setup and TLS handshakes retain their respective
+30-second and 10-second limits. The central server's existing 5-minute write
+timeout is independent: increasing the client timeout does not extend it.
+
 ## Artifact Operator Image
 
 The Artifact Operator sidecar image is configurable via the `ARTIFACT_OPERATOR_IMAGE` environment variable on the Falco Operator Deployment:
