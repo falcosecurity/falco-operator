@@ -1,0 +1,66 @@
+# Replace Falco's env overrides and check the rolled-out containers' environment.
+# Required bindings: falco_name, namespace, env_stage, env_overrides, expected_hostname,
+# expected_env (HOST_ROOT and FALCO_HOSTNAME entries, in that order),
+# container_resources (preserved when replacing the CR's container list).
+# Optional binding: hostname_from_node (default false) checks the restored default.
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: StepTemplate
+metadata:
+  name: patch-assert-falco-env
+spec:
+  bindings:
+    - name: hostname_from_node
+      value: false
+  try:
+    - patch:
+        resource:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          spec:
+            podTemplateSpec:
+              metadata:
+                annotations:
+                  test.falcosecurity.dev/env-stage: ($env_stage)
+              spec:
+                containers:
+                  - name: falco
+                    resources: ($container_resources)
+                    env: ($env_overrides)
+    - assert:
+        resource:
+          apiVersion: apps/v1
+          kind: DaemonSet
+          (status.observedGeneration == metadata.generation): true
+          (spec.template.spec.containers[?name == 'falco'].env[] | [?name == 'HOST_ROOT' || name == 'FALCO_HOSTNAME'] == $expected_env): true
+          metadata:
+            name: ($falco_name)
+            namespace: ($namespace)
+          spec:
+            template:
+              metadata:
+                annotations:
+                  test.falcosecurity.dev/env-stage: ($env_stage)
+              spec:
+                (containers[?name == 'artifact-operator']):
+                  - name: artifact-operator
+          status:
+            (updatedNumberScheduled == desiredNumberScheduled): true
+            (numberReady == desiredNumberScheduled): true
+    - script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FALCO_NAME
+            value: ($falco_name)
+          - name: ENV_STAGE
+            value: ($env_stage)
+          - name: EXPECTED_HOSTNAME
+            value: ($expected_hostname)
+          - name: HOSTNAME_FROM_NODE
+            value: (to_string($hostname_from_node))
+        content: bash ../../common/scripts/check_falco_env.sh
+        check:
+          (json_parse($stdout).status == 'success'): true

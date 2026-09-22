@@ -18,6 +18,7 @@ package instance
 
 import (
 	"fmt"
+	"slices"
 
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -29,6 +30,7 @@ import (
 
 // MergeApplyConfiguration merges a base workload with user-defined overrides
 // and normalizes its update strategy, returning the result as unstructured.
+// Each explicitly overridden env entry replaces the default entry with that name.
 // The kind parameter must be an apps/v1 resource kind (e.g., "Deployment", "DaemonSet").
 func MergeApplyConfiguration(kind string, baseResource runtime.Object, userOverrides *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	gvk := appsv1.SchemeGroupVersion.WithKind(kind)
@@ -49,11 +51,67 @@ func MergeApplyConfiguration(kind string, baseResource runtime.Object, userOverr
 
 	result.SetGroupVersionKind(gvk)
 
+	if err := replaceEnvOverrides(result, user); err != nil {
+		return nil, fmt.Errorf("replacing environment overrides: %w", err)
+	}
+
 	if err := enforceStrategyConstraints(result); err != nil {
 		return nil, fmt.Errorf("enforcing strategy constraints: %w", err)
 	}
 
 	return result, nil
+}
+
+// replaceEnvOverrides keeps each explicit env entry whole: merging its fields can
+// combine mutually exclusive sources or retain a default instead of an empty value.
+// Both inputs have already passed schema validation in managedfields.Merge.
+func replaceEnvOverrides(result, overrides *unstructured.Unstructured) error {
+	for _, field := range []string{"containers", "initContainers"} {
+		path := []string{"spec", "template", "spec", field}
+		overrideContainers, found, err := unstructured.NestedSlice(overrides.Object, path...)
+		if err != nil {
+			return err
+		}
+		if !found {
+			continue
+		}
+		containers, _, err := unstructured.NestedSlice(result.Object, path...)
+		if err != nil {
+			return err
+		}
+		for _, entry := range overrideContainers {
+			container := entry.(map[string]any)
+			env, _ := container["env"].([]any)
+			if len(env) == 0 {
+				continue
+			}
+			index := slices.IndexFunc(containers, func(entry any) bool {
+				return entry.(map[string]any)["name"] == container["name"]
+			})
+			if index < 0 {
+				return fmt.Errorf("merged %s missing container %q", field, container["name"])
+			}
+			byName := make(map[string]any, len(env))
+			for _, entry := range env {
+				name, ok := entry.(map[string]any)["name"].(string)
+				if !ok {
+					return fmt.Errorf("environment override in container %q requires a string name", container["name"])
+				}
+				byName[name] = entry
+			}
+			mergedEnv, _ := containers[index].(map[string]any)["env"].([]any)
+			for i, entry := range mergedEnv {
+				name, _ := entry.(map[string]any)["name"].(string)
+				if override, ok := byName[name]; ok {
+					mergedEnv[i] = override
+				}
+			}
+		}
+		if err := unstructured.SetNestedSlice(result.Object, containers, path...); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // enforceStrategyConstraints enforces Kubernetes strategy field
