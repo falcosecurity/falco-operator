@@ -17,8 +17,12 @@
 package compat
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"strconv"
+	"strings"
 
 	semver "github.com/blang/semver/v4"
 	"gopkg.in/yaml.v3"
@@ -114,20 +118,16 @@ func ValidatePluginDependency(dependency commonv1alpha1.ArtifactMetaDependency) 
 	return nil
 }
 
-// RulesRequirements holds requirements extracted from a Falco rules YAML document.
+// RulesRequirements holds requirements extracted from all documents in a Falco rules YAML stream.
 type RulesRequirements struct {
-	// EngineVersion is the value of the required_engine_version directive, empty if absent.
-	EngineVersion string
-	// EngineVersionIsInt is true when required_engine_version was written as a bare integer
-	// (e.g. "15") rather than a semver string (e.g. "0.57.0"). The two forms must be compared
-	// against different Falco capabilities: integers against "engine_version" (raw), semver
-	// strings against "engine_version_semver".
-	EngineVersionIsInt bool
+	// EngineVersions preserves every directive with its capability: legacy integers use
+	// engine_version, while semver strings use engine_version_semver.
+	EngineVersions []commonv1alpha1.ArtifactMetaRequirement
 	// PluginVersions holds all required_plugin_versions entries.
 	PluginVersions []commonv1alpha1.ArtifactMetaDependency
 }
 
-// ParseRulesRequirements scans a Falco rules YAML document for required_engine_version
+// ParseRulesRequirements scans every document in a Falco rules YAML stream for required_engine_version
 // and required_plugin_versions directives. It skips unknown top-level items (rules, macros,
 // lists, etc.) without error. Returns empty requirements when data is nil or empty.
 func ParseRulesRequirements(data []byte) (*RulesRequirements, error) {
@@ -141,32 +141,55 @@ func ParseRulesRequirements(data []byte) (*RulesRequirements, error) {
 		RequiredPluginVersions []commonv1alpha1.ArtifactMetaDependency `yaml:"required_plugin_versions"`
 	}
 
-	var items []rulesItem
-	if err := yaml.Unmarshal(data, &items); err != nil {
-		return nil, fmt.Errorf("parse rules YAML: %w", err)
-	}
-
 	var result RulesRequirements
-	for _, item := range items {
-		if item.RequiredEngineVersion != nil {
-			// gopkg.in/yaml.v3 decodes bare integers (e.g. "15") as int,
-			// and semver strings (e.g. "0.57.0") as string.
-			switch v := item.RequiredEngineVersion.(type) {
-			case int:
-				result.EngineVersion = strconv.Itoa(v)
-				result.EngineVersionIsInt = true
-			case string:
-				result.EngineVersion = v
-			default:
-				result.EngineVersion = fmt.Sprintf("%v", v)
-			}
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var items []rulesItem
+		if err := decoder.Decode(&items); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			return nil, fmt.Errorf("parse rules YAML: %w", err)
 		}
-		for _, dependency := range item.RequiredPluginVersions {
-			if err := ValidatePluginDependency(dependency); err != nil {
-				return nil, err
+		for _, item := range items {
+			if item.RequiredEngineVersion != nil {
+				const legacyCapability = "engine_version"
+				requirement := commonv1alpha1.ArtifactMetaRequirement{
+					Name: "engine_version_semver", Version: fmt.Sprint(item.RequiredEngineVersion),
+				}
+				// YAML normalizes bare integers; Falco also accepts quoted legacy integers.
+				switch value := item.RequiredEngineVersion.(type) {
+				case int:
+					requirement.Name = legacyCapability
+				case string:
+					if version, err := parseLegacyEngineVersion(value); err == nil {
+						requirement.Name = legacyCapability
+						requirement.Version = strconv.FormatUint(version, 10)
+					}
+				}
+				if requirement.Version != "" {
+					result.EngineVersions = append(result.EngineVersions, requirement)
+				}
 			}
-			result.PluginVersions = append(result.PluginVersions, dependency)
+			for _, dependency := range item.RequiredPluginVersions {
+				if err := ValidatePluginDependency(dependency); err != nil {
+					return nil, err
+				}
+				result.PluginVersions = append(result.PluginVersions, dependency)
+			}
 		}
 	}
 	return &result, nil
+}
+
+// parseLegacyEngineVersion follows yaml-cpp's unsigned integer conversion for quoted scalars.
+func parseLegacyEngineVersion(value string) (uint64, error) {
+	value = strings.TrimPrefix(strings.TrimRight(value, " \t\n\r\v\f"), "+")
+	base := 10
+	switch {
+	case strings.HasPrefix(value, "0x") || strings.HasPrefix(value, "0X"):
+		base, value = 16, value[2:]
+	case strings.HasPrefix(value, "0"):
+		base = 8
+	}
+	return strconv.ParseUint(value, base, 32)
 }

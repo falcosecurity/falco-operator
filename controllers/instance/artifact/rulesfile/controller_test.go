@@ -941,6 +941,76 @@ func TestFetchAndCacheArtifactMeta_InlineRules(t *testing.T) {
 	require.NotNil(t, rf.Status.ArtifactMeta)
 }
 
+func TestFetchAndCacheArtifactMeta_AllDocumentsAndRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		configMapRules          string
+		inlineRules             string
+		correctedConfigMapRules string
+		initialRequirements     []commonv1alpha1.ArtifactMetaRequirement
+		correctedRequirements   []commonv1alpha1.ArtifactMetaRequirement
+	}{
+		{
+			name:                    "legacy requirements across documents",
+			configMapRules:          "- required_engine_version: 999\n---\n- required_engine_version: 0\n",
+			inlineRules:             "- required_engine_version: 0.62.0\n- required_engine_version: 0.30.0\n",
+			correctedConfigMapRules: "- required_engine_version: 0\n---\n- required_engine_version: 26\n",
+			initialRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "999"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+			correctedRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+		},
+		{
+			name:                    "semantic requirements across documents",
+			configMapRules:          "- required_engine_version: 0.70.0\n---\n- required_engine_version: 0.20.0\n",
+			inlineRules:             "- required_engine_version: 99\n- required_engine_version: 15\n",
+			correctedConfigMapRules: "- required_engine_version: 0.20.0\n---\n- required_engine_version: 0.65.0\n",
+			initialRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "99"}, {Name: "engine_version_semver", Version: "0.70.0"},
+			},
+			correctedRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "99"}, {Name: "engine_version_semver", Version: "0.65.0"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "multi-document", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: tc.configMapRules},
+			}
+			rf := newTestRulesfile(withRulesfileOCI(), withRulesfileConfigMapRef(cm.Name),
+				withInlineRules(tc.inlineRules))
+			mockPuller := &pullerfake.MockOCIPuller{
+				ConfigDigest:  testRulesfileDigest,
+				ContentResult: []byte("- required_engine_version: 0\n---\n- required_plugin_versions:\n    - name: container\n      version: 0.7.0\n"),
+			}
+			r, cl := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, tc.initialRequirements, rf.Status.ArtifactMeta.Requirements)
+			assert.Equal(t, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.7.0"}}, rf.Status.ArtifactMeta.Dependencies)
+			previousMeta, previousHash := rf.Status.ArtifactMeta.DeepCopy(), rf.Status.ArtifactMetaSourcesHash
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Len(t, mockPuller.FetchContentCalls, 1, "unchanged inputs must remain a cache hit")
+
+			cm.Data[commonv1alpha1.ConfigMapRulesKey] = "- required_engine_version: 0\n---\nkey: [unclosed"
+			require.NoError(t, cl.Update(ctx, cm))
+			require.Error(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, previousMeta, rf.Status.ArtifactMeta, "later parse failures must not publish a partial aggregate")
+			assert.Equal(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+
+			cm.Data[commonv1alpha1.ConfigMapRulesKey] = tc.correctedConfigMapRules
+			require.NoError(t, cl.Update(ctx, cm))
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, tc.correctedRequirements, rf.Status.ArtifactMeta.Requirements)
+			assert.NotEqual(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+			assert.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest, "a local correction must not refresh the OCI tag")
+		})
+	}
+}
+
 func TestFetchAndCacheArtifactMeta_ConfigMapAndInlineRules(t *testing.T) {
 	// ConfigMap has no requirements; InlineRules declares required_engine_version.
 	// Both sources are parsed into ArtifactMeta.Requirements.
@@ -1146,6 +1216,45 @@ func TestAppendYAMLRequirements_EngineVersionSemver(t *testing.T) {
 	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Requirements, 1)
 	assert.Equal(t, "engine_version_semver", meta.Requirements[0].Name)
+}
+
+func TestAppendYAMLRequirements_AllEngineDirectives(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []commonv1alpha1.ArtifactMetaRequirement
+	}{
+		{
+			name: "later legacy directive cannot weaken requirement", content: "- required_engine_version: 999\n- required_engine_version: 0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "999"}},
+		},
+		{
+			name: "later semver directive cannot weaken requirement", content: "- required_engine_version: 999.0.0\n- required_engine_version: 0.0.0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "999.0.0"}},
+		},
+		{
+			name: "mixed capabilities remain distinct", content: "- required_engine_version: 26\n- required_engine_version: 0.62.0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+		},
+		{
+			name: "later document contributes requirements", content: "- required_engine_version: 0\n---\n- required_engine_version: 999\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "999"}},
+		},
+		{
+			name: "quoted integer uses legacy capability", content: "- required_engine_version: '26'\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "26"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := &commonv1alpha1.ArtifactMeta{}
+			require.NoError(t, appendYAMLRequirements(meta, []byte(tt.content)))
+			artifact.DeduplicateArtifactMeta(meta)
+			assert.Equal(t, tt.want, meta.Requirements)
+		})
+	}
 }
 
 func TestAppendYAMLRequirements_Empty(t *testing.T) {

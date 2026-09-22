@@ -3,10 +3,12 @@
 # A changed epoch proves a new Falco run, not which watcher initiated it or every
 # artifact that run loaded. Optional rules name/hash checks use the same snapshot.
 # Required env vars: NAMESPACE, FALCO_NAME.
-# MODE: capture (default), wait (different epoch), or hold (unchanged epoch).
+# MODE: capture (default), wait (different epoch), hold (unchanged epoch), or rules.
+# capture/wait/hold require one pod. rules checks the requested rules hash on every
+# matching pod, without treating independent reload epochs as one shared epoch.
 # wait requires BASELINE_EPOCH and POD_UID from a capture in the same Chainsaw step.
 # RULE_FILE_NAME and RULE_SHA256: optional pair that must be loaded throughout the check.
-# MAX_RETRIES / RETRY_DELAY: capture and wait bounds (defaults: 180 / 1 second).
+# MAX_RETRIES / RETRY_DELAY: capture, wait and rules bounds (defaults: 180 / 1 second).
 # SETTLE_SECONDS / HOLD_SECONDS: hold waits for pending setup reloads, then requires
 # continuous successful observations with one epoch (defaults: 75 / 130 seconds).
 # A Pod replacement or a failed observation during hold is an error, never success.
@@ -28,6 +30,7 @@ HOLD_SECONDS="${HOLD_SECONDS:-130}"
 POD=""
 EPOCH=""
 LAST_ERROR="no attempts made"
+OBSERVATIONS='[]'
 
 fail() {
   jq -n --arg message "$1" --arg pod "$POD" --arg uid "$POD_UID" --arg epoch "$EPOCH" \
@@ -37,12 +40,17 @@ fail() {
 
 case "$MODE" in
   capture|hold) ;;
+  rules)
+    if [ -z "$RULE_FILE_NAME" ] || [ -z "$RULE_SHA256" ]; then
+      fail "rules requires RULE_FILE_NAME and RULE_SHA256"
+    fi
+    ;;
   wait)
     if [ -z "$BASELINE_EPOCH" ] || [ -z "$POD_UID" ]; then
       fail "wait requires BASELINE_EPOCH and POD_UID"
     fi
     ;;
-  *) fail "MODE must be capture, wait, or hold" ;;
+  *) fail "MODE must be capture, wait, hold, or rules" ;;
 esac
 if { [ -n "$RULE_FILE_NAME" ] && [ -z "$RULE_SHA256" ]; } || \
    { [ -z "$RULE_FILE_NAME" ] && [ -n "$RULE_SHA256" ]; }; then
@@ -54,7 +62,7 @@ if ! [[ "$MAX_RETRIES" =~ ^[1-9][0-9]*$ && "$HOLD_SECONDS" =~ ^[1-9][0-9]*$ &&
 fi
 
 observe() {
-  local pods identity observed_uid metrics
+  local pods identity observed_uid
   if ! pods=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" -o json 2>&1); then
     LAST_ERROR="kubectl get pods failed: $pods"
     return 1
@@ -72,6 +80,11 @@ observe() {
     fail "pod UID changed from $POD_UID to $observed_uid; replacement is not a Falco reload"
   fi
   POD_UID="$observed_uid"
+  observe_pod
+}
+
+observe_pod() {
+  local metrics
   if ! metrics=$(kubectl exec -n "$NAMESPACE" "$POD" -c netshoot -- \
       curl -fsS -m 5 http://localhost:8765/metrics 2>&1); then
     LAST_ERROR="kubectl exec/curl failed: $metrics"
@@ -109,6 +122,48 @@ observe() {
   fi
 }
 
+pod_identities() {
+  jq -ce '
+    [.items[].metadata | {name, uid}] |
+    select(length > 0 and all(.[];
+      (.name | type) == "string" and (.name | length) > 0 and
+      (.uid | type) == "string" and (.uid | length) > 0))
+  '
+}
+
+observe_rules() {
+  local response snapshot current
+  if ! response=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" -o json 2>&1); then
+    LAST_ERROR="kubectl get pods failed: $response"
+    return 1
+  fi
+  if ! snapshot=$(printf '%s' "$response" | pod_identities 2>&1); then
+    LAST_ERROR="expected a nonempty pod list with valid names and UIDs: $snapshot"
+    return 1
+  fi
+  OBSERVATIONS='[]'
+  while IFS=$'\t' read -r POD POD_UID; do
+    if ! observe_pod; then
+      LAST_ERROR="pod $POD: $LAST_ERROR"
+      return 1
+    fi
+    OBSERVATIONS=$(printf '%s' "$OBSERVATIONS" | jq -c --arg pod "$POD" --arg uid "$POD_UID" --arg epoch "$EPOCH" \
+      '. + [{pod: $pod, pod_uid: $uid, epoch: $epoch}]')
+  done < <(printf '%s' "$snapshot" | jq -r '.[] | [.name, .uid] | @tsv')
+  if ! response=$(kubectl get pods -n "$NAMESPACE" -l "app.kubernetes.io/name=$FALCO_NAME" -o json 2>&1); then
+    LAST_ERROR="kubectl get pods failed after observation: $response"
+    return 1
+  fi
+  if ! current=$(printf '%s' "$response" | pod_identities 2>&1); then
+    LAST_ERROR="invalid pod list after observation: $current"
+    return 1
+  fi
+  if [ "$(printf '%s' "$snapshot" | jq -Sc 'sort_by(.name)')" != "$(printf '%s' "$current" | jq -Sc 'sort_by(.name)')" ]; then
+    LAST_ERROR="pod membership or UID changed while checking loaded rules"
+    return 1
+  fi
+}
+
 if [ "$MODE" == hold ]; then
   sleep "$SETTLE_SECONDS"
   observe || fail "$LAST_ERROR"
@@ -124,8 +179,12 @@ if [ "$MODE" == hold ]; then
 else
   MATCHED=false
   for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
-    if observe; then
-      if [ "$MODE" == capture ] || [ "$EPOCH" != "$BASELINE_EPOCH" ]; then
+    OBSERVE=observe
+    if [ "$MODE" == rules ]; then
+      OBSERVE=observe_rules
+    fi
+    if "$OBSERVE"; then
+      if [ "$MODE" == capture ] || [ "$MODE" == rules ] || [ "$EPOCH" != "$BASELINE_EPOCH" ]; then
         MATCHED=true
         break
       fi
@@ -136,6 +195,12 @@ else
   if [ "$MATCHED" != true ]; then
     fail "$LAST_ERROR"
   fi
+fi
+
+if [ "$MODE" == rules ]; then
+  jq -n --argjson pods "$OBSERVATIONS" --arg rule "$RULE_FILE_NAME" --arg hash "$RULE_SHA256" \
+    '{status: "success", mode: "rules", pods: $pods, rule_file_name: $rule, rule_sha256: $hash}'
+  exit 0
 fi
 
 jq -n --arg mode "$MODE" --arg pod "$POD" --arg uid "$POD_UID" --arg epoch "$EPOCH" \

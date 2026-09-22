@@ -136,12 +136,11 @@ func TestPluginVersionCompatible(t *testing.T) {
 
 func TestParseRulesRequirements(t *testing.T) {
 	tests := []struct {
-		name         string
-		data         []byte
-		wantEng      string
-		wantEngIsInt bool
-		wantPlugins  []commonv1alpha1.ArtifactMetaDependency
-		wantErr      bool
+		name        string
+		data        []byte
+		wantEngines []commonv1alpha1.ArtifactMetaRequirement
+		wantPlugins []commonv1alpha1.ArtifactMetaDependency
+		wantErr     bool
 	}{
 		{
 			name: "nil data returns empty requirements",
@@ -156,22 +155,66 @@ func TestParseRulesRequirements(t *testing.T) {
 			data: []byte("- rule: test\n  desc: d\n  condition: always_true\n  output: o\n  priority: WARNING\n"),
 		},
 		{
-			name:    "engine version as semver string",
-			data:    []byte("- required_engine_version: 0.57.0\n"),
-			wantEng: "0.57.0",
+			name:        "engine version as semver string",
+			data:        []byte("- required_engine_version: 0.57.0\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "0.57.0"}},
 		},
 		{
-			name:         "engine version as bare integer",
-			data:         []byte("- required_engine_version: 26\n"),
-			wantEng:      "26",
-			wantEngIsInt: true,
+			name:        "engine version as bare integer",
+			data:        []byte("- required_engine_version: 26\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "26"}},
 		},
 		{
-			// yaml.v3 decodes a bare float (e.g. 1.5) as float64, which falls through
-			// to the default case and is formatted via fmt.Sprintf("%v", v).
-			name:    "engine version as float falls through to default formatter",
-			data:    []byte("- required_engine_version: 1.5\n"),
-			wantEng: "1.5",
+			// Preserve extraction behavior; this is not a claim that Falco accepts abbreviated semver.
+			name:        "engine version as float retains semver classification",
+			data:        []byte("- required_engine_version: 1.5\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "1.5"}},
+		},
+		{
+			name: "repeated engine versions retain declaration order",
+			data: []byte("- required_engine_version: 999\n- required_engine_version: 0\n- required_engine_version: 999\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "999"}, {Name: "engine_version", Version: "0"}, {Name: "engine_version", Version: "999"},
+			},
+		},
+		{
+			name: "mixed directives classify each version independently",
+			data: []byte("- required_engine_version: 26\n- required_engine_version: 0.62.0\n- required_engine_version: 15\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"}, {Name: "engine_version", Version: "15"},
+			},
+		},
+		{
+			name: "bare numeric forms keep YAML normalization",
+			data: []byte("- required_engine_version: 0x1a\n- required_engine_version: 032\n- required_engine_version: +26\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version", Version: "26"}, {Name: "engine_version", Version: "26"},
+			},
+		},
+		{
+			name: "empty documents do not repeat previous directives",
+			data: []byte("---\n- required_engine_version: 26\n---\n---\n- required_engine_version: 0.62.0\n---\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+		},
+		{
+			name:        "plugin requirements in later documents retain alternatives",
+			data:        []byte("- required_engine_version: 26\n---\n- required_plugin_versions:\n    - name: container\n      version: 0.7.0\n      alternatives:\n        - name: k8smeta\n          version: 0.1.0\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "26"}},
+			wantPlugins: []commonv1alpha1.ArtifactMetaDependency{
+				{Name: "container", Version: "0.7.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}}},
+			},
+		},
+		{
+			name:    "invalid later document returns no partial result",
+			data:    []byte("- required_engine_version: 26\n---\nkey: [unclosed"),
+			wantErr: true,
+		},
+		{
+			name:    "invalid later plugin returns no partial result",
+			data:    []byte("- required_engine_version: 26\n---\n- required_plugin_versions:\n    - name: container\n"),
+			wantErr: true,
 		},
 		{
 			name: "plugin without alternatives",
@@ -194,9 +237,9 @@ func TestParseRulesRequirements(t *testing.T) {
 			},
 		},
 		{
-			name:    "mixed engine version and plugin with alternatives",
-			data:    []byte("- required_engine_version: 0.57.0\n- required_plugin_versions:\n    - name: container\n      version: 0.4.0\n      alternatives:\n        - name: k8smeta\n          version: 0.1.0\n- rule: foo\n  desc: d\n  condition: always_true\n  output: o\n  priority: WARNING\n"),
-			wantEng: "0.57.0",
+			name:        "mixed engine version and plugin with alternatives",
+			data:        []byte("- required_engine_version: 0.57.0\n- required_plugin_versions:\n    - name: container\n      version: 0.4.0\n      alternatives:\n        - name: k8smeta\n          version: 0.1.0\n- rule: foo\n  desc: d\n  condition: always_true\n  output: o\n  priority: WARNING\n"),
+			wantEngines: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "0.57.0"}},
 			wantPlugins: []commonv1alpha1.ArtifactMetaDependency{
 				{
 					Name:    "container",
@@ -249,13 +292,30 @@ func TestParseRulesRequirements(t *testing.T) {
 			got, err := ParseRulesRequirements(tt.data)
 			if tt.wantErr {
 				require.Error(t, err)
+				assert.Nil(t, got)
 				return
 			}
 			require.NoError(t, err)
 			require.NotNil(t, got)
-			assert.Equal(t, tt.wantEng, got.EngineVersion)
-			assert.Equal(t, tt.wantEngIsInt, got.EngineVersionIsInt)
+			assert.Equal(t, tt.wantEngines, got.EngineVersions)
 			assert.Equal(t, tt.wantPlugins, got.PluginVersions)
+		})
+	}
+}
+
+func TestParseLegacyEngineVersion(t *testing.T) {
+	for _, value := range []string{"26", "+26", "032", "0x1a", "0X1A", "26 \t"} {
+		t.Run(value, func(t *testing.T) {
+			got, err := ParseRulesRequirements([]byte("- required_engine_version: '" + value + "'\n"))
+			require.NoError(t, err)
+			assert.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "26"}}, got.EngineVersions)
+		})
+	}
+	for _, value := range []string{"4294967296", "-1", "0b11010", "0o32", "2_6", " 26", "++26", "0.62.0"} {
+		t.Run(value, func(t *testing.T) {
+			got, err := ParseRulesRequirements([]byte("- required_engine_version: '" + value + "'\n"))
+			require.NoError(t, err)
+			assert.Equal(t, []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: value}}, got.EngineVersions)
 		})
 	}
 }
