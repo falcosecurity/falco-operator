@@ -142,6 +142,23 @@ spec:
         kubernetes.io/os: linux
 ```
 
+Environment entries in `containers` and `initContainers` override defaults by name.
+An explicit entry replaces the whole variable, including its `valueFrom` source;
+`value: ""` (or just `name`) sets an empty value. Variables omitted from the
+override retain their defaults. The same behavior applies to Component Pod templates.
+
+For an environment variable with the same `name`:
+
+| Operator default | Pod template override | Result |
+|------------------|-----------------------|--------|
+| `value: "30s"` | `valueFrom.secretKeyRef` | Only the Secret reference remains; the literal value is removed |
+| `valueFrom.fieldRef` | `value: "manual"` | Only the literal value remains; the field reference is removed |
+| Any value or source | `value: ""` | Explicitly empty value, with no `valueFrom` |
+| Any value or source | Variable omitted | Operator default retained |
+
+This replacement applies to each explicitly overridden environment variable,
+not to the whole `env` list or every field of the Pod template.
+
 ### Reserved names
 
 The following container names are reserved by the operator:

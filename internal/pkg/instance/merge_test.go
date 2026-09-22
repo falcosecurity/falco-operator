@@ -17,12 +17,14 @@
 package instance
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -224,6 +226,125 @@ func TestMergeApplyConfigurationPreservesListSemantics(t *testing.T) {
 				require.Equal(t, beforeUser, user)
 			})
 		}
+	}
+}
+
+func TestMergeApplyConfigurationEnvOverrides(t *testing.T) {
+	values := map[string]corev1.EnvVar{
+		"literal": {Name: "SETTING", Value: "default"},
+		"empty":   {Name: "SETTING"},
+		"configmap": {Name: "SETTING", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "key", Optional: new(true),
+		}}},
+		"secret": {Name: "SETTING", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+			LocalObjectReference: corev1.LocalObjectReference{Name: "settings"}, Key: "key",
+		}}},
+		"field": {Name: "SETTING", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			APIVersion: "v1", FieldPath: "metadata.name",
+		}}},
+		"resource": {Name: "SETTING", ValueFrom: &corev1.EnvVarSource{ResourceFieldRef: &corev1.ResourceFieldSelector{
+			ContainerName: "app", Resource: "limits.cpu",
+		}}},
+		"file": {Name: "SETTING", ValueFrom: &corev1.EnvVarSource{FileKeyRef: &corev1.FileKeySelector{
+			VolumeName: "settings", Path: "env", Key: "key",
+		}}},
+	}
+	overrides := make(map[string][]corev1.EnvVar, len(values)+6)
+	for name, value := range values {
+		overrides[name] = []corev1.EnvVar{value}
+	}
+	overrides["literal"] = []corev1.EnvVar{{Name: "SETTING", Value: "custom"}}
+	overrides["configmap"] = []corev1.EnvVar{{Name: "SETTING", ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+		LocalObjectReference: corev1.LocalObjectReference{Name: "other"}, Key: "other",
+	}}}}
+	overrides["omitted"] = nil
+	overrides["empty list"] = []corev1.EnvVar{}
+	overrides["new variable"] = []corev1.EnvVar{{Name: "ADDED", Value: "new"}}
+	overrides["invalid value and source"] = []corev1.EnvVar{{Name: "SETTING", Value: "invalid", ValueFrom: values["secret"].ValueFrom}}
+	overrides["invalid two sources"] = []corev1.EnvVar{{Name: "SETTING", ValueFrom: &corev1.EnvVarSource{
+		SecretKeyRef: values["secret"].ValueFrom.SecretKeyRef, ConfigMapKeyRef: values["configmap"].ValueFrom.ConfigMapKeyRef,
+	}}}
+	overrides["invalid empty source"] = []corev1.EnvVar{{Name: "SETTING", ValueFrom: &corev1.EnvVarSource{}}}
+
+	for _, kind := range []string{resources.ResourceTypeDeployment, resources.ResourceTypeDaemonSet} {
+		for _, field := range []string{"containers", "initContainers"} {
+			for baseName, baseValue := range values {
+				for name, env := range overrides {
+					t.Run(kind+"/"+field+"/"+baseName+" to "+name, func(t *testing.T) {
+						baseEnv := []corev1.EnvVar{baseValue, {Name: "KEEP", Value: "$(SETTING)"}}
+						defs := &resources.InstanceDefaults{ContainerName: "app", SupportsDaemonSet: true}
+						template := &corev1.PodTemplateSpec{}
+						if field == "containers" {
+							defs.EnvVars = baseEnv
+							template.Spec.Containers = []corev1.Container{{Name: "app", Env: env}}
+						} else {
+							defs.InitContainers = []corev1.Container{{Name: "prepare", Env: baseEnv}}
+							template.Spec.InitContainers = []corev1.Container{{Name: "prepare", Env: env}}
+						}
+						beforeTemplate := template.DeepCopy()
+						base, err := resources.GenerateWorkload(kind, &metav1.ObjectMeta{Name: "test"}, defs)
+						require.NoError(t, err)
+						user, err := resources.GenerateUserOverlay(kind, "test", defs, resources.WithOverlayPodTemplateSpec(template))
+						require.NoError(t, err)
+						beforeBase, beforeUser := base.DeepCopyObject(), user.DeepCopy()
+						merged, err := MergeApplyConfiguration(kind, base, user)
+						require.NoError(t, err)
+						containers, found, err := unstructured.NestedSlice(merged.Object, "spec", "template", "spec", field)
+						require.NoError(t, err)
+						require.True(t, found)
+						var got corev1.Container
+						require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(containers[0].(map[string]any), &got))
+						want := append([]corev1.EnvVar(nil), baseEnv...)
+						if len(env) != 0 {
+							if env[0].Name == "SETTING" {
+								want[0] = env[0]
+							} else {
+								want = append(want, env[0])
+							}
+						}
+						wantJSON, err := json.Marshal(want)
+						require.NoError(t, err)
+						gotJSON, err := json.Marshal(got.Env)
+						require.NoError(t, err)
+						assert.JSONEq(t, string(wantJSON), string(gotJSON), "replace only explicit entries, preserving order and invalid input")
+						// Mutate the returned object itself, not the decoded copy.
+						rawContainers, _, err := unstructured.NestedFieldNoCopy(merged.Object, "spec", "template", "spec", field)
+						require.NoError(t, err)
+						rawEnv := rawContainers.([]any)[0].(map[string]any)["env"].([]any)
+						for _, entry := range rawEnv {
+							value := entry.(map[string]any)
+							value["value"] = "changed after merge"
+							if source, ok := value["valueFrom"].(map[string]any); ok {
+								clear(source)
+							}
+						}
+						assert.Equal(t, beforeBase, base)
+						assert.Equal(t, beforeUser, user)
+						assert.Equal(t, beforeTemplate, template)
+					})
+				}
+			}
+		}
+	}
+}
+
+func TestMergeApplyConfigurationRejectsMalformedEnv(t *testing.T) {
+	for name, env := range map[string][]any{
+		"missing name": {map[string]any{"value": "test"}},
+		"null name":    {map[string]any{"name": nil, "value": "test"}},
+		"duplicate":    {map[string]any{"name": "SAME", "value": "one"}, map[string]any{"name": "SAME", "value": "two"}},
+		"null entry":   {nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := builders.NewDeployment().WithName("test").AddContainer(&corev1.Container{Name: "app", Image: "base:v1"}).Build()
+			user := &unstructured.Unstructured{Object: map[string]any{
+				"spec": map[string]any{"template": map[string]any{"spec": map[string]any{
+					"containers": []any{map[string]any{"name": "app", "env": env}},
+				}}},
+			}}
+			_, err := MergeApplyConfiguration(resources.ResourceTypeDeployment, base, user)
+			require.Error(t, err)
+		})
 	}
 }
 
