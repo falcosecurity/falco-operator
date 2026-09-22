@@ -205,6 +205,33 @@ func TestExchangeForRegistryToken(t *testing.T) {
 		assert.Equal(t, "https", gotScheme)
 	})
 
+	t.Run("returns an error when the exchange request fails at the transport level", func(t *testing.T) {
+		roundTrip := roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+			return nil, assert.AnError
+		})
+		httpClient := &http.Client{Transport: roundTrip}
+
+		_, err := exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exchange AAD token with myregistry.azurecr.io")
+	})
+
+	t.Run("returns an error when the response body is not valid JSON", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("not json"))
+		}))
+		defer server.Close()
+
+		target, err := url.Parse(server.URL)
+		require.NoError(t, err)
+		httpClient := &http.Client{Transport: redirectingTransport{target: target}}
+
+		_, err = exchangeForRegistryToken(context.Background(), httpClient, fakeTokenCredential{token: "aad-token"}, "myregistry.azurecr.io", false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "decode registry token exchange response from myregistry.azurecr.io")
+	})
+
 	t.Run("a registry host with an explicit port is used unmodified for both the URL host and the service parameter", func(t *testing.T) {
 		var gotHost, gotService string
 		roundTrip := roundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -820,6 +847,27 @@ func TestResolveClientCertificate(t *testing.T) {
 		_, _, err := resolveClientCertificate(context.Background(), fakeClient, namespace, &commonv1alpha1.AzureAuth{})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "clientCertificateRef (config) or AZURE_CLIENT_CERTIFICATE_PATH (environment variable)")
+	})
+
+	t.Run("errors when the secret named by clientCertificateRef does not exist", func(t *testing.T) {
+		clearAzureEnv(t)
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build()
+		cfg := &commonv1alpha1.AzureAuth{ClientCertificateRef: &commonv1alpha1.SecretRef{Name: "missing"}}
+
+		_, _, err := resolveClientCertificate(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "get secret falco/missing")
+	})
+
+	t.Run("errors when the secret is missing the certificate key", func(t *testing.T) {
+		clearAzureEnv(t)
+		secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "app-cert", Namespace: namespace}}
+		fakeClient := fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(secret).Build()
+		cfg := &commonv1alpha1.AzureAuth{ClientCertificateRef: &commonv1alpha1.SecretRef{Name: "app-cert"}}
+
+		_, _, err := resolveClientCertificate(context.Background(), fakeClient, namespace, cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `key "certificate" not found`)
 	})
 
 	t.Run("errors when the file named by AZURE_CLIENT_CERTIFICATE_PATH does not exist", func(t *testing.T) {
