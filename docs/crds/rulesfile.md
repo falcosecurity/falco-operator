@@ -25,8 +25,23 @@ The `Rulesfile` Custom Resource manages Falco detection rules. Rules can be sour
 | `image.tag` | `string` | Image tag or digest (default: `latest`) |
 | `registry.name` | `string` | Registry hostname (default: `ghcr.io`) |
 | `registry.auth.secretRef.name` | `string` | Secret with registry credentials (keys: `username`, `password`) |
+| `registry.auth.azure` | `*AzureAuth` | Azure identity authentication for Azure Container Registry (see below) |
 | `registry.plainHTTP` | `bool` | Use plain HTTP (mutually exclusive with `tls`) |
 | `registry.tls.insecureSkipVerify` | `bool` | Skip TLS verification |
+
+### AzureAuth
+
+Authenticates to Azure Container Registry (ACR) via an Azure identity instead of a static Secret. Exactly one of four methods, selected by `method`. Every field except `method` and `serviceAccountRef` falls back to the matching `AZURE_*` environment variable on the falco-operator Deployment when left unset — see the field godoc on `AzureAuth` for the full list.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `method` | `string` | **Required.** `clientSecret`, `clientCertificate`, `managedIdentity`, or `workloadIdentity` |
+| `tenantId` | `string` | Microsoft Entra tenant ID. Required for `clientSecret`, `clientCertificate`, `workloadIdentity` (falls back to `AZURE_TENANT_ID`) |
+| `clientId` | `string` | Application (client) ID. Required for `clientSecret`, `clientCertificate`, `workloadIdentity` (falls back to `AZURE_CLIENT_ID`); optional for `managedIdentity` (selects user-assigned when set) |
+| `clientSecretRef.name` | `string` | Secret with the app registration's client secret (key: `clientSecret`). Used for `clientSecret` (falls back to `AZURE_CLIENT_SECRET`) |
+| `clientCertificateRef.name` | `string` | Secret with the client certificate (key: `certificate`, PEM or PKCS#12) and optional password (key: `password`). Used for `clientCertificate` (falls back to `AZURE_CLIENT_CERTIFICATE_PATH`/`AZURE_CLIENT_CERTIFICATE_PASSWORD`) |
+| `sendCertificateChain` | `bool` | Send the certificate's public chain (x5c header) for Subject Name/Issuer trust. Only used for `clientCertificate` (falls back to `AZURE_CLIENT_SEND_CERTIFICATE_CHAIN`) |
+| `serviceAccountRef.name` | `string` | ServiceAccount (same namespace) to federate a token for. Required for `workloadIdentity`, no environment fallback. The named ServiceAccount must carry the annotation `azure.falcosecurity.dev/client-id`, set to exactly this `clientId`, before the operator will mint a token for it |
 
 ### ConfigMapRef
 
@@ -81,6 +96,32 @@ spec:
           name: registry-credentials
   priority: 40
 ```
+
+### From Azure Container Registry with workload identity
+
+```yaml
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Rulesfile
+metadata:
+  name: azure-rules
+spec:
+  ociArtifact:
+    image:
+      repository: my-org/falco-rules
+      tag: v1.0.0
+    registry:
+      name: myregistry.azurecr.io
+      auth:
+        azure:
+          method: workloadIdentity
+          tenantId: 00000000-0000-0000-0000-000000000000
+          clientId: 11111111-1111-1111-1111-111111111111
+          serviceAccountRef:
+            name: acr-reader
+  priority: 40
+```
+
+See `examples/artifact_v1alpha1_rulesfile_oci_azure.yaml` for all four methods (three commented out), including the required ServiceAccount annotation.
 
 ### Inline rules
 

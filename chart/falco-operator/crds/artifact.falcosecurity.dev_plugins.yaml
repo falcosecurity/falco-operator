@@ -96,6 +96,140 @@ spec:
                       auth:
                         description: Auth contains authentication configuration.
                         properties:
+                          azure:
+                            description: |-
+                              Azure authenticates using an Azure identity instead of a static Secret. See AzureAuth's
+                              own godoc for the four supported methods and what each requires.
+                            properties:
+                              clientCertificateRef:
+                                description: |-
+                                  ClientCertificateRef references a Secret containing the client certificate (PEM or PKCS#12,
+                                  under the key "certificate") and, if the certificate is password-protected, the password
+                                  under the key "password". Used when method is clientCertificate; falls back to reading a
+                                  certificate file at the path named by the AZURE_CLIENT_CERTIFICATE_PATH environment
+                                  variable (plus AZURE_CLIENT_CERTIFICATE_PASSWORD) when unset.
+                                properties:
+                                  name:
+                                    description: Name is the name of the Secret containing
+                                      credentials.
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              clientId:
+                                description: |-
+                                  ClientID is the application (client) ID to authenticate as. Required (from this field or
+                                  AZURE_CLIENT_ID) for clientSecret, clientCertificate, and workloadIdentity. For
+                                  managedIdentity, its presence selects a user-assigned identity by client ID; its absence
+                                  selects the node's system-assigned identity.
+                                type: string
+                              clientSecretRef:
+                                description: |-
+                                  ClientSecretRef references a Secret containing the app registration's client secret, under
+                                  the key "clientSecret". Used when method is clientSecret; falls back to the
+                                  AZURE_CLIENT_SECRET environment variable when unset.
+                                properties:
+                                  name:
+                                    description: Name is the name of the Secret containing
+                                      credentials.
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              method:
+                                description: |-
+                                  Method selects how the Azure identity is obtained.
+                                  - clientSecret: a Microsoft Entra app registration authenticated with a client secret.
+                                  - clientCertificate: the same, authenticated with a certificate instead.
+                                  - managedIdentity: the node's system-assigned identity, or a user-assigned identity when
+                                    clientId is set. Authenticates via the Azure Instance Metadata Service (IMDS) -- there is
+                                    no per-namespace or per-artifact isolation with this method, every AzureAuth using it
+                                    resolves to whichever identity is attached to the node the operator pod is scheduled on.
+                                  - workloadIdentity: a Kubernetes ServiceAccount token (serviceAccountRef), federated to an
+                                    Entra app or managed identity via OIDC trust.
+                                enum:
+                                - clientSecret
+                                - clientCertificate
+                                - managedIdentity
+                                - workloadIdentity
+                                type: string
+                              sendCertificateChain:
+                                description: |-
+                                  SendCertificateChain controls whether the certificate's public chain is sent in the x5c
+                                  header of each token request, as required for Subject Name/Issuer (SNI) authentication --
+                                  needed when the Microsoft Entra app registration trusts this certificate by subject
+                                  name/issuer rather than by exact thumbprint (e.g. because the certificate is reissued
+                                  periodically by an intermediate CA without updating the app registration each time). Only
+                                  used when method is clientCertificate. A pointer, not a bare bool: nil means "not set,
+                                  fall back to the AZURE_CLIENT_SEND_CERTIFICATE_CHAIN environment variable" (itself
+                                  defaulting to false), distinct from an explicit false in the CR. Matches azidentity's own
+                                  ClientCertificateCredentialOptions.SendCertificateChain default when nothing is set
+                                  anywhere.
+                                type: boolean
+                              serviceAccountRef:
+                                description: |-
+                                  ServiceAccountRef names the ServiceAccount, in the same namespace as this resource, whose
+                                  federated identity is used. Required when method is workloadIdentity -- unlike every other
+                                  field on AzureAuth, it has no environment variable fallback, deliberately: it names which
+                                  ServiceAccount to federate, not a credential value, so there is nothing meaningful to
+                                  source from the operator's own environment (that would collapse every workloadIdentity
+                                  AzureAuth cluster-wide onto a single identity, defeating the point of this method). The
+                                  Azure-side federated identity credential must trust the subject
+                                  system:serviceaccount:<this resource's namespace>:<name>.
+
+                                  This ServiceAccount does not need the azure.workload.identity/use pod label or the
+                                  Azure Workload Identity mutating webhook installed: the operator mints its token itself,
+                                  per resolution, via the Kubernetes TokenRequest API, rather than relying on a
+                                  webhook-projected token file tied to one pod's one identity. Those are only relevant to
+                                  azidentity's own file-based WorkloadIdentityCredential, which this does not use.
+
+                                  Security note: minting a token for a ServiceAccount is a materially different privilege
+                                  than referencing a Secret (as ClientSecretRef/ClientCertificateRef do). A Secret reference
+                                  only exposes whatever credential that Secret already contains; naming a ServiceAccount
+                                  here actively mints a *fresh* identity assertion for it, and the underlying
+                                  serviceaccounts/token permission is granted to the operator as a cluster-wide ClusterRole
+                                  (Kubernetes has no finer-grained way to scope it to "only ServiceAccounts referenced by a
+                                  resource in their own namespace"). Without a further check, that would let anyone able to
+                                  create a Rulesfile/Plugin/Config resource in a namespace get a token minted for *any*
+                                  ServiceAccount in it -- including one some unrelated workload already has federated to an
+                                  Azure identity, not just one meant for their own resource.
+
+                                  To narrow that: the named ServiceAccount must separately carry the annotation
+                                  azure.falcosecurity.dev/client-id, set to exactly this AzureAuth's ClientID, before the
+                                  operator will mint a token for it. Setting that annotation is a deliberate act by whoever
+                                  administers ServiceAccounts in the namespace -- not implied by merely being nameable here.
+                                  This narrows the trust to "any artifact author can use any ServiceAccount that has opted
+                                  in to their specific client ID", still namespace-local and still not a full authorization
+                                  system (someone who can both create artifact resources *and* edit ServiceAccounts in the
+                                  same namespace can self-authorize) but a real reduction from "any ServiceAccount already
+                                  federated to anything, for any reason". See the Reconcile doc comment in
+                                  controllers/instance/falco/controller.go for the full reasoning.
+                                properties:
+                                  name:
+                                    default: ""
+                                    description: |-
+                                      Name of the referent.
+                                      This field is effectively required, but due to backwards compatibility is
+                                      allowed to be empty. Instances of this type with an empty value here are
+                                      almost certainly wrong.
+                                      More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                                    type: string
+                                type: object
+                                x-kubernetes-map-type: atomic
+                              tenantId:
+                                description: |-
+                                  TenantID is the Microsoft Entra tenant ID. Required (from this field or AZURE_TENANT_ID)
+                                  for clientSecret, clientCertificate, and workloadIdentity; unused for managedIdentity
+                                  (IMDS resolves the tenant from the attached identity).
+                                type: string
+                            required:
+                            - method
+                            type: object
+                            x-kubernetes-validations:
+                            - message: serviceAccountRef.name is required when method
+                                is workloadIdentity
+                              rule: self.method != 'workloadIdentity' || (has(self.serviceAccountRef)
+                                && self.serviceAccountRef.name.size() > 0)
                           secretRef:
                             description: SecretRef references a Secret containing
                               registry credentials.
