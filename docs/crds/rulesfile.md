@@ -24,8 +24,8 @@ The `Rulesfile` Custom Resource manages Falco detection rules. Rules can be sour
 | `image.repository` | `string` | **Required.** OCI repository path (e.g., `falcosecurity/rules/falco-rules`) |
 | `image.tag` | `string` | Image tag or digest (default: `latest`) |
 | `registry.name` | `string` | Registry hostname (default: `ghcr.io`) |
-| `registry.auth.secretRef.name` | `string` | Secret with registry credentials (keys: `username`, `password`) |
-| `registry.auth.azure` | `*AzureAuth` | Azure identity authentication for Azure Container Registry (see below) |
+| `registry.auth.secretRef.name` | `string` | Secret with registry credentials (keys: `username`, `password`). Ignored if `registry.auth.azure` is also set |
+| `registry.auth.azure` | `*AzureAuth` | Azure identity authentication for Azure Container Registry (see below). Takes precedence over `secretRef` when both are set — not merged, `secretRef` is ignored entirely |
 | `registry.plainHTTP` | `bool` | Use plain HTTP (mutually exclusive with `tls`) |
 | `registry.tls.insecureSkipVerify` | `bool` | Skip TLS verification |
 
@@ -37,7 +37,7 @@ Authenticates to Azure Container Registry (ACR) via an Azure identity instead of
 |-------|------|-------------|
 | `method` | `string` | **Required.** `clientSecret`, `clientCertificate`, `managedIdentity`, or `workloadIdentity` |
 | `tenantId` | `string` | Microsoft Entra tenant ID. Required for `clientSecret`, `clientCertificate`, `workloadIdentity` (falls back to `AZURE_TENANT_ID`) |
-| `clientId` | `string` | Application (client) ID. Required for `clientSecret`, `clientCertificate`, `workloadIdentity` (falls back to `AZURE_CLIENT_ID`); optional for `managedIdentity` (selects user-assigned when set) |
+| `clientId` | `string` | Application (client) ID. Required for `clientSecret`, `clientCertificate`, `workloadIdentity` (falls back to `AZURE_CLIENT_ID`); optional for `managedIdentity` (selects user-assigned when set). **Warning:** the `AZURE_CLIENT_ID` fallback applies to `managedIdentity` too — if it's set cluster-wide for the other methods' convenience, every `managedIdentity` resource that leaves this field empty silently stops being system-assigned and attempts (and fails) a user-assigned lookup with that value instead. There's no way to force system-assigned back once the environment provides a value; an empty field can't override a non-empty environment variable |
 | `clientSecretRef.name` | `string` | Secret with the app registration's client secret (key: `clientSecret`). Used for `clientSecret` (falls back to `AZURE_CLIENT_SECRET`) |
 | `clientCertificateRef.name` | `string` | Secret with the client certificate (key: `certificate`, PEM or PKCS#12) and optional password (key: `password`). Used for `clientCertificate` (falls back to `AZURE_CLIENT_CERTIFICATE_PATH`/`AZURE_CLIENT_CERTIFICATE_PASSWORD`) |
 | `sendCertificateChain` | `bool` | Send the certificate's public chain (x5c header) for Subject Name/Issuer trust. Only used for `clientCertificate` (falls back to `AZURE_CLIENT_SEND_CERTIFICATE_CHAIN`) |
