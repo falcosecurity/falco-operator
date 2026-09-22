@@ -92,7 +92,7 @@ func TestFetchOCIAuthSecret(t *testing.T) {
 func TestFetchOCICredentials(t *testing.T) {
 	const namespace = "test-namespace"
 
-	t.Run("dispatches to Azure when Registry.Auth.Azure is set, ahead of SecretRef", func(t *testing.T) {
+	t.Run("dispatches to Azure when Registry.Auth.Azure is set", func(t *testing.T) {
 		sa := &corev1.ServiceAccount{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:        "registry-federator",
@@ -117,6 +117,39 @@ func TestFetchOCICredentials(t *testing.T) {
 
 		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
 		require.NoError(t, err)
+		assert.NotNil(t, credFunc)
+	})
+
+	t.Run("Azure takes precedence over SecretRef when both are set, SecretRef is never consulted", func(t *testing.T) {
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "registry-federator",
+				Namespace:   namespace,
+				Annotations: map[string]string{"azure.falcosecurity.dev/client-id": "22222222-2222-2222-2222-222222222222"},
+			},
+		}
+		// No Secret named "unused-secret-ref" is registered with the fake client. If dispatch
+		// ever fell through to (or merged in) SecretRef, fetchOCIAuthSecret would fail trying to
+		// fetch it -- so this succeeding at all is itself the proof that SecretRef was never
+		// consulted once Azure was set, not just that Azure "also" works.
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build(), namespace)
+
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{
+					SecretRef: &commonv1alpha1.SecretRef{Name: "unused-secret-ref"},
+					Azure: &commonv1alpha1.AzureAuth{
+						Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+						TenantID:          "11111111-1111-1111-1111-111111111111",
+						ClientID:          "22222222-2222-2222-2222-222222222222",
+						ServiceAccountRef: &corev1.LocalObjectReference{Name: "registry-federator"},
+					},
+				},
+			},
+		}
+
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err, "if this fails trying to fetch the SecretRef, precedence has regressed")
 		assert.NotNil(t, credFunc)
 	})
 

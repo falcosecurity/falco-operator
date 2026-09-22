@@ -25,8 +25,8 @@ The `Plugin` Custom Resource manages Falco plugins. Plugin binaries are download
 | `image.repository` | `string` | **Required.** OCI repository path (e.g., `falcosecurity/plugins/plugin/container`) |
 | `image.tag` | `string` | Image tag or digest (default: `latest`) |
 | `registry.name` | `string` | Registry hostname (default: `ghcr.io`) |
-| `registry.auth.secretRef.name` | `string` | Secret with registry credentials (keys: `username`, `password`) |
-| `registry.auth.azure` | `*AzureAuth` | Azure identity authentication for Azure Container Registry -- see the `Rulesfile` CRD reference's `AzureAuth` section; applies identically here |
+| `registry.auth.secretRef.name` | `string` | Secret with registry credentials (keys: `username`, `password`). Ignored if `registry.auth.azure` is also set |
+| `registry.auth.azure` | `*AzureAuth` | Azure identity authentication for Azure Container Registry -- see the `Rulesfile` CRD reference's `AzureAuth` section; applies identically here. Takes precedence over `secretRef` when both are set — not merged, `secretRef` is ignored entirely |
 | `registry.plainHTTP` | `bool` | Use plain HTTP (mutually exclusive with `tls`) |
 | `registry.tls.insecureSkipVerify` | `bool` | Skip TLS verification |
 
