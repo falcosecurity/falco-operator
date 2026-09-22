@@ -21,8 +21,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,10 +112,13 @@ func main() {
 	// envutil.BindFlagEnv, called after flag.Parse below, applies each env var to its flag when the
 	// flag isn't set on the command line.
 	var artifactServerURL string
+	var artifactDownloadTimeout time.Duration
 	var artifactClientCertPath, artifactClientCertName, artifactClientCertKey string
 	var artifactServerCAFile string
 	flag.StringVar(&artifactServerURL, "artifact-server-url", "",
 		"Required URL of the central artifact HTTP server.")
+	flag.DurationVar(&artifactDownloadTimeout, "artifact-download-timeout", artifact.DefaultDownloadTimeout,
+		"Maximum duration of one complete download from the artifact server, including connection setup and response body. Must be positive.")
 	flag.StringVar(&artifactClientCertPath, "artifact-client-cert-path", "",
 		"The directory that contains the client certificate used to authenticate to the central "+
 			"artifact server via mTLS. Only meaningful when the artifact server requires client certs.")
@@ -136,6 +137,11 @@ func main() {
 	}
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
+
+	if artifactDownloadTimeout <= 0 {
+		setupLog.Error(nil, "artifact download timeout must be positive; configure --artifact-download-timeout or ARTIFACT_DOWNLOAD_TIMEOUT")
+		os.Exit(1)
+	}
 
 	if falcoReloadCooldown <= 0 {
 		setupLog.Error(nil, "falco reload cooldown must be positive; configure --falco-reload-cooldown or FALCO_RELOAD_COOLDOWN")
@@ -382,43 +388,9 @@ func main() {
 		}
 	}
 
-	artifactTransport := http.DefaultTransport.(*http.Transport).Clone()
-	if artifactClientCertWatcher != nil || artifactCAWatcher != nil {
-		// http.Transport.TLSClientConfig is a single static *tls.Config shared across
-		// connections; there is no client-side hook to re-read the trust pool or client cert
-		// per connection. DialTLSContext instead builds a fresh tls.Config from the watchers'
-		// current state on every new TCP connection, so a cert/CA reload takes effect the next
-		// time a keep-alive connection is re-established.
-		artifactTransport.DialTLSContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
-			conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, network, addr)
-			if dialErr != nil {
-				return nil, dialErr
-			}
-			host, _, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				host = addr
-			}
-			tlsConfig := &tls.Config{ServerName: host}
-			if artifactCAWatcher != nil {
-				tlsConfig.RootCAs = artifactCAWatcher.CertPool()
-			}
-			if artifactClientCertWatcher != nil {
-				tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-					return artifactClientCertWatcher.GetCertificate(nil)
-				}
-			}
-			tlsConn := tls.Client(conn, tlsConfig)
-			if hsErr := tlsConn.HandshakeContext(dialCtx); hsErr != nil {
-				_ = conn.Close()
-				return nil, hsErr
-			}
-			return tlsConn, nil
-		}
-	}
-
 	artifactFetcher := &artifact.Fetcher{
 		ServerURL:  artifactServerURL,
-		HTTPClient: &http.Client{Transport: artifactTransport},
+		HTTPClient: artifact.NewHTTPClient(artifactDownloadTimeout, artifactClientCertWatcher, artifactCAWatcher),
 		K8sClient:  mgr.GetClient(),
 		NodeName:   nodeName,
 	}

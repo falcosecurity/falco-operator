@@ -1,0 +1,431 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-download-timeout
+spec:
+  description: |
+    A stalled cache response must time out without replacing installed rules or
+    blocking another Rulesfile. Recovery must need neither a CR edit nor a Pod restart.
+    Only the cache HTTP response is controlled; metadata comes from the real registry.
+  bindings:
+    - name: falco_name
+      value: falco-download-timeout
+    - name: rulesfile_name
+      value: download-timeout
+    - name: inline_name
+      value: download-independent
+    - name: oci_file
+      value: 50-01-download-timeout-oci.yaml
+    - name: inline_file
+      value: 50-03-download-independent-inline.yaml
+    - name: old_hash
+      # Existing rule-basic.yaml OCI fixture.
+      value: edd70605e934df18ef745bcaec799e624183d0975d09762f73864611b4079f3b
+    - name: new_hash
+      # Existing rule-with-engine-req.yaml OCI fixture.
+      value: 4f971a1345a37a8bd84b40ec007fa9a278f2c85b94391b5cc6e95a47ea4825c5
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Use a short per-instance timeout and an isolated cache endpoint in netshoot.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+            - name: artifact_operator_env
+              value:
+                - name: ARTIFACT_SERVER_URL
+                  value: http://127.0.0.1:18082
+                - name: ARTIFACT_DOWNLOAD_TIMEOUT
+                  value: 2s
+
+    - name: "Step 02: Start-controlled-cache"
+      description: Serve existing OCI fixture bytes through a controllable local HTTP endpoint.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: netshoot
+              - name: REMOTE_PATH
+                value: /tmp/artifact-download-server.sh
+              - name: LOCAL_FILE
+                value: artifact-server.sh
+            content: bash ../../common/scripts/write_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: netshoot
+              - name: REMOTE_PATH
+                value: /tmp/artifact-download-old.yaml
+              - name: LOCAL_FILE
+                value: ../../../../../hack/oci-test-artifacts/fixtures/rule-basic.yaml
+            content: bash ../../common/scripts/write_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: netshoot
+              - name: REMOTE_PATH
+                value: /tmp/artifact-download-new.yaml
+              - name: LOCAL_FILE
+                value: ../../../../../hack/oci-test-artifacts/fixtures/rule-with-engine-req.yaml
+            content: bash ../../common/scripts/write_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: start
+            content: bash artifact-server.sh
+
+    - name: "Step 03: Install-initial-rules"
+      description: Resolve real OCI metadata and install the complete initial response.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 04: Verify-initial-Falco-load"
+      description: Verify both installed bytes and the hash actually loaded by Falco.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $oci_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $old_hash): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($oci_file)
+              - name: RULE_SHA256
+                value: ($old_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+
+    - name: "Step 05: Stall-update-and-verify-independent-progress"
+      description: |
+        Wait until the response body is stalled before creating another Rulesfile.
+        A timed-out update must preserve the old OCI file while the other rules load.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: arm
+            content: bash artifact-server.sh
+
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-config-content-reqs
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: started
+            content: bash artifact-server.sh
+
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($inline_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_engine_version: "0.0.1"
+                  - rule: Independent download timeout test
+                    desc: A second Rulesfile progresses while OCI downloads time out.
+                    condition: evt.type = execve
+                    output: "independent process=%proc.cmdline"
+                    priority: DEBUG
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 2
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'False'
+                    (contains(message, 'read artifact server response body')): true
+                    (contains(message, 'context deadline exceeded')): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: cancelled
+            content: bash artifact-server.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($inline_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $oci_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $old_hash): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($oci_file)
+              - name: RULE_SHA256
+                value: ($old_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $inline_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: inline_hash
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($inline_file)
+              - name: RULE_SHA256
+                value: ($inline_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+
+    - name: "Step 06: Recover-without-another-edit"
+      description: Release only the endpoint and require new bytes, a Falco load and unchanged Pod identity.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: status
+            content: bash artifact-server.sh
+            outputs:
+              - name: original_pods
+                value: (json_parse($stdout).pods)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: recover
+            content: bash artifact-server.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 2
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/', $oci_file]))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $new_hash): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: ($oci_file)
+              - name: RULE_SHA256
+                value: ($new_hash)
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: ACTION
+                value: status
+            content: bash artifact-server.sh
+            check:
+              (json_parse($stdout).pods == $original_pods): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_no_pod_restarts.sh
+
+    - name: "Step 07: Delete-artifacts"
+      description: Ordinary deletion must remove both ArtifactNodes and their installed files after recovery.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: ($oci_file)
+              - name: SHOULD_EXIST
+                value: 'false'
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($inline_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $inline_name]))
+            for:
+              deletion: {}
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: ($inline_file)
+              - name: SHOULD_EXIST
+                value: 'false'
+            content: bash ../../common/scripts/assert_file_on_node.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: rulesfile-download-timeout
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: bash ../../common/scripts/debug_snapshot.sh

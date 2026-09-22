@@ -19,6 +19,7 @@ package falco
 import (
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,6 +27,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
@@ -34,6 +36,67 @@ import (
 )
 
 var falcoDefs = resources.FalcoDefaults
+
+func TestGenerateApplyConfigurationDownloadTimeout(t *testing.T) {
+	original := resources.FalcoDefaults.SidecarContainers[0].DeepCopy()
+	t.Cleanup(func() { resources.FalcoDefaults.SidecarContainers[0] = *original })
+	resources.SetArtifactDownloadTimeout(2 * time.Minute)
+	defaults := resources.FalcoDefaults.SidecarContainers[0].DeepCopy()
+	for _, kind := range []string{resources.ResourceTypeDaemonSet, resources.ResourceTypeDeployment} {
+		for _, secure := range []bool{false, true} {
+			for name, override := range map[string]*corev1.EnvVar{
+				"default": nil,
+				"literal": {Name: "ARTIFACT_DOWNLOAD_TIMEOUT", Value: "30s"},
+				"configmap": {Name: "ARTIFACT_DOWNLOAD_TIMEOUT", ValueFrom: &corev1.EnvVarSource{
+					ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+						LocalObjectReference: corev1.LocalObjectReference{Name: "download-settings"}, Key: "timeout",
+					},
+				}},
+			} {
+				t.Run(fmt.Sprintf("%s/TLS=%t/%s", kind, secure, name), func(t *testing.T) {
+					falco := newTestFalcoName()
+					falco.Spec.Type = &kind
+					want := corev1.EnvVar{Name: "ARTIFACT_DOWNLOAD_TIMEOUT", Value: "2m0s"}
+					if override != nil {
+						want = *override
+						falco.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: falcoDefs.SidecarContainerName,
+								Env: []corev1.EnvVar{want}}},
+						}}
+					}
+					before := falco.DeepCopy()
+					certName, caName := "", ""
+					if secure {
+						certName, caName = "client-tls", "artifact-ca"
+					}
+					result, err := generateApplyConfiguration(falco, kind, certName, caName)
+					require.NoError(t, err)
+					var sidecar corev1.Container
+					require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(
+						mustFindContainer(t, mustGetContainers(t, result), falcoDefs.SidecarContainerName), &sidecar))
+					count := 0
+					for _, env := range sidecar.Env {
+						if env.Name == "ARTIFACT_DOWNLOAD_TIMEOUT" {
+							count++
+							assert.Equal(t, want, env)
+						}
+					}
+					assert.Equal(t, 1, count)
+					for _, env := range original.Env {
+						assert.Contains(t, sidecar.Env, env)
+					}
+					assert.Equal(t, defaults.ReadinessProbe, sidecar.ReadinessProbe)
+					assert.Equal(t, defaults.LivenessProbe, sidecar.LivenessProbe)
+					for _, mount := range defaults.VolumeMounts {
+						assert.Contains(t, sidecar.VolumeMounts, mount)
+					}
+					assert.Equal(t, before, falco)
+					assert.Equal(t, defaults, &resources.FalcoDefaults.SidecarContainers[0])
+				})
+			}
+		}
+	}
+}
 
 // buildFalcoImageStringFromVersion builds the expected Falco image string for a given
 // version, defaulting to FalcoTag when version is empty, for comparison against

@@ -18,6 +18,7 @@ package resources
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -77,4 +78,23 @@ func TestSetArtifactOperatorEnforceRequirements(t *testing.T) {
 			assert.Equal(t, "false", found.Value)
 		}
 	})
+}
+
+func TestSetArtifactDownloadTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		timeout time.Duration
+		want    string
+	}{
+		{name: "minutes", timeout: 2 * time.Minute, want: "2m0s"},
+		{name: "fractional seconds", timeout: 1500 * time.Millisecond, want: "1.5s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveSidecarEnv(t)
+			before := append([]corev1.EnvVar(nil), FalcoDefaults.SidecarContainers[0].Env...)
+			SetArtifactDownloadTimeout(tc.timeout)
+			before = append(before, corev1.EnvVar{Name: "ARTIFACT_DOWNLOAD_TIMEOUT", Value: tc.want})
+			assert.Equal(t, before, FalcoDefaults.SidecarContainers[0].Env)
+		})
+	}
 }
