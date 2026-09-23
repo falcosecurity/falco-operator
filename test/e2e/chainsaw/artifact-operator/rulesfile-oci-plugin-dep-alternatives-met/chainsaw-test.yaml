@@ -11,7 +11,7 @@ spec:
     The OCI artifact falco-test/rulesfile-plugin-dep-alternatives:latest is pushed with:
       --depends-on "json:999.0.0|container:0.1.0"
     Primary dependency: json is not installed.
-    Alternative dependency: container>=0.1.0, met by container 0.7.4.
+    Alternative dependency: container>=0.1.0, met by container 0.7.5.
 
     The instance operator stores the parsed dependency (including alternatives) in
     ArtifactMeta.Dependencies. Because the primary is absent, the per-node sidecar checks
@@ -94,7 +94,7 @@ spec:
 
     - name: "Step 04: Assert-alternative-dep-met"
       description: |
-        Primary json is absent. The loaded container 0.7.4 satisfies its alternative
+        Primary json is absent. The loaded container 0.7.5 satisfies its alternative
         requirement, so DependenciesSatisfied becomes True.
       try:
         - assert:
