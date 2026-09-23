@@ -170,19 +170,25 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
 		// would never reach the Rulesfile's own status.
 		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-		controllerhelper.ComputeAggregateConditions(ctx, rulesfile, &rulesfile.Status.Conditions, nodeSets)
+		aggregated := controllerhelper.AggregateConditions(nodeSets, rulesfile.Generation)
 
 		// The instance-level metadata failure is the more specific, authoritative cause of
 		// Programmed=False; it must win over whatever the per-node aggregate computed above.
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, metav1.Condition{
+		apimeta.SetStatusCondition(&aggregated, metav1.Condition{
 			Type:               commonv1alpha1.ConditionProgrammed.String(),
 			Status:             metav1.ConditionFalse,
 			Reason:             artifact.ReasonProgramFailed,
 			Message:            fmt.Sprintf("Failed to compute artifact metadata: %s", err.Error()),
 			ObservedGeneration: rulesfile.Generation,
 		})
-		if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
-			return ctrl.Result{}, patchErr
+		// Apply only the final outcome so unchanged failures keep their transition time
+		// and do not create status events that bypass the error retry backoff.
+		controllerhelper.LogConditionTransitions(ctx, rulesfile.Status.Conditions, aggregated)
+		controllerhelper.ApplyAggregateConditions(&rulesfile.Status.Conditions, aggregated)
+		if !apiequality.Semantic.DeepEqual(*oldStatus, rulesfile.Status) {
+			if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
 		}
 		return ctrl.Result{}, err
 	}
@@ -433,12 +439,9 @@ func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error
 			}
 			return nil
 		})).
-		For(&artifactv1alpha1.Rulesfile{}, builder.WithPredicates(predicate.Or(
-			predicate.GenerationChangedPredicate{},
-			predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				return !obj.GetDeletionTimestamp().IsZero()
-			}),
-		))).
+		// Status events must reconcile too: a cached no-op can race with an earlier
+		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
+		For(&artifactv1alpha1.Rulesfile{}).
 		Watches(&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.RulesfileList{})

@@ -1747,15 +1747,21 @@ func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
 			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "installed-rules"}
 			installRequiringRulesfile(t, r, key)
 			require.NoError(t, cl.Delete(ctx, node))
-			if failPatch {
-				watchClient, ok := cl.(client.WithWatch)
-				require.True(t, ok)
-				r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
-					SubResourceApply: func(context.Context, client.Client, string, k8sruntime.ApplyConfiguration, ...client.SubResourceApplyOption) error {
+			watchClient, ok := cl.(client.WithWatch)
+			require.True(t, ok)
+			statusWrites := 0
+			r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj k8sruntime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					statusWrites++
+					if failPatch {
 						return patchFailure
-					},
-				})
-			}
+					}
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
 			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(node)}
 			_, err = r.Reconcile(ctx, request)
 			if failPatch {
@@ -1776,6 +1782,24 @@ func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
 				condition := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
 				require.NotNil(t, condition)
 				assert.Equal(t, metav1.ConditionTrue, condition.Status)
+				for range 2 {
+					_, err = r.Reconcile(ctx, request)
+					require.NoError(t, err)
+				}
+				assert.Equal(t, 1, statusWrites, "an unchanged deletion block must not be republished")
+			} else {
+				failPatch = false
+				for range 2 {
+					_, err = r.Reconcile(ctx, request)
+					require.NoError(t, err)
+				}
+				assert.Equal(t, 2, statusWrites, "retry must publish the block once, then stop writing")
+				require.NoError(t, cl.Get(ctx, request.NamespacedName, node))
+				condition := apimeta.FindStatusCondition(node.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
+				require.NotNil(t, condition)
+				assert.Equal(t, metav1.ConditionTrue, condition.Status)
+				assert.Contains(t, node.Finalizers, pluginNodeFinalizer)
+				assert.Equal(t, installed, node.Status.InstalledArtifacts)
 			}
 
 			// Once the dependent rules are removed, normal cleanup can finish without installing.
