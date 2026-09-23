@@ -149,7 +149,7 @@ for ARCH in x86_64 aarch64; do
         "https://download.falco.org/plugins/stable/json-0.7.4-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-json-${ARCH}.tar.gz"
     curl -fsSL -L \
-        "https://download.falco.org/plugins/stable/container-0.7.4-linux-${ARCH}.tar.gz" \
+        "https://download.falco.org/plugins/stable/container-0.7.5-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-container-${ARCH}.tar.gz"
     curl -fsSL -L \
         "https://download.falco.org/plugins/stable/k8smeta-0.4.0-linux-${ARCH}.tar.gz" \
@@ -218,8 +218,8 @@ push_plugin "falco-test/plugin-json:latest" "0.7.4" "plugin-json" \
     --requires plugin_api_version:3.11.0
 
 echo ""
-echo "Pushing plugin-container (real container 0.7.4 binary, requires plugin_api_version 3.10.0)..."
-push_plugin "falco-test/plugin-container:latest" "0.7.4" "plugin-container" \
+echo "Pushing plugin-container (real container 0.7.5 binary, requires plugin_api_version 3.10.0)..."
+push_plugin "falco-test/plugin-container:latest" "0.7.5" "plugin-container" \
     --requires plugin_api_version:3.10.0
 
 echo ""

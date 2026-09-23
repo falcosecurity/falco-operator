@@ -181,7 +181,7 @@ spec:
 
     - name: "Step 07: Assert-deps-satisfied"
       description: |
-        With the container plugin loaded (0.7.4 >= 0.4.0), the dependency is met and
+        With the container plugin loaded (0.7.5 >= 0.4.0), the dependency is met and
         the rulesfile is installed: DependenciesSatisfied=True,
         OCIArtifactProgrammed=True, Programmed=True.
       try:
