@@ -38,12 +38,20 @@ The `Rulesfile` Custom Resource manages Falco detection rules. Rules can be sour
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `conditions` | `[]metav1.Condition` | `Programmed` and `ResolvedRefs` conditions |
+| `conditions` | `[]metav1.Condition` | Aggregated programming, reference and compatibility conditions from [ArtifactNode](artifactnode.md) resources |
 | `artifactMeta` | `ArtifactMeta` | Requirements and dependencies aggregated from every configured source |
 | `artifactMetaSourcesHash` | `string` | Hash of the source snapshot represented by `artifactMeta` |
 | `observedGeneration` | `int64` | Latest resource generation fully processed by the instance operator |
 
 ## Examples
+
+Compatibility enforcement is enabled by default. Declare the actual engine and
+plugin requirements in rules YAML or OCI metadata; see
+[artifact compatibility](../configuration.md#artifact-compatibility). The inline
+and ConfigMap examples below extend the default rules installed in
+[Getting Started](../getting-started.md), including its container plugin and macros.
+They target engine version `0.62.0`, reported by the default Falco 0.44.1;
+engine versions are distinct from Falco release versions.
 
 ### From OCI registry
 
@@ -91,6 +99,10 @@ metadata:
   name: custom-rules
 spec:
   inlineRules:
+    - required_engine_version: 0.62.0
+    - required_plugin_versions:
+        - name: container
+          version: 0.7.0
     - rule: Terminal shell in container
       desc: A shell was used as the entrypoint into a container with an attached terminal.
       condition: >
@@ -114,6 +126,7 @@ metadata:
   name: my-rules
 data:
   rules.yaml: |
+    - required_engine_version: 0.62.0
     - rule: Write below binary dir
       desc: An attempt to write below a binary directory.
       condition: bin_dir and evt.dir = < and open_write
@@ -157,4 +170,4 @@ spec:
 - When combining multiple sources (OCI + inline + ConfigMap), each source gets a sub-priority within the main priority.
 - The ConfigMap must contain a key named `rules.yaml` with the rules content.
 - The operator adds a finalizer to referenced ConfigMaps to prevent accidental deletion.
-- OCI artifacts are re-pulled when any of `image.repository`, `image.tag`, `registry.name`, `registry.plainHTTP`, `registry.tls.insecureSkipVerify`, `registry.auth.secretRef.name`, or the referenced auth Secret data changes. Pin `image.tag` to a digest (`sha256:...`) for strict GitOps: a mutable tag whose content moves on the registry is not detected until the spec changes or the pod restarts.
+- Restarts, auth Secret rotation and inline/ConfigMap edits do not refresh an unchanged OCI tag. See [OCI revisions](../configuration.md#oci-revisions) for explicit updates and digest pinning.

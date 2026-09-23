@@ -26,7 +26,8 @@ The `Config` Custom Resource manages Falco configuration fragments. Fragments ar
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `conditions` | `[]metav1.Condition` | `Programmed` and `ResolvedRefs` conditions |
+| `conditions` | `[]metav1.Condition` | Aggregated programming and reference conditions from [ArtifactNode](artifactnode.md) resources |
+| `observedGeneration` | `int64` | Latest resource generation fully processed by the instance operator |
 
 ## PrintColumns
 

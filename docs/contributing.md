@@ -19,18 +19,21 @@ git clone https://github.com/falcosecurity/falco-operator.git
 cd falco-operator
 ```
 
-Install development tools:
+Download the repository-local CLI tools:
 
 ```bash
-make controller-gen envtest golangci-lint
+make tools
 ```
+
+Go tools such as controller-gen, setup-envtest and golangci-lint are pinned in
+`go.mod`; Make invokes them through `go tool` without separate install targets.
 
 ## Project Structure
 
 ```
 falco-operator/
 ├── api/                          # CRD type definitions
-│   ├── artifact/v1alpha1/        # Rulesfile, Plugin, Config types
+│   ├── artifact/v1alpha1/        # Rulesfile, Plugin, Config, ArtifactNode types
 │   ├── common/v1alpha1/          # Shared types (OCIArtifact, conditions)
 │   └── instance/v1alpha1/        # Falco, Component types
 ├── cmd/
@@ -40,6 +43,7 @@ falco-operator/
 │   ├── instance/                 # Instance controllers
 │   │   ├── falco/                # Falco reconciler
 │   │   ├── component/            # Component reconciler
+│   │   ├── artifact/             # Parent metadata, cache and status aggregators
 │   │   └── reference/            # Secret/ConfigMap finalizer controllers
 │   └── artifact/                 # Artifact controllers
 │       ├── rulesfile/            # Rulesfile reconciler
@@ -47,6 +51,8 @@ falco-operator/
 │       └── config/               # Config reconciler
 ├── internal/pkg/                 # Shared internal packages
 │   ├── artifact/                 # OCI registry defaults, artifact utilities
+│   ├── artifactcache/            # Central OCI blob cache and ownership index
+│   ├── artifactserver/           # HTTP(S) delivery and mTLS authorization
 │   ├── builders/                 # Fluent builders for K8s resources
 │   ├── common/                   # Archive, conditions, finalizer, JSON, sidecar helpers
 │   ├── controllerhelper/         # Shared controller helpers (diff, deletion, finalizer, status)
@@ -57,6 +63,7 @@ falco-operator/
 │   ├── instance/                 # Shared instance reconciliation logic
 │   ├── managedfields/            # Managed fields comparison for SSA
 │   ├── mounts/                   # Volume mount helpers
+│   ├── nodeartifacts/            # Installed files, dependencies and Falco reloads
 │   ├── oci/                      # OCI client and puller
 │   ├── priority/                 # Priority ordering
 │   ├── resources/                # Pod/container generation, defaults, overlays
@@ -73,7 +80,6 @@ falco-operator/
 ├── test/
 │   └── e2e/                      # End-to-end tests
 ├── hack/                         # Helper scripts
-├── CHANGELOG.md
 ├── Makefile
 └── go.mod / go.sum
 ```
@@ -87,28 +93,31 @@ make build
 ```
 
 This produces:
-- `bin/instance-operator` — The Instance Operator (manages Falco and Component CRs)
+
+- `bin/instance-operator` — The Instance Operator (workloads, parent artifacts and central server)
 - `bin/artifact-operator` — The Artifact Operator (manages Rulesfile, Plugin, Config CRs)
 
 Build container images:
 
 ```bash
-# Build the instance operator image
-make docker-build IMG=falcosecurity/falco-operator:dev
-
-# Build the artifact operator image
-OPERATOR=artifact make docker-build IMG=falcosecurity/artifact-operator:dev
+export IMG_INSTANCE=falco-operator:dev
+export IMG_ARTIFACT=artifact-operator:dev
+make docker.build.instance docker.build.artifact
 ```
 
-> **Note on build dependency**: The instance operator embeds the artifact operator image reference at compile time via ldflags (`version.ArtifactOperatorImage`). In CI, the artifact operator image is built and pushed first, and its tag is injected into the instance operator build. For local development, the default `docker.io/falcosecurity/artifact-operator:latest` is used.
+The instance build embeds `IMG_ARTIFACT` through `version.ArtifactOperatorImage`.
+Keep this reference aligned with the artifact image you build and load. The
+lower-level `docker.build` target uses `OPERATOR` and `IMG`; the paired targets
+above set these for you.
 
 ### Generating the install manifest
 
 ```bash
-make build-installer IMG=falcosecurity/falco-operator:dev
+make installer.build IMG="$IMG_INSTANCE"
 ```
 
-This generates `dist/install.yaml` via `helm template`, aggregating CRDs, RBAC, and the operator Deployment.
+This generates `dist/install.yaml` via `helm template`, aggregating CRDs, RBAC,
+the operator Deployment and artifact Service.
 
 ### Helm chart publishing and versioning
 
@@ -121,7 +130,11 @@ Open Falco Operator chart issues and PRs in this repository; `falcosecurity/char
 
 Use SemVer for `Chart.yaml` `version`: major for breaking changes, minor for backward-compatible chart features, patch for fixes or metadata changes. Set `appVersion` to the Falco Operator version rendered by the chart when preparing a chart release.
 
-Run `make chart-docs` after changing chart values or chart documentation. Normal chart changes and version bumps must not be authored directly in `falcosecurity/charts`.
+Run `make chart.docs` after changing chart values or chart documentation. Normal chart changes and version bumps must not be authored directly in `falcosecurity/charts`.
+
+Before publishing a chart, verify its `appVersion` and rendered image against the
+release's matching operator pair, CRDs, RBAC and artifact Service. A chart install
+using an older default image does not validate current-source artifact delivery.
 
 ## Code Generation
 
@@ -144,13 +157,28 @@ This updates:
 make test
 ```
 
-Uses kubebuilder's `envtest` for integration testing against an in-memory API server.
+Uses kubebuilder's `envtest` to run a local API server and etcd for integration tests.
 
 ### E2E tests
 
 Chainsaw tests require a test cluster with the operator, KWOK and OCI fixtures
 installed. Use an absolute `KUBECONFIG` path so standalone scripts can find it
 when Chainsaw runs them from each test directory.
+
+On a dedicated local Kind cluster, build and load both images, deploy the operator,
+and populate the registry fixtures:
+
+```bash
+export CLUSTER_PROVIDER=kind
+make cluster.up WITH_TELEPRESENCE=false
+make cluster.load
+make deploy.http
+make registry.setup
+```
+
+`cluster.up` also installs KWOK and the configured PKI test dependencies. For mTLS
+coverage, use `make deploy.mtls` instead. These targets configure shared PKI
+controllers for the test namespace; do not run them against a production cluster.
 
 ```bash
 make test.chainsaw
@@ -178,7 +206,7 @@ make lint
 Fix lint issues automatically:
 
 ```bash
-make lint-fix
+make lint.fix
 ```
 
 ## Pull Request Guidelines
@@ -234,14 +262,17 @@ make install
 # Run locally with an artifact server URL reachable from Falco pods
 ARTIFACT_SERVER_URL="http://<operator-host>:8082" make run
 
-# Or deploy to the cluster
-make deploy IMG=falcosecurity/falco-operator:dev
+# Or build/load both images and deploy to the local cluster
+make cluster.load IMG_INSTANCE=falco-operator:dev IMG_ARTIFACT=artifact-operator:dev
+make deploy.http IMG_INSTANCE=falco-operator:dev IMG_ARTIFACT=artifact-operator:dev
 ```
 
 The central artifact server is required. Helm configures its in-cluster URL
 automatically; local runs must advertise a host and port reachable from the pods.
 
-> `make deploy` and `make undeploy` use the local Helm chart in [`chart/falco-operator/`](../chart/falco-operator/) under the hood (via `helm upgrade --install` and `helm uninstall`). This is the same chart that gets published to `falcosecurity/charts` — see [Helm chart publishing and versioning](#helm-chart-publishing-and-versioning).
+`make deploy.http`, `make deploy.mtls` and `make undeploy` use the local Helm chart
+in [`chart/falco-operator/`](../chart/falco-operator/), via `helm upgrade --install`
+and `helm uninstall`. See [Helm chart publishing and versioning](#helm-chart-publishing-and-versioning).
 
 Clean up:
 

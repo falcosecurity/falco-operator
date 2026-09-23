@@ -56,16 +56,19 @@ mtls:
   # the Falco controller creates a unique per-instance client certificate (with a SPIFFE URI
   # SAN identifying the instance) for every Falco instance's artifact-operator sidecar, and the
   # operator's ClusterRole gains permission to create cert-manager Certificate objects. When
-  # false (the default), the artifact server runs over plain HTTP, unchanged from today: no
-  # cert-manager dependency at all, and clusters using a service mesh for transport-level mTLS
-  # instead can safely leave this off.
+  # false (the default), the artifact server runs over plain HTTP without application-level
+  # authentication or namespace authorization, and has no cert-manager dependency. Mesh mTLS
+  # alone does not enable these checks; restrict access with network/mesh authorization policies.
   enabled: false
 
   # -- If true, this chart bootstraps its own private CA (a self-signed Issuer, a CA
   # Certificate, and a ClusterIssuer) and a trust-manager Bundle that distributes that CA to any
-  # namespace labeled trustLabel below. If false, set issuerName to an existing ClusterIssuer
-  # you manage yourself, and handle trust distribution to Falco instances' namespaces on your own
-  # (this chart never creates a Bundle when createIssuer is false).
+  # namespace labeled trustLabel below. The CA Secret lives in the release namespace, which must
+  # match cert-manager's --cluster-resource-namespace and trust-manager's app.trust.namespace.
+  # These are shared controller settings: do not change them blindly on an existing PKI.
+  # If false, set issuerName to an existing ClusterIssuer you manage yourself, and distribute
+  # trust to BOTH the operator and Falco namespaces (this chart creates no Bundle in that mode).
+  # See docs/installation.md for onboarding and issuance-policy requirements.
   createIssuer: true
 
   # -- Name of the ClusterIssuer used to sign the server and per-instance client certificates.
@@ -84,10 +87,10 @@ mtls:
   caBundleConfigMapName: ""
 
   # -- Label applied to namespaces that should receive the CA trust bundle via trust-manager
-  # (only relevant when createIssuer is true). A cluster admin must label a Falco instance's
-  # namespace with this key=true before that instance can complete mTLS setup; this chart never
+  # (only relevant when createIssuer is true). A cluster admin must label BOTH the operator's
+  # namespace and every Falco namespace with this key=true before mTLS setup; this chart never
   # labels namespaces on its own (a deliberate, explicit, admin-approves-trust step). Without it,
-  # a Falco instance's sidecar has no CA bundle ConfigMap to mount and its pod will sit stuck in
+  # the operator or a Falco sidecar has no CA bundle ConfigMap to mount and its pod will sit stuck in
   # ContainerCreating.
   trustLabel: artifact.falcosecurity.dev/trust
 

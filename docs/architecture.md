@@ -1,139 +1,117 @@
 # Architecture
 
-The Falco Operator manages Falco deployments, companion components, and runtime artifacts in Kubernetes through a set of cooperating controllers.
-
-![Falco Operator Architecture](./images/falco-operator-architecture.svg)
+The Falco Operator manages Falco workloads, companion components and runtime artifacts through two cooperating binaries.
 
 ## Components
 
 ### Falco Operator (Instance Controller)
 
-The Falco Operator is the primary component that users install and interact with. It runs as a Deployment in the `falco-operator` namespace and watches for Custom Resources in the `instance.falcosecurity.dev` and `artifact.falcosecurity.dev` API groups.
+The instance operator runs as a Deployment, in `falco-operator` by default.
+It registers seven controllers:
 
-The instance operator binary registers four controllers:
-1. **Falco controller** — Reconciles `Falco` CRs
-2. **Component controller** — Reconciles `Component` CRs
-3. **ConfigMap reference controller** — Manages referenced ConfigMap finalizers
-4. **Secret reference controller** — Manages referenced Secret finalizers
+| Controllers | Responsibility |
+|-------------|----------------|
+| Falco and Component | Manage workloads, base configuration, Services and RBAC |
+| ConfigMap and Secret references | Protect referenced resources with finalizers |
+| Rulesfile, Plugin and Config aggregators | Process metadata, assign ArtifactNodes and aggregate per-node status |
 
-**Responsibilities:**
-- Reconcile `Falco` CRs into DaemonSets or Deployments
-- Reconcile `Component` CRs into Deployments for companion services
-- Manage RBAC resources (ServiceAccount, Role, RoleBinding, ClusterRole, ClusterRoleBinding)
-- Create Services for pod discovery
-- Create ConfigMaps with base Falco configuration
-- Deploy the Artifact Operator as a native sidecar in each Falco pod
-- Track Secret and ConfigMap references with finalizers
+For OCI sources, the instance operator resolves metadata and a digest, pulls the
+required files into its local cache, and serves them over the artifact Service
+(port 8082). Registry credentials are read from the artifact's namespace. Plugin
+files are cached for the operating systems and architectures of target nodes.
+Inline and ConfigMap rules also contribute compatibility metadata.
 
-**Reconciliation flow for Falco CRs:**
-1. Fetch the Falco CR
-2. Handle deletion (cleanup via finalizers)
-3. Create RBAC resources
-4. Create a Service
-5. Create a ConfigMap with base configuration
-6. Apply defaults (engine mode, resource limits, probes)
-7. Set finalizer for graceful deletion
-8. Create the DaemonSet or Deployment with the Artifact Operator as a native sidecar
+The Falco controller creates the Artifact Operator container and shared volumes
+in each Falco pod. With application mTLS enabled, it also manages a per-instance
+client Certificate. The chart supplies the server Certificate and trust settings.
 
 ### Artifact Operator (Sidecar Controller)
 
-The Artifact Operator runs as a **native sidecar container** (Kubernetes 1.29+) in each Falco pod. It watches for Custom Resources in the `artifact.falcosecurity.dev` API group and delivers artifacts to the Falco container via shared `emptyDir` volumes.
+The Artifact Operator is a regular container in `spec.containers`, not a
+restartable init container. Falco starts alongside it with the base configuration.
+The sidecar waits for Falco's `/versions` API before starting its three artifact
+controllers.
 
-**Responsibilities:**
-- Watch for `Rulesfile`, `Plugin`, and `Config` CRs
-- Download OCI artifacts (rules and plugin binaries)
-- Resolve inline definitions and ConfigMap references
-- Write artifacts to the shared filesystem with priority ordering
-- Manage plugin configuration entries
-- Record Kubernetes events for all operations
+The sidecar reconciles ArtifactNodes assigned to its node and watches their parent
+artifacts in its namespace. It checks compatibility, downloads OCI files from the central server, reads
+inline and ConfigMap sources, and writes files to shared `emptyDir` volumes.
+It manages generated plugin configuration and reports per-node installation
+state in operator-owned [ArtifactNode](crds/artifactnode.md) resources.
 
-**Three controllers handle different artifact types:**
-
-| Controller | Artifact Type | Sources | Output Path |
-|------------|--------------|---------|-------------|
-| Rulesfile | Detection rules (`.yaml`) | OCI artifact, inline YAML, ConfigMap | Shared rulesfiles volume |
-| Plugin | Plugin binaries (`.so`) | OCI artifact | Shared plugins volume |
-| Config | Configuration fragments (`.yaml`) | Inline YAML, ConfigMap | Shared config volume |
+| Controller | Sources | Falco path |
+|------------|---------|------------|
+| Rulesfile | OCI, inline YAML, ConfigMap | `/etc/falco/rules.d` |
+| Plugin | OCI binary, plugin configuration | `/usr/share/falco/plugins` and `/etc/falco/config.d` |
+| Config | Inline YAML, ConfigMap | `/etc/falco/config.d` |
 
 ### Interaction Between Components
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                     Kubernetes API Server                        │
-│                                                                  │
-│  Falco CR   Component CR   Rulesfile CR   Plugin CR   Config CR  │
-└─────┬───────────┬──────────────┬────────────┬──────────┬─────────┘
-      │           │              │            │          │
-      ▼           ▼              ▼            ▼          ▼
-┌──────────────────────┐
-│   Falco Operator     │   Watches all CRDs, reconciles
-│   (Deployment)       │   Falco instances, Components,
-│                      │   and reference finalizers
-└───┬──────────┬───────┘
-    │          │ creates
-    │          ▼
-    │  ┌───────────────────────────────────────────────────┐
-    │  │  Falco Pod (per node or replica)                  │
-    │  │                                                   │
-    │  │  ┌──────────────────┐  ┌───────────────────────┐  │
-    │  │  │ Artifact Operator│  │   Falco Container     │  │
-    │  │  │ (native sidecar) │  │                       │  │
-    │  │  │                  │  │   modern_ebpf /       │  │
-    │  │  │ Watches artifact │  │   nodriver            │  │
-    │  │  │ CRs, downloads   │  │                       │  │
-    │  │  │ OCI artifacts,   │  │  Reads:               │  │
-    │  │  │ writes to shared │  │   /etc/falco/rules.d  │  │
-    │  │  │ volumes ─────────┼──┼─► /etc/falco/config.d │  │
-    │  │  │                  │  │   /usr/share/falco/   │  │
-    │  │  │                  │  │     plugins/          │  │
-    │  │  └──────────────────┘  └───────────────────────┘  │
-    │  └───────────────────────────────────────────────────┘
-    │ creates
-    ▼
-┌──────────────────────────────┐
-│  Component Deployment        │  e.g., k8s-metacollector
-│  (per Component CR)          │
-└──────────────────────────────┘
+```text
+User CRs: Falco / Component / Rulesfile / Plugin / Config
+                         |
+                         v
+             Instance operator Deployment
+             | workloads, metadata, aggregate status
+OCI registry --> local cache --> artifact HTTP(S) Service
+                                      |
+                                      v
+             Falco pod: Artifact Operator sidecar
+             | inline/ConfigMap sources from Kubernetes
+             | compatibility checks and file installation
+             +--> ArtifactNode status --> parent aggregation
+             |
+             v
+             shared emptyDir files --> Falco reads/reloads
 ```
 
-Users only need to install the Falco Operator Deployment. The Artifact Operator is automatically deployed as a sidecar alongside each Falco instance — users never interact with it directly.
+The cache and installed volumes have different owners and lifetimes. A sidecar
+restart preserves the pod's volumes; pod recreation does not. A missing server
+cache entry can be rebuilt from the resolved digest while sidecars retry.
+Already-installed files remain available during download failures. See
+[operator replicas and artifact downloads](configuration.md#operator-replicas-and-artifact-downloads)
+for leader routing and cache recovery.
 
 ## Custom Resource Design
 
 ### API Groups
 
-| API Group | Scope | CRDs |
-|-----------|-------|------|
-| `instance.falcosecurity.dev/v1alpha1` | Cluster-level instance management | `Falco`, `Component` |
-| `artifact.falcosecurity.dev/v1alpha1` | Per-node artifact delivery | `Rulesfile`, `Plugin`, `Config` |
+All custom resources are namespaced.
+
+| API Group | CRDs |
+|-----------|------|
+| `instance.falcosecurity.dev/v1alpha1` | User-managed `Falco`, `Component` |
+| `artifact.falcosecurity.dev/v1alpha1` | User-managed `Rulesfile`, `Plugin`, `Config`; operator-managed `ArtifactNode` |
 
 ### Status and Conditions
 
-All CRDs report status through Kubernetes conditions:
+Instance resources report `Reconciled` and `Available`. Artifact parents report
+aggregated node conditions and `status.observedGeneration`; Rulesfile and Plugin
+also hold resolved metadata. Per-node conditions distinguish reference resolution,
+compatibility, source installation, generated plugin configuration and blocked
+deletion. See the [ArtifactNode reference](crds/artifactnode.md).
 
-**Instance CRDs (`Falco`, `Component`):**
-- `Reconciled` — Whether the last reconciliation succeeded
-- `Available` — Whether the service is ready
-
-**Artifact CRDs (`Rulesfile`, `Plugin`, `Config`):**
-- `Programmed` — Whether the artifact is successfully applied
-- `ResolvedRefs` — Whether all referenced resources (ConfigMaps, Secrets) exist
+Desired configuration, installed files and Falco's loaded runtime state are
+distinct. `Programmed=True` is not a reload acknowledgement. Check current
+generations, installed files and Falco behavior when verifying an update.
+[Reloads are best effort](configuration.md#artifact-reloads).
 
 ### Reference Protection
 
-The operator uses Kubernetes finalizers to protect referenced resources:
+The operator protects referenced resources with these finalizers:
 
-- `artifact.falcosecurity.dev/secret-in-use` — Prevents deletion of Secrets referenced by OCI artifact credentials
-- `artifact.falcosecurity.dev/configmap-in-use` — Prevents deletion of ConfigMaps referenced by Rulesfile or Config resources
+- `artifact.falcosecurity.dev/secret-in-use`: Secrets holding registry credentials.
+- `artifact.falcosecurity.dev/configmap-in-use`: ConfigMaps referenced by rules or configuration.
+
+Artifact finalizers also track cleanup. Plugin removal can wait for installed rules that still
+depend on it. Remove artifacts before the Falco workloads that run their cleanup
+controllers; see [uninstall](installation.md#uninstall).
 
 ## Reconciliation Strategy
 
-All controllers use **Server-Side Apply (SSA)** for resource management:
-
-- The operator only manages fields it owns, leaving user-applied changes intact
-- Concurrent modifications to managed fields are detected and reported
-- Managed fields comparison prevents unnecessary API calls (spurious updates)
-- Finalizer operations use Patch instead of Update for safety
+Controllers use Server-Side Apply for managed resources and status, and patches
+for finalizers. Field ownership limits unrelated changes; ownership conflicts
+still require investigation. Reconciliation retries incomplete work rather than
+treating a successful API write as proof of installed files or loaded Falco state.
 
 ## Default Configuration
 
@@ -162,6 +140,6 @@ All controllers use **Server-Side Apply (SSA)** for resource management:
 | Setting | Value |
 |---------|-------|
 | Image | Configurable via `ARTIFACT_OPERATOR_IMAGE` env var |
-| Default image | `docker.io/falcosecurity/artifact-operator:latest` |
+| Default image | Matching release image embedded at build time; local fallback is `latest` |
 | Probes | Startup (`/readyz`, 3s delay), Readiness (`/readyz`, 5s delay), Liveness (`/healthz`, 15s delay) — all on port 8081 |
 | Volumes | 3 shared `emptyDir` volumes (config, rulesfiles, plugins) |

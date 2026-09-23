@@ -20,5 +20,5 @@ The two are independent — you can do them at different times. If you need to d
 ## Related documentation
 
 - [Installation](installation.md) — Install with Helm or YAML manifest, including upgrade and uninstall instructions.
-- [CHANGELOG](../CHANGELOG.md) — Per-release notes for the operator.
+- [Operator releases](https://github.com/falcosecurity/falco-operator/releases): per-release notes for the operator.
 - [Chart CHANGELOG](../chart/falco-operator/CHANGELOG.md) — Per-release notes for the Helm chart.

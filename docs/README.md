@@ -21,6 +21,7 @@ Complete documentation for the [Falco Operator](https://github.com/falcosecurity
 | &nbsp;&nbsp;[Plugin](crds/plugin.md) | Plugin management from OCI registries |
 | &nbsp;&nbsp;[Config](crds/config.md) | Configuration fragments |
 | &nbsp;&nbsp;[Component](crds/component.md) | Companion components (e.g., k8s-metacollector) |
+| &nbsp;&nbsp;[ArtifactNode](crds/artifactnode.md) | Operator-managed per-node artifact installation status |
 
 
 ## Quick Links

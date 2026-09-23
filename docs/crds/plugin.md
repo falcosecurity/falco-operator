@@ -33,7 +33,9 @@ The `Plugin` Custom Resource manages Falco plugins. Plugin binaries are download
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `conditions` | `[]metav1.Condition` | `Programmed` and `ResolvedRefs` conditions |
+| `conditions` | `[]metav1.Condition` | Aggregated programming, reference, compatibility and deletion-blocked conditions from [ArtifactNode](artifactnode.md) resources |
+| `artifactMeta` | `ArtifactMeta` | Resolved OCI digest, requirements and plugin metadata |
+| `observedGeneration` | `int64` | Latest resource generation fully processed by the instance operator |
 
 ## Examples
 
@@ -99,4 +101,6 @@ spec:
 - When `config.name` is not specified, the operator derives it from the OCI artifact metadata.
 - The operator manages plugin configuration entries in the shared Falco config automatically.
 - The operator adds a finalizer to referenced Secrets to prevent accidental deletion.
-- OCI artifacts are re-pulled when any of `image.repository`, `image.tag`, `registry.name`, `registry.plainHTTP`, `registry.tls.insecureSkipVerify`, `registry.auth.secretRef.name`, or the referenced auth Secret data changes. Pin `image.tag` to a digest (`sha256:...`) for strict GitOps: a mutable tag whose content moves on the registry is not detected until the spec changes or the pod restarts.
+- OCI plugins without compatibility requirements in their metadata are blocked by default; see [artifact compatibility](../configuration.md#artifact-compatibility).
+- Restarts and auth Secret rotation do not refresh an unchanged OCI tag. See [OCI revisions](../configuration.md#oci-revisions) for explicit updates and digest pinning.
+- Removal can be blocked while installed rules still depend on this plugin. Inspect `DeletionBlocked` and remove or update the dependent rules before deleting it; do not strip finalizers to bypass cleanup.

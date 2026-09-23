@@ -12,6 +12,11 @@ kubectl wait pods --for=condition=Ready --all -n falco-operator
 
 Then choose how you want to get started:
 
+If application mTLS is enabled, first label the namespace where you will create
+Falco and verify its trust ConfigMap as described in
+[mTLS onboarding](installation.md#artifact-transport-and-mtls). The full-stack
+quickstart uses `falco`; the individual examples use your current kubectl namespace.
+
 ## Full Stack Quickstart
 
 Deploy the entire Falco ecosystem in the `falco` namespace with one command:

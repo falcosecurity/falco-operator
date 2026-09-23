@@ -11,10 +11,10 @@ The Kubernetes-native way to deploy and manage [Falco](https://falco.org). The F
 
 The Falco Operator brings two components that work together:
 
-- **Falco Operator** — Manages the lifecycle of Falco instances (DaemonSet or Deployment mode) and companion components (e.g., k8s-metacollector, falcosidekick, falcosidekick-ui)
-- **Artifact Operator** — Manages rules, plugins, and configuration fragments (runs as a native sidecar in each Falco pod)
+- **Falco Operator**: manages Falco instances, companion components, artifact metadata and the central OCI cache/server.
+- **Artifact Operator**: installs rules, plugins and configuration fragments as a regular sidecar container in each Falco pod.
 
-Five Custom Resource Definitions provide a declarative API:
+Five user-managed Custom Resource Definitions provide a declarative API; a sixth records per-node artifact delivery:
 
 | CRD | API Group | Purpose |
 |-----|-----------|---------|
@@ -23,12 +23,11 @@ Five Custom Resource Definitions provide a declarative API:
 | [`Rulesfile`](docs/crds/rulesfile.md) | `artifact.falcosecurity.dev/v1alpha1` | Detection rules (OCI, inline, ConfigMap) |
 | [`Plugin`](docs/crds/plugin.md) | `artifact.falcosecurity.dev/v1alpha1` | Falco plugins from OCI registries |
 | [`Config`](docs/crds/config.md) | `artifact.falcosecurity.dev/v1alpha1` | Configuration fragments (inline, ConfigMap) |
+| [`ArtifactNode`](docs/crds/artifactnode.md) | `artifact.falcosecurity.dev/v1alpha1` | Operator-managed per-node installation status |
 
 ## Architecture
 
-![Falco Operator Architecture](docs/images/falco-operator-architecture.svg)
-
-Users only need to install the Falco Operator Deployment. The Artifact Operator is automatically deployed as a native sidecar (Kubernetes 1.29+) alongside each Falco instance. Artifacts are delivered to Falco through shared `emptyDir` volumes.
+Users install the Falco Operator Deployment. It resolves OCI artifacts and serves cached files to the Artifact Operator in each Falco pod. The sidecar also reads inline and ConfigMap sources, writes shared `emptyDir` volumes, and records installation state in `ArtifactNode` resources. Falco reads the installed files and reloads them on a best-effort basis.
 
 For details, see the [Architecture documentation](docs/architecture.md).
 
