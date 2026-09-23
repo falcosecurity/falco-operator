@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -1157,7 +1158,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 				mockFS := fsfake.NewMockFileSystem()
 				path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), "plugins-config",
 					priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig)
-				mockFS.WriteErrFor = map[string]error{path + ".tmp": tt.writeErr}
+				mockFS.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp"): tt.writeErr}
 				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			}
 

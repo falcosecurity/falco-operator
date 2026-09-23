@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -413,7 +414,7 @@ func TestWarmSync_PluginConfigRepairPrecedesOrphanRemoval(t *testing.T) {
 			original := string(fs.Files[config.Path])
 			cl := fake.NewClientBuilder().WithScheme(newWarmSyncTestScheme(t)).
 				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
-			fs.WriteErrFor = map[string]error{config.Path + ".tmp": assert.AnError}
+			fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(config.Path), ".tmp", filepath.Base(config.Path)+".tmp"): assert.AnError}
 			after := nodeartifacts.NewManager(store, versions)
 
 			require.Error(t, nodeartifacts.WarmSync(ctx, cl, after, plugin.Namespace, "node"))

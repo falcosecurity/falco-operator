@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -939,9 +940,9 @@ func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testin
 			case readFailure:
 				fs.ReadErrFor = map[string]error{file.Path: ioErr}
 			case writeFailure:
-				fs.WriteErrFor = map[string]error{file.Path + ".tmp": ioErr}
+				fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): ioErr}
 			case renameFailure:
-				fs.RenameErrFor = map[string]error{file.Path + ".tmp": ioErr}
+				fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): ioErr}
 			}
 
 			err = after.restorePluginsConfig(ctx, nil)
@@ -964,7 +965,7 @@ func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testin
 			assert.Empty(t, after.pluginsConfig.Configs)
 			assert.Empty(t, after.pluginsConfig.LoadPlugins)
 			assert.Empty(t, after.pluginConfigOwners)
-			assert.NotContains(t, fs.Files, file.Path+".tmp")
+			assert.NotContains(t, fs.Files, filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"))
 			assert.Contains(t, string(fs.Files[file.Path]), "plugins: []")
 			intact, err := after.Verify(ctx, after.FindInstalled(PluginConfigKey, artifact.MediumInline))
 			require.NoError(t, err)
@@ -1001,7 +1002,7 @@ func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 			_, file, err := m.AddPluginConfig(ctx, plugin, fetcher)
 			require.NoError(t, err)
 			before := string(fs.Files[file.Path])
-			fs.WriteErrFor = map[string]error{file.Path + ".tmp": fmt.Errorf("disk full")}
+			fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): fmt.Errorf("disk full")}
 			switch operation {
 			case removeOperation:
 				err = m.RemovePluginConfig(ctx, fetcher, plugin)
