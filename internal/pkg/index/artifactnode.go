@@ -29,8 +29,7 @@ import (
 const ArtifactNodeOwnerKind = "ArtifactNodeOwnerKind"
 
 // ArtifactNodeNodeName is the field index name for ArtifactNode indexed by Spec.NodeName.
-// Used by the per-node artifact-operator sidecar's warm sync (nodeartifacts.WarmSync) to list
-// only the ArtifactNodes assigned to its own node, once the manager's cache has synced.
+// Used by WarmSync and per-node controllers to find ArtifactNodes assigned to the same node.
 const ArtifactNodeNodeName = "ArtifactNodeNodeName"
 
 // ArtifactNodeIndexes holds all field indexes for ArtifactNode resources.

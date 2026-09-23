@@ -36,17 +36,11 @@ import (
 // determine which observed aggregate entries remain owned; historical rule dependencies
 // are not recovered and must be registered by normal source reconciliation.
 //
-// cl is expected to be the manager's own cache-backed client (mgr.GetClient()): WarmSync is
-// only ever called from WarmSyncRunnable.Warmup, which controller-runtime guarantees runs after
-// the manager's cache has synced (see WarmSyncRunnable's doc comment); so the
-// index.ArtifactNodeNodeName field index below is safe to use, giving a real cached indexed
-// lookup instead of a label-selector List.
-func WarmSync(ctx context.Context, cl client.Client, mgr *Manager, namespace, nodeName string) error {
+// Call after the manager cache has synced, but before controllers start. The reader must
+// provide the ArtifactNodeNodeName index; labels are not authoritative for node assignment.
+func WarmSync(ctx context.Context, cl client.Reader, mgr *Manager, namespace, nodeName string) error {
 	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	if err := cl.List(ctx, nodeList,
-		client.InNamespace(namespace),
-		client.MatchingFields{index.ArtifactNodeNodeName: nodeName},
-	); err != nil {
+	if err := cl.List(ctx, nodeList, client.InNamespace(namespace), client.MatchingFields{index.ArtifactNodeNodeName: nodeName}); err != nil {
 		return fmt.Errorf("listing ArtifactNodes for warm sync: %w", err)
 	}
 	pluginList := &artifactv1alpha1.PluginList{}
