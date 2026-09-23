@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -126,6 +127,7 @@ func main() {
 	var artifactCacheDir string
 	var artifactCacheEvictionGracePeriod time.Duration
 	var artifactServerURL string
+	var clusterDomain string
 	var artifactDownloadTimeout time.Duration
 	var artifactServerCertPath, artifactServerCertName, artifactServerCertKey string
 	var artifactServerClientCAFile string
@@ -148,6 +150,7 @@ func main() {
 		"URL of the artifact HTTP server to advertise to artifact-operator sidecars. "+
 			"Overrides the default in-cluster URL derived from OPERATOR_NAMESPACE. "+
 			"Useful when running the operator outside the cluster (e.g. during local development).")
+	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Cluster DNS domain used for the default artifact server URL.")
 	flag.DurationVar(&artifactDownloadTimeout, "artifact-download-timeout", artifact.DefaultDownloadTimeout,
 		"Maximum duration of one complete download from the artifact server, injected into artifact-operator sidecars. Must be positive.")
 	flag.StringVar(&artifactServerCertPath, "artifact-server-cert-path", "",
@@ -219,7 +222,7 @@ func main() {
 			serviceName = "falco-operator"
 		}
 		var err error
-		artifactServerURL, err = artifactServiceURL(operatorNamespace, serviceName, artifactServeAddr, artifactServerCertPath != "")
+		artifactServerURL, err = artifactServiceURL(operatorNamespace, serviceName, clusterDomain, artifactServeAddr, artifactServerCertPath != "")
 		if err != nil {
 			setupLog.Error(err, "unable to derive artifact server URL")
 			os.Exit(1)
@@ -546,7 +549,10 @@ func main() {
 	}
 }
 
-func artifactServiceURL(namespace, serviceName, bindAddress string, secure bool) (string, error) {
+func artifactServiceURL(namespace, serviceName, clusterDomain, bindAddress string, secure bool) (string, error) {
+	if problems := validation.IsDNS1123Subdomain(clusterDomain); len(problems) != 0 {
+		return "", fmt.Errorf("invalid cluster DNS domain %q: %s", clusterDomain, strings.Join(problems, "; "))
+	}
 	_, port, err := net.SplitHostPort(bindAddress)
 	if err != nil {
 		return "", fmt.Errorf("invalid artifact server bind address: %w", err)
@@ -555,6 +561,6 @@ func artifactServiceURL(namespace, serviceName, bindAddress string, secure bool)
 	if secure {
 		scheme = "https"
 	}
-	host := net.JoinHostPort(serviceName+"."+namespace+".svc.cluster.local", port)
+	host := net.JoinHostPort(serviceName+"."+namespace+".svc."+clusterDomain, port)
 	return scheme + "://" + host, nil
 }

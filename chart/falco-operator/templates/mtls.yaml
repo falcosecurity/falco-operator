@@ -88,7 +88,7 @@ metadata:
 spec:
   secretName: {{ include "falco-operator.fullname" . }}-artifact-server-tls
   dnsNames:
-    - {{ include "falco-operator.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+    - {{ include "falco-operator.fullname" . }}.{{ .Release.Namespace }}.svc.{{ include "falco-operator.clusterDomain" . }}
   duration: {{ .Values.mtls.server.certDuration }}
   renewBefore: {{ .Values.mtls.server.certRenewBefore }}
   issuerRef:

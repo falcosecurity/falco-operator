@@ -167,6 +167,18 @@ The following container names are reserved by the operator:
 
 You can customize these containers in `podTemplateSpec` by matching their names.
 
+## Artifact Server DNS
+
+The artifact server URL uses the cluster DNS domain, which defaults to
+`cluster.local`. For a different domain, set the Helm value `clusterDomain` to the
+domain configured in your cluster. This updates both the advertised URL and the
+server certificate when mTLS is enabled.
+
+For installations without Helm, configure the instance operator with
+`--cluster-domain` or `CLUSTER_DOMAIN`, and ensure any server certificate covers
+the resulting Service hostname. An explicit `ARTIFACT_SERVER_URL` still overrides
+the generated URL and requires a certificate matching that URL when using TLS.
+
 ## Artifact Reloads
 
 With Falco versions before 0.45, artifact reloads are **best effort**. By default,

@@ -48,6 +48,7 @@ The following table lists the configurable parameters of the falco-operator char
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity rules |
+| clusterDomain | string | `"cluster.local"` | Cluster DNS domain, used for the artifact server URL and its TLS certificate. |
 | dnsConfig | object | `{}` | Pod DNS config. Requires dnsPolicy to be set to None to take full effect. |
 | dnsPolicy | string | `""` | Pod DNS policy. One of ClusterFirst, ClusterFirstWithHostNet, Default or None. |
 | enforceRequirements | bool | `true` | When false, the artifact-operator sidecar installs artifacts regardless of Falco version or plugin dependency constraints. Useful when compatibility metadata is unavailable or incorrect. |

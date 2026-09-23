@@ -27,6 +27,9 @@ nameOverride: ""
 # -- Full name override for the chart
 fullnameOverride: ""
 
+# -- Cluster DNS domain, used for the artifact server URL and its TLS certificate.
+clusterDomain: cluster.local
+
 # -- Service account configuration
 serviceAccount:
   # -- Specifies whether a service account should be created
