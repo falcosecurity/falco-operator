@@ -19,18 +19,25 @@ package config
 import (
 	"context"
 	"fmt"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -141,6 +148,144 @@ func TestReconcile_NotFound(t *testing.T) {
 	result, err := r.Reconcile(context.Background(), testutil.Request("nonexistent"))
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+// Parent status can land after a reconcile observed an older cached healthy value.
+// With no further child/spec events, the parent's own status event must restore the
+// aggregate, and the resulting self-event must not cause an endless status-write loop.
+func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition *metav1.Condition
+	}{
+		{name: "pending condition", condition: &metav1.Condition{
+			Type: "Programmed", Status: metav1.ConditionUnknown, Reason: "Pending", Message: "Intermediate aggregate",
+		}},
+		{name: "missing condition"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := &envtest.Environment{
+				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				ErrorIfCRDPathMissing: true,
+			}
+			cfg, err := environment.Start()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, environment.Stop()) })
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			skipNameValidation := true
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
+			})
+			require.NoError(t, err)
+			for _, idx := range index.All {
+				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
+			}
+			direct, err := client.New(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			cached, err := client.NewWithWatch(cfg, client.Options{
+				Scheme: scheme, Cache: &client.CacheOptions{Reader: mgr.GetCache()},
+			})
+			require.NoError(t, err)
+			var statusApplies atomic.Int32
+			counted := interceptor.NewClient(cached, interceptor.Funcs{
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					if subresource == "status" {
+						statusApplies.Add(1)
+					}
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
+			r := NewConfigAggregatorReconciler(counted, scheme)
+			require.NoError(t, r.SetupWithManager(mgr))
+
+			parent := newTestConfig()
+			require.NoError(t, direct.Create(t.Context(), parent))
+			require.NoError(t, direct.Create(t.Context(), newTestNode()))
+			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
+			pod := newRunningFalcoPod()
+			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
+			require.NoError(t, direct.Create(t.Context(), pod))
+			pod.Status.Phase = corev1.PodRunning
+			require.NoError(t, direct.Status().Update(t.Context(), pod))
+			child := newTestConfigNode()
+			child.OwnerReferences[0].UID = parent.UID
+			require.NoError(t, direct.Create(t.Context(), child))
+			child.Status.Conditions = []metav1.Condition{{
+				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
+				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
+			}}
+			require.NoError(t, direct.Status().Update(t.Context(), child))
+			childVersion := child.ResourceVersion
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- mgr.Start(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(10 * time.Second):
+					t.Error("manager did not stop")
+				}
+			})
+			key := client.ObjectKeyFromObject(parent)
+			healthy := func(cl client.Reader) bool {
+				current := &artifactv1alpha1.Config{}
+				if err := cl.Get(ctx, key, current); err != nil {
+					return false
+				}
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, "Programmed")
+				return condition != nil && condition.Status == metav1.ConditionTrue &&
+					condition.ObservedGeneration == current.Generation
+			}
+			waitForQuiet := func() {
+				t.Helper()
+				lastCount, lastChange := statusApplies.Load(), time.Now()
+				require.Eventually(t, func() bool {
+					count := statusApplies.Load()
+					if count != lastCount {
+						lastCount, lastChange = count, time.Now()
+					}
+					return time.Since(lastChange) >= 500*time.Millisecond
+				}, 5*time.Second, 20*time.Millisecond, "status Apply calls must settle")
+			}
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				10*time.Second, 20*time.Millisecond)
+			waitForQuiet()
+			require.NoError(t, direct.Get(ctx, key, parent))
+			generation := parent.Generation
+			beforeCorrection := statusApplies.Load()
+
+			// Simulate an intermediate aggregate write landing after the healthy-child event
+			// was consumed. No child update, spec change or manual reconcile follows this write.
+			if tc.condition == nil {
+				apimeta.RemoveStatusCondition(&parent.Status.Conditions, "Programmed")
+			} else {
+				condition := *tc.condition
+				condition.ObservedGeneration = generation
+				apimeta.SetStatusCondition(&parent.Status.Conditions, condition)
+			}
+			require.NoError(t, direct.Status().Update(ctx, parent))
+			require.Equal(t, generation, parent.Generation)
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				5*time.Second, 20*time.Millisecond, "a status-only parent event must restore the healthy child aggregate")
+			waitForQuiet()
+			afterCorrection := statusApplies.Load()
+			require.Positive(t, afterCorrection-beforeCorrection, "recovery must apply corrected status")
+			require.LessOrEqual(t, afterCorrection-beforeCorrection, int32(3), "self-events must not cause a status-write storm")
+			require.Never(t, func() bool { return statusApplies.Load() != afterCorrection },
+				500*time.Millisecond, 20*time.Millisecond, "a settled aggregate must remain a write-free no-op")
+			require.NoError(t, direct.Get(ctx, key, parent))
+			require.Equal(t, generation, parent.Generation, "recovery must not require a spec update")
+			require.NoError(t, direct.Get(ctx, client.ObjectKeyFromObject(child), child))
+			require.Equal(t, childVersion, child.ResourceVersion, "the child must remain unchanged throughout recovery")
+		})
+	}
 }
 
 func TestReconcile_GetError(t *testing.T) {

@@ -18,8 +18,11 @@ package component
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,11 +30,14 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -337,6 +343,149 @@ func TestReconcile_StatusPersisted(t *testing.T) {
 
 	// Verify DesiredReplicas is set.
 	assert.Equal(t, int32(1), fetched.Status.DesiredReplicas)
+}
+
+func TestReconcile_UnchangedStatus(t *testing.T) {
+	for _, cachedState := range []string{"current", "condition order", "transition time"} {
+		t.Run(cachedState, func(t *testing.T) {
+			ctx := context.Background()
+			comp := createComponent(t, ctx, &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "test-status-noop-", Namespace: testutil.TestNamespace},
+				Spec:       instancev1alpha1.ComponentSpec{Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector}},
+			})
+			key := client.ObjectKeyFromObject(comp)
+			r := newTestReconciler()
+			reconcileN(t, ctx, r, comp.Name, 4)
+			current := &instancev1alpha1.Component{}
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			require.Len(t, current.Status.Conditions, 2)
+			cached := current.DeepCopy()
+			switch cachedState {
+			case "condition order":
+				slices.Reverse(cached.Status.Conditions)
+			case "transition time":
+				cached.Status.Conditions[0].LastTransitionTime = metav1.NewTime(cached.Status.Conditions[0].LastTransitionTime.Add(-time.Minute))
+			}
+			// Seed two real API versions; only the parent read lags behind the latest one.
+			require.NoError(t, r.patchStatus(ctx, cached))
+			require.NoError(t, k8sClient.Get(ctx, key, cached))
+			require.NoError(t, r.patchStatus(ctx, current))
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			workload := &appsv1.Deployment{}
+			require.NoError(t, k8sClient.Get(ctx, key, workload))
+			workloadRV := workload.ResourceVersion
+			cl, err := client.NewWithWatch(testEnv.Config, client.Options{Scheme: k8sClient.Scheme()})
+			require.NoError(t, err)
+			writes := 0
+			r.Client = interceptor.NewClient(cl, interceptor.Funcs{
+				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if parent, ok := obj.(*instancev1alpha1.Component); ok {
+						cached.DeepCopyInto(parent)
+						return nil
+					}
+					return cl.Get(ctx, key, obj, opts...)
+				},
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					writes++
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
+			reconcileN(t, ctx, r, comp.Name, 3)
+			assert.Zero(t, writes, "unchanged cached status must not be republished")
+			got := &instancev1alpha1.Component{}
+			require.NoError(t, k8sClient.Get(ctx, key, got))
+			assert.Equal(t, current.Status, got.Status)
+			assert.Equal(t, current.ResourceVersion, got.ResourceVersion)
+			require.NoError(t, k8sClient.Get(ctx, key, workload))
+			assert.Equal(t, workloadRV, workload.ResourceVersion)
+		})
+	}
+}
+
+func TestReconcile_StatusRecoveryAndRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status metav1.ConditionStatus
+	}{
+		{name: "stale true", status: metav1.ConditionTrue},
+		{name: "stale unknown", status: metav1.ConditionUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			comp := createComponent(t, ctx, &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{GenerateName: "test-status-retry-", Namespace: testutil.TestNamespace},
+				Spec:       instancev1alpha1.ComponentSpec{Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector}},
+			})
+			key := client.ObjectKeyFromObject(comp)
+			r := newTestReconciler()
+			reconcileN(t, ctx, r, comp.Name, 4)
+			current := &instancev1alpha1.Component{}
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			condition := apimeta.FindStatusCondition(current.Status.Conditions, "Available")
+			require.NotNil(t, condition)
+			condition.Status = tc.status
+			require.NoError(t, r.patchStatus(ctx, current))
+			cl, err := client.NewWithWatch(testEnv.Config, client.Options{Scheme: k8sClient.Scheme()})
+			require.NoError(t, err)
+			applyFailure, fetchFailure := fmt.Errorf("injected status failure"), fmt.Errorf("injected availability failure")
+			failApply, failFetch, writes := true, false, 0
+			r.Client = interceptor.NewClient(cl, interceptor.Funcs{
+				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, ok := obj.(*appsv1.Deployment); ok && failFetch {
+						return fetchFailure
+					}
+					return cl.Get(ctx, key, obj, opts...)
+				},
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					writes++
+					if failApply {
+						return applyFailure
+					}
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
+			_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+			require.ErrorIs(t, err, applyFailure)
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			condition = apimeta.FindStatusCondition(current.Status.Conditions, "Available")
+			require.NotNil(t, condition)
+			require.Equal(t, tc.status, condition.Status)
+			failApply = false
+			reconcileN(t, ctx, r, comp.Name, 2)
+			assert.Equal(t, 2, writes, "retry must publish the correction, then stop writing")
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			testutil.RequireCondition(t, current.Status.Conditions, "Available", metav1.ConditionFalse, instance.ReasonDeploymentUnavailable)
+			failFetch = true
+			for range 2 {
+				_, err = r.Reconcile(ctx, reconcile.Request{NamespacedName: key})
+				require.ErrorIs(t, err, fetchFailure, "an unchanged error status must not suppress the retry")
+			}
+			assert.Equal(t, 3, writes, "the repeated availability error needs only one status update")
+			failFetch = false
+			reconcileN(t, ctx, r, comp.Name, 2)
+			assert.Equal(t, 4, writes)
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			testutil.RequireCondition(t, current.Status.Conditions, "Available", metav1.ConditionFalse, instance.ReasonDeploymentUnavailable)
+
+			expected := current.Status.DeepCopy()
+			current.Status = instancev1alpha1.ComponentStatus{}
+			require.NoError(t, k8sClient.Status().Update(ctx, current))
+			reconcileN(t, ctx, r, comp.Name, 2)
+			assert.Equal(t, 5, writes, "missing status must be rebuilt, then stop writing")
+			require.NoError(t, k8sClient.Get(ctx, key, current))
+			assert.Equal(t, expected.Version, current.Status.Version)
+			assert.Equal(t, expected.ResourceType, current.Status.ResourceType)
+			assert.Equal(t, expected.DesiredReplicas, current.Status.DesiredReplicas)
+			testutil.RequireCondition(t, current.Status.Conditions, "Reconciled", metav1.ConditionTrue, instance.ReasonResourceUpToDate)
+			testutil.RequireCondition(t, current.Status.Conditions, "Available", metav1.ConditionFalse, instance.ReasonDeploymentUnavailable)
+		})
+	}
 }
 
 // TestReconcile_StatusInfo verifies that status.version and status.resourceType are set after reconciliation.

@@ -12,7 +12,7 @@ spec:
     Both fake nodes match a selector scoped to chainsaw-node-group=($namespace), isolating this
     test from the real cluster node and from other tests' fake nodes running in parallel.
 
-    All scenarios below directly status-patch (or metadata-patch) the ArtifactNode objects to
+    Most scenarios below directly status-patch (or metadata-patch) the ArtifactNode objects to
     simulate what a real per-node sidecar would report, then rely on each parent CR's own
     ArtifactNode watch (EnqueueRequestForOwner) to trigger a real reconcile: no manual
     reconcile trigger is needed, the assert steps' own retry/poll is what waits for that
@@ -28,6 +28,11 @@ spec:
     on a single-node cluster): patch both nodes to Programmed=True with the same reason, and
     assert the aggregate is True with no "(failing nodes: ...)" suffix lingering from Scenario 1,
     proving the message correctly reverts when a prior failure clears.
+
+    Scenario 2b: parent-only status recovery. With both children healthy, patch only each
+    parent's Programmed condition to Unknown at the same generation. Assert the parent watch
+    restores the healthy aggregate without another child or spec update. This tests recovery
+    from a stale parent status, not the exact cache ordering that originally produced one.
 
     Scenario 3: Unknown beats True: patch node-b to Programmed=Unknown while node-a stays
     True, and assert the aggregate is Unknown with node-b's reason, the other half of the
@@ -559,6 +564,109 @@ spec:
                   - status: 'True'
                     reason: SimulatedHealthyAll
                     message: All nodes healthy for aggregation test.
+
+    - name: "Step 11b: Patch-only-parent-status-to-pending"
+      description: |
+        Scenario 2b. Both children's healthy conditions from Step 10 remain unchanged. Patch
+        only the parent status subresource to simulate a stale aggregate, without changing
+        the parent spec or generation and without triggering an ArtifactNode watch.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: Programmed
+                    status: "Unknown"
+                    reason: SimulatedPending
+                    message: Simulated stale parent aggregate with healthy children.
+                    observedGeneration: 1
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: Programmed
+                    status: "Unknown"
+                    reason: SimulatedPending
+                    message: Simulated stale parent aggregate with healthy children.
+                    observedGeneration: 1
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                conditions:
+                  - type: Programmed
+                    status: "Unknown"
+                    reason: SimulatedPending
+                    message: Simulated stale parent aggregate with healthy children.
+                    observedGeneration: 1
+                    lastTransitionTime: "2024-01-01T00:00:00Z"
+            subresource: status
+
+    - name: "Step 11c: Assert-parent-status-recovers-without-child-update"
+      description: |
+        Scenario 2b. The parent status event must restore the exact healthy aggregate from
+        the unchanged children. Generation remains 1: no spec edit is needed for recovery.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    reason: SimulatedHealthyAll
+                    message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    reason: SimulatedHealthyAll
+                    message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+                generation: 1
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                    reason: SimulatedHealthyAll
+                    message: All nodes healthy for aggregation test.
+                    observedGeneration: 1
 
     - name: "Step 12: Patch-node-b-artifactnodes-to-programmed-unknown"
       description: Scenario 3. Only fake-node-b changes; fake-node-a stays True from Step 10.

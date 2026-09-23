@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -248,10 +249,10 @@ func ComputeAggregateConditions(
 	ApplyAggregateConditions(conditions, aggregated)
 }
 
-// UpdateAggregateConditions computes aggregate conditions from nodeList and patches obj's status via
-// PatchStatusSSA; the caller is responsible for bumping obj's ObservedGeneration separately. conditions is
-// passed as an addressable pointer (e.g. &plugin.Status.Conditions) because each aggregator controller's
-// Status struct (Plugin, Rulesfile, Config) is differently typed.
+// UpdateAggregateConditions computes aggregate conditions from nodeList and patches status only when
+// conditions change. Callers must publish other status changes separately. conditions is passed as an
+// addressable pointer (e.g. &plugin.Status.Conditions) because each aggregator controller's Status struct
+// (Plugin, Rulesfile, Config) is differently typed.
 func UpdateAggregateConditions(
 	ctx context.Context,
 	cl client.Client,
@@ -269,6 +270,10 @@ func UpdateAggregateConditions(
 			Conditions: nodeList.Items[i].Status.Conditions,
 		}
 	}
+	condSnap := slices.Clone(*conditions)
 	ComputeAggregateConditions(ctx, obj, conditions, sets)
+	if apiequality.Semantic.DeepEqual(condSnap, *conditions) {
+		return nil
+	}
 	return PatchStatusSSA(ctx, cl, scheme, obj, fieldManager)
 }

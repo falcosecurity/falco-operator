@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,15 +124,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// resource on the API server keeps its labels.
 	comp.SetLabels(r.labelFilter.Apply(comp.GetLabels()))
 
-	// Patch status via defer to ensure it's always called.
+	oldStatus := comp.Status.DeepCopy()
+	// Compute status even on failure, but only publish changes.
 	defer func() {
 		computeErr := r.computeAvailableCondition(ctx, comp)
 		if computeErr != nil {
 			logger.Error(computeErr, "unable to compute available condition")
 		}
-		patchErr := r.patchStatus(ctx, comp)
-		if patchErr != nil {
-			logger.Error(patchErr, "unable to patch Component status")
+		var patchErr error
+		if !apiequality.Semantic.DeepEqual(*oldStatus, comp.Status) {
+			patchErr = r.patchStatus(ctx, comp)
+			if patchErr != nil {
+				logger.Error(patchErr, "unable to patch Component status")
+			}
 		}
 		reterr = kerrors.NewAggregate([]error{reterr, computeErr, patchErr})
 	}()

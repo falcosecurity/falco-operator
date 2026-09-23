@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +34,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -58,6 +60,7 @@ import (
 )
 
 const (
+	testStatusSubresource   = "status"
 	testRulesfileName       = "test-rulesfile"
 	testRulesfileDigest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	testNextRulesfileDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -409,6 +412,227 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 					require.Equal(t, http.StatusServiceUnavailable, response.Code)
 				}
 			}
+		})
+	}
+}
+
+// Parent status can land after a reconcile observed an older cached healthy value.
+// With no further child/spec events, the parent's own status event must restore the
+// aggregate, and the resulting self-event must not cause an endless status-write loop.
+func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition *metav1.Condition
+	}{
+		{name: "pending condition", condition: &metav1.Condition{
+			Type: "Programmed", Status: metav1.ConditionUnknown, Reason: "Pending", Message: "Intermediate aggregate",
+		}},
+		{name: "missing condition"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := &envtest.Environment{
+				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				ErrorIfCRDPathMissing: true,
+			}
+			cfg, err := environment.Start()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, environment.Stop()) })
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			skipNameValidation := true
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
+			})
+			require.NoError(t, err)
+			for _, idx := range index.All {
+				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
+			}
+			direct, err := client.New(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			cached, err := client.NewWithWatch(cfg, client.Options{
+				Scheme: scheme, Cache: &client.CacheOptions{Reader: mgr.GetCache()},
+			})
+			require.NoError(t, err)
+			var statusApplies atomic.Int32
+			counted := interceptor.NewClient(cached, interceptor.Funcs{
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					if subresource == testStatusSubresource {
+						statusApplies.Add(1)
+					}
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
+			r := NewRulesfileAggregatorReconciler(counted, scheme, events.NewFakeRecorder(100), nil)
+			require.NoError(t, r.SetupWithManager(mgr))
+
+			parent := newTestRulesfile()
+			require.NoError(t, direct.Create(t.Context(), parent))
+			require.NoError(t, direct.Create(t.Context(), newTestNode()))
+			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
+			pod := newRunningFalcoPod()
+			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
+			require.NoError(t, direct.Create(t.Context(), pod))
+			pod.Status.Phase = corev1.PodRunning
+			require.NoError(t, direct.Status().Update(t.Context(), pod))
+			child := newTestRulesfileNode()
+			child.OwnerReferences[0].UID = parent.UID
+			require.NoError(t, direct.Create(t.Context(), child))
+			child.Status.Conditions = []metav1.Condition{{
+				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
+				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
+			}}
+			require.NoError(t, direct.Status().Update(t.Context(), child))
+			childVersion := child.ResourceVersion
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- mgr.Start(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(10 * time.Second):
+					t.Error("manager did not stop")
+				}
+			})
+			key := client.ObjectKeyFromObject(parent)
+			healthy := func(cl client.Reader) bool {
+				current := &artifactv1alpha1.Rulesfile{}
+				if err := cl.Get(ctx, key, current); err != nil {
+					return false
+				}
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, "Programmed")
+				return condition != nil && condition.Status == metav1.ConditionTrue &&
+					condition.ObservedGeneration == current.Generation
+			}
+			waitForQuiet := func() {
+				t.Helper()
+				lastCount, lastChange := statusApplies.Load(), time.Now()
+				require.Eventually(t, func() bool {
+					count := statusApplies.Load()
+					if count != lastCount {
+						lastCount, lastChange = count, time.Now()
+					}
+					return time.Since(lastChange) >= 500*time.Millisecond
+				}, 5*time.Second, 20*time.Millisecond, "status Apply calls must settle")
+			}
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				10*time.Second, 20*time.Millisecond)
+			waitForQuiet()
+			require.NoError(t, direct.Get(ctx, key, parent))
+			generation := parent.Generation
+			beforeCorrection := statusApplies.Load()
+
+			// Simulate an intermediate aggregate write landing after the healthy-child event
+			// was consumed. No child update, spec change or manual reconcile follows this write.
+			if tc.condition == nil {
+				apimeta.RemoveStatusCondition(&parent.Status.Conditions, "Programmed")
+			} else {
+				condition := *tc.condition
+				condition.ObservedGeneration = generation
+				apimeta.SetStatusCondition(&parent.Status.Conditions, condition)
+			}
+			require.NoError(t, direct.Status().Update(ctx, parent))
+			require.Equal(t, generation, parent.Generation)
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				5*time.Second, 20*time.Millisecond, "a status-only parent event must restore the healthy child aggregate")
+			waitForQuiet()
+			afterCorrection := statusApplies.Load()
+			require.Positive(t, afterCorrection-beforeCorrection, "recovery must apply corrected status")
+			require.LessOrEqual(t, afterCorrection-beforeCorrection, int32(3), "self-events must not cause a status-write storm")
+			require.Never(t, func() bool { return statusApplies.Load() != afterCorrection },
+				500*time.Millisecond, 20*time.Millisecond, "a settled aggregate must remain a write-free no-op")
+			require.NoError(t, direct.Get(ctx, key, parent))
+			require.Equal(t, generation, parent.Generation, "recovery must not require a spec update")
+			require.NoError(t, direct.Get(ctx, client.ObjectKeyFromObject(child), child))
+			require.Equal(t, childVersion, child.ResourceVersion, "the child must remain unchanged throughout recovery")
+		})
+	}
+}
+
+func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		programmed       metav1.ConditionStatus
+		programmedReason string
+	}{
+		{name: "healthy child", programmed: metav1.ConditionTrue, programmedReason: "Programmed"},
+		{name: "pending child", programmed: metav1.ConditionUnknown, programmedReason: "Pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchErr := fmt.Errorf("registry down")
+			parent := newTestRulesfile(withRulesfileOCI())
+			parent.Generation = 1
+			child := newTestRulesfileNode()
+			child.Status.Conditions = []metav1.Condition{
+				{Type: "Programmed", Status: tc.programmed, Reason: tc.programmedReason, ObservedGeneration: 1},
+				{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ReferenceResolved", ObservedGeneration: 1},
+			}
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			var statusApplies int
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(parent, child, newTestNode(), newTestFalco(), newRunningFalcoPod()).
+				WithStatusSubresource(&artifactv1alpha1.Rulesfile{}, &artifactv1alpha1.ArtifactNode{}).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceApply: func(
+						ctx context.Context, c client.Client, subresource string,
+						obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+					) error {
+						if subresource == testStatusSubresource {
+							statusApplies++
+						}
+						return c.SubResource(subresource).Apply(ctx, obj, opts...)
+					},
+				}).Build()
+			r := NewRulesfileAggregatorReconciler(cl, scheme, events.NewFakeRecorder(100), nil)
+			r.ociPuller = &pullerfake.MockOCIPuller{FetchConfigErr: fetchErr}
+			ctx := t.Context()
+			request := testutil.Request(parent.Name)
+			_, err := r.Reconcile(ctx, request)
+			require.ErrorIs(t, err, fetchErr)
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+			failure := apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+			require.NotNil(t, failure)
+			require.Equal(t, metav1.ConditionFalse, failure.Status)
+			// Backdating makes transient True -> False restamping observable without sleeping.
+			oldTransition := metav1.NewTime(time.Now().Add(-time.Hour)).Rfc3339Copy()
+			failure.LastTransitionTime = oldTransition
+			require.NoError(t, cl.Status().Update(ctx, parent))
+			beforeRetry := statusApplies
+			for range 3 {
+				_, err = r.Reconcile(ctx, request)
+				require.ErrorIs(t, err, fetchErr, "the original error must still drive normal retry backoff")
+				require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+				failure = apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+				require.NotNil(t, failure)
+				assert.Equal(t, metav1.ConditionFalse, failure.Status)
+				assert.True(t, failure.LastTransitionTime.Equal(&oldTransition), "only the final condition is an observable transition")
+			}
+			require.Equal(t, beforeRetry, statusApplies, "an unchanged metadata failure must not generate status self-events")
+
+			// A real child reference failure must still reach the parent while metadata fails.
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(child), child))
+			apimeta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+				Type: "ResolvedRefs", Status: metav1.ConditionFalse, Reason: "ReferenceNotFound",
+				Message: "Missing reference", ObservedGeneration: parent.Generation,
+			})
+			require.NoError(t, cl.Status().Update(ctx, child))
+			_, err = r.Reconcile(ctx, request)
+			require.ErrorIs(t, err, fetchErr)
+			require.Equal(t, beforeRetry+1, statusApplies)
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+			references := apimeta.FindStatusCondition(parent.Status.Conditions, "ResolvedRefs")
+			require.NotNil(t, references)
+			assert.Equal(t, metav1.ConditionFalse, references.Status)
+			assert.Equal(t, "ReferenceNotFound", references.Reason)
+			failure = apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+			require.NotNil(t, failure)
+			assert.True(t, failure.LastTransitionTime.Equal(&oldTransition))
 		})
 	}
 }

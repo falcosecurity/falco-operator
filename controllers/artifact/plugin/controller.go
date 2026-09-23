@@ -267,12 +267,15 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 				artifact.RecordWarning(r.recorder, nodeObj, artifact.ReasonDependenciesNotSatisfied, "%s", blocked.Error())
 				// Sets a DeletionBlocked condition so the instance-level aggregator can propagate
 				// the block onto the parent Plugin's status.
+				oldStatus := nodeObj.Status.DeepCopy()
 				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDeletionBlockedCondition(
 					metav1.ConditionTrue, artifact.ReasonPluginConfigStillRequired, blocked.Error(), plugin.Generation,
 				))
-				if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager); patchErr != nil {
-					logger.Error(patchErr, "unable to patch PluginNode status with DeletionBlocked condition")
-					return true, patchErr
+				if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {
+					if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager); patchErr != nil {
+						logger.Error(patchErr, "unable to patch PluginNode status with DeletionBlocked condition")
+						return true, patchErr
+					}
 				}
 				return true, nil
 			}
