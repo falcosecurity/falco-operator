@@ -287,22 +287,28 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 
 	// Stale-entry cleanup: remove files and conditions for mediums no longer in spec.
 	if config.Spec.Config == nil {
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumInline); err != nil {
 			logger.Error(err, "unable to remove stale inline config")
+			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
+				metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, err.Error(), gen,
+			))
 			return err
 		} else if removed {
 			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
 		}
+		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 	}
 	if config.Spec.ConfigMapRef == nil {
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigMapArtifactProgrammed.String())
 		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumConfigMap); err != nil {
 			logger.Error(err, "unable to remove stale configmap config")
+			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
+				metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, err.Error(), gen,
+			))
 			return err
 		} else if removed {
 			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumConfigMap)
 		}
+		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigMapArtifactProgrammed.String())
 	}
 
 	// Store inline config if specified.
