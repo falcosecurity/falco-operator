@@ -503,13 +503,17 @@ func (r *RulesfileReconciler) cleanupStaleMedium(
 		return nil
 	}
 	logger := log.FromContext(ctx)
-	apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, conditionType)
 	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
 	path, removed, err := r.store.RemoveIfInstalled(ctx, key, medium)
 	if err != nil {
 		logger.Error(err, "unable to remove stale rulesfile", "medium", medium)
+		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewCondition(
+			commonv1alpha1.ConditionType(conditionType), metav1.ConditionFalse,
+			artifact.ReasonArtifactRemoveFailed, err.Error(), rulesfile.GetGeneration(),
+		))
 		return err
 	}
+	apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, conditionType)
 	if !removed {
 		return nil
 	}
