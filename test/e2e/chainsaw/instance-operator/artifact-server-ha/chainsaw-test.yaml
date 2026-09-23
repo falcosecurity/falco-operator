@@ -9,6 +9,8 @@ spec:
     Two Ready instance-operator replicas must expose only the elected server through
     the artifact Service. After failover, the new leader serves the same OCI content
     and the old leader can restart in the same Pod without becoming an endpoint.
+    When that replica becomes leader again, it must release cache references to
+    artifacts deleted while it was stopped without disrupting the surviving artifact.
     This test temporarily changes the installed operator Deployment, so it requires
     CHAINSAW_ENABLE_HA_TEST=true and runs separately from concurrent Chainsaw tests.
   concurrent: false
@@ -21,6 +23,8 @@ spec:
       value: artifact-server-ha-client
     - name: rulesfile_name
       value: artifact-server-ha-rules
+    - name: deleted_rulesfile_name
+      value: (join('-', [$rulesfile_name, 'deleted']))
 
   steps:
     - name: Check-disruptive-test-opt-in
@@ -60,6 +64,24 @@ spec:
         template: ../../common/_step_templates/apply-rulesfile.yaml
         with:
           bindings:
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Create-artifact-to-delete-during-failover
+      description: Cache a second owner of the same OCI blob to exercise missed deletion on the old replica.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($deleted_rulesfile_name)
             - name: rulesfile_spec
               value:
                 ociArtifact:
@@ -171,6 +193,21 @@ spec:
                 value: ($namespace)
               - name: ACTION
                 value: failover
+            content: |
+              bash ../../common/scripts/artifact_server_ha.sh
+
+    - name: Fail-back-to-retained-cache-replica
+      description: |
+        Elect the restarted original replica with its retained cache after the second
+        Rulesfile was deleted while it was stopped. The deleted owner must return HTTP
+        503 through the authenticated Service while the original artifact stays intact.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ACTION
+                value: failback
             content: |
               bash ../../common/scripts/artifact_server_ha.sh
 

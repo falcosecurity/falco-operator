@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -151,6 +152,28 @@ func (c *Cache) Load() error {
 	c.derefTimes = make(map[string]time.Time)
 	c.mu.Unlock()
 	return nil
+}
+
+// Owners returns the distinct CR names indexed for artifactType, across all platforms.
+// Controllers use this snapshot to reconcile owners that disappeared while this replica
+// was inactive. The returned slice is independent of the live index.
+func (c *Cache) Owners(artifactType string) []types.NamespacedName {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	seen := make(map[types.NamespacedName]struct{})
+	var owners []types.NamespacedName
+	for key := range c.index {
+		if key.ArtifactType != artifactType {
+			continue
+		}
+		owner := types.NamespacedName{Namespace: key.Namespace, Name: key.Name}
+		if _, exists := seen[owner]; !exists {
+			seen[owner] = struct{}{}
+			owners = append(owners, owner)
+		}
+	}
+	return owners
 }
 
 // Lookup returns the current absolute blob path indexed for (artifactType, namespace, name,

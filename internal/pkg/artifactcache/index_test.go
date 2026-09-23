@@ -28,6 +28,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 )
@@ -130,6 +131,66 @@ func TestCache_Load_RestartResilience(t *testing.T) {
 	got, ok := second.Lookup("plugin", "ns", "json", "linux-amd64")
 	require.True(t, ok)
 	assert.Equal(t, blobPath, got)
+}
+
+func TestCache_Owners(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, otherKind string
+		platforms             []string
+	}{
+		{name: "plugin platform variants", kind: "plugin", otherKind: "rulesfile", platforms: []string{"linux-amd64", "linux-arm64"}},
+		{name: "platform independent rulesfile", kind: "rulesfile", otherKind: "plugin", platforms: []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := artifactcache.NewCache(t.TempDir())
+			require.NoError(t, c.Load())
+			require.Empty(t, c.Owners(tc.kind))
+			blob := filepath.Join(c.Dir(), "blobs", "shared")
+			require.NoError(t, c.Store(blob, []byte("content"), 0o644))
+			for _, platform := range tc.platforms {
+				require.NoError(t, c.Set(tc.kind, "ns", "one", platform, blob))
+			}
+			require.NoError(t, c.Set(tc.kind, "other-ns", "one", tc.platforms[0], blob))
+			require.NoError(t, c.Set(tc.kind, "ns", "two", tc.platforms[0], blob))
+			require.NoError(t, c.Set(tc.otherKind, "ns", "rules", "", blob))
+			want := []types.NamespacedName{
+				{Namespace: "ns", Name: "one"},
+				{Namespace: "other-ns", Name: "one"},
+				{Namespace: "ns", Name: "two"},
+			}
+			reloaded := artifactcache.NewCache(c.Dir())
+			require.NoError(t, reloaded.Load())
+			for _, cache := range []*artifactcache.Cache{c, reloaded} {
+				owners := cache.Owners(tc.kind)
+				require.ElementsMatch(t, want, owners, "platform variants must enqueue their CR only once")
+				owners[0].Name = "changed"
+				require.ElementsMatch(t, want, cache.Owners(tc.kind), "caller must not mutate the index")
+				require.Equal(t, []types.NamespacedName{{Namespace: "ns", Name: "rules"}}, cache.Owners(tc.otherKind))
+				require.Empty(t, cache.Owners("config"))
+			}
+
+			owners := c.Owners(tc.kind)
+			require.NoError(t, c.RemoveAll(tc.kind, "ns", "one"))
+			require.ElementsMatch(t, want, owners, "later mutations must not change the returned snapshot")
+			assert.ElementsMatch(t, want[1:], c.Owners(tc.kind))
+
+			var wg sync.WaitGroup
+			for range 20 {
+				wg.Add(2)
+				go func() {
+					defer wg.Done()
+					assert.NoError(t, c.Set(tc.kind, "ns", "concurrent", tc.platforms[0], blob))
+				}()
+				go func() {
+					defer wg.Done()
+					c.Owners(tc.kind)
+				}()
+			}
+			wg.Wait()
+			require.NoError(t, c.RemoveAll(tc.kind, "ns", "concurrent"))
+			assert.ElementsMatch(t, want[1:], c.Owners(tc.kind))
+		})
+	}
 }
 
 func TestCache_Lookup(t *testing.T) {
