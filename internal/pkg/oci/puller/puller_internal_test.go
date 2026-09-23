@@ -26,10 +26,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/opencontainers/image-spec/specs-go"
@@ -105,6 +108,117 @@ func TestResolveConfigDescriptor_IndexRequiresPlatformManifest(t *testing.T) {
 	_, err := resolveConfigDescriptor(context.Background(), fetcher, "registry.example/plugin:1", &rootDesc)
 
 	require.EqualError(t, err, `image index for "registry.example/plugin:1" has no platform manifests`)
+}
+
+func TestFetchConfig_RejectsContentDigestMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		original    string
+		replacement string
+	}{
+		{name: "altered version", original: "1.0.0", replacement: "9.0.0"},
+		{name: "altered name", original: "test-rules", replacement: "fake-rules"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, digest := testRegistryHandler(t)
+			var alterContent atomic.Bool
+			alterContent.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, r)
+				body := response.Body.Bytes()
+				if alterContent.Load() && r.Method == http.MethodGet && response.Header().Get("Content-Type") == FalcoRulesfileConfigMediaType {
+					body = bytes.ReplaceAll(body, []byte(tc.original), []byte(tc.replacement))
+				}
+				maps.Copy(w.Header(), response.Header())
+				w.WriteHeader(response.Code)
+				_, _ = w.Write(body)
+			}))
+			t.Cleanup(server.Close)
+			ref := strings.TrimPrefix(server.URL, "http://") + "/test/rules@" + digest
+			puller := NewOciPuller(nil)
+			options := &RegistryOptions{PlainHTTP: true}
+			config, resolved, err := puller.FetchConfig(t.Context(), ref, nil, options)
+			require.ErrorIs(t, err, orascontent.ErrMismatchedDigest)
+			assert.Nil(t, config)
+			assert.Empty(t, resolved)
+
+			alterContent.Store(false)
+			config, resolved, err = puller.FetchConfig(t.Context(), ref, nil, options)
+			require.NoError(t, err)
+			assert.Equal(t, "1.0.0", config.Version)
+			assert.Equal(t, digest, resolved)
+		})
+	}
+}
+
+func TestFetchBytes_VerifiesDescriptor(t *testing.T) {
+	data := []byte(`{"name":"rules"}`)
+	desc := descriptorForContent(FalcoRulesfileConfigMediaType, data)
+	for _, tc := range []struct {
+		name    string
+		content []byte
+		wantErr error
+	}{
+		{name: "valid", content: data},
+		{name: "different bytes", content: []byte(`{"name":"other"}`), wantErr: orascontent.ErrMismatchedDigest},
+		{name: "truncated", content: data[:len(data)-1], wantErr: io.ErrUnexpectedEOF},
+		{name: "trailing bytes", content: append(append([]byte(nil), data...), '\n'), wantErr: orascontent.ErrTrailingData},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetcher := memoryDescriptorFetcher{desc.Digest.String(): tc.content}
+			got, err := fetchBytes(t.Context(), fetcher, &desc)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, data, got)
+		})
+	}
+}
+
+type testReadCloser struct {
+	io.Reader
+	closeErr   error
+	closeCalls int
+}
+
+func (r *testReadCloser) Close() error {
+	r.closeCalls++
+	return r.closeErr
+}
+
+func TestReadAndClose_ErrorPrecedence(t *testing.T) {
+	data := []byte("metadata")
+	desc := descriptorForContent(FalcoRulesfileConfigMediaType, data)
+	readErr := fmt.Errorf("read failed")
+	closeErr := fmt.Errorf("close failed")
+	for _, tc := range []struct {
+		name     string
+		reader   io.Reader
+		closeErr error
+		wantErr  error
+	}{
+		{name: "valid", reader: bytes.NewReader(data)},
+		{name: "close failure", reader: bytes.NewReader(data), closeErr: closeErr, wantErr: closeErr},
+		{name: "read failure", reader: iotest.ErrReader(readErr), closeErr: closeErr, wantErr: readErr},
+		{name: "digest failure", reader: strings.NewReader("modified"), closeErr: closeErr, wantErr: orascontent.ErrMismatchedDigest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := &testReadCloser{Reader: tc.reader, closeErr: tc.closeErr}
+			got, err := readAndClose(reader, &desc)
+			assert.Equal(t, 1, reader.closeCalls)
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, data, got)
+		})
+	}
 }
 
 func TestRegistryCredentialIsolation(t *testing.T) {
