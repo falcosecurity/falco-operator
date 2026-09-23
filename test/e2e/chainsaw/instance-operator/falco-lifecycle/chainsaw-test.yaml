@@ -96,6 +96,42 @@ spec:
             check:
               (to_string(json_parse($stdout).status) == 'success'): true
 
+    - name: Cache-artifact-for-certificate-recovery
+      description: Cache the existing rules fixture to verify authenticated downloads during Certificate recovery.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: certificate-recovery-rules
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: Recover-client-certificate-without-falco-edit
+      description: |
+        With mTLS, delete the generated Certificate and require a new Ready Certificate
+        owned by the unchanged Falco, then verify an authenticated artifact download.
+        Without mTLS, verify HTTP downloads without accessing Certificate resources.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULESFILE_NAME
+                value: certificate-recovery-rules
+            content: bash check_certificate_recovery.sh
+            check:
+              (json_parse($stdout).status): success
+
     - name: Reject-legacy-artifact-operator-init-container-override
       description: |
         An artifact-operator override in initContainers must report the placement error
