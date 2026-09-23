@@ -3,7 +3,7 @@
 # Env vars:
 #   NAMESPACE:       Namespace of the Falco pod.
 #   FALCO_NAME:      Value of app.kubernetes.io/name label on the Falco pod.
-#   DIR:             Directory to search recursively (e.g. /etc/falco/rules.d).
+#   DIR:             Directory containing installed YAML files (e.g. /etc/falco/rules.d).
 #   CONTENT_PATTERN: Substring to grep for within file contents.
 #   FILE_PATTERN:    Substring to further filter matches by filename. Optional.
 set -o errexit
@@ -36,14 +36,24 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
   fi
 
   if ! MATCHES=$(kubectl exec -n "$NAMESPACE" "$POD" -c falco -- \
-      sh -c "grep -r \"$CONTENT_PATTERN\" \"$DIR\"/ 2>/dev/null || true" 2>&1); then
+      sh -ec '
+        for file in "$1"/*.yaml; do
+          [ -f "$file" ] || continue
+          case "${file##*/}" in
+            *"$3"*) ;;
+            *) continue ;;
+          esac
+          if matches=$(grep -nF -e "$2" "$file"); then
+            printf "%s:%s\n" "$file" "$matches"
+          else
+            result=$?
+            [ "$result" -eq 1 ] || exit "$result"
+          fi
+        done
+      ' sh "$DIR" "$CONTENT_PATTERN" "$FILE_PATTERN"); then
     LAST_ERROR="kubectl exec failed: $MATCHES"
     sleep "$RETRY_DELAY"
     continue
-  fi
-
-  if [ -n "$FILE_PATTERN" ]; then
-    MATCHES=$(echo "$MATCHES" | grep "$FILE_PATTERN" || true)
   fi
 
   if [ -n "$MATCHES" ]; then

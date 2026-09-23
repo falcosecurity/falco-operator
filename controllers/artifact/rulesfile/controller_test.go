@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1289,7 +1290,7 @@ func TestEnsureRulesfile(t *testing.T) {
 					mockFS.WriteErrFor = make(map[string]error)
 					for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap} {
 						path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority, medium, artifact.TypeRulesfile)
-						mockFS.WriteErrFor[path+".tmp"] = tt.writeErr
+						mockFS.WriteErrFor[filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp")] = tt.writeErr
 					}
 				}
 				r.fetcher = &testFetcher{

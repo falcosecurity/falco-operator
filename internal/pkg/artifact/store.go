@@ -116,8 +116,13 @@ func (s *LocalStore) Store(ctx context.Context, current *File, name string, arti
 	// Priority rename: content is the same but the file needs to move.
 	priorityChanged := current != nil && current.ContentHash == result.ContentHash && current.Path != newPath
 
-	// Write content to a sibling temp path then rename atomically.
-	tmpPath := newPath + ".tmp"
+	// Falco loads every regular file in config.d, regardless of its extension.
+	// Stage in a subdirectory on the same filesystem, outside its directory scan.
+	tmpDir := filepath.Join(filepath.Dir(newPath), ".tmp")
+	if err := s.FS.MkdirAll(tmpDir, 0o700); err != nil {
+		return StoreActionNone, nil, fmt.Errorf("create artifact staging directory: %w", err)
+	}
+	tmpPath := filepath.Join(tmpDir, filepath.Base(newPath)+".tmp")
 	if err := s.FS.WriteFile(tmpPath, result.Content, result.Perm); err != nil {
 		logger.Error(err, "unable to write artifact temp file", "tmp", tmpPath)
 		_ = s.FS.Remove(tmpPath)

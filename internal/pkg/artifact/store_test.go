@@ -23,12 +23,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 )
 
@@ -45,6 +47,172 @@ func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
 		Config:    "/configs",
 	}
 	return &LocalStore{FS: mockFS, Dirs: dirs}, mockFS
+}
+
+// Stop after the real write, before Store can rename or clean up the candidate.
+type interruptedWriteFS struct {
+	filesystem.FileSystem
+	partial bool
+}
+
+func (f interruptedWriteFS) WriteFile(name string, data []byte, perm os.FileMode) error {
+	if f.partial {
+		data = data[:len(data)/2]
+	}
+	if err := f.FileSystem.WriteFile(name, data, perm); err != nil {
+		return err
+	}
+	panic("interrupted after staging write")
+}
+
+func TestLocalStore_InterruptedWrite(t *testing.T) {
+	for _, artifactType := range []Type{TypeConfig, TypeRulesfile, TypePlugin} {
+		for _, installed := range []bool{false, true} {
+			for _, partial := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/installed=%t/partial=%t", artifactType, installed, partial), func(t *testing.T) {
+					dir := t.TempDir()
+					store := &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: ArtifactDirs{Config: dir, Rulesfile: dir, Plugin: dir}}
+					medium := MediumInline
+					if artifactType == TypePlugin {
+						medium = MediumOCI
+					}
+					old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: PermFor(artifactType)}
+					updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: old.Perm}
+					reference := filepath.Join(t.TempDir(), "permissions")
+					require.NoError(t, os.WriteFile(reference, old.Content, old.Perm))
+					referenceInfo, err := os.Stat(reference)
+					require.NoError(t, err)
+					var current *File
+					if installed {
+						_, file, err := store.Store(t.Context(), nil, "test", 50, artifactType, medium, old)
+						require.NoError(t, err)
+						current = file
+					}
+					store.FS = interruptedWriteFS{FileSystem: store.FS, partial: partial}
+					require.PanicsWithValue(t, "interrupted after staging write", func() {
+						_, _, _ = store.Store(t.Context(), current, "test", 50, artifactType, medium, updated)
+					})
+
+					finalPath := ArtifactPath(store.Dirs, "test", 50, medium, artifactType)
+					stagedPath := filepath.Join(dir, ".tmp", filepath.Base(finalPath)+".tmp")
+					staged, err := os.ReadFile(stagedPath)
+					require.NoError(t, err)
+					expected := updated.Content
+					if partial {
+						expected = expected[:len(expected)/2]
+					}
+					assert.Equal(t, expected, staged)
+					entries, err := os.ReadDir(dir)
+					require.NoError(t, err)
+					for _, entry := range entries {
+						if entry.Type().IsRegular() {
+							require.True(t, installed)
+							assert.Equal(t, filepath.Base(finalPath), entry.Name(), "only committed files may be visible to Falco")
+						}
+					}
+
+					// A fresh store discovers committed files only, without promoting the candidate.
+					store = &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: store.Dirs}
+					snapshot, err := store.ScanAll(t.Context(), artifactType)
+					require.NoError(t, err)
+					if installed {
+						require.Len(t, snapshot["test"], 1)
+						assert.Equal(t, old.ContentHash, snapshot["test"][0].ContentHash)
+						current = FindInstalled(snapshot["test"], medium)
+					} else {
+						assert.Empty(t, snapshot)
+						require.NoFileExists(t, finalPath)
+					}
+					_, file, err := store.Store(t.Context(), current, "test", 50, artifactType, medium, updated)
+					require.NoError(t, err)
+					require.NotNil(t, file)
+					data, err := os.ReadFile(finalPath)
+					require.NoError(t, err)
+					assert.Equal(t, updated.Content, data)
+					info, err := os.Stat(finalPath)
+					require.NoError(t, err)
+					assert.Equal(t, referenceInfo.Mode().Perm(), info.Mode().Perm(), "preserve WriteFile permissions, including the process umask")
+					require.NoFileExists(t, stagedPath)
+					action, _, err := store.Store(t.Context(), file, "test", 50, artifactType, medium, updated)
+					require.NoError(t, err)
+					assert.Equal(t, StoreActionUnchanged, action)
+					require.NoError(t, store.Remove(t.Context(), []artifactv1alpha1.InstalledArtifact{{Path: finalPath}}))
+					require.NoFileExists(t, finalPath)
+				})
+			}
+		}
+	}
+}
+
+func TestLocalStore_RemoveAfterInterruptedWrite(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		artifactType Type
+		medium       Medium
+	}{
+		{name: "configuration", artifactType: TypeConfig, medium: MediumInline},
+		{name: "rulesfile", artifactType: TypeRulesfile, medium: MediumInline},
+		{name: "plugin", artifactType: TypePlugin, medium: MediumOCI},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: ArtifactDirs{Config: dir, Rulesfile: dir, Plugin: dir}}
+			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: PermFor(tc.artifactType)}
+			_, current, err := store.Store(t.Context(), nil, "test", 50, tc.artifactType, tc.medium, old)
+			require.NoError(t, err)
+			store.FS = interruptedWriteFS{FileSystem: store.FS}
+			require.Panics(t, func() {
+				_, _, _ = store.Store(t.Context(), current, "test", 50, tc.artifactType, tc.medium,
+					FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: old.Perm})
+			})
+			store = &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: store.Dirs}
+			snapshot, err := store.ScanAll(t.Context(), tc.artifactType)
+			require.NoError(t, err)
+			require.Len(t, snapshot["test"], 1)
+			require.NoError(t, store.Remove(t.Context(), snapshot["test"]))
+			remaining, err := os.ReadDir(dir)
+			require.NoError(t, err)
+			require.Len(t, remaining, 1)
+			assert.True(t, remaining[0].IsDir(), "deleting the committed file must leave no active artifact")
+			require.FileExists(t, filepath.Join(dir, ".tmp", filepath.Base(current.Path)+".tmp"))
+			snapshot, err = store.ScanAll(t.Context(), tc.artifactType)
+			require.NoError(t, err)
+			assert.Empty(t, snapshot)
+		})
+	}
+}
+
+func TestLocalStore_StagingDirectoryFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		priority int32
+	}{
+		{name: "replacement at the same priority", priority: 50},
+		{name: "replacement at a different priority", priority: 20},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, mockFS := newTestStore()
+			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: 0o644}
+			_, current, err := store.Store(t.Context(), nil, "test", 50, TypeConfig, MediumInline, old)
+			require.NoError(t, err)
+			mockFS.MkdirErr = assert.AnError
+			updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: old.Perm}
+			action, file, err := store.Store(t.Context(), current, "test", tc.priority, TypeConfig, MediumInline, updated)
+			require.ErrorIs(t, err, assert.AnError)
+			assert.Equal(t, StoreActionNone, action)
+			assert.Nil(t, file)
+			assert.Equal(t, old.Content, mockFS.Files[current.Path])
+			assert.Len(t, mockFS.Files, 1)
+			mockFS.MkdirErr = nil
+			_, file, err = store.Store(t.Context(), current, "test", tc.priority, TypeConfig, MediumInline, updated)
+			require.NoError(t, err)
+			require.NotNil(t, file)
+			if tc.priority != current.Priority {
+				assert.NotContains(t, mockFS.Files, current.Path)
+			}
+			assert.Equal(t, updated.Content, mockFS.Files[file.Path])
+		})
+	}
 }
 
 func TestLocalStore_Read(t *testing.T) {

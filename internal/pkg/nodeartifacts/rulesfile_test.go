@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/opencontainers/go-digest"
@@ -90,9 +91,9 @@ func TestManager_StoreRulesfile_PreservesOtherSourcesAndFailedWrites(t *testing.
 			oldInline := m.FindInstalled(key, artifact.MediumInline)
 			storeErr := errors.New("filesystem unavailable")
 			if failure == writeFailure {
-				fs.WriteErrFor = map[string]error{oldInline.Path + ".tmp": storeErr}
+				fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(oldInline.Path), ".tmp", filepath.Base(oldInline.Path)+".tmp"): storeErr}
 			} else {
-				fs.RenameErrFor = map[string]error{oldInline.Path + ".tmp": storeErr}
+				fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(oldInline.Path), ".tmp", filepath.Base(oldInline.Path)+".tmp"): storeErr}
 			}
 			_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumInline, newContent, &commonv1alpha1.ArtifactMeta{}, true)
 			require.ErrorIs(t, err, storeErr)
@@ -192,11 +193,11 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				storeErr := errors.New("filesystem unavailable")
 				switch failure {
 				case writeFailure:
-					fs.WriteErrFor = map[string]error{newPath + ".tmp": storeErr}
+					fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"): storeErr}
 				case "move":
 					fs.RenameErrFor = map[string]error{oldFile.Path: storeErr}
 				case replacementFailure:
-					fs.RenameErrFor = map[string]error{newPath + ".tmp": storeErr}
+					fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"): storeErr}
 				}
 
 				_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 20, artifact.MediumOCI, newContent, &commonv1alpha1.ArtifactMeta{}, true)
@@ -297,7 +298,7 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				// A later failed content update must not discard either surviving revision.
 				failedContent, err := fetcher.FetchInline(ctx, []byte("rejected rules"))
 				require.NoError(t, err)
-				fs.WriteErrFor = map[string]error{file.Path + ".tmp": ioErr}
+				fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): ioErr}
 				_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 20, artifact.MediumOCI, failedContent, &commonv1alpha1.ArtifactMeta{}, false)
 				require.ErrorIs(t, err, ioErr)
 				for _, name := range []string{"container", "json"} {

@@ -89,6 +89,8 @@ spec:
               value: /etc/falco/config.d
             - name: content_pattern
               value: "log_level: info"
+            - name: file_pattern
+              value: 50-03-config-update-inline-test-inline.yaml
 
     - name: "Step 05: Patch-config-inline-v2"
       description: Change the inline log level to debug while keeping JSON output disabled.
@@ -152,6 +154,8 @@ spec:
               value: /etc/falco/config.d
             - name: content_pattern
               value: "log_level: debug"
+            - name: file_pattern
+              value: 50-03-config-update-inline-test-inline.yaml
 
     - name: "Step 09: Create-config-with-long-name"
       description: A valid Config name longer than 63 characters must not prevent ArtifactNode creation.
@@ -305,6 +309,20 @@ spec:
               value: 50-03-config-update-inline-test-inline.yaml
             - name: content_pattern
               value: "log_level: debug"
+
+    - name: "Step 17: Assert-staged-config-is-not-active"
+      description: An interrupted write must not become an active Falco configuration or satisfy installed-content assertions.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: |
+              bash check_staged_config.sh
+            check:
+              (json_parse($stdout).status): success
 
   catch:
     - description: Capture debug snapshot on failure

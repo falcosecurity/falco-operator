@@ -1,5 +1,5 @@
 # Assert that specific content is present in a file on the Falco node filesystem.
-# Wraps check_content_on_node.sh, which greps recursively under DIR for CONTENT_PATTERN.
+# Wraps check_content_on_node.sh, which checks installed YAML files directly under DIR.
 #
 # Required bindings:
 #   - falco_name:      app.kubernetes.io/name label on the Falco pod.
