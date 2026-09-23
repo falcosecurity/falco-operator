@@ -45,6 +45,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
@@ -310,9 +311,23 @@ func main() {
 	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
 	// keeping a plugin's config entry until no rules file on this node still requires it. It also
 	// caches Falco's reported capabilities and plugin versions so compatibility checks never
-	// require a live HTTP call. WarmSync observes installed files and current assignments after
-	// the manager's cache syncs, before reconcilers start. Dependency metadata is rebuilt during
+	// require a live HTTP call. WarmSync observes installed files and current assignments using
+	// the synced manager cache, before any reconcilers start. Dependency metadata is rebuilt during
 	// reconciliation, without restoring historical state from disk or ArtifactNode status.
+	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
+	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
+	mgr, err = controllerhelper.WithStartup(mgr, func(ctx context.Context) error {
+		if err := nodeartifacts.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
+			return err
+		}
+		setupLog.Info("Node artifact manager observed installed files and current plugin assignments")
+		return nil
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to configure node artifact startup")
+		os.Exit(1)
+	}
+
 	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
 	if err := mgr.Add(reloadCoordinator); err != nil {
 		setupLog.Error(err, "unable to add reload coordinator to manager")
@@ -326,13 +341,6 @@ func main() {
 	}
 	if err := mgr.Add(dirWatcher); err != nil {
 		setupLog.Error(err, "unable to add Falco dir watcher to manager")
-		os.Exit(1)
-	}
-
-	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
-	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
-	if err := mgr.Add(nodeartifacts.NewWarmSyncRunnable(mgr.GetClient(), nodeManager, namespace, nodeName)); err != nil {
-		setupLog.Error(err, "unable to add node artifact manager warm sync to manager")
 		os.Exit(1)
 	}
 
