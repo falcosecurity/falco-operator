@@ -20,6 +20,7 @@ RETRY_DELAY="${RETRY_DELAY:-1}"
 BACKUP_NAME=artifact-server-ha-backup
 PROBE_NAME=artifact-server-ha-probe
 RULESFILE_NAME=artifact-server-ha-rules
+DELETED_RULESFILE_NAME=$RULESFILE_NAME-deleted
 LEASE_NAME=1d54f32f.falcosecurity.dev
 SERVING_LABEL=artifact.falcosecurity.dev/serving
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -167,7 +168,7 @@ read_digest() {
 }
 
 check_download() {
-  local digest=$1 port scheme=http
+  local digest=$1 name=${2:-$RULESFILE_NAME} expected_status=${3:-200} port scheme=http status url
   local tls_args=()
   port=$(jq -r '.port' "$WORK_DIR/snapshot.json")
   if jq -e '.tls' "$WORK_DIR/snapshot.json" > /dev/null; then
@@ -176,20 +177,29 @@ check_download() {
   fi
   # Match how push-artifacts.sh constructs this existing OCI fixture.
   printf '%s\n' "$(cat "$SCRIPT_DIR/../../../../../.github/e2e/oci-artifacts/fixtures/rule-basic.yaml")" > "$WORK_DIR/expected"
+  url="$scheme://$SERVICE_NAME.$OPERATOR_NAMESPACE.svc.cluster.local:$port/v1/artifacts/rulesfiles/$NAMESPACE/$name?digest=$digest"
   for _ in $(seq 1 "$MAX_RETRIES"); do
-    if kube exec -n "$NAMESPACE" "$PROBE_NAME" -c netshoot -- curl --fail --silent --show-error --max-time 5 \
+    if [ "$expected_status" = 503 ]; then
+      # curl must complete normally with verified TLS. A connection failure or
+      # any other status is not evidence that the deleted owner's index is gone.
+      if status=$(kube exec -n "$NAMESPACE" "$PROBE_NAME" -c netshoot -- curl --silent --show-error --max-time 5 \
+        ${tls_args[@]+"${tls_args[@]}"} --output /dev/null --write-out '%{http_code}' "$url"); then
+        [ "$status" = 503 ] && return
+      fi
+    elif kube exec -n "$NAMESPACE" "$PROBE_NAME" -c netshoot -- curl --fail --silent --show-error --max-time 5 \
       ${tls_args[@]+"${tls_args[@]}"} \
-      "$scheme://$SERVICE_NAME.$OPERATOR_NAMESPACE.svc.cluster.local:$port/v1/artifacts/rulesfiles/$NAMESPACE/$RULESFILE_NAME?digest=$digest" \
+      "$url" \
       > "$WORK_DIR/download"; then
       cmp -s "$WORK_DIR/expected" "$WORK_DIR/download" || fail "Service returned different rulesfile content"
       return
     fi
     retry_pause
   done
-  fail "artifact download through the Service did not recover"
+  fail "artifact $name did not return expected HTTP $expected_status through the Service"
 }
 
 failover() {
+  local phase=$1
   wait_for_routing true
   local digest leader follower uid count pid
   digest=$(read_digest)
@@ -199,6 +209,20 @@ failover() {
   uid=$(jq -r --arg leader "$leader" '.items[] | select(.metadata.name == $leader) | .metadata.uid' "$WORK_DIR/pods.json")
   count=$(jq -r --arg leader "$leader" '.items[] | select(.metadata.name == $leader) |
     .status.containerStatuses[] | select(.name == "manager") | .restartCount' "$WORK_DIR/pods.json")
+  if [ "$phase" = delete ]; then
+    check_download "$digest" "$DELETED_RULESFILE_NAME"
+  elif [ "$phase" = failback ]; then
+    # The previous action restarted this exact Pod with its old cache snapshot.
+    # It must be the replica elected next, not a freshly created replacement.
+    jq -e --arg follower "$follower" --slurpfile backup "$WORK_DIR/backup.json" '
+      ($backup[0].data.stopped | fromjson) as $stale |
+      $follower == $stale.pod and
+      any(.items[]; .metadata.name == $follower and .metadata.uid == $stale.uid)
+    ' "$WORK_DIR/pods.json" > /dev/null || fail "failback target is not the retained-cache replica"
+    check_download "$digest" "$DELETED_RULESFILE_NAME" 503
+  else
+    fail "unknown failover phase: $phase"
+  fi
   pid=$(kube exec -n "$OPERATOR_NAMESPACE" "$leader" -c artifact-ha-control -- pgrep -x manager)
   [[ "$pid" =~ ^[0-9]+$ ]] || fail "expected exactly one manager process"
   jq -n --arg pod "$leader" --arg uid "$uid" --arg pid "$pid" \
@@ -207,6 +231,11 @@ failover() {
   kube exec -n "$OPERATOR_NAMESPACE" "$leader" -c artifact-ha-control -- sh -c 'kill -STOP "$1"' sh "$pid"
   wait_for_routing false "$follower"
   check_download "$digest"
+  if [ "$phase" = delete ]; then
+    check_download "$digest" "$DELETED_RULESFILE_NAME"
+    kube delete rulesfile -n "$NAMESPACE" "$DELETED_RULESFILE_NAME" --wait=true --timeout=60s
+  fi
+  check_download "$digest" "$DELETED_RULESFILE_NAME" 503
   kube get pod -n "$OPERATOR_NAMESPACE" "$leader" -o json |
     jq -e --arg uid "$uid" '.metadata.uid == $uid' > /dev/null || fail "old leader Pod was replaced"
   kube exec -n "$OPERATOR_NAMESPACE" "$leader" -c artifact-ha-control -- sh -c 'kill -KILL "$1"' sh "$pid"
@@ -220,8 +249,11 @@ failover() {
       select(.name == "manager") | .restartCount > $count and .ready
     ' "$WORK_DIR/pods.json" > /dev/null; then
       check_download "$digest"
+      check_download "$digest" "$DELETED_RULESFILE_NAME" 503
       jq -n --arg leader "$follower" --arg restarted "$leader" --arg uid "$uid" --arg digest "$digest" \
-        '{status: "success", leader: $leader, restarted_pod: $restarted, restarted_uid: $uid, digest: $digest}'
+        --arg phase "$phase" --arg deleted "$DELETED_RULESFILE_NAME" \
+        '{status: "success", phase: $phase, leader: $leader, restarted_pod: $restarted,
+          restarted_uid: $uid, digest: $digest, deleted_owner: $deleted, deleted_http_status: 503}'
       return
     fi
     retry_pause
@@ -281,7 +313,11 @@ case "$ACTION" in
     ;;
   failover)
     load_backup
-    failover
+    failover delete
+    ;;
+  failback)
+    load_backup
+    failover failback
     ;;
   restore) restore ;;
   *) fail "unknown HA fixture action: $ACTION" ;;

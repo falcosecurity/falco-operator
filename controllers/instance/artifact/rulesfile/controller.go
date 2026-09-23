@@ -28,10 +28,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -94,6 +97,9 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	rulesfile := &artifactv1alpha1.Rulesfile{}
 	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil {
+		if k8serrors.IsNotFound(err) && r.cache != nil {
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypeRulesfile), req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -417,6 +423,16 @@ func (r *RulesfileAggregatorReconciler) handleDeletion(ctx context.Context, rule
 // SetupWithManager registers this controller with the manager.
 func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		// Initial informer events omit CRs deleted while this replica was inactive.
+		// Queue their persisted owners too; workers wait for informer synchronization.
+		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+			if r.cache != nil {
+				for _, owner := range r.cache.Owners(string(artifact.TypeRulesfile)) {
+					queue.Add(reconcile.Request{NamespacedName: owner})
+				}
+			}
+			return nil
+		})).
 		For(&artifactv1alpha1.Rulesfile{}, builder.WithPredicates(predicate.Or(
 			predicate.GenerationChangedPredicate{},
 			predicate.NewPredicateFuncs(func(obj client.Object) bool {

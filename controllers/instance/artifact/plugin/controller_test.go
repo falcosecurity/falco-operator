@@ -24,7 +24,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,6 +41,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -171,6 +176,201 @@ func TestReconcile_NotFound(t *testing.T) {
 	result, err := r.Reconcile(context.Background(), testutil.Request("nonexistent"))
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestReconcile_MissingCacheOwner(t *testing.T) {
+	const (
+		shared       = "shared"
+		grace        = "grace"
+		readError    = "read error"
+		persistError = "persist error"
+	)
+	for _, scenario := range []string{"unreferenced", shared, grace, readError, persistError} {
+		t.Run(scenario, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir)
+			if scenario == grace {
+				r.cache = artifactcache.NewCache(cacheDir)
+				require.NoError(t, r.cache.Load())
+			}
+			platforms := []string{"linux-amd64", "linux-arm64"}
+			paths := make([]string, 0, len(platforms))
+			for _, platform := range platforms {
+				path := artifactcache.BlobPath(cacheDir, "plugin", "repo:tag", testPluginDigest, "linux", strings.TrimPrefix(platform, "linux-"))
+				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
+				require.NoError(t, r.cache.Set("plugin", testutil.TestNamespace, testPluginName, platform, path))
+				if scenario == shared {
+					require.NoError(t, r.cache.Set("plugin", testutil.TestNamespace, "other", platform, path))
+				}
+				paths = append(paths, path)
+			}
+
+			originalClient := r.Client
+			if scenario == readError {
+				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return fmt.Errorf("API unavailable")
+					},
+				}).Build()
+			}
+			snapshot := filepath.Join(cacheDir, "index.json")
+			if scenario == persistError {
+				require.NoError(t, os.Rename(snapshot, snapshot+".backup"))
+				require.NoError(t, os.Mkdir(snapshot, 0o750))
+			}
+			_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+			if scenario == readError || scenario == persistError {
+				require.Error(t, err)
+				require.NotEmpty(t, r.cache.Owners("plugin"), "failed cleanup must retain the live index")
+				for _, path := range paths {
+					require.FileExists(t, path)
+				}
+				r.Client = originalClient
+				if scenario == persistError {
+					require.NoError(t, os.Remove(snapshot))
+					require.NoError(t, os.Rename(snapshot+".backup", snapshot))
+				}
+				reloaded := artifactcache.NewCache(cacheDir)
+				require.NoError(t, reloaded.Load())
+				require.Contains(t, reloaded.Owners("plugin"), types.NamespacedName{
+					Namespace: testutil.TestNamespace, Name: testPluginName,
+				}, "failed cleanup must retain the durable index")
+				_, err = r.Reconcile(t.Context(), testutil.Request(testPluginName))
+			}
+			require.NoError(t, err)
+			require.NotContains(t, r.cache.Owners("plugin"), types.NamespacedName{
+				Namespace: testutil.TestNamespace, Name: testPluginName,
+			})
+			reloaded := artifactcache.NewCache(cacheDir)
+			require.NoError(t, reloaded.Load())
+			require.NotContains(t, reloaded.Owners("plugin"), types.NamespacedName{
+				Namespace: testutil.TestNamespace, Name: testPluginName,
+			}, "successful cleanup must survive restart")
+			removed, err := r.cache.Sweep(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, removed, "shared/grace blobs are protected; immediate mode already removed unreferenced blobs")
+			for _, path := range paths {
+				if scenario == shared || scenario == grace {
+					require.FileExists(t, path)
+					require.True(t, r.cache.BlobExists(path))
+				} else {
+					require.NoFileExists(t, path)
+					require.NoFileExists(t, path+artifactcache.PermSuffix)
+				}
+			}
+			response := httptest.NewRecorder()
+			artifactserver.New(r.cache).Handler().ServeHTTP(response, httptest.NewRequestWithContext(
+				t.Context(), http.MethodGet, "/v1/artifacts/plugins/default/"+testPluginName+"?os=linux&arch=amd64&digest="+testPluginDigest, http.NoBody,
+			))
+			require.Equal(t, http.StatusServiceUnavailable, response.Code, "a removed name must not serve even a shared or retained blob")
+		})
+	}
+}
+
+func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		namespace string
+	}{
+		{name: "default namespace", namespace: testutil.TestNamespace},
+		{name: "custom namespace", namespace: "cache-owner-recovery"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := &envtest.Environment{
+				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				ErrorIfCRDPathMissing: true,
+			}
+			cfg, err := environment.Start()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, environment.Stop()) })
+
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			skipNameValidation := true
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
+			})
+			require.NoError(t, err)
+			for _, idx := range index.All {
+				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
+			}
+			direct, err := client.New(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			survivor := newTestPlugin(withPluginOCI())
+			if tc.namespace != testutil.TestNamespace {
+				require.NoError(t, direct.Create(t.Context(), &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: tc.namespace},
+				}))
+			}
+			survivor.Name = "survivor"
+			survivor.Namespace = tc.namespace
+			require.NoError(t, direct.Create(t.Context(), survivor))
+
+			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
+			require.NoError(t, seed.Load())
+			missingPath := artifactcache.BlobPath(seed.Dir(), "plugin", "deleted:tag", testPluginDigest, "linux", "amd64")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), "plugin", "shared:tag", testPluginDigest, "linux", "amd64")
+			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
+			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
+			require.NoError(t, seed.Set("plugin", tc.namespace, "missing", "linux-amd64", missingPath))
+			require.NoError(t, seed.Set("plugin", tc.namespace, "missing-shared", "linux-amd64", sharedPath))
+			require.NoError(t, seed.Set("plugin", tc.namespace, survivor.Name, "linux-amd64", sharedPath))
+			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
+			require.NoError(t, cache.Load())
+			r := NewPluginAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
+			// A failed registry fetch must not remove a still-existing owner's previous reference.
+			r.ociPuller = &pullerfake.MockOCIPuller{FetchConfigErr: fmt.Errorf("registry unavailable")}
+			require.NoError(t, r.SetupWithManager(mgr))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- mgr.Start(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(10 * time.Second):
+					t.Error("manager did not stop")
+				}
+			})
+
+			// Neither missing name has ever existed in this API server. Only the controller's
+			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
+			require.Eventually(t, func() bool {
+				_, missing := cache.Lookup("plugin", tc.namespace, "missing", "linux-amd64")
+				_, shared := cache.Lookup("plugin", tc.namespace, "missing-shared", "linux-amd64")
+				return !missing && !shared
+			}, 10*time.Second, 20*time.Millisecond)
+			require.Eventually(t, func() bool {
+				current := &artifactv1alpha1.Plugin{}
+				if err := direct.Get(t.Context(), client.ObjectKeyFromObject(survivor), current); err != nil {
+					return false
+				}
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+				return condition != nil && condition.Status == metav1.ConditionFalse
+			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("plugin"))
+			require.NoFileExists(t, missingPath)
+			require.FileExists(t, sharedPath)
+			reloaded := artifactcache.NewCache(seed.Dir())
+			require.NoError(t, reloaded.Load())
+			require.Equal(t, cache.Owners("plugin"), reloaded.Owners("plugin"))
+
+			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
+				response := httptest.NewRecorder()
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+					"/v1/artifacts/plugins/"+tc.namespace+"/"+name+"?os=linux&arch=amd64&digest="+testPluginDigest, http.NoBody)
+				artifactserver.New(cache).Handler().ServeHTTP(response, request)
+				if name == survivor.Name {
+					require.Equal(t, http.StatusOK, response.Code)
+					require.Equal(t, "surviving content", response.Body.String())
+				} else {
+					require.Equal(t, http.StatusServiceUnavailable, response.Code)
+				}
+			}
+		})
+	}
 }
 
 func TestReconcile_GetError(t *testing.T) {

@@ -30,10 +30,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -93,6 +96,9 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	plugin := &artifactv1alpha1.Plugin{}
 	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil {
+		if k8serrors.IsNotFound(err) && r.cache != nil {
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypePlugin), req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -340,6 +346,16 @@ func (r *PluginAggregatorReconciler) handleDeletion(ctx context.Context, plugin 
 // SetupWithManager registers this controller with the manager.
 func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		// Initial informer events omit CRs deleted while this replica was inactive.
+		// Queue their persisted owners too; workers wait for informer synchronization.
+		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+			if r.cache != nil {
+				for _, owner := range r.cache.Owners(string(artifact.TypePlugin)) {
+					queue.Add(reconcile.Request{NamespacedName: owner})
+				}
+			}
+			return nil
+		})).
 		For(&artifactv1alpha1.Plugin{}, builder.WithPredicates(predicate.Or(
 			predicate.GenerationChangedPredicate{},
 			predicate.NewPredicateFuncs(func(obj client.Object) bool {
