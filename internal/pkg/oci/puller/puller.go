@@ -28,6 +28,7 @@ import (
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
+	"oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -161,7 +162,7 @@ func manifestFromDesc(ctx context.Context, target oras.Target, desc *v1.Descript
 		return nil, fmt.Errorf("unable to fetch descriptor with digest %q: %w", desc.Digest, err)
 	}
 
-	descBytes, err := readAndClose(descReader)
+	descBytes, err := readAndClose(descReader, desc)
 	if err != nil {
 		return nil, fmt.Errorf("unable to read bytes from descriptor: %w", err)
 	}
@@ -177,8 +178,8 @@ func manifestFromDesc(ctx context.Context, target oras.Target, desc *v1.Descript
 	return &manifest, nil
 }
 
-func readAndClose(reader io.ReadCloser) ([]byte, error) {
-	data, readErr := io.ReadAll(reader)
+func readAndClose(reader io.ReadCloser, desc *v1.Descriptor) ([]byte, error) {
+	data, readErr := content.ReadAll(reader, *desc)
 	closeErr := reader.Close()
 	if readErr != nil {
 		return nil, readErr
@@ -364,5 +365,5 @@ func fetchBytes(ctx context.Context, target descriptorFetcher, desc *v1.Descript
 	if err != nil {
 		return nil, err
 	}
-	return readAndClose(r)
+	return readAndClose(r, desc)
 }
