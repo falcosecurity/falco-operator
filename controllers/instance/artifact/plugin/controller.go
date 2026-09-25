@@ -30,10 +30,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -93,6 +96,9 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	plugin := &artifactv1alpha1.Plugin{}
 	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil {
+		if k8serrors.IsNotFound(err) && r.cache != nil {
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypePlugin), req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -162,19 +168,25 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
 		// would never reach the Plugin's own status.
 		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-		controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, nodeSets)
+		aggregated := controllerhelper.AggregateConditions(nodeSets, plugin.Generation)
 
 		// The instance-level metadata failure is the more specific, authoritative cause of
 		// Programmed=False; it must win over whatever the per-node aggregate computed above.
-		apimeta.SetStatusCondition(&plugin.Status.Conditions, metav1.Condition{
+		apimeta.SetStatusCondition(&aggregated, metav1.Condition{
 			Type:               commonv1alpha1.ConditionProgrammed.String(),
 			Status:             metav1.ConditionFalse,
 			Reason:             artifact.ReasonOCIArtifactProgramFailed,
 			Message:            fmt.Sprintf("Failed to fetch OCI artifact metadata: %s", err.Error()),
 			ObservedGeneration: plugin.Generation,
 		})
-		if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); patchErr != nil {
-			return ctrl.Result{}, patchErr
+		// Apply only the final outcome so unchanged failures keep their transition time
+		// and do not create status events that bypass the error retry backoff.
+		controllerhelper.LogConditionTransitions(ctx, plugin.Status.Conditions, aggregated)
+		controllerhelper.ApplyAggregateConditions(&plugin.Status.Conditions, aggregated)
+		if !apiequality.Semantic.DeepEqual(*oldStatus, plugin.Status) {
+			if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
 		}
 		return ctrl.Result{}, err
 	}
@@ -340,12 +352,19 @@ func (r *PluginAggregatorReconciler) handleDeletion(ctx context.Context, plugin 
 // SetupWithManager registers this controller with the manager.
 func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&artifactv1alpha1.Plugin{}, builder.WithPredicates(predicate.Or(
-			predicate.GenerationChangedPredicate{},
-			predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				return !obj.GetDeletionTimestamp().IsZero()
-			}),
-		))).
+		// Initial informer events omit CRs deleted while this replica was inactive.
+		// Queue their persisted owners too; workers wait for informer synchronization.
+		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+			if r.cache != nil {
+				for _, owner := range r.cache.Owners(string(artifact.TypePlugin)) {
+					queue.Add(reconcile.Request{NamespacedName: owner})
+				}
+			}
+			return nil
+		})).
+		// Status events must reconcile too: a cached no-op can race with an earlier
+		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
+		For(&artifactv1alpha1.Plugin{}).
 		Watches(&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.PluginList{})

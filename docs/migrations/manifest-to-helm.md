@@ -1,6 +1,6 @@
 # Migration Guide: YAML manifest to Helm
 
-This guide covers moving an existing Falco Operator installation from the YAML manifest (`install.yaml`) to the official Helm chart, without losing Falco coverage or your custom resources (`Falco`, `Component`, `Rulesfile`, `Plugin`, `Config`).
+This guide covers moving an existing Falco Operator installation from the YAML manifest (`install.yaml`) to the official Helm chart while preserving custom resources (`Falco`, `Component`, `Rulesfile`, `Plugin`, `Config` and operator-managed `ArtifactNode`).
 
 The YAML manifest and the Helm chart render the same Kubernetes resources — `install.yaml` is produced by `helm template` of the chart. Migrating to Helm replaces ad-hoc `kubectl apply` workflows with a tracked release that can be configured through `values.yaml` and upgraded with `helm upgrade`.
 
@@ -15,7 +15,29 @@ kubectl get rulesfiles,plugins,configs -A -o yaml > artifacts-backup.yaml
 
 Helm 3.17+ is assumed throughout this guide (Approach A needs `--take-ownership`, added in 3.17).
 
-CRDs and custom resources are preserved across the migration. Falco pods are managed by the `Falco` CR (not directly by the operator process), so swapping the operator does not restart them.
+Pin the source operator release and target chart version. Save the source installer
+for rollback, and render the target using your reviewed values:
+
+```bash
+SOURCE_VERSION="<installed-operator-release>"
+CHART_VERSION="<target-chart-version>"
+curl -fL "https://github.com/falcosecurity/falco-operator/releases/download/${SOURCE_VERSION}/install.yaml" -o install-before.yaml
+helm template falco-operator falcosecurity/falco-operator \
+  --namespace falco-operator --version "$CHART_VERSION" \
+  --values my-values.yaml --include-crds > helm-target.yaml
+```
+
+Compare the rendered resource inventory with the live installation, including
+the artifact Service and any optional mTLS resources. The commands below assume
+default names; adapt them to that inventory. For a packaging-only migration,
+select the same operator version in the target chart. If also changing versions,
+follow the applicable [version migration](../migration-guide.md) and
+[CRD-first upgrade procedure](../installation.md#upgrade) before installing Helm.
+
+CRDs and custom resources are preserved. A packaging-only swap need not restart
+Falco pods, but operator version or configuration changes can update their pod
+templates and trigger a rollout. In particular, v0.4.x to v0.5.0 requires the
+[dedicated migration steps](v0.4.x-to-v0.5.0.md).
 
 ## Selector compatibility check
 
@@ -29,6 +51,7 @@ kubectl get deployment falco-operator -n falco-operator \
 
 helm template falco-operator falcosecurity/falco-operator \
   --namespace falco-operator \
+  --version "$CHART_VERSION" --values my-values.yaml \
   | awk '/^kind: Deployment/,/^---/' \
   | grep -A8 'selector:'
 ```
@@ -41,33 +64,26 @@ Same labels on both sides → any approach. Different → use Approach C.
 
 | Approach | Tolerates selector mismatch | Operator downtime | Complexity |
 |----------|-----------------------------|-------------------|------------|
-| [A. `helm upgrade --install --take-ownership`](#approach-a-helm-upgrade---install---take-ownership) | No | None | One command |
-| [B. Manual annotation + `helm install`](#approach-b-manual-annotation--helm-install) | No | None | ~10 kubectl commands |
-| [C. Clean swap](#approach-c-clean-swap) | Yes | ~12s | Few commands |
+| [A. `helm upgrade --install --take-ownership`](#approach-a-helm-upgrade---install---take-ownership) | No | Not required for adoption | One command |
+| [B. Manual annotation + `helm install`](#approach-b-manual-annotation--helm-install) | No | Not required for adoption | Annotations and install |
+| [C. Clean swap](#approach-c-clean-swap) | Yes | Until the replacement is ready | Delete and install |
 
-`--force-conflicts` is only needed on Helm 4 (which defaults to Server-Side Apply). Helm 3.x uses client-side apply and doesn't have the flag.
+[Helm 4 defaults to Server-Side Apply](https://helm.sh/docs/helm/helm_install/).
+If ownership conflicts occur, inspect the affected resources and field managers
+before deciding whether Helm should take those fields. Add `--force-conflicts`
+only for that reviewed ownership transfer, not as a blanket migration default.
+Helm 3.x does not have this flag.
 
 ## Approach A: `helm upgrade --install --take-ownership`
 
 `--take-ownership` lets Helm claim resources that lack its annotations. It was introduced in Helm 3.17.
 
-**Helm 3.17+ (3.x)**:
-
 ```bash
 helm upgrade --install falco-operator falcosecurity/falco-operator \
   --namespace falco-operator \
   --create-namespace \
+  --version "$CHART_VERSION" --values my-values.yaml \
   --take-ownership
-```
-
-**Helm 4**:
-
-```bash
-helm upgrade --install falco-operator falcosecurity/falco-operator \
-  --namespace falco-operator \
-  --create-namespace \
-  --take-ownership \
-  --force-conflicts
 ```
 
 Verify:
@@ -94,7 +110,10 @@ for crd in \
   components.instance.falcosecurity.dev \
   configs.artifact.falcosecurity.dev \
   plugins.artifact.falcosecurity.dev \
-  rulesfiles.artifact.falcosecurity.dev; do
+  rulesfiles.artifact.falcosecurity.dev \
+  artifactnodes.artifact.falcosecurity.dev; do
+  existing=$(kubectl get crd "$crd" --ignore-not-found -o name) || exit 1
+  [ -n "$existing" ] || continue
   kubectl annotate crd "$crd" \
     meta.helm.sh/release-name="$RELEASE" \
     meta.helm.sh/release-namespace="$NAMESPACE" --overwrite
@@ -109,8 +128,10 @@ for obj in clusterrole/falco-operator-role clusterrolebinding/falco-operator-rol
   kubectl label "$obj" app.kubernetes.io/managed-by=Helm --overwrite
 done
 
-# Namespaced: ServiceAccount + Deployment
-for obj in serviceaccount/falco-operator deployment/falco-operator; do
+# Namespaced: ServiceAccount + Deployment + artifact Service
+for obj in serviceaccount/falco-operator deployment/falco-operator service/falco-operator; do
+  existing=$(kubectl -n "$NAMESPACE" get "$obj" --ignore-not-found -o name) || exit 1
+  [ -n "$existing" ] || continue
   kubectl -n "$NAMESPACE" annotate "$obj" \
     meta.helm.sh/release-name="$RELEASE" \
     meta.helm.sh/release-namespace="$NAMESPACE" --overwrite
@@ -122,14 +143,18 @@ done
 
 ```bash
 helm install falco-operator falcosecurity/falco-operator \
-  --namespace falco-operator
+  --namespace falco-operator \
+  --version "$CHART_VERSION" --values my-values.yaml
 ```
 
 > If `helm install` fails with `Apply failed with 1 conflict … field is immutable` on the Deployment, the selectors don't match — use Approach C.
 
 ## Approach C: Clean swap
 
-Delete the operator Deployment + RBAC, then `helm install` fresh. CRDs and CRs stay in place; Falco pods keep running (they're managed by the `Falco`/`Component` CRs).
+Delete the operator Deployment, Service and RBAC, then `helm install` fresh.
+CRDs and CRs stay in place; existing Falco pods keep running, but artifact
+downloads pause while the server is unavailable. A version/configuration change
+can still roll those pods once the new operator starts.
 
 > Do **not** delete the CRDs or the artifact CRs. The operator must be running to process their finalizers on deletion.
 
@@ -137,6 +162,7 @@ Delete the operator Deployment + RBAC, then `helm install` fresh. CRDs and CRs s
 
 ```bash
 kubectl -n falco-operator delete deployment falco-operator
+kubectl -n falco-operator delete service falco-operator --ignore-not-found
 kubectl -n falco-operator delete serviceaccount falco-operator
 kubectl delete clusterrolebinding falco-operator-rolebinding
 kubectl delete clusterrole falco-operator-role
@@ -144,22 +170,11 @@ kubectl delete clusterrole falco-operator-role
 
 ### C.2 — Install
 
-**Helm 3.17+ (3.x)**:
-
-```bash
-helm install falco-operator falcosecurity/falco-operator \
-  --namespace falco-operator
-```
-
-**Helm 4**:
-
 ```bash
 helm install falco-operator falcosecurity/falco-operator \
   --namespace falco-operator \
-  --force-conflicts
+  --version "$CHART_VERSION" --values my-values.yaml
 ```
-
-`--force-conflicts` is required on Helm 4 because the CRDs were installed by `kubectl apply --server-side` and the `kubectl` field manager still owns `.spec.versions`; without it, Helm 4's CRD install errors with `Apply failed with 1 conflict: conflict with "kubectl": .spec.versions`.
 
 ### C.3 — Verify
 
@@ -170,12 +185,15 @@ helm list -n falco-operator
 
 ## Rollback
 
-If the migration goes wrong, restore the manifest install and re-apply the backups:
+For a packaging-only rollback, restore the saved source installer and re-apply
+the backups. If the migration also changed versions, review downgrade compatibility
+first; do not replace CRDs or status schemas blindly.
 
 ```bash
-kubectl apply --server-side -f https://github.com/falcosecurity/falco-operator/releases/latest/download/install.yaml
+kubectl apply --server-side -f install-before.yaml
 kubectl apply -f falcos-components-backup.yaml
 kubectl apply -f artifacts-backup.yaml
 ```
 
-For Approach C, only the Deployment + RBAC need to be recreated by re-applying `install.yaml` — CRDs and CRs were never removed.
+For Approach C, the Deployment, Service and RBAC need to be recreated by re-applying
+the saved installer. CRDs and CRs were never removed.

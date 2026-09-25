@@ -23,10 +23,10 @@ kubectl rollout status deployment/registry -n "${REGISTRY_NAMESPACE}" --timeout=
 
 echo "Starting port-forward to registry on localhost:5000..."
 kubectl port-forward -n "${REGISTRY_NAMESPACE}" svc/registry 5000:5000 &
-PF_PID=$!
+PF_PIDS=("$!")
 
 TMPDIR=$(mktemp -d)
-trap 'kill "${PF_PID}" 2>/dev/null; rm -rf "${TMPDIR}"' EXIT
+trap 'kill "${PF_PIDS[@]}" 2>/dev/null || true; rm -rf "${TMPDIR}"' EXIT
 
 # falcoctl defaults to writing its config at /etc/falcoctl/falcoctl.yaml and creates that
 # directory if missing, which requires root/sudo. Redirect every falcoctl call below into our
@@ -148,7 +148,7 @@ for ARCH in x86_64 aarch64; do
         "https://download.falco.org/plugins/stable/json-0.7.4-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-json-${ARCH}.tar.gz"
     curl -fsSL -L \
-        "https://download.falco.org/plugins/stable/container-0.7.4-linux-${ARCH}.tar.gz" \
+        "https://download.falco.org/plugins/stable/container-0.7.5-linux-${ARCH}.tar.gz" \
         -o "${TMPDIR}/plugin-container-${ARCH}.tar.gz"
     curl -fsSL -L \
         "https://download.falco.org/plugins/stable/k8smeta-0.4.0-linux-${ARCH}.tar.gz" \
@@ -217,8 +217,8 @@ push_plugin "falco-test/plugin-json:latest" "0.7.4" "plugin-json" \
     --requires plugin_api_version:3.11.0
 
 echo ""
-echo "Pushing plugin-container (real container 0.7.4 binary, requires plugin_api_version 3.10.0)..."
-push_plugin "falco-test/plugin-container:latest" "0.7.4" "plugin-container" \
+echo "Pushing plugin-container (real container 0.7.5 binary, requires plugin_api_version 3.10.0)..."
+push_plugin "falco-test/plugin-container:latest" "0.7.5" "plugin-container" \
     --requires plugin_api_version:3.10.0
 
 echo ""
@@ -233,3 +233,36 @@ push_plugin "falco-test/plugin-k8saudit:latest" "0.18.0" "plugin-k8saudit" \
 
 echo ""
 echo "All OCI test artifacts pushed to ${REGISTRY}."
+
+# The separate authenticated registry uses disposable credentials over plain HTTP only
+# inside the e2e fixture. Seed one existing rules artifact, leaving public refs untouched.
+echo "Waiting for authenticated registry deployment..."
+kubectl rollout status deployment/private-registry -n "${REGISTRY_NAMESPACE}" --timeout=120s
+kubectl port-forward -n "${REGISTRY_NAMESPACE}" svc/private-registry 5001:5000 &
+PF_PIDS+=("$!")
+
+for i in $(seq 1 30); do
+    if curl -sf -m 5 -u oci-test:oci-test-password http://localhost:5001/v2/ >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+curl -sf -m 5 -u oci-test:oci-test-password http://localhost:5001/v2/ >/dev/null ||
+    { echo "ERROR: authenticated registry not reachable after 30s"; exit 1; }
+if [ "$(curl -sS -m 5 -o /dev/null -w '%{http_code}' http://localhost:5001/v2/)" != "401" ]; then
+    echo "ERROR: authenticated registry accepted an anonymous request"
+    exit 1
+fi
+if [ "$(curl -sS -m 5 -u oci-test:wrong-password -o /dev/null -w '%{http_code}' http://localhost:5001/v2/)" != "401" ]; then
+    echo "ERROR: authenticated registry accepted an incorrect password"
+    exit 1
+fi
+
+# --config does not redirect falcoctl's credential store. Keep fixture credentials
+# in this temporary directory, never the runner's normal Docker credential file.
+printf '{"auths":{"localhost:5001":{"auth":"%s"}}}\n' \
+    "$(printf '%s' 'oci-test:oci-test-password' | base64 | tr -d '\n')" > "${TMPDIR}/private-registry.json"
+FALCOCTL_REGISTRY_CREDS_CONFIG="${TMPDIR}/private-registry.json" falcoctl registry push \
+    --type rulesfile --version 0.1.0 --plain-http --requires engine_version_semver:0.0.1 \
+    localhost:5001/falco-test/rulesfile-engine-req-met:latest \
+    "${TMPDIR}/rulesfile-engine-req-met.tar.gz"

@@ -28,10 +28,12 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -39,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -94,6 +97,9 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 
 	rulesfile := &artifactv1alpha1.Rulesfile{}
 	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil {
+		if k8serrors.IsNotFound(err) && r.cache != nil {
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypeRulesfile), req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -164,19 +170,25 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
 		// would never reach the Rulesfile's own status.
 		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-		controllerhelper.ComputeAggregateConditions(ctx, rulesfile, &rulesfile.Status.Conditions, nodeSets)
+		aggregated := controllerhelper.AggregateConditions(nodeSets, rulesfile.Generation)
 
 		// The instance-level metadata failure is the more specific, authoritative cause of
 		// Programmed=False; it must win over whatever the per-node aggregate computed above.
-		apimeta.SetStatusCondition(&rulesfile.Status.Conditions, metav1.Condition{
+		apimeta.SetStatusCondition(&aggregated, metav1.Condition{
 			Type:               commonv1alpha1.ConditionProgrammed.String(),
 			Status:             metav1.ConditionFalse,
 			Reason:             artifact.ReasonProgramFailed,
 			Message:            fmt.Sprintf("Failed to compute artifact metadata: %s", err.Error()),
 			ObservedGeneration: rulesfile.Generation,
 		})
-		if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
-			return ctrl.Result{}, patchErr
+		// Apply only the final outcome so unchanged failures keep their transition time
+		// and do not create status events that bypass the error retry backoff.
+		controllerhelper.LogConditionTransitions(ctx, rulesfile.Status.Conditions, aggregated)
+		controllerhelper.ApplyAggregateConditions(&rulesfile.Status.Conditions, aggregated)
+		if !apiequality.Semantic.DeepEqual(*oldStatus, rulesfile.Status) {
+			if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
 		}
 		return ctrl.Result{}, err
 	}
@@ -358,7 +370,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 }
 
 // appendYAMLRequirements parses required_engine_version and required_plugin_versions from
-// a Falco rules YAML document and appends the results to meta.
+// all documents in a Falco rules YAML stream and appends the results to meta.
 func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) error {
 	rulesReqs, err := compat.ParseRulesRequirements(content)
 	if err != nil {
@@ -367,15 +379,7 @@ func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) e
 	if rulesReqs == nil {
 		return nil
 	}
-	if rulesReqs.EngineVersion != "" {
-		capName := "engine_version_semver"
-		if rulesReqs.EngineVersionIsInt {
-			capName = "engine_version"
-		}
-		meta.Requirements = append(meta.Requirements, commonv1alpha1.ArtifactMetaRequirement{
-			Name: capName, Version: rulesReqs.EngineVersion,
-		})
-	}
+	meta.Requirements = append(meta.Requirements, rulesReqs.EngineVersions...)
 	meta.Dependencies = append(meta.Dependencies, rulesReqs.PluginVersions...)
 	return nil
 }
@@ -425,12 +429,19 @@ func (r *RulesfileAggregatorReconciler) handleDeletion(ctx context.Context, rule
 // SetupWithManager registers this controller with the manager.
 func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&artifactv1alpha1.Rulesfile{}, builder.WithPredicates(predicate.Or(
-			predicate.GenerationChangedPredicate{},
-			predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				return !obj.GetDeletionTimestamp().IsZero()
-			}),
-		))).
+		// Initial informer events omit CRs deleted while this replica was inactive.
+		// Queue their persisted owners too; workers wait for informer synchronization.
+		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
+			if r.cache != nil {
+				for _, owner := range r.cache.Owners(string(artifact.TypeRulesfile)) {
+					queue.Add(reconcile.Request{NamespacedName: owner})
+				}
+			}
+			return nil
+		})).
+		// Status events must reconcile too: a cached no-op can race with an earlier
+		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
+		For(&artifactv1alpha1.Rulesfile{}).
 		Watches(&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.RulesfileList{})

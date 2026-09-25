@@ -188,12 +188,9 @@ func (r *ConfigAggregatorReconciler) handleDeletion(ctx context.Context, config 
 // SetupWithManager registers this controller with the manager.
 func (r *ConfigAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&artifactv1alpha1.Config{}, builder.WithPredicates(predicate.Or(
-			predicate.GenerationChangedPredicate{},
-			predicate.NewPredicateFuncs(func(obj client.Object) bool {
-				return !obj.GetDeletionTimestamp().IsZero()
-			}),
-		))).
+		// Status events must reconcile too: a cached no-op can race with an earlier
+		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
+		For(&artifactv1alpha1.Config{}).
 		Watches(&corev1.Node{},
 			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
 				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.ConfigList{})

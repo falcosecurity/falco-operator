@@ -142,22 +142,87 @@ spec:
         kubernetes.io/os: linux
 ```
 
+Environment entries in `containers` and `initContainers` override defaults by name.
+An explicit entry replaces the whole variable, including its `valueFrom` source;
+`value: ""` (or just `name`) sets an empty value. Variables omitted from the
+override retain their defaults. The same behavior applies to Component Pod templates.
+
+For an environment variable with the same `name`:
+
+| Operator default | Pod template override | Result |
+|------------------|-----------------------|--------|
+| `value: "30s"` | `valueFrom.secretKeyRef` | Only the Secret reference remains; the literal value is removed |
+| `valueFrom.fieldRef` | `value: "manual"` | Only the literal value remains; the field reference is removed |
+| Any value or source | `value: ""` | Explicitly empty value, with no `valueFrom` |
+| Any value or source | Variable omitted | Operator default retained |
+
+This replacement applies to each explicitly overridden environment variable,
+not to the whole `env` list or every field of the Pod template.
+
 ### Reserved names
 
 The following container names are reserved by the operator:
 - `falco` — The main Falco container
-- `artifact-operator` — The Artifact Operator native sidecar
+- `artifact-operator`: the Artifact Operator regular sidecar container
 
 You can customize these containers in `podTemplateSpec` by matching their names.
 
+## Artifact compatibility
+
+The Helm chart defaults to `enforceRequirements: true`. OCI plugins must declare
+compatibility requirements in their OCI metadata. Rulesfile requirements are
+collected from OCI metadata and every configured rules source, including inline
+YAML and ConfigMaps. A Rulesfile with neither engine requirements nor plugin
+dependencies is blocked. Declare the requirements the rules actually need, such
+as `required_engine_version` and `required_plugin_versions`; see the
+[Rulesfile examples](crds/rulesfile.md#examples).
+
+Missing or incompatible requirements appear in `DependenciesSatisfied` on the
+parent and its `ArtifactNode` resources. A rejected update retains installed
+files; it does not install the rejected revision. A new pod has fresh `emptyDir`
+volumes and cannot retain files from its predecessor.
+
+To allow installation without enforcing these checks, explicitly set the Helm
+value `enforceRequirements: false` (advise mode). For non-Helm installations, use
+`--enforce-requirements=false` on the instance operator; it propagates this setting
+to sidecars. This does not make incompatible artifacts loadable by Falco or remove
+the startup prerequisite below.
+
+## Falco API prerequisite
+
+Before starting artifact controllers, the sidecar waits for a successful JSON
+response from Falco's `/versions` endpoint. This is required in both enforce and
+advise mode. The default base URL is `http://localhost:8765`; keep the Falco
+webserver enabled. If you change its address or port, set `FALCO_URL` (or
+`--falco-url`) on the `artifact-operator` container and adjust Falco's probes too.
+The versions client has no dedicated private-CA or client-certificate setting;
+the artifact-server TLS options do not configure this connection.
+
+If sidecar logs remain at `Waiting for Falco to be available`, check Falco startup
+logs and access to `/versions` from the pod. Falco must be able to start before
+artifact installation begins. Disabling Prometheus metrics does not remove this
+API requirement; metrics are optional and separate from `/versions`.
+
+## Artifact Server DNS
+
+The artifact server URL uses the cluster DNS domain, which defaults to
+`cluster.local`. For a different domain, set the Helm value `clusterDomain` to the
+domain configured in your cluster. This updates both the advertised URL and the
+server certificate when mTLS is enabled.
+
+For installations without Helm, configure the instance operator with
+`--cluster-domain` or `CLUSTER_DOMAIN`, and ensure any server certificate covers
+the resulting Service hostname. An explicit `ARTIFACT_SERVER_URL` still overrides
+the generated URL and requires a certificate matching that URL when using TLS.
+
 ## Artifact Reloads
 
-With Falco versions before 0.45, artifact reloads are **best effort**. By default,
+Artifact reloads are **best effort** with the default Falco 0.44.1. By default,
 the Artifact Operator sends SIGHUP and waits at least **5 seconds** before checking Falco's HTTP
 endpoint or sending another signal. This cooldown reduces repeated signals; it
 does not confirm that a reload completed or prevent every conflict with Falco's
-own file watcher. Support for the reload changes planned for Falco 0.45 will be
-validated separately; this setting does not enable a different reload mechanism.
+own file watcher. A future reload API requires separate integration and validation;
+selecting Falco 0.45 or later does not itself enable a different reload mechanism.
 
 Configure the cooldown per instance on the `artifact-operator` container:
 
@@ -182,6 +247,57 @@ variable. Changing the Pod template follows the workload's update strategy; this
 is not a live adjustment to an already-running sidecar. Falco metrics are not
 required for the cooldown or the HTTP availability check.
 
+## Artifact Downloads
+
+The Artifact Operator limits each download from the central artifact server to
+**5 minutes** by default. This is the total time for one attempt, including
+connection setup and reading the response, not an inactivity timeout. A failed
+download does not replace the installed OCI file; the controller retries it.
+This setting does not affect registry pulls performed by the instance operator.
+
+Set a global default using the Helm chart's existing `extraEnv`:
+
+```yaml
+extraEnv:
+  - name: ARTIFACT_DOWNLOAD_TIMEOUT
+    value: "2m"
+```
+
+The instance operator injects this value into its Artifact Operator sidecars.
+Override it for one Falco instance through its Pod template:
+
+```yaml
+spec:
+  podTemplateSpec:
+    spec:
+      containers:
+        - name: artifact-operator
+          env:
+            - name: ARTIFACT_DOWNLOAD_TIMEOUT
+              value: "1m"
+```
+
+Both binaries also accept `--artifact-download-timeout`; an explicit flag takes
+precedence over the environment variable. Values must be positive Go durations,
+such as `30s` or `2m`; zero does not disable the timeout. Updating an injected
+value changes the Pod template and follows the workload's update strategy, not
+a live reload. TCP connection setup and TLS handshakes retain their respective
+30-second and 10-second limits. The central server's existing 5-minute write
+timeout is independent: increasing the client timeout does not extend it.
+
+### OCI revisions
+
+An OCI reference is resolved when its `ociArtifact` spec changes. The resolved
+digest is retained in parent status and reused after pod/operator restarts and
+cache rebuilds. Rotating auth Secret data retries with new credentials but does
+not refresh an unchanged floating tag. Neither does changing a Rulesfile's inline
+or ConfigMap source. Change the tag or pin a new digest (`sha256:...`) to select
+new content.
+
+Deleting and recreating the parent also discards its resolved metadata, but runs
+artifact cleanup first and can interrupt coverage. Dependency finalizers can
+delay deletion. Prefer an explicit reference update to forcing a refresh this way.
+
 ## Artifact Operator Image
 
 The Artifact Operator sidecar image is configurable via the `ARTIFACT_OPERATOR_IMAGE` environment variable on the Falco Operator Deployment:
@@ -189,10 +305,13 @@ The Artifact Operator sidecar image is configurable via the `ARTIFACT_OPERATOR_I
 ```yaml
 env:
   - name: ARTIFACT_OPERATOR_IMAGE
-    value: "docker.io/falcosecurity/artifact-operator:v0.2.0"
+    value: "docker.io/falcosecurity/artifact-operator:<matching-release-tag>"
 ```
 
-Default: `docker.io/falcosecurity/artifact-operator:latest`
+Release builds embed the matching Artifact Operator image. An unconfigured local
+build falls back to `docker.io/falcosecurity/artifact-operator:latest`. Keep the
+two operator images on a matching release; overriding only the sidecar image can
+break their shared API and artifact-delivery protocol.
 
 ## Operator replicas and artifact downloads
 
@@ -226,9 +345,10 @@ not removed because the server is temporarily unavailable.
 ## Artifact server CA renewal
 
 With `mtls.createIssuer: true`, cert-manager automatically renews the bootstrap CA
-certificate. This is separate from rotating its private key. The chart does not set
-a key rotation policy: cert-manager 1.16 defaults to reusing the key, while 1.18
-changed the default to replacing it. See the [cert-manager 1.18 release notes](https://cert-manager.io/docs/releases/release-notes/release-notes-1.18/).
+certificate. The chart sets `privateKey.rotationPolicy: Never` on this CA so renewal
+reuses its private key and existing, valid server and client certificates remain
+trusted. This does not change the renewal or key rotation policy of those server
+and client certificates, or of externally managed CAs.
 
 The chart does not automate CA key rotation. Its trust-manager Bundle normally
 contains one CA; replacing that CA does not retain trust in the old one, and a
@@ -236,7 +356,8 @@ CA Secret update does not automatically reissue existing leaf certificates.
 Plan a dual-trust interval, renew the server and all client certificates against
 the new CA, and verify their use before withdrawing the old CA. Review the
 [CA issuer requirements](https://cert-manager.io/v1.16-docs/configuration/ca/)
-before changing the issuer or upgrading cert-manager across a default-policy change.
+before changing the issuer. Key reuse cannot recover a lost CA key or undo a
+rotation already underway.
 
 ## Excluding labels from propagation
 

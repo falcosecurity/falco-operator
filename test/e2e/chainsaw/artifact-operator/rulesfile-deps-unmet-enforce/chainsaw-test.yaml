@@ -117,6 +117,263 @@ spec:
             - name: should_exist
               value: "false"
 
+    - name: "Step 05: Reject-weaker-following-requirements"
+      description: |
+        Later semver and legacy requirements must not hide the unmet first requirement.
+        Wait for diagnostics for this generation before checking that no file was installed.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_engine_version: "999.0.0"
+                  - required_engine_version: "0.30.0"
+                  - required_engine_version: 0
+                  - rule: Chainsaw deps-unmet-enforce inline rule
+                    desc: Later requirements must not weaken the first engine requirement.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=repeated-unmet-enforce"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'DependenciesSatisfied'].observedGeneration == [metadata.generation]): true
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfied
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'False'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: 50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+
+    - name: "Step 06: Correct-requirements-and-observe-loaded-rules"
+      description: |
+        Correcting only the Rulesfile must unblock installation. Check the exact file
+        and confirm that Falco reports its hash, not just successful CR conditions.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - required_engine_version: 0
+                  - rule: Chainsaw deps-unmet-enforce inline rule
+                    desc: Corrected requirements allow the existing Rulesfile to recover.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=corrected-enforce"
+                    priority: DEBUG
+                    tags: [test, chainsaw, deps]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'DependenciesSatisfied'].observedGeneration == [metadata.generation]): true
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+                (conditions[?type == 'InlineArtifactProgrammed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/rules.d/50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: installed_checksum
+                value: (json_parse($stdout).checksum)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: 50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+              - name: RULE_SHA256
+                value: ($installed_checksum)
+              - name: MODE
+                value: rules
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+
+    - name: "Step 07: Reject-unmet-requirement-in-later-document"
+      description: |
+        A ConfigMap's second YAML document is part of its requirements. Reject the
+        source change and preserve the installed inline file and Falco's loaded hash.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/rules.d/50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            outputs:
+              - name: installed_checksum
+                value: (json_parse($stdout).checksum)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: rulesfile-deps-unmet-enforce-cm
+                namespace: ($namespace)
+              data:
+                rules.yaml: |
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw deps-unmet-enforce configmap rule
+                    desc: A later document contains an unmet engine requirement.
+                    condition: evt.type = execve
+                    output: "process=%proc.cmdline marker=multidoc-unmet-enforce"
+                    priority: DEBUG
+                  ---
+                  - required_engine_version: "999.0.0"
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                inlineRules: null
+                configMapRef:
+                  name: rulesfile-deps-unmet-enforce-cm
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (status.conditions[?type == 'DependenciesSatisfied'].observedGeneration == [metadata.generation]): true
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'False'
+                    reason: DependenciesNotSatisfiedUpdateRejected
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/rules.d/50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (json_parse($stdout).checksum == $installed_checksum): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /etc/falco/rules.d
+              - name: EXPECTED_FILE
+                value: 50-02-rulesfile-deps-unmet-enforce-test-configmap.yaml
+              - name: SHOULD_EXIST
+                value: "false"
+            content: bash ../../common/scripts/assert_file_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULE_FILE_NAME
+                value: 50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+              - name: RULE_SHA256
+                value: ($installed_checksum)
+              - name: MODE
+                value: rules
+            content: bash ../../common/scripts/check_falco_reload_on_node.sh
+
+    - name: "Step 08: Delete-rulesfile"
+      description: |
+        Deleting a Rulesfile with a rejected update must clean up its ArtifactNode
+        and release the ConfigMap reference before automatic test cleanup.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            namespace: ($namespace)
+            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: rulesfile-deps-unmet-enforce-cm
+                namespace: ($namespace)
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/configmap-in-use')): false
+
+    - name: "Step 09: Assert-retained-file-absent-from-filesystem"
+      description: Deletion must remove the old inline file retained when the ConfigMap update was rejected.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-rulesfile-deps-unmet-enforce-test-inline.yaml
+            - name: should_exist
+              value: "false"
+
   catch:
     - description: Capture debug snapshot on failure
       script:

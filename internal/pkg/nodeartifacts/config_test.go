@@ -19,6 +19,7 @@ package nodeartifacts_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,59 +32,69 @@ import (
 )
 
 func TestManager_StoreConfig_PartialPriorityMoveTracksInstalledFileAndRetries(t *testing.T) {
-	ctx := t.Context()
-	fs := fsfake.NewMockFileSystem()
-	dirs := artifact.DefaultArtifactDirs()
-	m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: dirs}, compatfake.NewMockVersionsFetcher(nil))
-	fetcher := &artifact.Fetcher{}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns", Name: "myfile"}
-	oldContent, err := fetcher.FetchInline(ctx, []byte("old config"))
-	require.NoError(t, err)
-	updatedContent, err := fetcher.FetchInline(ctx, []byte("updated config"))
-	require.NoError(t, err)
-	_, original, err := m.StoreConfig(ctx, key.Namespace, key.Name, 50, artifact.MediumInline, oldContent)
-	require.NoError(t, err)
-	require.NotNil(t, original)
-	newPath := artifact.ArtifactPath(dirs, key.Name, 20, artifact.MediumInline, artifact.TypeConfig)
-	replaceErr := errors.New("cannot replace moved config")
-	fs.RenameErrFor = map[string]error{newPath + ".tmp": replaceErr}
+	for _, tc := range []struct {
+		name                     string
+		oldPriority, newPriority int32
+	}{
+		{name: "higher priority", oldPriority: 50, newPriority: 20},
+		{name: "lower priority", oldPriority: 20, newPriority: 50},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			fs := fsfake.NewMockFileSystem()
+			dirs := artifact.DefaultArtifactDirs()
+			m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: dirs}, compatfake.NewMockVersionsFetcher(nil))
+			fetcher := &artifact.Fetcher{}
+			key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns", Name: "myfile"}
+			oldContent, err := fetcher.FetchInline(ctx, []byte("old config"))
+			require.NoError(t, err)
+			updatedContent, err := fetcher.FetchInline(ctx, []byte("updated config"))
+			require.NoError(t, err)
+			_, original, err := m.StoreConfig(ctx, key.Namespace, key.Name, tc.oldPriority, artifact.MediumInline, oldContent)
+			require.NoError(t, err)
+			require.NotNil(t, original)
+			newPath := artifact.ArtifactPath(dirs, key.Name, tc.newPriority, artifact.MediumInline, artifact.TypeConfig)
+			replaceErr := errors.New("cannot replace moved config")
+			fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"): replaceErr}
 
-	action, relocated, err := m.StoreConfig(ctx, key.Namespace, key.Name, 20, artifact.MediumInline, updatedContent)
+			action, relocated, err := m.StoreConfig(ctx, key.Namespace, key.Name, tc.newPriority, artifact.MediumInline, updatedContent)
 
-	require.ErrorIs(t, err, replaceErr)
-	assert.Equal(t, artifact.StoreActionPriorityChanged, action)
-	require.NotNil(t, relocated)
-	assert.Equal(t, newPath, relocated.Path)
-	assert.Equal(t, int32(20), relocated.Priority)
-	assert.Equal(t, oldContent.ContentHash, relocated.ContentHash)
-	assert.Equal(t, relocated, m.FindInstalled(key, artifact.MediumInline))
-	assert.Equal(t, oldContent.Content, fs.Files[newPath])
-	assert.NotContains(t, fs.Files, original.Path)
-	assert.NotContains(t, fs.Files, newPath+".tmp")
-	intact, err := m.Verify(ctx, relocated)
-	require.NoError(t, err)
-	assert.True(t, intact)
+			require.ErrorIs(t, err, replaceErr)
+			assert.Equal(t, artifact.StoreActionPriorityChanged, action)
+			require.NotNil(t, relocated)
+			assert.Equal(t, newPath, relocated.Path)
+			assert.Equal(t, tc.newPriority, relocated.Priority)
+			assert.Equal(t, oldContent.ContentHash, relocated.ContentHash)
+			assert.Equal(t, relocated, m.FindInstalled(key, artifact.MediumInline))
+			assert.Equal(t, oldContent.Content, fs.Files[newPath])
+			assert.NotContains(t, fs.Files, original.Path)
+			assert.NotContains(t, fs.Files, filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"))
+			intact, err := m.Verify(ctx, relocated)
+			require.NoError(t, err)
+			assert.True(t, intact)
 
-	delete(fs.RenameErrFor, newPath+".tmp")
-	action, installed, err := m.StoreConfig(ctx, key.Namespace, key.Name, 20, artifact.MediumInline, updatedContent)
+			delete(fs.RenameErrFor, filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"))
+			action, installed, err := m.StoreConfig(ctx, key.Namespace, key.Name, tc.newPriority, artifact.MediumInline, updatedContent)
 
-	require.NoError(t, err)
-	assert.Equal(t, artifact.StoreActionUpdated, action)
-	require.NotNil(t, installed)
-	assert.Equal(t, newPath, installed.Path)
-	assert.Equal(t, int32(20), installed.Priority)
-	assert.Equal(t, updatedContent.ContentHash, installed.ContentHash)
-	assert.Equal(t, installed, m.FindInstalled(key, artifact.MediumInline))
-	assert.Equal(t, updatedContent.Content, fs.Files[newPath])
-	assert.NotContains(t, fs.Files, original.Path)
-	assert.NotContains(t, fs.Files, newPath+".tmp")
-	intact, err = m.Verify(ctx, installed)
-	require.NoError(t, err)
-	assert.True(t, intact)
+			require.NoError(t, err)
+			assert.Equal(t, artifact.StoreActionUpdated, action)
+			require.NotNil(t, installed)
+			assert.Equal(t, newPath, installed.Path)
+			assert.Equal(t, tc.newPriority, installed.Priority)
+			assert.Equal(t, updatedContent.ContentHash, installed.ContentHash)
+			assert.Equal(t, installed, m.FindInstalled(key, artifact.MediumInline))
+			assert.Equal(t, updatedContent.Content, fs.Files[newPath])
+			assert.NotContains(t, fs.Files, original.Path)
+			assert.NotContains(t, fs.Files, filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"))
+			intact, err = m.Verify(ctx, installed)
+			require.NoError(t, err)
+			assert.True(t, intact)
 
-	action, _, err = m.StoreConfig(ctx, key.Namespace, key.Name, 20, artifact.MediumInline, updatedContent)
-	require.NoError(t, err)
-	assert.Equal(t, artifact.StoreActionUnchanged, action)
+			action, _, err = m.StoreConfig(ctx, key.Namespace, key.Name, tc.newPriority, artifact.MediumInline, updatedContent)
+			require.NoError(t, err)
+			assert.Equal(t, artifact.StoreActionUnchanged, action)
+		})
+	}
 }
 
 func TestManager_StoreConfigPassesThroughToUnderlyingStore(t *testing.T) {

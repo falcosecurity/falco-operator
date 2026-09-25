@@ -21,8 +21,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,6 +45,7 @@ import (
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
@@ -114,10 +113,13 @@ func main() {
 	// envutil.BindFlagEnv, called after flag.Parse below, applies each env var to its flag when the
 	// flag isn't set on the command line.
 	var artifactServerURL string
+	var artifactDownloadTimeout time.Duration
 	var artifactClientCertPath, artifactClientCertName, artifactClientCertKey string
 	var artifactServerCAFile string
 	flag.StringVar(&artifactServerURL, "artifact-server-url", "",
 		"Required URL of the central artifact HTTP server.")
+	flag.DurationVar(&artifactDownloadTimeout, "artifact-download-timeout", artifact.DefaultDownloadTimeout,
+		"Maximum duration of one complete download from the artifact server, including connection setup and response body. Must be positive.")
 	flag.StringVar(&artifactClientCertPath, "artifact-client-cert-path", "",
 		"The directory that contains the client certificate used to authenticate to the central "+
 			"artifact server via mTLS. Only meaningful when the artifact server requires client certs.")
@@ -136,6 +138,11 @@ func main() {
 	}
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
+
+	if artifactDownloadTimeout <= 0 {
+		setupLog.Error(nil, "artifact download timeout must be positive; configure --artifact-download-timeout or ARTIFACT_DOWNLOAD_TIMEOUT")
+		os.Exit(1)
+	}
 
 	if falcoReloadCooldown <= 0 {
 		setupLog.Error(nil, "falco reload cooldown must be positive; configure --falco-reload-cooldown or FALCO_RELOAD_COOLDOWN")
@@ -304,9 +311,23 @@ func main() {
 	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
 	// keeping a plugin's config entry until no rules file on this node still requires it. It also
 	// caches Falco's reported capabilities and plugin versions so compatibility checks never
-	// require a live HTTP call. WarmSync observes installed files and current assignments after
-	// the manager's cache syncs, before reconcilers start. Dependency metadata is rebuilt during
+	// require a live HTTP call. WarmSync observes installed files and current assignments using
+	// the synced manager cache, before any reconcilers start. Dependency metadata is rebuilt during
 	// reconciliation, without restoring historical state from disk or ArtifactNode status.
+	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
+	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
+	mgr, err = controllerhelper.WithStartup(mgr, func(ctx context.Context) error {
+		if err := nodeartifacts.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
+			return err
+		}
+		setupLog.Info("Node artifact manager observed installed files and current plugin assignments")
+		return nil
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to configure node artifact startup")
+		os.Exit(1)
+	}
+
 	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
 	if err := mgr.Add(reloadCoordinator); err != nil {
 		setupLog.Error(err, "unable to add reload coordinator to manager")
@@ -320,13 +341,6 @@ func main() {
 	}
 	if err := mgr.Add(dirWatcher); err != nil {
 		setupLog.Error(err, "unable to add Falco dir watcher to manager")
-		os.Exit(1)
-	}
-
-	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
-	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
-	if err := mgr.Add(nodeartifacts.NewWarmSyncRunnable(mgr.GetClient(), nodeManager, namespace, nodeName)); err != nil {
-		setupLog.Error(err, "unable to add node artifact manager warm sync to manager")
 		os.Exit(1)
 	}
 
@@ -382,43 +396,9 @@ func main() {
 		}
 	}
 
-	artifactTransport := http.DefaultTransport.(*http.Transport).Clone()
-	if artifactClientCertWatcher != nil || artifactCAWatcher != nil {
-		// http.Transport.TLSClientConfig is a single static *tls.Config shared across
-		// connections; there is no client-side hook to re-read the trust pool or client cert
-		// per connection. DialTLSContext instead builds a fresh tls.Config from the watchers'
-		// current state on every new TCP connection, so a cert/CA reload takes effect the next
-		// time a keep-alive connection is re-established.
-		artifactTransport.DialTLSContext = func(dialCtx context.Context, network, addr string) (net.Conn, error) {
-			conn, dialErr := (&net.Dialer{}).DialContext(dialCtx, network, addr)
-			if dialErr != nil {
-				return nil, dialErr
-			}
-			host, _, splitErr := net.SplitHostPort(addr)
-			if splitErr != nil {
-				host = addr
-			}
-			tlsConfig := &tls.Config{ServerName: host}
-			if artifactCAWatcher != nil {
-				tlsConfig.RootCAs = artifactCAWatcher.CertPool()
-			}
-			if artifactClientCertWatcher != nil {
-				tlsConfig.GetClientCertificate = func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
-					return artifactClientCertWatcher.GetCertificate(nil)
-				}
-			}
-			tlsConn := tls.Client(conn, tlsConfig)
-			if hsErr := tlsConn.HandshakeContext(dialCtx); hsErr != nil {
-				_ = conn.Close()
-				return nil, hsErr
-			}
-			return tlsConn, nil
-		}
-	}
-
 	artifactFetcher := &artifact.Fetcher{
 		ServerURL:  artifactServerURL,
-		HTTPClient: &http.Client{Transport: artifactTransport},
+		HTTPClient: artifact.NewHTTPClient(artifactDownloadTimeout, artifactClientCertWatcher, artifactCAWatcher),
 		K8sClient:  mgr.GetClient(),
 		NodeName:   nodeName,
 	}

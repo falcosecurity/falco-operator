@@ -7,6 +7,8 @@ release numbering uses [semantic versioning](http://semver.org).
 
 * Require `spec` on Component resources so missing component configuration is rejected at admission.
 * Fix the artifact Service selector to target only the active leader when leader election is enabled.
+* Keep the bootstrap CA private key during certificate renewal so existing mTLS certificates remain trusted.
+* Add `clusterDomain` to configure the artifact server hostname and its TLS certificate for non-default cluster DNS domains.
 
 ## v0.4.0-rc2
 

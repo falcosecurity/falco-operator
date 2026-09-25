@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -898,6 +899,130 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		medium        artifact.Medium
+		conditionType commonv1alpha1.ConditionType
+	}{
+		{artifact.MediumOCI, commonv1alpha1.ConditionOCIArtifactProgrammed},
+		{artifact.MediumInline, commonv1alpha1.ConditionInlineArtifactProgrammed},
+		{artifact.MediumConfigMap, commonv1alpha1.ConditionConfigMapArtifactProgrammed},
+	} {
+		for _, missingCondition := range []bool{false, true} {
+			for _, enforce := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/missing-condition=%t/enforce=%t", tc.medium, missingCondition, enforce), func(t *testing.T) {
+					ctx := t.Context()
+					cm := &corev1.ConfigMap{
+						ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: testutil.TestNamespace},
+						Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: testRulesData},
+					}
+					rf := &artifactv1alpha1.Rulesfile{
+						ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 1},
+						Spec:       artifactv1alpha1.RulesfileSpec{Priority: 50},
+					}
+					switch tc.medium {
+					case artifact.MediumOCI:
+						rf.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}}
+					case artifact.MediumInline:
+						rf.Spec.InlineRules = &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}
+					case artifact.MediumConfigMap:
+						rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
+					}
+					node := newTestNodeObj(withOwnerRef())
+					node.Finalizers = []string{rulesfileNodeFinalizer}
+					r, cl := newTestReconciler(t, rf, cm, node)
+					r.enforceRequirements = enforce
+					fs := fsfake.NewMockFileSystem()
+					versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
+					r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, versions)
+					r.store.OnFalcoVersionsObserved(versions.Result)
+					setCurrentRulesfileMetadata(t, rf, cl)
+					rf.Status.ArtifactMeta.Requirements = []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "0.57.0"}}
+					require.NoError(t, cl.Update(ctx, rf))
+					key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rf)
+					req := testutil.Request(node.Name)
+					_, err := r.Reconcile(ctx, req)
+					require.NoError(t, err)
+					require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
+					require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+					previousInstalled := node.Status.DeepCopy().InstalledArtifacts
+					require.Len(t, previousInstalled, 1)
+					previousPath := previousInstalled[0].Path
+					previousContent := append([]byte(nil), fs.Files[previousPath]...)
+					if missingCondition {
+						apimeta.RemoveStatusCondition(&node.Status.Conditions, tc.conditionType.String())
+						require.NoError(t, cl.Status().Update(ctx, node))
+					}
+
+					// A source switch refreshes refs/dependencies, but cleanup must still gate Programmed.
+					require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(rf), rf))
+					rf.Generation++
+					rf.Spec.OCIArtifact = nil
+					rf.Spec.InlineRules = &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}
+					rf.Spec.ConfigMapRef = nil
+					nextMedium, nextContent := artifact.MediumInline, testInlineRulesYAML
+					if tc.medium == artifact.MediumInline {
+						rf.Spec.InlineRules = nil
+						rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
+						nextMedium, nextContent = artifact.MediumConfigMap, testRulesData
+					}
+					setCurrentRulesfileMetadata(t, rf, cl)
+					require.NoError(t, cl.Update(ctx, rf))
+					nextPath := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), rf.Name, rf.Spec.Priority, nextMedium, artifact.TypeRulesfile)
+					removeErr := fmt.Errorf("injected stale rulesfile removal failure")
+					fs.RemoveErr = removeErr
+					for range 2 {
+						_, err = r.Reconcile(ctx, req)
+						require.ErrorIs(t, err, removeErr)
+						require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
+						assert.True(t, apimeta.IsStatusConditionFalse(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()),
+							"%+v", node.Status.Conditions)
+						condition := apimeta.FindStatusCondition(node.Status.Conditions, tc.conditionType.String())
+						require.NotNil(t, condition)
+						assert.Equal(t, metav1.ConditionFalse, condition.Status)
+						assert.Equal(t, artifact.ReasonArtifactRemoveFailed, condition.Reason)
+						assert.Equal(t, rf.Generation, condition.ObservedGeneration)
+						assert.Contains(t, condition.Message, removeErr.Error())
+						assert.Equal(t, previousContent, fs.Files[previousPath])
+						assert.NotContains(t, fs.Files, nextPath)
+						assert.Equal(t, previousInstalled, node.Status.InstalledArtifacts)
+						assert.Equal(t, previousInstalled, r.store.GetInstalled(key))
+					}
+
+					fs.RemoveErr = nil
+					_, err = r.Reconcile(ctx, req)
+					require.NoError(t, err)
+					require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
+					assert.Nil(t, apimeta.FindStatusCondition(node.Status.Conditions, tc.conditionType.String()))
+					require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+					assert.NotContains(t, fs.Files, previousPath)
+					assert.Equal(t, []byte(nextContent), fs.Files[nextPath])
+					require.Len(t, node.Status.InstalledArtifacts, 1)
+					assert.Equal(t, nextPath, node.Status.InstalledArtifacts[0].Path)
+					assert.Equal(t, node.Status.InstalledArtifacts, r.store.GetInstalled(key))
+
+					stableStatus := node.Status.DeepCopy()
+					writes, removes := len(fs.WriteCalls), len(fs.RemoveCalls)
+					for _, staleCondition := range []bool{false, true} {
+						if staleCondition {
+							// A stale status condition must also clear when nothing remains installed.
+							apimeta.SetStatusCondition(&node.Status.Conditions, common.NewCondition(tc.conditionType,
+								metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, removeErr.Error(), rf.Generation))
+							require.NoError(t, cl.Status().Update(ctx, node))
+						}
+						_, err = r.Reconcile(ctx, req)
+						require.NoError(t, err)
+						require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
+						assert.Equal(t, *stableStatus, node.Status)
+						assert.Len(t, fs.WriteCalls, writes)
+						assert.Len(t, fs.RemoveCalls, removes)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestEnsureRulesfile(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1289,7 +1414,7 @@ func TestEnsureRulesfile(t *testing.T) {
 					mockFS.WriteErrFor = make(map[string]error)
 					for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap} {
 						path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority, medium, artifact.TypeRulesfile)
-						mockFS.WriteErrFor[path+".tmp"] = tt.writeErr
+						mockFS.WriteErrFor[filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp")] = tt.writeErr
 					}
 				}
 				r.fetcher = &testFetcher{

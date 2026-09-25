@@ -23,7 +23,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -32,6 +34,7 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	"oras.land/oras-go/v2/registry/remote/auth"
@@ -39,6 +42,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -54,6 +60,7 @@ import (
 )
 
 const (
+	testStatusSubresource   = "status"
 	testRulesfileName       = "test-rulesfile"
 	testRulesfileDigest     = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	testNextRulesfileDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -212,6 +219,422 @@ func TestReconcile_NotFound(t *testing.T) {
 	result, err := r.Reconcile(context.Background(), testutil.Request("nonexistent"))
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
+}
+
+func TestReconcile_MissingCacheOwner(t *testing.T) {
+	const (
+		shared       = "shared"
+		grace        = "grace"
+		readError    = "read error"
+		persistError = "persist error"
+	)
+	for _, scenario := range []string{"unreferenced", shared, grace, readError, persistError} {
+		t.Run(scenario, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir)
+			if scenario == grace {
+				r.cache = artifactcache.NewCache(cacheDir)
+				require.NoError(t, r.cache.Load())
+			}
+			platforms := []string{""}
+			paths := make([]string, 0, len(platforms))
+			for _, platform := range platforms {
+				path := artifactcache.BlobPath(cacheDir, "rulesfile", "repo:tag", testRulesfileDigest, "", "")
+				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
+				require.NoError(t, r.cache.Set("rulesfile", testutil.TestNamespace, testRulesfileName, platform, path))
+				if scenario == shared {
+					require.NoError(t, r.cache.Set("rulesfile", testutil.TestNamespace, "other", platform, path))
+				}
+				paths = append(paths, path)
+			}
+
+			originalClient := r.Client
+			if scenario == readError {
+				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						return fmt.Errorf("API unavailable")
+					},
+				}).Build()
+			}
+			snapshot := filepath.Join(cacheDir, "index.json")
+			if scenario == persistError {
+				require.NoError(t, os.Rename(snapshot, snapshot+".backup"))
+				require.NoError(t, os.Mkdir(snapshot, 0o750))
+			}
+			_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+			if scenario == readError || scenario == persistError {
+				require.Error(t, err)
+				require.NotEmpty(t, r.cache.Owners("rulesfile"), "failed cleanup must retain the live index")
+				for _, path := range paths {
+					require.FileExists(t, path)
+				}
+				r.Client = originalClient
+				if scenario == persistError {
+					require.NoError(t, os.Remove(snapshot))
+					require.NoError(t, os.Rename(snapshot+".backup", snapshot))
+				}
+				reloaded := artifactcache.NewCache(cacheDir)
+				require.NoError(t, reloaded.Load())
+				require.Contains(t, reloaded.Owners("rulesfile"), types.NamespacedName{
+					Namespace: testutil.TestNamespace, Name: testRulesfileName,
+				}, "failed cleanup must retain the durable index")
+				_, err = r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+			}
+			require.NoError(t, err)
+			require.NotContains(t, r.cache.Owners("rulesfile"), types.NamespacedName{
+				Namespace: testutil.TestNamespace, Name: testRulesfileName,
+			})
+			reloaded := artifactcache.NewCache(cacheDir)
+			require.NoError(t, reloaded.Load())
+			require.NotContains(t, reloaded.Owners("rulesfile"), types.NamespacedName{
+				Namespace: testutil.TestNamespace, Name: testRulesfileName,
+			}, "successful cleanup must survive restart")
+			removed, err := r.cache.Sweep(t.Context())
+			require.NoError(t, err)
+			require.Zero(t, removed, "shared/grace blobs are protected; immediate mode already removed unreferenced blobs")
+			for _, path := range paths {
+				if scenario == shared || scenario == grace {
+					require.FileExists(t, path)
+					require.True(t, r.cache.BlobExists(path))
+				} else {
+					require.NoFileExists(t, path)
+					require.NoFileExists(t, path+artifactcache.PermSuffix)
+				}
+			}
+			response := httptest.NewRecorder()
+			artifactserver.New(r.cache).Handler().ServeHTTP(response, httptest.NewRequestWithContext(
+				t.Context(), http.MethodGet, "/v1/artifacts/rulesfiles/default/"+testRulesfileName+"?digest="+testRulesfileDigest, http.NoBody,
+			))
+			require.Equal(t, http.StatusServiceUnavailable, response.Code, "a removed name must not serve even a shared or retained blob")
+		})
+	}
+}
+
+func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		namespace string
+	}{
+		{name: "default namespace", namespace: testutil.TestNamespace},
+		{name: "custom namespace", namespace: "cache-owner-recovery"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := &envtest.Environment{
+				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				ErrorIfCRDPathMissing: true,
+			}
+			cfg, err := environment.Start()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, environment.Stop()) })
+
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			skipNameValidation := true
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
+			})
+			require.NoError(t, err)
+			for _, idx := range index.All {
+				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
+			}
+			direct, err := client.New(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			survivor := newTestRulesfile(withRulesfileOCI())
+			if tc.namespace != testutil.TestNamespace {
+				require.NoError(t, direct.Create(t.Context(), &corev1.Namespace{
+					ObjectMeta: metav1.ObjectMeta{Name: tc.namespace},
+				}))
+			}
+			survivor.Name = "survivor"
+			survivor.Namespace = tc.namespace
+			require.NoError(t, direct.Create(t.Context(), survivor))
+
+			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
+			require.NoError(t, seed.Load())
+			missingPath := artifactcache.BlobPath(seed.Dir(), "rulesfile", "deleted:tag", testRulesfileDigest, "", "")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), "rulesfile", "shared:tag", testRulesfileDigest, "", "")
+			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
+			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
+			require.NoError(t, seed.Set("rulesfile", tc.namespace, "missing", "", missingPath))
+			require.NoError(t, seed.Set("rulesfile", tc.namespace, "missing-shared", "", sharedPath))
+			require.NoError(t, seed.Set("rulesfile", tc.namespace, survivor.Name, "", sharedPath))
+			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
+			require.NoError(t, cache.Load())
+			r := NewRulesfileAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
+			// A failed registry fetch must not remove a still-existing owner's previous reference.
+			r.ociPuller = &pullerfake.MockOCIPuller{FetchConfigErr: fmt.Errorf("registry unavailable")}
+			require.NoError(t, r.SetupWithManager(mgr))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- mgr.Start(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(10 * time.Second):
+					t.Error("manager did not stop")
+				}
+			})
+
+			// Neither missing name has ever existed in this API server. Only the controller's
+			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
+			require.Eventually(t, func() bool {
+				_, missing := cache.Lookup("rulesfile", tc.namespace, "missing", "")
+				_, shared := cache.Lookup("rulesfile", tc.namespace, "missing-shared", "")
+				return !missing && !shared
+			}, 10*time.Second, 20*time.Millisecond)
+			require.Eventually(t, func() bool {
+				current := &artifactv1alpha1.Rulesfile{}
+				if err := direct.Get(t.Context(), client.ObjectKeyFromObject(survivor), current); err != nil {
+					return false
+				}
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+				return condition != nil && condition.Status == metav1.ConditionFalse
+			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("rulesfile"))
+			require.NoFileExists(t, missingPath)
+			require.FileExists(t, sharedPath)
+			reloaded := artifactcache.NewCache(seed.Dir())
+			require.NoError(t, reloaded.Load())
+			require.Equal(t, cache.Owners("rulesfile"), reloaded.Owners("rulesfile"))
+
+			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
+				response := httptest.NewRecorder()
+				request := httptest.NewRequestWithContext(t.Context(), http.MethodGet,
+					"/v1/artifacts/rulesfiles/"+tc.namespace+"/"+name+"?digest="+testRulesfileDigest, http.NoBody)
+				artifactserver.New(cache).Handler().ServeHTTP(response, request)
+				if name == survivor.Name {
+					require.Equal(t, http.StatusOK, response.Code)
+					require.Equal(t, "surviving content", response.Body.String())
+				} else {
+					require.Equal(t, http.StatusServiceUnavailable, response.Code)
+				}
+			}
+		})
+	}
+}
+
+// Parent status can land after a reconcile observed an older cached healthy value.
+// With no further child/spec events, the parent's own status event must restore the
+// aggregate, and the resulting self-event must not cause an endless status-write loop.
+func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		condition *metav1.Condition
+	}{
+		{name: "pending condition", condition: &metav1.Condition{
+			Type: "Programmed", Status: metav1.ConditionUnknown, Reason: "Pending", Message: "Intermediate aggregate",
+		}},
+		{name: "missing condition"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			environment := &envtest.Environment{
+				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				ErrorIfCRDPathMissing: true,
+			}
+			cfg, err := environment.Start()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, environment.Stop()) })
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			skipNameValidation := true
+			mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+				Scheme: scheme, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
+				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
+			})
+			require.NoError(t, err)
+			for _, idx := range index.All {
+				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
+			}
+			direct, err := client.New(cfg, client.Options{Scheme: scheme})
+			require.NoError(t, err)
+			cached, err := client.NewWithWatch(cfg, client.Options{
+				Scheme: scheme, Cache: &client.CacheOptions{Reader: mgr.GetCache()},
+			})
+			require.NoError(t, err)
+			var statusApplies atomic.Int32
+			counted := interceptor.NewClient(cached, interceptor.Funcs{
+				SubResourceApply: func(
+					ctx context.Context, cl client.Client, subresource string,
+					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+				) error {
+					if subresource == testStatusSubresource {
+						statusApplies.Add(1)
+					}
+					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
+				},
+			})
+			r := NewRulesfileAggregatorReconciler(counted, scheme, events.NewFakeRecorder(100), nil)
+			require.NoError(t, r.SetupWithManager(mgr))
+
+			parent := newTestRulesfile()
+			require.NoError(t, direct.Create(t.Context(), parent))
+			require.NoError(t, direct.Create(t.Context(), newTestNode()))
+			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
+			pod := newRunningFalcoPod()
+			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
+			require.NoError(t, direct.Create(t.Context(), pod))
+			pod.Status.Phase = corev1.PodRunning
+			require.NoError(t, direct.Status().Update(t.Context(), pod))
+			child := newTestRulesfileNode()
+			child.OwnerReferences[0].UID = parent.UID
+			require.NoError(t, direct.Create(t.Context(), child))
+			child.Status.Conditions = []metav1.Condition{{
+				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
+				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
+			}}
+			require.NoError(t, direct.Status().Update(t.Context(), child))
+			childVersion := child.ResourceVersion
+
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- mgr.Start(ctx) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(10 * time.Second):
+					t.Error("manager did not stop")
+				}
+			})
+			key := client.ObjectKeyFromObject(parent)
+			healthy := func(cl client.Reader) bool {
+				current := &artifactv1alpha1.Rulesfile{}
+				if err := cl.Get(ctx, key, current); err != nil {
+					return false
+				}
+				condition := apimeta.FindStatusCondition(current.Status.Conditions, "Programmed")
+				return condition != nil && condition.Status == metav1.ConditionTrue &&
+					condition.ObservedGeneration == current.Generation
+			}
+			waitForQuiet := func() {
+				t.Helper()
+				lastCount, lastChange := statusApplies.Load(), time.Now()
+				require.Eventually(t, func() bool {
+					count := statusApplies.Load()
+					if count != lastCount {
+						lastCount, lastChange = count, time.Now()
+					}
+					return time.Since(lastChange) >= 500*time.Millisecond
+				}, 5*time.Second, 20*time.Millisecond, "status Apply calls must settle")
+			}
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				10*time.Second, 20*time.Millisecond)
+			waitForQuiet()
+			require.NoError(t, direct.Get(ctx, key, parent))
+			generation := parent.Generation
+			beforeCorrection := statusApplies.Load()
+
+			// Simulate an intermediate aggregate write landing after the healthy-child event
+			// was consumed. No child update, spec change or manual reconcile follows this write.
+			if tc.condition == nil {
+				apimeta.RemoveStatusCondition(&parent.Status.Conditions, "Programmed")
+			} else {
+				condition := *tc.condition
+				condition.ObservedGeneration = generation
+				apimeta.SetStatusCondition(&parent.Status.Conditions, condition)
+			}
+			require.NoError(t, direct.Status().Update(ctx, parent))
+			require.Equal(t, generation, parent.Generation)
+			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
+				5*time.Second, 20*time.Millisecond, "a status-only parent event must restore the healthy child aggregate")
+			waitForQuiet()
+			afterCorrection := statusApplies.Load()
+			require.Positive(t, afterCorrection-beforeCorrection, "recovery must apply corrected status")
+			require.LessOrEqual(t, afterCorrection-beforeCorrection, int32(3), "self-events must not cause a status-write storm")
+			require.Never(t, func() bool { return statusApplies.Load() != afterCorrection },
+				500*time.Millisecond, 20*time.Millisecond, "a settled aggregate must remain a write-free no-op")
+			require.NoError(t, direct.Get(ctx, key, parent))
+			require.Equal(t, generation, parent.Generation, "recovery must not require a spec update")
+			require.NoError(t, direct.Get(ctx, client.ObjectKeyFromObject(child), child))
+			require.Equal(t, childVersion, child.ResourceVersion, "the child must remain unchanged throughout recovery")
+		})
+	}
+}
+
+func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		programmed       metav1.ConditionStatus
+		programmedReason string
+	}{
+		{name: "healthy child", programmed: metav1.ConditionTrue, programmedReason: "Programmed"},
+		{name: "pending child", programmed: metav1.ConditionUnknown, programmedReason: "Pending"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fetchErr := fmt.Errorf("registry down")
+			parent := newTestRulesfile(withRulesfileOCI())
+			parent.Generation = 1
+			child := newTestRulesfileNode()
+			child.Status.Conditions = []metav1.Condition{
+				{Type: "Programmed", Status: tc.programmed, Reason: tc.programmedReason, ObservedGeneration: 1},
+				{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ReferenceResolved", ObservedGeneration: 1},
+			}
+			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
+			var statusApplies int
+			cl := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(parent, child, newTestNode(), newTestFalco(), newRunningFalcoPod()).
+				WithStatusSubresource(&artifactv1alpha1.Rulesfile{}, &artifactv1alpha1.ArtifactNode{}).
+				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourceApply: func(
+						ctx context.Context, c client.Client, subresource string,
+						obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
+					) error {
+						if subresource == testStatusSubresource {
+							statusApplies++
+						}
+						return c.SubResource(subresource).Apply(ctx, obj, opts...)
+					},
+				}).Build()
+			r := NewRulesfileAggregatorReconciler(cl, scheme, events.NewFakeRecorder(100), nil)
+			r.ociPuller = &pullerfake.MockOCIPuller{FetchConfigErr: fetchErr}
+			ctx := t.Context()
+			request := testutil.Request(parent.Name)
+			_, err := r.Reconcile(ctx, request)
+			require.ErrorIs(t, err, fetchErr)
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+			failure := apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+			require.NotNil(t, failure)
+			require.Equal(t, metav1.ConditionFalse, failure.Status)
+			// Backdating makes transient True -> False restamping observable without sleeping.
+			oldTransition := metav1.NewTime(time.Now().Add(-time.Hour)).Rfc3339Copy()
+			failure.LastTransitionTime = oldTransition
+			require.NoError(t, cl.Status().Update(ctx, parent))
+			beforeRetry := statusApplies
+			for range 3 {
+				_, err = r.Reconcile(ctx, request)
+				require.ErrorIs(t, err, fetchErr, "the original error must still drive normal retry backoff")
+				require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+				failure = apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+				require.NotNil(t, failure)
+				assert.Equal(t, metav1.ConditionFalse, failure.Status)
+				assert.True(t, failure.LastTransitionTime.Equal(&oldTransition), "only the final condition is an observable transition")
+			}
+			require.Equal(t, beforeRetry, statusApplies, "an unchanged metadata failure must not generate status self-events")
+
+			// A real child reference failure must still reach the parent while metadata fails.
+			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(child), child))
+			apimeta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+				Type: "ResolvedRefs", Status: metav1.ConditionFalse, Reason: "ReferenceNotFound",
+				Message: "Missing reference", ObservedGeneration: parent.Generation,
+			})
+			require.NoError(t, cl.Status().Update(ctx, child))
+			_, err = r.Reconcile(ctx, request)
+			require.ErrorIs(t, err, fetchErr)
+			require.Equal(t, beforeRetry+1, statusApplies)
+			require.NoError(t, cl.Get(ctx, request.NamespacedName, parent))
+			references := apimeta.FindStatusCondition(parent.Status.Conditions, "ResolvedRefs")
+			require.NotNil(t, references)
+			assert.Equal(t, metav1.ConditionFalse, references.Status)
+			assert.Equal(t, "ReferenceNotFound", references.Reason)
+			failure = apimeta.FindStatusCondition(parent.Status.Conditions, "Programmed")
+			require.NotNil(t, failure)
+			assert.True(t, failure.LastTransitionTime.Equal(&oldTransition))
+		})
+	}
 }
 
 func TestReconcile_GetError(t *testing.T) {
@@ -941,6 +1364,76 @@ func TestFetchAndCacheArtifactMeta_InlineRules(t *testing.T) {
 	require.NotNil(t, rf.Status.ArtifactMeta)
 }
 
+func TestFetchAndCacheArtifactMeta_AllDocumentsAndRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		configMapRules          string
+		inlineRules             string
+		correctedConfigMapRules string
+		initialRequirements     []commonv1alpha1.ArtifactMetaRequirement
+		correctedRequirements   []commonv1alpha1.ArtifactMetaRequirement
+	}{
+		{
+			name:                    "legacy requirements across documents",
+			configMapRules:          "- required_engine_version: 999\n---\n- required_engine_version: 0\n",
+			inlineRules:             "- required_engine_version: 0.62.0\n- required_engine_version: 0.30.0\n",
+			correctedConfigMapRules: "- required_engine_version: 0\n---\n- required_engine_version: 26\n",
+			initialRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "999"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+			correctedRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+		},
+		{
+			name:                    "semantic requirements across documents",
+			configMapRules:          "- required_engine_version: 0.70.0\n---\n- required_engine_version: 0.20.0\n",
+			inlineRules:             "- required_engine_version: 99\n- required_engine_version: 15\n",
+			correctedConfigMapRules: "- required_engine_version: 0.20.0\n---\n- required_engine_version: 0.65.0\n",
+			initialRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "99"}, {Name: "engine_version_semver", Version: "0.70.0"},
+			},
+			correctedRequirements: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "99"}, {Name: "engine_version_semver", Version: "0.65.0"},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			cm := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "multi-document", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: tc.configMapRules},
+			}
+			rf := newTestRulesfile(withRulesfileOCI(), withRulesfileConfigMapRef(cm.Name),
+				withInlineRules(tc.inlineRules))
+			mockPuller := &pullerfake.MockOCIPuller{
+				ConfigDigest:  testRulesfileDigest,
+				ContentResult: []byte("- required_engine_version: 0\n---\n- required_plugin_versions:\n    - name: container\n      version: 0.7.0\n"),
+			}
+			r, cl := newTestReconcilerWithPuller(t, mockPuller, rf, cm)
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, tc.initialRequirements, rf.Status.ArtifactMeta.Requirements)
+			assert.Equal(t, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.7.0"}}, rf.Status.ArtifactMeta.Dependencies)
+			previousMeta, previousHash := rf.Status.ArtifactMeta.DeepCopy(), rf.Status.ArtifactMetaSourcesHash
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Len(t, mockPuller.FetchContentCalls, 1, "unchanged inputs must remain a cache hit")
+
+			cm.Data[commonv1alpha1.ConfigMapRulesKey] = "- required_engine_version: 0\n---\nkey: [unclosed"
+			require.NoError(t, cl.Update(ctx, cm))
+			require.Error(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, previousMeta, rf.Status.ArtifactMeta, "later parse failures must not publish a partial aggregate")
+			assert.Equal(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+
+			cm.Data[commonv1alpha1.ConfigMapRulesKey] = tc.correctedConfigMapRules
+			require.NoError(t, cl.Update(ctx, cm))
+			require.NoError(t, r.fetchAndCacheArtifactMeta(ctx, rf))
+			assert.Equal(t, tc.correctedRequirements, rf.Status.ArtifactMeta.Requirements)
+			assert.NotEqual(t, previousHash, rf.Status.ArtifactMetaSourcesHash)
+			assert.Equal(t, testRulesfileDigest, rf.Status.ArtifactMeta.Digest, "a local correction must not refresh the OCI tag")
+		})
+	}
+}
+
 func TestFetchAndCacheArtifactMeta_ConfigMapAndInlineRules(t *testing.T) {
 	// ConfigMap has no requirements; InlineRules declares required_engine_version.
 	// Both sources are parsed into ArtifactMeta.Requirements.
@@ -1146,6 +1639,45 @@ func TestAppendYAMLRequirements_EngineVersionSemver(t *testing.T) {
 	require.NoError(t, appendYAMLRequirements(meta, content))
 	require.Len(t, meta.Requirements, 1)
 	assert.Equal(t, "engine_version_semver", meta.Requirements[0].Name)
+}
+
+func TestAppendYAMLRequirements_AllEngineDirectives(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    []commonv1alpha1.ArtifactMetaRequirement
+	}{
+		{
+			name: "later legacy directive cannot weaken requirement", content: "- required_engine_version: 999\n- required_engine_version: 0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "999"}},
+		},
+		{
+			name: "later semver directive cannot weaken requirement", content: "- required_engine_version: 999.0.0\n- required_engine_version: 0.0.0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "999.0.0"}},
+		},
+		{
+			name: "mixed capabilities remain distinct", content: "- required_engine_version: 26\n- required_engine_version: 0.62.0\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{
+				{Name: "engine_version", Version: "26"}, {Name: "engine_version_semver", Version: "0.62.0"},
+			},
+		},
+		{
+			name: "later document contributes requirements", content: "- required_engine_version: 0\n---\n- required_engine_version: 999\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "999"}},
+		},
+		{
+			name: "quoted integer uses legacy capability", content: "- required_engine_version: '26'\n",
+			want: []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version", Version: "26"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := &commonv1alpha1.ArtifactMeta{}
+			require.NoError(t, appendYAMLRequirements(meta, []byte(tt.content)))
+			artifact.DeduplicateArtifactMeta(meta)
+			assert.Equal(t, tt.want, meta.Requirements)
+		})
+	}
 }
 
 func TestAppendYAMLRequirements_Empty(t *testing.T) {

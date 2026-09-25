@@ -23,6 +23,11 @@ spec:
       value: falco-podtemplate-test
     - name: test_name
       value: falco-podtemplate
+    - name: container_resources
+      value:
+        limits:
+          cpu: 500m
+          memory: 1Gi
 
   steps:
     - name: Create-falco
@@ -136,6 +141,181 @@ spec:
               spec:
                 template:
                   spec:
+                    (containers[?name == 'netshoot']): []
+
+    - name: Prepare-env-sources
+      description: Create ConfigMap and Secret values used to override built-in Falco environment variables.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: falco-env
+                namespace: ($namespace)
+              data:
+                hostname: configmap-host
+                root: /host
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                name: falco-env
+                namespace: ($namespace)
+              stringData:
+                hostname: secret-host
+
+    - name: Override-downward-api-with-literal
+      description: Replace the built-in hostname fieldRef with a literal without retaining the old source.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: literal
+            - name: env_overrides
+              value:
+                - name: FALCO_HOSTNAME
+                  value: literal-host
+            - name: expected_hostname
+              value: literal-host
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","value":"/host"},
+                {"name":"FALCO_HOSTNAME","value":"literal-host"}]`)
+
+    - name: Override-defaults-with-configmap
+      description: Replace both a built-in literal and a downward-API source with ConfigMap values on every Falco Pod.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: configmap
+            - name: env_overrides
+              value:
+                - name: HOST_ROOT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: falco-env
+                      key: root
+                - name: FALCO_HOSTNAME
+                  valueFrom:
+                    configMapKeyRef:
+                      name: falco-env
+                      key: hostname
+            - name: expected_hostname
+              value: configmap-host
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","valueFrom":{"configMapKeyRef":{"name":"falco-env","key":"root"}}},
+                {"name":"FALCO_HOSTNAME","valueFrom":{"configMapKeyRef":{"name":"falco-env","key":"hostname"}}}]`)
+
+    - name: Switch-configmap-to-secret
+      description: Change the hostname source without keeping either the previous ConfigMap or the default fieldRef.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: secret
+            - name: env_overrides
+              value:
+                - name: FALCO_HOSTNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: falco-env
+                      key: hostname
+            - name: expected_hostname
+              value: secret-host
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","value":"/host"},
+                {"name":"FALCO_HOSTNAME","valueFrom":{"secretKeyRef":{"name":"falco-env","key":"hostname"}}}]`)
+
+    - name: Switch-secret-to-literal
+      description: Remove the live workload's Secret reference when applying a literal hostname.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: literal-again
+            - name: env_overrides
+              value:
+                - name: FALCO_HOSTNAME
+                  value: final-host
+            - name: expected_hostname
+              value: final-host
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","value":"/host"},
+                {"name":"FALCO_HOSTNAME","value":"final-host"}]`)
+
+    - name: Override-with-empty-value
+      description: An explicitly empty hostname must reach the container as an empty variable, not as the default node name.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: empty
+            - name: env_overrides
+              value:
+                - name: FALCO_HOSTNAME
+                  value: ""
+            - name: expected_hostname
+              value: ""
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","value":"/host"},{"name":"FALCO_HOSTNAME"}]`)
+
+    - name: Restore-default-environment
+      description: Removing the env overrides restores each Pod's node name and preserves the earlier custom resources, labels and tolerations.
+      use:
+        template: ../../common/_step_templates/patch-assert-falco-env.yaml
+        with:
+          bindings:
+            - name: env_stage
+              value: defaults
+            - name: env_overrides
+              value: []
+            - name: expected_hostname
+              value: ""
+            - name: hostname_from_node
+              value: true
+            - name: expected_env
+              value: >-
+                (`[{"name":"HOST_ROOT","value":"/host"},
+                {"name":"FALCO_HOSTNAME","valueFrom":{"fieldRef":{"apiVersion":"v1","fieldPath":"spec.nodeName"}}}]`)
+
+    - name: Assert-custom-podtemplate-fields-preserved
+      description: Environment overrides and their removal must not undo the earlier labels, tolerations, resource limits or sidecar merge behavior.
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  metadata:
+                    labels:
+                      custom-label: test-value
+                  spec:
+                    (tolerations[?key == 'test-toleration']):
+                      - operator: Exists
+                        effect: NoSchedule
+                    (containers[?name == 'falco']):
+                      - resources:
+                          limits:
+                            cpu: 500m
+                            memory: 1Gi
+                    (containers[?name == 'artifact-operator']):
+                      - name: artifact-operator
                     (containers[?name == 'netshoot']): []
 
   catch:

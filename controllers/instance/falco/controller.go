@@ -27,6 +27,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -186,15 +187,19 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	// resource on the API server keeps its labels.
 	falco.SetLabels(r.labelFilter.Apply(falco.GetLabels()))
 
-	// Patch status via defer to ensure it's always called.
+	oldStatus := falco.Status.DeepCopy()
+	// Compute status even on failure, but only publish changes.
 	defer func() {
 		computeErr := r.computeAvailableCondition(ctx, falco)
 		if computeErr != nil {
 			logger.Error(computeErr, "unable to compute available condition")
 		}
-		patchErr := r.patchStatus(ctx, falco)
-		if patchErr != nil {
-			logger.Error(patchErr, "unable to patch Falco status")
+		var patchErr error
+		if !apiequality.Semantic.DeepEqual(*oldStatus, falco.Status) {
+			patchErr = r.patchStatus(ctx, falco)
+			if patchErr != nil {
+				logger.Error(patchErr, "unable to patch Falco status")
+			}
 		}
 		reterr = kerrors.NewAggregate([]error{reterr, computeErr, patchErr})
 	}()
@@ -254,7 +259,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	controllerBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&instancev1alpha1.Falco{}).
 		Owns(&appsv1.DaemonSet{}).
 		Owns(&appsv1.Deployment{}).
@@ -266,8 +271,13 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&rbacv1.ClusterRoleBinding{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Watches(&rbacv1.ClusterRole{}, handler.EnqueueRequestsFromMapFunc(instance.ClusterScopedResourceHandler)).
 		Named("falco").
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "falco", &instancev1alpha1.Falco{})).
-		Complete(r)
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "falco", &instancev1alpha1.Falco{}))
+	if r.artifactMTLSEnabled {
+		certificate := &unstructured.Unstructured{}
+		certificate.SetGroupVersionKind(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+		controllerBuilder.Owns(certificate)
+	}
+	return controllerBuilder.Complete(r)
 }
 
 // ensureDeployment ensures the Falco deployment or daemonset is created or updated.
@@ -630,9 +640,10 @@ func (r *Reconciler) ensureArtifactClientCertificate(ctx context.Context, falco 
 	}
 
 	// controllerhelper.Diff has no schema for cert-manager's CRD types, so it can't compare this
-	// resource. Compares the spec fields we set directly instead; cert-manager only writes back to status.
+	// resource. Compare the spec fields and controller reference we set directly instead;
+	// unrelated owner references and cert-manager's status do not require an apply.
 	if resourceExists {
-		unchanged := true
+		unchanged := reflect.DeepEqual(metav1.GetControllerOf(existing), metav1.GetControllerOf(desired))
 		for _, field := range []string{"secretName", "commonName", "duration", "renewBefore"} {
 			existingVal, _, _ := unstructured.NestedString(existing.Object, "spec", field)
 			desiredVal, _, _ := unstructured.NestedString(desired.Object, "spec", field)
