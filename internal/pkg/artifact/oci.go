@@ -29,6 +29,7 @@ import (
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/credentials"
+	"github.com/falcosecurity/falco-operator/internal/pkg/credentials/azure"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -77,6 +78,14 @@ func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
 }
 
 func (am *Manager) fetchOCICredentials(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) (auth.CredentialFunc, error) {
+	if azureCfg := authAzure(ociArtifact); azureCfg != nil {
+		creds, err := azure.CredentialFunc(am.client, am.namespace, azureCfg, ResolveRegistryOptions(ociArtifact))
+		if err != nil {
+			return nil, fmt.Errorf("derive azure credentials: %w", err)
+		}
+		return creds, nil
+	}
+
 	secret, err := am.fetchOCIAuthSecret(ctx, authSecretRef(ociArtifact))
 	if err != nil {
 		return nil, fmt.Errorf("fetch auth secret: %w", err)
