@@ -314,16 +314,22 @@ func setEnvVar(envs []corev1.EnvVar, e *corev1.EnvVar) []corev1.EnvVar {
 }
 
 func applyVersionOverride(defs *InstanceDefaults, version *string, template *corev1.PodTemplateSpec) {
+	if version == nil || *version == "" {
+		return
+	}
+
 	for i := range template.Spec.Containers {
-		if template.Spec.Containers[i].Name == defs.ContainerName {
+		container := &template.Spec.Containers[i]
+		if container.Name == defs.ContainerName {
+			if container.Image == "" {
+				container.Image = defs.ImageName.Ref(*version)
+			}
 			return
 		}
 	}
 
-	if version != nil && *version != "" {
-		template.Spec.Containers = append(template.Spec.Containers, corev1.Container{
-			Name:  defs.ContainerName,
-			Image: defs.ImageName.Ref(*version),
-		})
-	}
+	template.Spec.Containers = append(template.Spec.Containers, corev1.Container{
+		Name:  defs.ContainerName,
+		Image: defs.ImageName.Ref(*version),
+	})
 }

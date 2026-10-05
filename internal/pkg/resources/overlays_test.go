@@ -23,12 +23,14 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 )
 
 func TestGenerateUserOverlaySidecarPlacement(t *testing.T) {
@@ -391,98 +393,82 @@ func TestGenerateOverlayOptions(t *testing.T) {
 }
 
 func TestApplyVersionOverride(t *testing.T) {
+	const registry = "registry.example.com:5000/cache"
+	previous := image.Registry
+	t.Cleanup(func() { image.Registry = previous })
+	require.NoError(t, image.SetRegistry(registry))
+
+	custom := corev1.Container{
+		Name: FalcoDefaults.ContainerName,
+		Env:  []corev1.EnvVar{{Name: "CUSTOM", Value: "preserved"}},
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+		},
+	}
+	versioned := *custom.DeepCopy()
+	versioned.Image = registry + "/falcosecurity/falco:0.38.0"
+	explicit := *custom.DeepCopy()
+	explicit.Image = "user-image:latest"
+	other := corev1.Container{Name: "other-container", Image: "user-image:latest"}
+
 	tests := []struct {
-		name           string
-		defs           *InstanceDefaults
-		version        *string
-		existingName   string
-		wantContainers int
-		wantImage      string
+		name       string
+		defs       *InstanceDefaults
+		version    *string
+		containers []corev1.Container
+		want       []corev1.Container
 	}{
+		{name: "nil version adds no container", defs: FalcoDefaults},
+		{name: "empty version adds no container", defs: FalcoDefaults, version: new("")},
 		{
-			name:           "nil version adds no container",
-			defs:           FalcoDefaults,
-			version:        nil,
-			wantContainers: 0,
+			name: "non-empty version appends container with resolved image",
+			defs: MetacollectorDefaults, version: new("0.5.0"),
+			want: []corev1.Container{{Name: MetacollectorDefaults.ContainerName, Image: registry + "/falcosecurity/k8s-metacollector:0.5.0"}},
 		},
 		{
-			name:           "empty version adds no container",
-			defs:           FalcoDefaults,
-			version:        new(""),
-			wantContainers: 0,
+			name: "existing explicit image wins over requested version",
+			defs: FalcoDefaults, version: new("0.38.0"),
+			containers: []corev1.Container{explicit}, want: []corev1.Container{explicit},
 		},
 		{
-			name:           "non-empty version appends container with resolved image",
-			defs:           MetacollectorDefaults,
-			version:        new("0.5.0"),
-			wantContainers: 1,
-			wantImage:      MetacollectorDefaults.ImageName.Ref("0.5.0"),
+			name:       "explicit image is preserved without a version",
+			defs:       FalcoDefaults,
+			containers: []corev1.Container{explicit}, want: []corev1.Container{explicit},
 		},
 		{
-			name:           "existing container with matching name is not overridden",
-			defs:           FalcoDefaults,
-			version:        new("0.38.0"),
-			existingName:   FalcoDefaults.ContainerName,
-			wantContainers: 1,
-			wantImage:      "user-image:latest",
+			name: "unrelated container is preserved when appending the main container",
+			defs: FalcoDefaults, version: new("0.38.0"),
+			containers: []corev1.Container{other},
+			want: []corev1.Container{
+				other, {Name: FalcoDefaults.ContainerName, Image: registry + "/falcosecurity/falco:0.38.0"},
+			},
 		},
 		{
-			name:           "existing non-matching container still gets version container appended",
-			defs:           FalcoDefaults,
-			version:        new("0.38.0"),
-			existingName:   "other-container",
-			wantContainers: 2,
-			wantImage:      "user-image:latest",
+			name: "image-less main container receives requested version without losing other fields",
+			defs: FalcoDefaults, version: new("0.38.0"),
+			containers: []corev1.Container{other, custom}, want: []corev1.Container{other, versioned},
+		},
+		{
+			name:       "image-less main container stays unchanged with nil version",
+			defs:       FalcoDefaults,
+			containers: []corev1.Container{custom}, want: []corev1.Container{custom},
+		},
+		{
+			name: "image-less main container stays unchanged with empty version",
+			defs: FalcoDefaults, version: new(""),
+			containers: []corev1.Container{custom}, want: []corev1.Container{custom},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			template := &corev1.PodTemplateSpec{}
-			if tt.existingName != "" {
-				template.Spec.Containers = []corev1.Container{
-					{Name: tt.existingName, Image: "user-image:latest"},
-				}
-			}
-
+			template := (&corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"custom": "preserved"}},
+				Spec:       corev1.PodSpec{Containers: tt.containers},
+			}).DeepCopy()
 			applyVersionOverride(tt.defs, tt.version, template)
-
-			assert.Len(t, template.Spec.Containers, tt.wantContainers)
-
-			// Verify the main container image by looking it up by name.
-			if tt.wantImage != "" {
-				var found bool
-				for _, c := range template.Spec.Containers {
-					if c.Name == tt.defs.ContainerName || (tt.existingName != "" && c.Name == tt.existingName) {
-						found = true
-						break
-					}
-				}
-				assert.True(t, found, "expected container not found")
-			}
-
-			// When an existing container with matching name is present, its image is preserved.
-			if tt.existingName == tt.defs.ContainerName && tt.wantImage != "" {
-				for _, c := range template.Spec.Containers {
-					if c.Name == tt.existingName {
-						assert.Equal(t, tt.wantImage, c.Image, "existing container image should be preserved")
-					}
-				}
-			}
-
-			// When version is set and no matching container exists, the appended container has the version image.
-			if tt.version != nil && *tt.version != "" && tt.existingName != tt.defs.ContainerName {
-				wantVersionImage := tt.defs.ImageName.Ref(*tt.version)
-				var foundVersion bool
-				for _, c := range template.Spec.Containers {
-					if c.Name == tt.defs.ContainerName {
-						assert.Equal(t, wantVersionImage, c.Image, "appended version container should have resolved image")
-						foundVersion = true
-						break
-					}
-				}
-				assert.True(t, foundVersion, "version container %s should be appended", tt.defs.ContainerName)
-			}
+			assert.Equal(t, tt.want, template.Spec.Containers)
+			assert.Equal(t, map[string]string{"custom": "preserved"}, template.Labels)
 		})
 	}
 }

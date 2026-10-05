@@ -169,6 +169,156 @@ spec:
                     (containers[?name == 'falco']):
                       - image: ($override_image)
 
+    - name: Remove-explicit-image-override
+      description: Removing the image override restores the requested version and configured registry.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec: null
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($upgraded_image)
+
+    - name: Assert-falco-version-restored
+      description: Status must report the requested version again after removing the explicit image.
+      try:
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                version: ($upgraded_version)
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+
+    - name: Restore-initial-version-before-customizing
+      description: Return to the initial version before testing the same upgrade with a resource-only container override.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                version: ($initial_version)
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($initial_image)
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                version: ($initial_version)
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+
+    - name: Customize-container-without-overriding-image
+      description: A memory request must preserve the version selected in spec.version.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                podTemplateSpec:
+                  spec:
+                    containers:
+                      - name: falco
+                        resources:
+                          requests:
+                            memory: 256Mi
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($initial_image)
+                        resources:
+                          requests:
+                            memory: 256Mi
+
+    - name: Upgrade-version-with-custom-container
+      description: Changing spec.version must update the image and status without losing the custom memory request.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                version: ($upgraded_version)
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'falco']):
+                      - image: ($upgraded_image)
+                        resources:
+                          requests:
+                            memory: 256Mi
+        - assert:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              status:
+                resourceType: Deployment
+                version: ($upgraded_version)
+                (conditions[?type == 'Reconciled']):
+                  - status: 'True'
+
   catch:
     - description: Capture debug snapshot on failure
       script:
