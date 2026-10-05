@@ -119,6 +119,8 @@ func TestGenerateApplyConfigurationImages(t *testing.T) {
 			{name: "default version", wantTag: defs.ImageTag},
 			{name: "empty version uses default", version: new(""), wantTag: defs.ImageTag},
 			{name: "requested version", version: new(requested), wantTag: requested},
+			{name: "memory override keeps requested version", version: new(requested), memory: true, wantTag: requested},
+			{name: "env override keeps requested version", version: new(requested), env: true, wantTag: requested},
 			{name: "memory override keeps default version", memory: true, wantTag: defs.ImageTag},
 			{name: "env override keeps default version", env: true, wantTag: defs.ImageTag},
 			{name: "memory override with empty version", version: new(""), memory: true, wantTag: defs.ImageTag},
