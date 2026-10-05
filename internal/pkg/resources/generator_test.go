@@ -17,14 +17,19 @@
 package resources
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
 const (
@@ -41,6 +46,85 @@ func testObject() *corev1.ConfigMap {
 			Namespace: testNamespace,
 			Labels:    testLabels,
 		},
+	}
+}
+
+func TestGenerateWorkloadUsesConfiguredRegistry(t *testing.T) {
+	previousRegistry, previousNamespace := image.Registry, image.Namespace
+	t.Cleanup(func() { image.Registry, image.Namespace = previousRegistry, previousNamespace })
+
+	for _, settings := range []struct {
+		name      string
+		registry  string
+		namespace string
+	}{
+		{name: "defaults", registry: "docker.io", namespace: "falcosecurity"},
+		{name: "custom registry", registry: "registry.example.com:5000/team/cache", namespace: "falcosecurity"},
+		{name: "custom namespace", registry: "registry.example.com:5000/team/cache", namespace: "custom"},
+	} {
+		for _, tt := range []struct {
+			name     string
+			kind     string
+			defs     *InstanceDefaults
+			mainName string
+		}{
+			{name: "Falco DaemonSet", kind: ResourceTypeDaemonSet, defs: FalcoDefaults, mainName: "falco"},
+			{name: "Falco Deployment", kind: ResourceTypeDeployment, defs: FalcoDefaults, mainName: "falco"},
+			{name: "Metacollector", kind: ResourceTypeDeployment, defs: MetacollectorDefaults, mainName: "k8s-metacollector"},
+			{name: "Falcosidekick", kind: ResourceTypeDeployment, defs: FalcosidekickDefaults, mainName: "falcosidekick"},
+			{name: "Falcosidekick UI", kind: ResourceTypeDeployment, defs: FalcosidekickUIDefaults, mainName: "falcosidekick-ui"},
+		} {
+			t.Run(settings.name+"/"+tt.name, func(t *testing.T) {
+				require.NoError(t, image.SetRegistry(settings.registry))
+				image.Namespace = settings.namespace
+				meta := &metav1.ObjectMeta{Name: testName, Namespace: testNamespace}
+				metaBefore := meta.DeepCopy()
+				defaultsBefore, err := json.Marshal(tt.defs)
+				require.NoError(t, err)
+
+				result, err := GenerateWorkload(tt.kind, meta, tt.defs)
+				require.NoError(t, err)
+				assert.Equal(t, metaBefore, meta)
+				defaultsAfterFirst, err := json.Marshal(tt.defs)
+				require.NoError(t, err)
+				assert.Equal(t, defaultsBefore, defaultsAfterFirst)
+				var podSpec corev1.PodSpec
+				switch workload := result.(type) {
+				case *appsv1.Deployment:
+					podSpec = workload.Spec.Template.Spec
+				case *appsv1.DaemonSet:
+					podSpec = workload.Spec.Template.Spec
+				default:
+					t.Fatalf("unexpected workload type %T", result)
+				}
+				require.Len(t, podSpec.Containers, 1+len(tt.defs.SidecarContainers))
+				require.Len(t, podSpec.InitContainers, len(tt.defs.InitContainers))
+				prefix := settings.registry + "/" + settings.namespace + "/"
+				assert.Equal(t, prefix+tt.mainName+":"+tt.defs.ImageTag, podSpec.Containers[0].Image)
+				if tt.defs == FalcoDefaults {
+					want := tt.defs.SidecarContainers[0].DeepCopy()
+					want.Image = prefix + "artifact-operator:" + version.ArtifactOperatorTag
+					want.RestartPolicy = nil
+					assert.Equal(t, *want, podSpec.Containers[1])
+					assert.Empty(t, tt.defs.SidecarContainers[0].Image)
+				}
+				if tt.defs == FalcosidekickUIDefaults {
+					want := tt.defs.InitContainers[0].DeepCopy()
+					want.Image = settings.registry + "/redis/redis-stack:" + image.RedisTag
+					assert.Equal(t, *want, podSpec.InitContainers[0])
+					assert.Empty(t, tt.defs.InitContainers[0].Image)
+				}
+				first := result.DeepCopyObject()
+				repeated, err := GenerateWorkload(tt.kind, meta, tt.defs)
+				require.NoError(t, err)
+				assert.Equal(t, first, result)
+				assert.Equal(t, first, repeated)
+				assert.Equal(t, metaBefore, meta)
+				defaultsAfter, err := json.Marshal(tt.defs)
+				require.NoError(t, err)
+				assert.Equal(t, defaultsBefore, defaultsAfter)
+			})
+		}
 	}
 }
 

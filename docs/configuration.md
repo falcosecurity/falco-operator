@@ -298,20 +298,58 @@ Deleting and recreating the parent also discards its resolved metadata, but runs
 artifact cleanup first and can interrupt coverage. Dependency finalizers can
 delay deletion. Prefer an explicit reference update to forcing a refresh this way.
 
-## Artifact Operator Image
+## Image Registry
 
-The Artifact Operator sidecar image is configurable via the `ARTIFACT_OPERATOR_IMAGE` environment variable on the Falco Operator Deployment:
+To use a different registry for the default Docker Hub images without maintaining
+release tags yourself, configure the Helm value:
 
 ```yaml
-env:
-  - name: ARTIFACT_OPERATOR_IMAGE
-    value: "docker.io/falcosecurity/artifact-operator:<matching-release-tag>"
+imageRegistry: nexus.my.tld:8443/dockerhub
 ```
 
-Release builds embed the matching Artifact Operator image. An unconfigured local
-build falls back to `docker.io/falcosecurity/artifact-operator:latest`. Keep the
-two operator images on a matching release; overriding only the sidecar image can
-break their shared API and artifact-delivery protocol.
+This covers the instance operator, artifact-operator sidecar, Falco, Components
+and their generated auxiliary containers. Each image keeps its own tag or digest;
+the default operator images retain their matching release versions. For example,
+`docker.io/falcosecurity/artifact-operator:<release-tag>` becomes
+`nexus.my.tld:8443/dockerhub/falcosecurity/artifact-operator:<release-tag>`.
+The instance binary embeds only the artifact operator's tag, independently of
+the registry: `main` for main builds, the release version for releases, and
+`latest` for builds without linker overrides or snapshots. Development Make
+targets default to `dev`.
+
+The chart uses this registry for the manager when `image.repository` equals
+`falcosecurity/falco-operator`; other repository values remain literal.
+`image.tag` and `image.digest` retain their existing precedence. Explicit images
+in `podTemplateSpec` also remain unchanged. Remove
+such overrides to use automatic registry/version selection; an explicit image
+without a tag does not inherit a release tag. Falco and Component versions
+selected through their CRs retain the existing override precedence.
+
+Outside Helm, configure the instance operator's `--image-registry` flag
+or `IMAGE_REGISTRY` environment variable for its generated workloads;
+its own container image must be configured separately. Use a registry hostname
+(with a domain or port) and optional repository prefix, without a URL scheme,
+tag or digest. An empty value leaves the existing behavior unchanged.
+
+This setting does not rewrite Plugin/Rulesfile OCI references or change pull
+policies, credentials or TLS trust. Configure node trust and pull secrets
+separately as needed. Changing or removing the Helm value restarts the operator;
+workload image changes follow the configured update strategy. A DaemonSet using
+`OnDelete` requires manual Pod replacement.
+
+## Paired operator versions
+
+The Instance Operator build embeds its compatible Artifact Operator tag. Changing
+the Instance Operator release therefore selects the corresponding sidecar version;
+there is no separate runtime tag setting. Pod replacement follows the workload's
+update strategy, including manual replacement for a DaemonSet using `OnDelete`.
+
+The sidecar repository remains `falcosecurity/artifact-operator`; `imageRegistry`
+changes only its registry, not the paired tag. An explicit image in the Falco CR's
+`spec.podTemplateSpec.spec.containers` takes precedence and must be kept compatible
+by the user. Development Make targets default to `dev`; plain `go build` without
+linker overrides defaults to `latest`. Developers can select the paired tag at
+build time as described in [Contributing](contributing.md).
 
 ## Operator replicas and artifact downloads
 

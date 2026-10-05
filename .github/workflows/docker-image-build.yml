@@ -32,6 +32,7 @@ jobs:
       build_date: ${{ needs.docker-configure.outputs.build_date }}
       image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
       component_name: "instance"
+      artifact_operator_tag: "main"
 
   artifact-operator:
     if: ${{ github.event_name == 'push' }}

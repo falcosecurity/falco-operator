@@ -46,7 +46,7 @@ var FalcoDefaults = &InstanceDefaults{
 	Replicas:             new(int32(1)),
 	ContainerName:        "falco",
 	SidecarContainerName: "artifact-operator",
-	ImageRepository:      image.Registry + "/" + image.Repository + "/" + image.FalcoImage,
+	ImageName:            image.Falco,
 	ImageTag:             image.FalcoTag,
 	DefaultArgs:          []string{"/usr/bin/falco"},
 	ImagePullPolicy:      corev1.PullIfNotPresent,
@@ -212,78 +212,81 @@ var FalcoDefaults = &InstanceDefaults{
 		MountPath:  "/etc/falco/falco.yaml",
 		SubPath:    "falco.yaml",
 	},
-	SidecarContainers: []corev1.Container{
+	SidecarContainers: []ContainerDefaults{
 		{
-			Name:            "artifact-operator",
-			Image:           version.ArtifactOperatorImage,
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			RestartPolicy:   &restartPolicy,
-			EnvFrom:         []corev1.EnvFromSource{},
-			Env: []corev1.EnvVar{
-				{
-					Name: "POD_NAMESPACE",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"},
+			ImageName: image.ArtifactOperator,
+			ImageTag:  version.ArtifactOperatorTag,
+			Container: corev1.Container{
+				Name:            "artifact-operator",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				RestartPolicy:   &restartPolicy,
+				EnvFrom:         []corev1.EnvFromSource{},
+				Env: []corev1.EnvVar{
+					{
+						Name: "POD_NAMESPACE",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.namespace"},
+						},
+					},
+					{
+						Name: "NODE_NAME",
+						ValueFrom: &corev1.EnvVarSource{
+							FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "spec.nodeName"},
+						},
 					},
 				},
-				{
-					Name: "NODE_NAME",
-					ValueFrom: &corev1.EnvVarSource{
-						FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "spec.nodeName"},
+				VolumeMounts: []corev1.VolumeMount{
+					{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
+					{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
+					{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
+				},
+				StartupProbe: &corev1.Probe{
+					InitialDelaySeconds: 3,
+					TimeoutSeconds:      5,
+					PeriodSeconds:       5,
+					FailureThreshold:    20,
+					SuccessThreshold:    1,
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/readyz",
+							Port: intstr.FromInt32(8081),
+						},
 					},
 				},
-			},
-			VolumeMounts: []corev1.VolumeMount{
-				{Name: mounts.ConfigMountName, MountPath: mounts.ConfigDirPath},
-				{Name: mounts.RulesfileMountName, MountPath: mounts.RulesfileDirPath},
-				{Name: mounts.PluginMountName, MountPath: mounts.PluginDirPath},
-			},
-			StartupProbe: &corev1.Probe{
-				InitialDelaySeconds: 3,
-				TimeoutSeconds:      5,
-				PeriodSeconds:       5,
-				FailureThreshold:    20,
-				SuccessThreshold:    1,
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/readyz",
-						Port: intstr.FromInt32(8081),
+				ReadinessProbe: &corev1.Probe{
+					InitialDelaySeconds: 5,
+					TimeoutSeconds:      5,
+					PeriodSeconds:       10,
+					FailureThreshold:    3,
+					SuccessThreshold:    1,
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/readyz",
+							Port: intstr.FromInt32(8081),
+						},
 					},
 				},
-			},
-			ReadinessProbe: &corev1.Probe{
-				InitialDelaySeconds: 5,
-				TimeoutSeconds:      5,
-				PeriodSeconds:       10,
-				FailureThreshold:    3,
-				SuccessThreshold:    1,
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/readyz",
-						Port: intstr.FromInt32(8081),
+				LivenessProbe: &corev1.Probe{
+					InitialDelaySeconds: 15,
+					TimeoutSeconds:      5,
+					PeriodSeconds:       10,
+					FailureThreshold:    3,
+					SuccessThreshold:    1,
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path: "/healthz",
+							Port: intstr.FromInt32(8081),
+						},
 					},
 				},
-			},
-			LivenessProbe: &corev1.Probe{
-				InitialDelaySeconds: 15,
-				TimeoutSeconds:      5,
-				PeriodSeconds:       10,
-				FailureThreshold:    3,
-				SuccessThreshold:    1,
-				ProbeHandler: corev1.ProbeHandler{
-					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/healthz",
-						Port: intstr.FromInt32(8081),
-					},
+				// Run as root so the sidecar can send SIGHUP to the Falco process in the shared PID
+				// namespace (shareProcessNamespace: true). Falco runs as UID 0; the distroless image
+				// defaults to UID 65532, and a non-root→root kill(2) is blocked by the container
+				// runtime even with CAP_KILL in the effective set on Kubernetes 1.27+ (SeccompDefault
+				// active). Root can always signal root.
+				SecurityContext: &corev1.SecurityContext{
+					RunAsUser: new(int64),
 				},
-			},
-			// Run as root so the sidecar can send SIGHUP to the Falco process in the shared PID
-			// namespace (shareProcessNamespace: true). Falco runs as UID 0; the distroless image
-			// defaults to UID 65532, and a non-root→root kill(2) is blocked by the container
-			// runtime even with CAP_KILL in the effective set on Kubernetes 1.27+ (SeccompDefault
-			// active). Root can always signal root.
-			SecurityContext: &corev1.SecurityContext{
-				RunAsUser: new(int64),
 			},
 		},
 	},
@@ -307,15 +310,6 @@ func SetArtifactServerURL(url string) {
 		Name:  "ARTIFACT_SERVER_URL",
 		Value: url,
 	})
-}
-
-// SetArtifactOperatorImage sets the artifact-operator sidecar image used for every Falco pod.
-// Call this once during falco-operator startup.
-func SetArtifactOperatorImage(img string) {
-	if img == "" {
-		return
-	}
-	FalcoDefaults.SidecarContainers[0].Image = img
 }
 
 // SetArtifactOperatorEnforceRequirements propagates the --enforce-requirements flag to every

@@ -6,6 +6,7 @@ release numbering uses [semantic versioning](http://semver.org).
 ## Unreleased
 
 * Require `spec` on Component resources so missing component configuration is rejected at admission.
+* Add `imageRegistry` for both operators and generated workload images, preserving their versions and explicit image overrides.
 * Fix the artifact Service selector to target only the active leader when leader election is enabled.
 * Keep the bootstrap CA private key during certificate renewal so existing mTLS certificates remain trusted.
 * Add `clusterDomain` to configure the artifact server hostname and its TLS certificate for non-default cluster DNS domains.

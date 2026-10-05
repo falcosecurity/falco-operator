@@ -278,7 +278,7 @@ func TestMergeApplyConfigurationEnvOverrides(t *testing.T) {
 							defs.EnvVars = baseEnv
 							template.Spec.Containers = []corev1.Container{{Name: "app", Env: env}}
 						} else {
-							defs.InitContainers = []corev1.Container{{Name: "prepare", Env: baseEnv}}
+							defs.InitContainers = []resources.ContainerDefaults{{Container: corev1.Container{Name: "prepare", Env: baseEnv}}}
 							template.Spec.InitContainers = []corev1.Container{{Name: "prepare", Env: env}}
 						}
 						beforeTemplate := template.DeepCopy()

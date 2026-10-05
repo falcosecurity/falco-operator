@@ -8,7 +8,8 @@ on:
 
 env:
   IMG_INSTANCE: falco-operator:e2e
-  IMG_ARTIFACT: artifact-operator:e2e
+  IMG_ARTIFACT: docker.io/falcosecurity/artifact-operator:e2e
+  ARTIFACT_OPERATOR_TAG: e2e
   # renovate: datasource=github-releases depName=kubernetes-sigs/kind
   KIND_VERSION: v0.32.0
   # renovate: datasource=github-releases depName=kubernetes/kubernetes
@@ -37,7 +38,7 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          go build -ldflags "-s -w -X '${PROJECT}/internal/pkg/version.ArtifactOperatorImage=${IMG_ARTIFACT}'" \
+          go build -ldflags "-s -w -X '${PROJECT}/internal/pkg/version.ArtifactOperatorTag=${ARTIFACT_OPERATOR_TAG}'" \
             -o bin/linux/amd64/instance-manager ./cmd/instance/main.go
 
       - name: Build artifact-operator binary
@@ -203,7 +204,6 @@ jobs:
         run: |
           helm upgrade --install falco-operator chart/falco-operator --namespace "${NAMESPACE}" --create-namespace \
             --set image.repository="${IMG_INSTANCE%:*}" --set-string image.tag="${IMG_INSTANCE##*:}" \
-            --set-string extraEnv[0].name=ARTIFACT_OPERATOR_IMAGE,extraEnv[0].value="${IMG_ARTIFACT}" \
             --set mtls.enabled=${{ matrix.mode.mtls_enabled }} \
             --wait --timeout 180s
 
@@ -296,7 +296,6 @@ jobs:
         run: |
           helm upgrade --install falco-operator chart/falco-operator --namespace "${NAMESPACE}" --create-namespace \
             --set image.repository="${IMG_INSTANCE%:*}" --set-string image.tag="${IMG_INSTANCE##*:}" \
-            --set-string extraEnv[0].name=ARTIFACT_OPERATOR_IMAGE,extraEnv[0].value="${IMG_ARTIFACT}" \
             --wait --timeout 180s
 
       - name: Run chainsaw e2e tests

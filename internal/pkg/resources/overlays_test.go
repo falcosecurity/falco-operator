@@ -17,7 +17,6 @@
 package resources
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -127,7 +126,7 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "falco"},
 			wantReplicas: 3,
-			wantVersion:  fmt.Sprintf("%s:%s", FalcoDefaults.ImageRepository, "0.38.0"),
+			wantVersion:  FalcoDefaults.ImageName.Ref("0.38.0"),
 			wantStrategy: string(appsv1.RecreateDeploymentStrategyType),
 		},
 		{
@@ -224,7 +223,7 @@ func TestGenerateOverlayOptions(t *testing.T) {
 			resourceType: ResourceTypeDeployment,
 			wantLabels:   map[string]string{"app": "metacollector"},
 			wantReplicas: 5,
-			wantVersion:  fmt.Sprintf("%s:%s", MetacollectorDefaults.ImageRepository, "0.2.0"),
+			wantVersion:  MetacollectorDefaults.ImageName.Ref("0.2.0"),
 			wantStrategy: string(appsv1.RecreateDeploymentStrategyType),
 		},
 		{
@@ -417,7 +416,7 @@ func TestApplyVersionOverride(t *testing.T) {
 			defs:           MetacollectorDefaults,
 			version:        new("0.5.0"),
 			wantContainers: 1,
-			wantImage:      MetacollectorDefaults.ImageRepository + ":0.5.0",
+			wantImage:      MetacollectorDefaults.ImageName.Ref("0.5.0"),
 		},
 		{
 			name:           "existing container with matching name is not overridden",
@@ -473,7 +472,7 @@ func TestApplyVersionOverride(t *testing.T) {
 
 			// When version is set and no matching container exists, the appended container has the version image.
 			if tt.version != nil && *tt.version != "" && tt.existingName != tt.defs.ContainerName {
-				wantVersionImage := tt.defs.ImageRepository + ":" + *tt.version
+				wantVersionImage := tt.defs.ImageName.Ref(*tt.version)
 				var foundVersion bool
 				for _, c := range template.Spec.Containers {
 					if c.Name == tt.defs.ContainerName {

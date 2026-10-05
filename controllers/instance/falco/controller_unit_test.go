@@ -646,7 +646,7 @@ func TestEnsureDeployment(t *testing.T) {
 					assert.Equal(t, wantImage, actualImage)
 				} else {
 					// When no version is specified, the controller must use the default from FalcoDefaults.
-					wantImage := fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Repository, image.FalcoImage, resources.FalcoDefaults.ImageTag)
+					wantImage := fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Namespace, image.Falco, resources.FalcoDefaults.ImageTag)
 					assert.Equal(t, wantImage, actualImage,
 						"default Falco image must use FalcoDefaults.ImageTag when spec.version is nil")
 				}

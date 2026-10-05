@@ -90,7 +90,8 @@ func generateDaemonSet(meta *metav1.ObjectMeta, defs *InstanceDefaults) *appsv1.
 // addInitContainers adds true init containers (run to completion) from defaults.
 func addInitContainers(b any, defs *InstanceDefaults) {
 	for i := range defs.InitContainers {
-		initC := defs.InitContainers[i]
+		initC := defs.InitContainers[i].Container
+		initC.Image = defs.InitContainers[i].ImageName.Ref(defs.InitContainers[i].ImageTag)
 		switch builder := b.(type) {
 		case *builders.DeploymentBuilder:
 			builder.AddInitContainer(&initC)
@@ -103,7 +104,8 @@ func addInitContainers(b any, defs *InstanceDefaults) {
 // addSidecarContainers adds the sidecar containers as regular containers.
 func addSidecarContainers(b any, defs *InstanceDefaults) {
 	for i := range defs.SidecarContainers {
-		sidecar := defs.SidecarContainers[i]
+		sidecar := defs.SidecarContainers[i].Container
+		sidecar.Image = defs.SidecarContainers[i].ImageName.Ref(defs.SidecarContainers[i].ImageTag)
 		sidecar.RestartPolicy = nil
 		switch builder := b.(type) {
 		case *builders.DeploymentBuilder:

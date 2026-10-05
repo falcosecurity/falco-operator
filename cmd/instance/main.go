@@ -57,6 +57,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
@@ -134,7 +135,7 @@ func main() {
 	var artifactClientCertIssuerName string
 	var artifactCABundleConfigMapName string
 	var artifactClientCertDuration, artifactClientCertRenewBefore time.Duration
-	var artifactOperatorImage string
+	var imageRegistry string
 	var artifactOperatorEnforceRequirements bool
 	var artifactServerMaxConcurrentRequests int
 	flag.StringVar(&artifactServeAddr, "artifact-serve-addr", ":8082",
@@ -177,11 +178,10 @@ func main() {
 		"Validity period for a per-instance artifact client mTLS certificate.")
 	flag.DurationVar(&artifactClientCertRenewBefore, "artifact-client-cert-renew-before", falco.DefaultArtifactClientCertRenewBefore,
 		"How long before expiry cert-manager renews a per-instance artifact client mTLS certificate.")
-	flag.StringVar(&artifactOperatorImage, "artifact-operator-image", "",
-		"Overrides the artifact-operator sidecar image injected into every Falco pod. Normally this is "+
-			"baked in at build time (version.ArtifactOperatorImage, via -ldflags) to match the release pair; "+
-			"set this (or the ARTIFACT_OPERATOR_IMAGE env var) to repoint an already-built binary at a "+
-			"different image, e.g. a private registry mirror or a local dev build, without rebuilding.")
+	flag.StringVar(&imageRegistry, "image-registry", "",
+		"Registry used instead of Docker Hub for the default images of Falco, artifact-operator, components "+
+			"and auxiliary containers. Format: host[:port][/prefix]. Image tags are preserved and explicit "+
+			"image overrides take precedence. Empty uses the default registry.")
 	flag.BoolVar(&artifactOperatorEnforceRequirements, "enforce-requirements", true,
 		"Whether the artifact-operator sidecar enforces artifact compatibility requirements. "+
 			"Set to false to install artifacts regardless of Falco version or plugin dependency constraints.")
@@ -198,16 +198,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if artifactOperatorImage != "" {
-		version.ArtifactOperatorImage = artifactOperatorImage
+	if err := image.SetRegistry(imageRegistry); err != nil {
+		_, _ = fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	if artifactDownloadTimeout <= 0 {
 		_, _ = fmt.Fprintln(os.Stderr, "artifact download timeout must be positive; configure --artifact-download-timeout or ARTIFACT_DOWNLOAD_TIMEOUT")
 		os.Exit(1)
 	}
-	// Reassigning version.ArtifactOperatorImage above has no effect on FalcoDefaults, which was
-	// already initialized from it at package-init time; this call applies the override directly.
-	resources.SetArtifactOperatorImage(version.ArtifactOperatorImage)
 	resources.SetArtifactOperatorEnforceRequirements(artifactOperatorEnforceRequirements)
 	resources.SetArtifactDownloadTimeout(artifactDownloadTimeout)
 
@@ -237,7 +235,7 @@ func main() {
 
 	setupLog.Info("Starting instance operator", "version", version.SemVersion, "commit", version.GitCommit,
 		"buildDate", version.BuildDate, "compiler", version.Compiler, "platform", version.Platform,
-		"artifactOperatorImage", version.ArtifactOperatorImage)
+		"imageRegistry", image.Registry, "artifactOperatorTag", version.ArtifactOperatorTag)
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and

@@ -26,7 +26,7 @@ import (
 func forgeMainContainer(defs *InstanceDefaults) *corev1.Container {
 	return &corev1.Container{
 		Name:            defs.ContainerName,
-		Image:           defs.ImageRepository + ":" + defs.ImageTag,
+		Image:           defs.ImageName.Ref(defs.ImageTag),
 		ImagePullPolicy: defs.ImagePullPolicy,
 		Resources:       defs.DefaultResources,
 		Ports:           defs.DefaultPorts,

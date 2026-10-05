@@ -17,18 +17,22 @@
 package component
 
 import (
-	"fmt"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
 )
 
@@ -84,6 +88,162 @@ func mustFindContainer(t *testing.T, containers []any, name string) map[string]a
 	return nil
 }
 
+func TestGenerateApplyConfigurationImages(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const requested = "9.8.7"
+	previous := image.Registry
+	t.Cleanup(func() { image.Registry = previous })
+
+	for _, component := range []struct {
+		kind       instancev1alpha1.ComponentType
+		defs       *resources.InstanceDefaults
+		repository string
+	}{
+		{kind: instancev1alpha1.ComponentTypeMetacollector, defs: mcDefs, repository: "falcosecurity/k8s-metacollector"},
+		{kind: instancev1alpha1.ComponentTypeFalcosidekick, defs: skDefs, repository: "falcosecurity/falcosidekick"},
+		{kind: instancev1alpha1.ComponentTypeFalcosidekickUI, defs: uiDefs, repository: "falcosecurity/falcosidekick-ui"},
+	} {
+		defs := component.defs
+		type testCase struct {
+			name      string
+			version   *string
+			mainImage string
+			memory    bool
+			env       bool
+			initImage string
+			initEnv   bool
+			extra     bool
+			wantTag   string
+		}
+		tests := []testCase{
+			{name: "default version", wantTag: defs.ImageTag},
+			{name: "empty version uses default", version: new(""), wantTag: defs.ImageTag},
+			{name: "requested version", version: new(requested), wantTag: requested},
+			{name: "memory override keeps default version", memory: true, wantTag: defs.ImageTag},
+			{name: "env override keeps default version", env: true, wantTag: defs.ImageTag},
+			{name: "memory override with empty version", version: new(""), memory: true, wantTag: defs.ImageTag},
+			{name: "explicit Docker Hub image wins", version: new(requested), mainImage: "docker.io/" + component.repository + ":custom"},
+			{name: "explicit external image wins", version: new(requested), mainImage: "registry.example.net:5000/team/component:custom"},
+			{name: "unqualified image remains literal", version: new(requested), mainImage: "custom/component:custom"},
+			{name: "tagless image remains literal", version: new(requested), mainImage: "custom/component"},
+			{name: "digest-only image remains literal", version: new(requested), memory: true, mainImage: "docker.io/custom/component@" + digest},
+			{name: "tag and digest image remains literal", version: new(requested), mainImage: "docker.io/custom/component:custom@" + digest},
+			{name: "additional containers remain literal", extra: true, wantTag: defs.ImageTag},
+		}
+		if component.kind == instancev1alpha1.ComponentTypeFalcosidekickUI {
+			tests = append(tests,
+				testCase{name: "explicit Redis image wins", initImage: "docker.io/custom/redis:7", wantTag: defs.ImageTag},
+				testCase{name: "Redis digest remains literal", initImage: "quay.io/custom/redis@" + digest, wantTag: defs.ImageTag},
+				testCase{name: "Redis env override keeps generated image", initEnv: true, wantTag: defs.ImageTag},
+			)
+		}
+		for _, registry := range []string{"docker.io", "registry.example.com:5000/team/cache"} {
+			for _, tt := range tests {
+				t.Run(string(component.kind)+"/"+registry+"/"+tt.name, func(t *testing.T) {
+					require.NoError(t, image.SetRegistry(registry))
+					comp := &instancev1alpha1.Component{
+						ObjectMeta: metav1.ObjectMeta{Name: "test-component", Namespace: testutil.TestNamespace},
+						Spec: instancev1alpha1.ComponentSpec{
+							Component: instancev1alpha1.ComponentInfo{Type: component.kind, Version: tt.version},
+						},
+					}
+					template := &corev1.PodTemplateSpec{}
+					if tt.mainImage != "" || tt.memory || tt.env {
+						main := corev1.Container{Name: defs.ContainerName, Image: tt.mainImage}
+						if tt.memory {
+							main.Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}
+						}
+						if tt.env {
+							main.Env = []corev1.EnvVar{{Name: "CUSTOM", Value: "preserved"}}
+						}
+						template.Spec.Containers = append(template.Spec.Containers, main)
+					}
+					if tt.initImage != "" || tt.initEnv {
+						init := corev1.Container{Name: "wait-redis", Image: tt.initImage}
+						if tt.initEnv {
+							init.Env = []corev1.EnvVar{{Name: "REDIS_ADDR", Value: "custom-redis:6379"}}
+						}
+						template.Spec.InitContainers = append(template.Spec.InitContainers, init)
+					}
+					if tt.extra {
+						template.Spec.Containers = append(template.Spec.Containers,
+							corev1.Container{Name: "user-sidecar", Image: "docker.io/library/busybox:1.37"})
+						template.Spec.InitContainers = append(template.Spec.InitContainers,
+							corev1.Container{Name: "user-init", Image: "docker.io/library/alpine:3.21"})
+					}
+					if len(template.Spec.Containers)+len(template.Spec.InitContainers) > 0 {
+						comp.Spec.PodTemplateSpec = template
+					}
+					before := comp.DeepCopy()
+					defaultsBefore, err := json.Marshal(defs)
+					require.NoError(t, err)
+
+					result, err := generateApplyConfiguration(comp, defs)
+					require.NoError(t, err)
+					assert.Equal(t, before, comp)
+					defaultsAfterFirst, err := json.Marshal(defs)
+					require.NoError(t, err)
+					assert.Equal(t, defaultsBefore, defaultsAfterFirst)
+					assert.Equal(t, resources.ResourceTypeDeployment, result.GetKind())
+					containers := mustGetContainers(t, result)
+					var main corev1.Container
+					require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(
+						mustFindContainer(t, containers, defs.ContainerName), &main))
+					wantMain := registry + "/" + component.repository + ":" + tt.wantTag
+					if tt.mainImage != "" {
+						wantMain = tt.mainImage
+					} else {
+						assert.Equal(t, tt.wantTag, instance.ResolveVersion(comp, defs))
+					}
+					assert.Equal(t, wantMain, main.Image)
+					if tt.memory {
+						assert.Equal(t, resource.MustParse("256Mi"), main.Resources.Requests[corev1.ResourceMemory])
+					}
+					if tt.env {
+						assert.Contains(t, main.Env, corev1.EnvVar{Name: "CUSTOM", Value: "preserved"})
+					}
+					initContainers, _, err := unstructured.NestedSlice(result.Object, "spec", "template", "spec", "initContainers")
+					require.NoError(t, err)
+					if component.kind == instancev1alpha1.ComponentTypeFalcosidekickUI {
+						wantInit := registry + "/redis/redis-stack:" + image.RedisTag
+						if tt.initImage != "" {
+							wantInit = tt.initImage
+						}
+						var init corev1.Container
+						require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(
+							mustFindContainer(t, initContainers, "wait-redis"), &init))
+						assert.Equal(t, wantInit, init.Image)
+						wantAddress := resources.DefaultRedisAddress
+						if tt.initEnv {
+							wantAddress = "custom-redis:6379"
+						}
+						assert.Contains(t, init.Env, corev1.EnvVar{Name: "REDIS_ADDR", Value: wantAddress})
+					}
+					if tt.extra {
+						assert.Len(t, containers, 2)
+						assert.Len(t, initContainers, len(defs.InitContainers)+1)
+						assert.Equal(t, "docker.io/library/busybox:1.37", mustFindContainer(t, containers, "user-sidecar")["image"])
+						assert.Equal(t, "docker.io/library/alpine:3.21", mustFindContainer(t, initContainers, "user-init")["image"])
+					} else {
+						assert.Len(t, containers, 1)
+						assert.Len(t, initContainers, len(defs.InitContainers))
+					}
+
+					first := result.DeepCopy()
+					repeated, err := generateApplyConfiguration(comp, defs)
+					require.NoError(t, err)
+					assert.Equal(t, first, result)
+					assert.Equal(t, first, repeated)
+					assert.Equal(t, before, comp)
+					defaultsAfter, err := json.Marshal(defs)
+					require.NoError(t, err)
+					assert.Equal(t, defaultsBefore, defaultsAfter)
+				})
+			}
+		}
+	}
+}
+
 func TestGenerateApplyConfiguration(t *testing.T) {
 	tests := []struct {
 		name                string
@@ -104,7 +264,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			defs:                mcDefs,
 			comp:                newMetacollectorComponent("test-mc"),
 			wantContainerCount:  1,
-			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
+			wantMainImage:       mcDefs.ImageName.Ref(mcDefs.ImageTag),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -123,7 +283,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				return c
 			}(),
 			wantContainerCount:  1,
-			wantMainImage:       fmt.Sprintf("%s:%s", mcDefs.ImageRepository, "0.2.0"),
+			wantMainImage:       mcDefs.ImageName.Ref("0.2.0"),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -142,7 +302,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				return c
 			}(),
 			wantContainerCount:  1,
-			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
+			wantMainImage:       mcDefs.ImageName.Ref(mcDefs.ImageTag),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -161,7 +321,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				return c
 			}(),
 			wantContainerCount:  1,
-			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
+			wantMainImage:       mcDefs.ImageName.Ref(mcDefs.ImageTag),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -180,7 +340,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				return c
 			}(),
 			wantContainerCount:  1,
-			wantMainImage:       mcDefs.ImageRepository + ":" + mcDefs.ImageTag,
+			wantMainImage:       mcDefs.ImageName.Ref(mcDefs.ImageTag),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -253,7 +413,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 				return c
 			}(),
 			wantContainerCount:  1,
-			wantMainImage:       fmt.Sprintf("%s:%s", mcDefs.ImageRepository, "0.2.0"),
+			wantMainImage:       mcDefs.ImageName.Ref("0.2.0"),
 			wantTolerationCount: 0,
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-mc",
@@ -268,7 +428,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			defs:               skDefs,
 			comp:               newSidekickComponent("test-sk"),
 			wantContainerCount: 1,
-			wantMainImage:      skDefs.ImageRepository + ":" + skDefs.ImageTag,
+			wantMainImage:      skDefs.ImageName.Ref(skDefs.ImageTag),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-sk",
 				"app.kubernetes.io/instance": "test-sk",
@@ -282,7 +442,7 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 			comp:               newSidekickUIComponent("test-ui"),
 			wantContainerCount: 1,
 			wantInitContainers: 1,
-			wantMainImage:      uiDefs.ImageRepository + ":" + uiDefs.ImageTag,
+			wantMainImage:      uiDefs.ImageName.Ref(uiDefs.ImageTag),
 			wantPodLabels: map[string]string{
 				"app.kubernetes.io/name":     "test-ui",
 				"app.kubernetes.io/instance": "test-ui",

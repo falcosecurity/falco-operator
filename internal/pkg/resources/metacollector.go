@@ -35,7 +35,7 @@ var MetacollectorDefaults = &InstanceDefaults{
 	ResourceType:    ResourceTypeDeployment,
 	Replicas:        new(int32(1)),
 	ContainerName:   "metacollector",
-	ImageRepository: image.Registry + "/" + image.Repository + "/" + image.MetacollectorImage,
+	ImageName:       image.Metacollector,
 	ImageTag:        image.MetacollectorTag,
 	DefaultCommand:  []string{"/meta-collector"},
 	DefaultArgs:     []string{"run"},

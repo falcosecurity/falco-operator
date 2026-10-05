@@ -129,7 +129,7 @@ jobs:
       build_date: ${{ needs.docker-configure.outputs.build_date }}
       image_name: ${{ vars.FALCO_OPERATOR_IMAGE_NAME }}
       component_name: "instance"
-      artifact_operator_image: "${{ vars.ARTIFACT_OPERATOR_IMAGE_NAME }}:${{ needs.docker-configure.outputs.release }}"
+      artifact_operator_tag: ${{ needs.docker-configure.outputs.release }}
 
   provenance-for-images-artifact:
     needs: [docker-configure, artifact-operator-image]

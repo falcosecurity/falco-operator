@@ -38,6 +38,6 @@ var (
 	// Platform indicates the operating system and architecture of the build.
 	Platform = fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 
-	// ArtifactOperatorImage indicates the artifact-operator container image.
-	ArtifactOperatorImage = "docker.io/falcosecurity/artifact-operator:latest"
+	// ArtifactOperatorTag identifies the artifact-operator image paired with this build.
+	ArtifactOperatorTag = "latest"
 )

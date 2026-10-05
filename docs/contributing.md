@@ -101,14 +101,23 @@ Build container images:
 
 ```bash
 export IMG_INSTANCE=falco-operator:dev
-export IMG_ARTIFACT=artifact-operator:dev
+export ARTIFACT_OPERATOR_TAG=dev
 make docker.build.instance docker.build.artifact
 ```
 
-The instance build embeds `IMG_ARTIFACT` through `version.ArtifactOperatorImage`.
-Keep this reference aligned with the artifact image you build and load. The
-lower-level `docker.build` target uses `OPERATOR` and `IMG`; the paired targets
-above set these for you.
+`IMG_INSTANCE` and `IMG_ARTIFACT` name the output images. By default, the artifact operator
+image is `docker.io/falcosecurity/artifact-operator:$ARTIFACT_OPERATOR_TAG`.
+Set `IMAGE_REGISTRY` to replace its registry. The instance binary
+embeds only `ARTIFACT_OPERATOR_TAG` (default `dev` in Make) through
+`version.ArtifactOperatorTag`; its default repository is
+`docker.io/falcosecurity/artifact-operator`, or the configured image registry.
+Set the tag explicitly when building a release pair. `make build` and `make run`
+also embed this tag; deployment targets inherit it from the selected Instance
+Operator image and configure only the registry. There is no runtime tag override.
+If you override `IMG_ARTIFACT`, keep it aligned with these inputs, or set the full
+image explicitly in your Falco CR.
+The lower-level `docker.build` target uses `OPERATOR` and `IMG`; the paired
+targets above set these for you.
 
 ### Generating the install manifest
 
@@ -263,8 +272,8 @@ make install
 ARTIFACT_SERVER_URL="http://<operator-host>:8082" make run
 
 # Or build/load both images and deploy to the local cluster
-make cluster.load IMG_INSTANCE=falco-operator:dev IMG_ARTIFACT=artifact-operator:dev
-make deploy.http IMG_INSTANCE=falco-operator:dev IMG_ARTIFACT=artifact-operator:dev
+make cluster.load IMG_INSTANCE=falco-operator:dev ARTIFACT_OPERATOR_TAG=dev
+make deploy.http IMG_INSTANCE=falco-operator:dev
 ```
 
 The central artifact server is required. Helm configures its in-cluster URL

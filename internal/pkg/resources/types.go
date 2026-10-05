@@ -20,6 +20,8 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 )
 
 const (
@@ -37,6 +39,14 @@ type ConfigMapVolumeConfig struct {
 	SubPath    string
 }
 
+// ContainerDefaults is a default container whose image is composed from ImageName and ImageTag
+// when the workload is generated, so it reflects the registry configured at startup.
+type ContainerDefaults struct {
+	corev1.Container
+	ImageName image.Name
+	ImageTag  string
+}
+
 // InstanceDefaults defines all the default configuration for an instance controller.
 // Each instance type (falco, metacollector, etc.) registers its own defaults.
 type InstanceDefaults struct {
@@ -47,22 +57,22 @@ type InstanceDefaults struct {
 	Replicas *int32
 
 	// Container
-	ContainerName        string
-	SidecarContainerName string
-	ImageRepository      string
-	ImageTag             string
-	DefaultCommand       []string
-	DefaultArgs          []string
-	ImagePullPolicy      corev1.PullPolicy
-	DefaultPorts         []corev1.ContainerPort
-	DefaultResources     corev1.ResourceRequirements
-	StartupProbe         *corev1.Probe
-	LivenessProbe        *corev1.Probe
-	ReadinessProbe       *corev1.Probe
-	SecurityContext      *corev1.SecurityContext
+	ContainerName         string
+	SidecarContainerName  string
+	ImageName             image.Name
+	ImageTag              string
+	DefaultCommand        []string
+	DefaultArgs           []string
+	ImagePullPolicy       corev1.PullPolicy
+	DefaultPorts          []corev1.ContainerPort
+	DefaultResources      corev1.ResourceRequirements
+	StartupProbe          *corev1.Probe
+	LivenessProbe         *corev1.Probe
+	ReadinessProbe        *corev1.Probe
+	SecurityContext       *corev1.SecurityContext
 	PodSecurityContext    *corev1.PodSecurityContext
 	ShareProcessNamespace *bool
-	EnvVars              []corev1.EnvVar
+	EnvVars               []corev1.EnvVar
 
 	// Tolerations
 	Tolerations []corev1.Toleration
@@ -86,10 +96,10 @@ type InstanceDefaults struct {
 	ConfigMapVolume *ConfigMapVolumeConfig
 
 	// InitContainers are added as true init containers (run to completion before main).
-	InitContainers []corev1.Container
+	InitContainers []ContainerDefaults
 
 	// Sidecar containers (nil = no sidecar).
-	SidecarContainers []corev1.Container
+	SidecarContainers []ContainerDefaults
 
 	// SupportsDaemonSet indicates whether this instance type supports DaemonSet workloads.
 	SupportsDaemonSet bool

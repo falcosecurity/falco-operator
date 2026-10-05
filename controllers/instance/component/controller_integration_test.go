@@ -198,7 +198,7 @@ func TestReconcile_FullReconciliation(t *testing.T) {
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, dep)
 	require.NoError(t, err)
 	require.NotEmpty(t, dep.Spec.Template.Spec.Containers)
-	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.MetacollectorImage)
+	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.Metacollector)
 	require.Len(t, dep.OwnerReferences, 1)
 	assert.Equal(t, "Component", dep.OwnerReferences[0].Kind)
 
@@ -562,7 +562,7 @@ func TestReconcile_FalcosidekickRoleCreation(t *testing.T) {
 	dep := &appsv1.Deployment{}
 	err = k8sClient.Get(ctx, types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}, dep)
 	require.NoError(t, err)
-	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.FalcosidekickImage)
+	assert.Contains(t, dep.Spec.Template.Spec.Containers[0].Image, image.Falcosidekick)
 }
 
 // TestReconcile_RecoveryAfterSubResourceDeletion verifies that the controller

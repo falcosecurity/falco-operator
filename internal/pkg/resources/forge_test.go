@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
@@ -143,7 +144,7 @@ func TestGenerateWorkload(t *testing.T) {
 			require.Len(t, podSpec.Containers, tt.wantContainers)
 
 			// Verify main container properties by looking it up by name.
-			wantImage := tt.defs.ImageRepository + ":" + tt.defs.ImageTag
+			wantImage := tt.defs.ImageName.Ref(tt.defs.ImageTag)
 			var foundMain bool
 			for _, c := range podSpec.Containers {
 				if c.Name != tt.defs.ContainerName {
@@ -179,7 +180,7 @@ func TestGenerateWorkload(t *testing.T) {
 						continue
 					}
 					foundSidecar = true
-					assert.Equal(t, version.ArtifactOperatorImage, c.Image, "sidecar should have the correct image")
+					assert.Equal(t, image.ArtifactOperator.Ref(version.ArtifactOperatorTag), c.Image, "sidecar should have the correct image")
 					assert.Nil(t, c.RestartPolicy, "sidecar should have nil RestartPolicy")
 					assertArtifactOperatorReadinessProbes(t, &c)
 					break
@@ -466,7 +467,7 @@ func TestForgeMainContainer(t *testing.T) {
 			c := forgeMainContainer(tt.defs)
 			require.NotNil(t, c)
 			assert.Equal(t, tt.defs.ContainerName, c.Name)
-			assert.Equal(t, tt.defs.ImageRepository+":"+tt.defs.ImageTag, c.Image)
+			assert.Equal(t, tt.defs.ImageName.Ref(tt.defs.ImageTag), c.Image)
 			assert.Equal(t, tt.defs.ImagePullPolicy, c.ImagePullPolicy)
 			assert.Equal(t, tt.defs.DefaultCommand, c.Command)
 			assert.Equal(t, tt.defs.DefaultArgs, c.Args)
