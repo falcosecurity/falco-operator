@@ -19,6 +19,9 @@ image:
   # -- Optional image digest (e.g. sha256:abc...). When set, takes precedence over tag and renders repository@digest.
   digest: ""
 
+# -- Registry host[:port][/path] for the default Docker Hub images of the operator and generated workloads. Preserves tags/digests; custom repositories and explicit images take precedence.
+imageRegistry: ""
+
 # -- Image pull secrets
 imagePullSecrets: []
 
@@ -186,8 +189,6 @@ extraArgs: []
 
 # -- Extra environment variables
 extraEnv: []
-  # - name: ARTIFACT_OPERATOR_IMAGE
-  #   value: "docker.io/falcosecurity/artifact-operator:latest"
   # - name: ARTIFACT_DOWNLOAD_TIMEOUT
   #   value: "2m"
 

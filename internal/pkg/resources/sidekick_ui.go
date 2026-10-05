@@ -42,7 +42,7 @@ var FalcosidekickUIDefaults = &InstanceDefaults{
 	ResourceType:    ResourceTypeDeployment,
 	Replicas:        new(int32(2)),
 	ContainerName:   "falcosidekick-ui",
-	ImageRepository: image.Registry + "/" + image.Repository + "/" + image.FalcosidekickUIImage,
+	ImageName:       image.FalcosidekickUI,
 	ImageTag:        image.FalcosidekickUITag,
 	DefaultArgs:     []string{"-r", DefaultRedisAddress},
 	ImagePullPolicy: corev1.PullIfNotPresent,
@@ -82,17 +82,20 @@ var FalcosidekickUIDefaults = &InstanceDefaults{
 	},
 	// Wait-redis init container: blocks until Redis is reachable.
 	// If Redis is not deployed, the pod stays in Init:0/1, signaling the dependency.
-	InitContainers: []corev1.Container{
+	InitContainers: []ContainerDefaults{
 		{
-			Name:            "wait-redis",
-			Image:           image.RedisRegistry + "/" + image.RedisRepository + "/" + image.RedisImage + ":" + image.RedisTag,
-			ImagePullPolicy: corev1.PullIfNotPresent,
-			Command:         []string{"sh", "-c"},
-			Args: []string{
-				`until redis-cli -h "$(echo $REDIS_ADDR | cut -d: -f1)" -p "$(echo $REDIS_ADDR | cut -d: -f2)" ping 2>/dev/null | grep -q PONG; do echo "Waiting for Redis at $REDIS_ADDR..."; sleep 3; done; echo "Redis is ready"`,
-			},
-			Env: []corev1.EnvVar{
-				{Name: "REDIS_ADDR", Value: DefaultRedisAddress},
+			ImageName: image.Redis,
+			ImageTag:  image.RedisTag,
+			Container: corev1.Container{
+				Name:            "wait-redis",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Command:         []string{"sh", "-c"},
+				Args: []string{
+					`until redis-cli -h "$(echo $REDIS_ADDR | cut -d: -f1)" -p "$(echo $REDIS_ADDR | cut -d: -f2)" ping 2>/dev/null | grep -q PONG; do echo "Waiting for Redis at $REDIS_ADDR..."; sleep 3; done; echo "Redis is ready"`,
+				},
+				Env: []corev1.EnvVar{
+					{Name: "REDIS_ADDR", Value: DefaultRedisAddress},
+				},
 			},
 		},
 	},

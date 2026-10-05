@@ -35,7 +35,7 @@ var FalcosidekickDefaults = &InstanceDefaults{
 	ResourceType:    ResourceTypeDeployment,
 	Replicas:        new(int32(2)),
 	ContainerName:   "falcosidekick",
-	ImageRepository: image.Registry + "/" + image.Repository + "/" + image.FalcosidekickImage,
+	ImageName:       image.Falcosidekick,
 	ImageTag:        image.FalcosidekickTag,
 	ImagePullPolicy: corev1.PullIfNotPresent,
 	DefaultPorts: []corev1.ContainerPort{

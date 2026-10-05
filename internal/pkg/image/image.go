@@ -17,14 +17,57 @@
 package image
 
 import (
-	"strings"
+	_ "crypto/sha256" // Register digest algorithms used in image references.
+	_ "crypto/sha512"
+	"fmt"
+
+	"github.com/distribution/reference"
 )
 
-// VersionFromImage returns the version from the image string.
+// Ref composes the reference of the image with the given tag, using the registry and namespace
+// configured at startup. An empty Name yields an empty reference.
+func (n Name) Ref(tag string) string {
+	if n == "" {
+		return ""
+	}
+	namespace := Namespace
+	if n == Redis {
+		namespace = RedisNamespace
+	}
+	return Registry + "/" + namespace + "/" + string(n) + ":" + tag
+}
+
+// SetRegistry overrides the registry before starting controllers. Empty keeps the package default.
+func SetRegistry(value string) error {
+	if value == "" {
+		return nil
+	}
+	if err := ValidateRegistry(value); err != nil {
+		return err
+	}
+	Registry = value
+	return nil
+}
+
+// ValidateRegistry checks a registry host with an optional port and repository prefix.
+func ValidateRegistry(registry string) error {
+	if registry == "" {
+		return nil
+	}
+	if _, err := reference.ParseNamed(registry + "/library/image"); err != nil {
+		return fmt.Errorf("invalid image registry %q: %w", registry, err)
+	}
+	return nil
+}
+
+// VersionFromImage returns the explicit image tag, or empty if absent or invalid.
 func VersionFromImage(image string) string {
-	parts := strings.Split(image, ":")
-	if len(parts) == 2 {
-		return parts[1]
+	named, err := reference.ParseNormalizedNamed(image)
+	if err != nil {
+		return ""
+	}
+	if tagged, ok := named.(reference.Tagged); ok {
+		return tagged.Tag()
 	}
 	return ""
 }

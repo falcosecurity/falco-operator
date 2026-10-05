@@ -198,7 +198,7 @@ func TestResolveVersion(t *testing.T) {
 			want: resources.FalcoDefaults.ImageTag,
 		},
 		{
-			name: "image with only tag and no repository returns the tag",
+			name: "invalid image with only tag and no repository falls back to default",
 			obj: &instancev1alpha1.Falco{
 				Spec: instancev1alpha1.FalcoSpec{
 					PodTemplateSpec: &corev1.PodTemplateSpec{
@@ -211,7 +211,7 @@ func TestResolveVersion(t *testing.T) {
 				},
 			},
 			defs: resources.FalcoDefaults,
-			want: "v1",
+			want: resources.FalcoDefaults.ImageTag,
 		},
 		{
 			name: "nil version and no matching container falls back to default",

@@ -323,7 +323,7 @@ func applyVersionOverride(defs *InstanceDefaults, version *string, template *cor
 	if version != nil && *version != "" {
 		template.Spec.Containers = append(template.Spec.Containers, corev1.Container{
 			Name:  defs.ContainerName,
-			Image: defs.ImageRepository + ":" + *version,
+			Image: defs.ImageName.Ref(*version),
 		})
 	}
 }

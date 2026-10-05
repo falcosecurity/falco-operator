@@ -530,7 +530,7 @@ func TestEnsureDeployment(t *testing.T) {
 			comp:                newMetacollectorComponent("test-mc"),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
-			wantImage:           defs.ImageRepository + ":" + defs.ImageTag,
+			wantImage:           defs.ImageName.Ref(defs.ImageTag),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
@@ -542,7 +542,7 @@ func TestEnsureDeployment(t *testing.T) {
 			}(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
-			wantImage:           fmt.Sprintf("%s:%s", defs.ImageRepository, "0.2.0"),
+			wantImage:           defs.ImageName.Ref("0.2.0"),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 		{
@@ -554,7 +554,7 @@ func TestEnsureDeployment(t *testing.T) {
 			}(),
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceCreated,
-			wantImage:           defs.ImageRepository + ":" + defs.ImageTag,
+			wantImage:           defs.ImageName.Ref(defs.ImageTag),
 			wantStrategyType:    appsv1.RecreateDeploymentStrategyType,
 		},
 		{
@@ -572,12 +572,12 @@ func TestEnsureDeployment(t *testing.T) {
 					}).
 					AddContainer(&corev1.Container{
 						Name:  defs.ContainerName,
-						Image: defs.ImageRepository + ":" + defs.ImageTag,
+						Image: defs.ImageName.Ref(defs.ImageTag),
 					}).Build(),
 			},
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonResourceUpdated,
-			wantImage:           fmt.Sprintf("%s:%s", defs.ImageRepository, "0.3.0"),
+			wantImage:           defs.ImageName.Ref("0.3.0"),
 			wantStrategyType:    appsv1.RollingUpdateDeploymentStrategyType,
 		},
 	}

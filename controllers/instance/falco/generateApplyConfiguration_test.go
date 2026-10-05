@@ -17,6 +17,7 @@
 package falco
 
 import (
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,14 +34,16 @@ import (
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
+	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
+	operatorversion "github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
 var falcoDefs = resources.FalcoDefaults
 
 func TestGenerateApplyConfigurationDownloadTimeout(t *testing.T) {
 	original := resources.FalcoDefaults.SidecarContainers[0].DeepCopy()
-	t.Cleanup(func() { resources.FalcoDefaults.SidecarContainers[0] = *original })
+	t.Cleanup(func() { resources.FalcoDefaults.SidecarContainers[0].Container = *original })
 	resources.SetArtifactDownloadTimeout(2 * time.Minute)
 	defaults := resources.FalcoDefaults.SidecarContainers[0].DeepCopy()
 	for _, kind := range []string{resources.ResourceTypeDaemonSet, resources.ResourceTypeDeployment} {
@@ -91,7 +95,7 @@ func TestGenerateApplyConfigurationDownloadTimeout(t *testing.T) {
 						assert.Contains(t, sidecar.VolumeMounts, mount)
 					}
 					assert.Equal(t, before, falco)
-					assert.Equal(t, defaults, &resources.FalcoDefaults.SidecarContainers[0])
+					assert.Equal(t, defaults, &resources.FalcoDefaults.SidecarContainers[0].Container)
 				})
 			}
 		}
@@ -105,7 +109,7 @@ func buildFalcoImageStringFromVersion(version string) string {
 	if version == "" {
 		version = image.FalcoTag
 	}
-	return fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Repository, image.FalcoImage, version)
+	return fmt.Sprintf("%s/%s/%s:%s", image.Registry, image.Namespace, image.Falco, version)
 }
 
 // mustGetContainers extracts the containers list from an unstructured workload.
@@ -506,8 +510,153 @@ func TestGenerateApplyConfiguration(t *testing.T) {
 	}
 }
 
+func TestGenerateApplyConfigurationImageRegistry(t *testing.T) {
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const requested = "0.40.0"
+	previous := image.Registry
+	t.Cleanup(func() { image.Registry = previous })
+
+	tests := []struct {
+		name            string
+		version         *string
+		mainImage       string
+		memory          bool
+		env             bool
+		sidecarImage    string
+		extraContainers bool
+		wantTag         string
+	}{
+		{name: "default version", wantTag: image.FalcoTag},
+		{name: "empty version uses default", version: new(""), wantTag: image.FalcoTag},
+		{name: "requested version", version: new(requested), wantTag: requested},
+		{name: "memory override keeps default version", memory: true, wantTag: image.FalcoTag},
+		{name: "env override keeps default version", env: true, wantTag: image.FalcoTag},
+		{name: "memory override with empty version", version: new(""), memory: true, wantTag: image.FalcoTag},
+		{
+			name: "main image override keeps generated sidecar", version: new(requested), memory: true,
+			mainImage: "docker.io/custom/falco@" + digest,
+		},
+		{
+			name: "explicit Docker Hub images win", version: new(requested),
+			mainImage: "docker.io/falcosecurity/falco:custom", sidecarImage: "docker.io/falcosecurity/artifact-operator:custom",
+		},
+		{
+			name: "explicit external images win", version: new(requested),
+			mainImage: "registry.example.net:5000/team/falco:custom", sidecarImage: "quay.io/team/artifact-operator:custom",
+		},
+		{
+			name: "unqualified images remain literal", version: new(requested),
+			mainImage: "falcosecurity/falco:custom", sidecarImage: "falcosecurity/artifact-operator:custom",
+		},
+		{
+			name: "tagless images remain literal", version: new(requested),
+			mainImage: "falco", sidecarImage: "custom/operator",
+		},
+		{
+			name: "digest-only images remain literal", version: new(requested), memory: true,
+			mainImage: "docker.io/custom/falco@" + digest, sidecarImage: "falcosecurity/artifact-operator@" + digest,
+		},
+		{
+			name: "tag and digest images remain literal", version: new(requested),
+			mainImage: "docker.io/custom/falco:custom@" + digest, sidecarImage: "falcosecurity/artifact-operator:custom@" + digest,
+		},
+		{name: "sidecar override keeps generated main image", sidecarImage: "quay.io/team/operator:custom", wantTag: image.FalcoTag},
+		{name: "additional containers remain literal", extraContainers: true, wantTag: image.FalcoTag},
+	}
+	for _, registry := range []string{"docker.io", "registry.example.com:5000/team/cache"} {
+		for _, kind := range []string{resources.ResourceTypeDaemonSet, resources.ResourceTypeDeployment} {
+			for _, tt := range tests {
+				t.Run(registry+"/"+kind+"/"+tt.name, func(t *testing.T) {
+					require.NoError(t, image.SetRegistry(registry))
+					falco := newTestFalcoName()
+					falco.Spec.Type = &kind
+					falco.Spec.Version = tt.version
+					template := &corev1.PodTemplateSpec{}
+					if tt.mainImage != "" || tt.memory || tt.env {
+						main := corev1.Container{Name: falcoDefs.ContainerName, Image: tt.mainImage}
+						if tt.memory {
+							main.Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")}
+						}
+						if tt.env {
+							main.Env = []corev1.EnvVar{{Name: "CUSTOM", Value: "preserved"}}
+						}
+						template.Spec.Containers = append(template.Spec.Containers, main)
+					}
+					if tt.sidecarImage != "" {
+						template.Spec.Containers = append(template.Spec.Containers,
+							corev1.Container{Name: falcoDefs.SidecarContainerName, Image: tt.sidecarImage})
+					}
+					if tt.extraContainers {
+						template.Spec.Containers = append(template.Spec.Containers,
+							corev1.Container{Name: "user-sidecar", Image: "docker.io/library/busybox:1.37"})
+						template.Spec.InitContainers = []corev1.Container{{Name: "user-init", Image: "docker.io/library/alpine:3.21"}}
+					}
+					if len(template.Spec.Containers) > 0 {
+						falco.Spec.PodTemplateSpec = template
+					}
+					before := falco.DeepCopy()
+					defaultsBefore, err := json.Marshal(falcoDefs)
+					require.NoError(t, err)
+
+					result, err := generateApplyConfiguration(falco, kind, "", "")
+					require.NoError(t, err)
+					assert.Equal(t, before, falco)
+					defaultsAfterFirst, err := json.Marshal(falcoDefs)
+					require.NoError(t, err)
+					assert.Equal(t, defaultsBefore, defaultsAfterFirst)
+					assert.Equal(t, kind, result.GetKind())
+					containers := mustGetContainers(t, result)
+					var main corev1.Container
+					require.NoError(t, runtime.DefaultUnstructuredConverter.FromUnstructured(
+						mustFindContainer(t, containers, falcoDefs.ContainerName), &main))
+					wantMain := registry + "/falcosecurity/falco:" + tt.wantTag
+					if tt.mainImage != "" {
+						wantMain = tt.mainImage
+					} else {
+						assert.Equal(t, tt.wantTag, instance.ResolveVersion(falco, falcoDefs))
+					}
+					assert.Equal(t, wantMain, main.Image)
+					if tt.memory {
+						assert.Equal(t, resource.MustParse("256Mi"), main.Resources.Requests[corev1.ResourceMemory])
+					}
+					if tt.env {
+						assert.Contains(t, main.Env, corev1.EnvVar{Name: "CUSTOM", Value: "preserved"})
+					}
+					wantSidecar := registry + "/falcosecurity/artifact-operator:" + operatorversion.ArtifactOperatorTag
+					if tt.sidecarImage != "" {
+						wantSidecar = tt.sidecarImage
+					}
+					assert.Equal(t, wantSidecar, mustFindContainer(t, containers, falcoDefs.SidecarContainerName)["image"])
+					initContainers, _, err := unstructured.NestedSlice(result.Object, "spec", "template", "spec", "initContainers")
+					require.NoError(t, err)
+					if tt.extraContainers {
+						assert.Len(t, containers, 3)
+						assert.Len(t, initContainers, 1)
+						assert.Equal(t, "docker.io/library/busybox:1.37", mustFindContainer(t, containers, "user-sidecar")["image"])
+						assert.Equal(t, "docker.io/library/alpine:3.21", mustFindContainer(t, initContainers, "user-init")["image"])
+					} else {
+						assert.Len(t, containers, 2)
+						assert.Empty(t, initContainers)
+					}
+
+					first := result.DeepCopy()
+					repeated, err := generateApplyConfiguration(falco, kind, "", "")
+					require.NoError(t, err)
+					assert.Equal(t, first, result)
+					assert.Equal(t, first, repeated)
+					assert.Equal(t, before, falco)
+					defaultsAfter, err := json.Marshal(falcoDefs)
+					require.NoError(t, err)
+					assert.Equal(t, defaultsBefore, defaultsAfter)
+				})
+			}
+		}
+	}
+}
+
 // TestGenerateApplyConfigurationSidecarProbes verifies that the sidecar container retains its
 // liveness/readiness probes, env vars, and volumeMounts after the merge.
+
 func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
 	falco := newTestFalcoName()
 	falco.Spec.Type = new(resources.ResourceTypeDeployment)

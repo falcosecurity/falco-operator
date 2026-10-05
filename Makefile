@@ -5,10 +5,11 @@ COMMIT ?= $(shell git rev-parse HEAD)
 BUILD_DATE ?= $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 OPERATOR ?= instance
 PROJECT ?= github.com/falcosecurity/falco-operator
-ARTIFACT_OPERATOR_IMAGE ?= docker.io/falcosecurity/artifact-operator:latest
+ARTIFACT_OPERATOR_TAG ?= dev
+IMAGE_REGISTRY ?=
 
 IMG_INSTANCE ?= falco-operator:dev
-IMG_ARTIFACT ?= artifact-operator:dev
+IMG_ARTIFACT ?= $(if $(IMAGE_REGISTRY),$(IMAGE_REGISTRY),docker.io)/falcosecurity/artifact-operator:$(ARTIFACT_OPERATOR_TAG)
 chart ?= chart/falco-operator
 
 include hack/make/tools.mk
@@ -138,12 +139,12 @@ lint.config: ## Verify golangci-lint linter configuration
 
 .PHONY: build
 build: manifests generate fmt vet ## Build manager binaries.
-	go build -o bin/instance-operator ./cmd/instance
+	go build -ldflags "-X '$(PROJECT)/internal/pkg/version.ArtifactOperatorTag=$(ARTIFACT_OPERATOR_TAG)'" -o bin/instance-operator ./cmd/instance
 	go build -o bin/artifact-operator ./cmd/artifact
 
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
-	go run ./cmd/instance --artifact-operator-image=$(IMG_ARTIFACT)
+	go run -ldflags "-X '$(PROJECT)/internal/pkg/version.ArtifactOperatorTag=$(ARTIFACT_OPERATOR_TAG)'" ./cmd/instance --image-registry=$(IMAGE_REGISTRY)
 
 GOARCH ?= $(shell go env GOARCH)
 .PHONY: docker.binaries
@@ -153,7 +154,7 @@ docker.binaries: ## Build Go binaries for Docker image.
 		-X '$(PROJECT)/internal/pkg/version.SemVersion=$(RELEASE)' \
 		-X '$(PROJECT)/internal/pkg/version.GitCommit=$(COMMIT)' \
 		-X '$(PROJECT)/internal/pkg/version.BuildDate=$(BUILD_DATE)' \
-		-X '$(PROJECT)/internal/pkg/version.ArtifactOperatorImage=$(ARTIFACT_OPERATOR_IMAGE)'" \
+		-X '$(PROJECT)/internal/pkg/version.ArtifactOperatorTag=$(ARTIFACT_OPERATOR_TAG)'" \
 		-o bin/linux/$(GOARCH)/manager ./cmd/$(OPERATOR)/main.go
 	chmod 755 bin/linux/$(GOARCH)/manager
 
@@ -163,12 +164,11 @@ docker.build: docker.binaries ## Build docker image with the manager.
 		-t ${IMG} \
 		-f build/Dockerfile .
 
-# ARTIFACT_OPERATOR_IMAGE is baked into the instance operator's binary at build time
-# (internal/pkg/version.ArtifactOperatorImage) — it's what the instance operator injects into
-# every Falco pod's sidecar spec, so it must match IMG_ARTIFACT below.
+# ARTIFACT_OPERATOR_TAG selects the default sidecar version independently of the
+# output image names. Deployment targets inherit the tag embedded in IMG_INSTANCE.
 .PHONY: docker.build.instance
 docker.build.instance: ## Build the instance operator's docker image (IMG_INSTANCE).
-	$(MAKE) docker.build OPERATOR=instance IMG=$(IMG_INSTANCE) ARTIFACT_OPERATOR_IMAGE=$(IMG_ARTIFACT)
+	$(MAKE) docker.build OPERATOR=instance IMG=$(IMG_INSTANCE)
 
 .PHONY: docker.build.artifact
 docker.build.artifact: ## Build the artifact operator's docker image (IMG_ARTIFACT).
@@ -223,7 +223,7 @@ deploy.http: manifests helm ## Deploy the local chart with mTLS disabled (plain 
 	@img="$(IMG_INSTANCE)"; \
 	$(HELM) upgrade --install falco-operator chart/falco-operator --namespace falco-operator --create-namespace \
 		--set image.repository="$${img%:*}" --set-string image.tag="$${img##*:}" \
-		--set-string extraEnv[0].name=ARTIFACT_OPERATOR_IMAGE,extraEnv[0].value=$(IMG_ARTIFACT) \
+		--set-string imageRegistry=$(IMAGE_REGISTRY) \
 		--set mtls.enabled=false \
 		--wait --timeout 180s
 
@@ -237,7 +237,7 @@ deploy.mtls: manifests helm kubectl ## Deploy the local chart with mTLS enabled.
 	@img="$(IMG_INSTANCE)"; \
 	$(HELM) upgrade --install falco-operator chart/falco-operator --namespace falco-operator --create-namespace \
 		--set image.repository="$${img%:*}" --set-string image.tag="$${img##*:}" \
-		--set-string extraEnv[0].name=ARTIFACT_OPERATOR_IMAGE,extraEnv[0].value=$(IMG_ARTIFACT) \
+		--set-string imageRegistry=$(IMAGE_REGISTRY) \
 		--set mtls.enabled=true \
 		--wait --timeout 180s
 	$(KUBECTL) wait -n falco-operator certificate/falco-operator-artifact-server-tls --for=condition=Ready --timeout=90s

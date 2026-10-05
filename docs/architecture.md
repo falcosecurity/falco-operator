@@ -139,7 +139,7 @@ treating a successful API write as proof of installed files or loaded Falco stat
 
 | Setting | Value |
 |---------|-------|
-| Image | Configurable via `ARTIFACT_OPERATOR_IMAGE` env var |
-| Default image | Matching release image embedded at build time; local fallback is `latest` |
+| Image | Fixed `falcosecurity/artifact-operator` repository; registry selected by `IMAGE_REGISTRY`, tag embedded in the Instance Operator build |
+| Default image | Matching release tag embedded at build time; development Make targets use `dev`, plain Go builds fall back to `latest` |
 | Probes | Startup (`/readyz`, 3s delay), Readiness (`/readyz`, 5s delay), Liveness (`/healthz`, 15s delay) — all on port 8081 |
 | Volumes | 3 shared `emptyDir` volumes (config, rulesfiles, plugins) |

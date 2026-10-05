@@ -8,10 +8,16 @@ spec:
     (docker.io/falcosecurity/falco:<version>), and an explicit podTemplateSpec image
     override takes precedence over spec.version once set.
 
+    When the operator is configured with an image registry, set
+    CHAINSAW_IMAGE_REGISTRY to the same prefix. Generated images must use
+    that prefix, while the explicit image override remains literal. Removing the
+    override restores the selected version and registry. This checks reconciliation,
+    not registry connectivity or image pulls.
+
     Deliberately does NOT go through apply-assert-falco.yaml: that template pins the falco
     container's image to $CHAINSAW_FALCO_IMAGE via its own podTemplateSpec override, which
     would make spec.version cosmetic and defeat the point of this test. Uses real published
-    Falco images from docker.io instead of the CI-pinned version.
+    Falco images from docker.io (or the configured registry) instead of the CI-pinned version.
 
     Uses type: Deployment (engine.kind: nodriver, see deploymentFalcoConfig in
     internal/pkg/resources/falco.go), not DaemonSet, and deliberately never waits for the
@@ -35,10 +41,14 @@ spec:
       value: "0.40.0"
     - name: upgraded_version
       value: "0.43.0"
+    - name: image_registry
+      value: (env('CHAINSAW_IMAGE_REGISTRY') || 'docker.io')
     - name: initial_image
-      value: docker.io/falcosecurity/falco:0.40.0
+      value: (join('', [$image_registry, '/falcosecurity/falco:', $initial_version]))
     - name: upgraded_image
-      value: docker.io/falcosecurity/falco:0.43.0
+      value: (join('', [$image_registry, '/falcosecurity/falco:', $upgraded_version]))
+    - name: override_image
+      value: docker.io/falcosecurity/falco:0.40.0
 
   steps:
     - name: Create-falco-with-initial-version
@@ -142,7 +152,7 @@ spec:
                   spec:
                     containers:
                       - name: falco
-                        image: ($initial_image)
+                        image: ($override_image)
 
     - name: Assert-deployment-image-overridden
       try:
@@ -157,7 +167,7 @@ spec:
                 template:
                   spec:
                     (containers[?name == 'falco']):
-                      - image: ($initial_image)
+                      - image: ($override_image)
 
   catch:
     - description: Capture debug snapshot on failure
