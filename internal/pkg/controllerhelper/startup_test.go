@@ -223,6 +223,125 @@ func TestWithStartup_ConstructionErrors(t *testing.T) {
 	}
 }
 
+func TestWithPrerequisite_DelaysRunnablesUntilWaitSucceeds(t *testing.T) {
+	realManager := &startupRecordingManager{}
+	initialized := make(chan struct{})
+	startup, err := controllerhelper.WithStartup(realManager, func(ctx context.Context) error {
+		select {
+		case <-initialized:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	require.NoError(t, err)
+	waiting, satisfied := make(chan struct{}), make(chan struct{})
+	gated, err := controllerhelper.WithPrerequisite(startup, func(ctx context.Context) error {
+		close(waiting)
+		select {
+		case <-satisfied:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	require.NoError(t, err)
+	require.Equal(t, "startup", realManager.readyName, "the prerequisite must not replace the readiness check")
+
+	direct, delayed := &startupTestRunnable{}, &startupTestRunnable{leader: true}
+	require.NoError(t, startup.Add(direct))
+	require.NoError(t, gated.Add(delayed))
+	registered := realManager.registered()
+	require.Len(t, registered, 1, "the prerequisite itself waits for initialization")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 2)
+	started := 0
+	start := func(r manager.Runnable) {
+		started++
+		go func() { done <- r.Start(ctx) }()
+	}
+	t.Cleanup(func() {
+		cancel()
+		for range started {
+			select {
+			case err := <-done:
+				assert.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Error("runnable did not stop")
+			}
+		}
+	})
+
+	start(registered[0])
+	close(initialized)
+	require.Eventually(t, func() bool { return realManager.readyCheck(nil) == nil }, 5*time.Second, time.Millisecond)
+	registered = realManager.registered()
+	require.Len(t, registered, 3)
+	assert.Same(t, direct, registered[2], "direct runnables start while the prerequisite is pending")
+
+	start(registered[1])
+	select {
+	case <-waiting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("prerequisite did not start waiting")
+	}
+	assert.Len(t, realManager.registered(), 3)
+	assert.NoError(t, realManager.readyCheck(nil), "readiness must not depend on the prerequisite")
+
+	close(satisfied)
+	require.Eventually(t, func() bool { return len(realManager.registered()) == 4 }, 5*time.Second, time.Millisecond)
+	registered = realManager.registered()
+	assert.Same(t, delayed, registered[3])
+	election, ok := registered[3].(manager.LeaderElectionRunnable)
+	require.True(t, ok)
+	assert.True(t, election.NeedLeaderElection())
+}
+
+func TestWithPrerequisite_FailedWaitDoesNotRegisterRunnables(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cancel  bool
+		waitErr error
+		wantErr error
+	}{
+		{name: "wait error", waitErr: assert.AnError, wantErr: assert.AnError},
+		{name: "canceled while waiting", cancel: true, wantErr: context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			realManager := &startupRecordingManager{}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			mgr, err := controllerhelper.WithPrerequisite(realManager, func(ctx context.Context) error {
+				if tc.cancel {
+					cancel()
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				return tc.waitErr
+			})
+			require.NoError(t, err)
+			require.NoError(t, mgr.Add(&startupTestRunnable{}))
+			require.Len(t, realManager.registered(), 1)
+			assert.Empty(t, realManager.readyName)
+
+			assert.ErrorIs(t, realManager.registered()[0].Start(ctx), tc.wantErr)
+			assert.Len(t, realManager.registered(), 1)
+		})
+	}
+}
+
+func TestWithPrerequisite_ConstructionError(t *testing.T) {
+	realManager := &startupRecordingManager{addErr: assert.AnError}
+	mgr, err := controllerhelper.WithPrerequisite(realManager, func(context.Context) error {
+		t.Error("construction must not run the wait")
+		return nil
+	})
+	assert.Nil(t, mgr)
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.Empty(t, realManager.registered())
+}
+
 type startupRecordingManager struct {
 	manager.Manager
 	mu         sync.Mutex

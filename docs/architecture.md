@@ -29,8 +29,8 @@ client Certificate. The chart supplies the server Certificate and trust settings
 
 The Artifact Operator is a regular container in `spec.containers`, not a
 restartable init container. Falco starts alongside it with the base configuration.
-The sidecar waits for Falco's `/versions` API before starting its three artifact
-controllers.
+The sidecar delivers Config resources as soon as its node state is warm, and waits
+for Falco's `/versions` API before starting the Rulesfile and Plugin controllers.
 
 The sidecar reconciles ArtifactNodes assigned to its node and watches their parent
 artifacts in its namespace. It checks compatibility, downloads OCI files from the central server, reads

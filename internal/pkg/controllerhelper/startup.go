@@ -39,6 +39,17 @@ func WithStartup(mgr manager.Manager, initialize func(context.Context) error) (m
 	return s, nil
 }
 
+// WithPrerequisite delays added runnables until wait succeeds, without taking part in the
+// readiness check. Stacked on a WithStartup manager, wait runs after initialization, while the
+// runnables added to that manager directly start without waiting.
+func WithPrerequisite(mgr manager.Manager, wait func(context.Context) error) (manager.Manager, error) {
+	s := &startupManager{Manager: mgr, initialize: wait, ready: make(chan struct{})}
+	if err := mgr.Add(startupRunnable(s.start)); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 type startupManager struct {
 	manager.Manager
 	initialize func(context.Context) error

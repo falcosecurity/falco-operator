@@ -173,18 +173,6 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	// Waits for Falco to be available before starting the controllers; Falco starts in idle mode
-	// (no plugins, no rules) as a regular container alongside the artifact operator. The fetched
-	// snapshot seeds nodeManager's Falco-capability cache below, which compatibility checks read
-	// instead of querying Falco live on every reconcile.
-	setupLog.Info("Waiting for Falco to be available", "url", falcoBaseURL)
-	initialFalcoVersions, err := compat.WaitAndFetch(ctx, falcoBaseURL)
-	if err != nil {
-		setupLog.Error(err, "failed to fetch Falco versions at startup")
-		os.Exit(1)
-	}
-	setupLog.Info("Falco versions fetched successfully")
-
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -315,7 +303,6 @@ func main() {
 	// the synced manager cache, before any reconcilers start. Dependency metadata is rebuilt during
 	// reconciliation, without restoring historical state from disk or ArtifactNode status.
 	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
-	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
 	mgr, err = controllerhelper.WithStartup(mgr, func(ctx context.Context) error {
 		if err := nodeartifacts.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
 			return err
@@ -356,9 +343,30 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Falco starts in idle mode (no plugins, no rules) as a regular container alongside the
+	// artifact operator, and a Config may carry what it needs to start at all (e.g. engine.kind),
+	// so Config delivery above does not wait for it. Rulesfile and Plugin check compatibility
+	// against the capabilities Falco reports, so they start once its /versions endpoint responds.
+	// That snapshot seeds nodeManager's cache, which the checks read instead of querying Falco
+	// live on every reconcile.
+	falcoMgr, err := controllerhelper.WithPrerequisite(mgr, func(ctx context.Context) error {
+		setupLog.Info("Waiting for Falco to be available", "url", falcoBaseURL)
+		versions, err := compat.WaitAndFetch(ctx, falcoBaseURL)
+		if err != nil {
+			return err
+		}
+		nodeManager.OnFalcoVersionsObserved(versions)
+		setupLog.Info("Falco versions fetched successfully")
+		return nil
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to configure Falco startup wait")
+		os.Exit(1)
+	}
+
 	versionsWatcher := compat.NewVersionsWatcher(falcoFetcher, compat.DefaultWatchInterval)
 	versionsWatcher.SetSink(nodeManager.OnFalcoVersionsObserved)
-	if err := mgr.Add(versionsWatcher); err != nil {
+	if err := falcoMgr.Add(versionsWatcher); err != nil {
 		setupLog.Error(err, "unable to add Falco versions watcher to manager")
 		os.Exit(1)
 	}
@@ -412,7 +420,7 @@ func main() {
 		enforceRequirements,
 		artifactFetcher,
 		nodeManager,
-	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
+	).SetupWithManager(falcoMgr, nodeManager.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
 	}
@@ -426,7 +434,7 @@ func main() {
 		enforceRequirements,
 		artifactFetcher,
 		nodeManager,
-	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
+	).SetupWithManager(falcoMgr, nodeManager.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
 		os.Exit(1)
 	}
