@@ -190,9 +190,11 @@ the startup prerequisite below.
 
 ## Falco API prerequisite
 
-Before starting artifact controllers, the sidecar waits for a successful JSON
+Before installing rules files and plugins, the sidecar waits for a successful JSON
 response from Falco's `/versions` endpoint. This is required in both enforce and
-advise mode. The default base URL is `http://localhost:8765`; keep the Falco
+advise mode. Config resources are delivered without this wait, so a Config can
+carry settings Falco needs to start, such as `engine.kind`.
+The default base URL is `http://localhost:8765`; keep the Falco
 webserver enabled. If you change its address or port, set `FALCO_URL` (or
 `--falco-url`) on the `artifact-operator` container and adjust Falco's probes too.
 The versions client has no dedicated private-CA or client-certificate setting;
@@ -200,8 +202,8 @@ the artifact-server TLS options do not configure this connection.
 
 If sidecar logs remain at `Waiting for Falco to be available`, check Falco startup
 logs and access to `/versions` from the pod. Falco must be able to start before
-artifact installation begins. Disabling Prometheus metrics does not remove this
-API requirement; metrics are optional and separate from `/versions`.
+rules files and plugins are installed. Disabling Prometheus metrics does not remove
+this API requirement; metrics are optional and separate from `/versions`.
 
 ## Artifact Server DNS
 
