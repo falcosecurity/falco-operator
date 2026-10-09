@@ -89,6 +89,110 @@ func TestFetchOCIAuthSecret(t *testing.T) {
 	}
 }
 
+func TestFetchOCICredentials(t *testing.T) {
+	const namespace = "test-namespace"
+
+	t.Run("dispatches to Azure when Registry.Auth.Azure is set", func(t *testing.T) {
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "registry-federator",
+				Namespace:   namespace,
+				Annotations: map[string]string{"azure.falcosecurity.dev/client-id": "22222222-2222-2222-2222-222222222222"},
+			},
+		}
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build(), namespace)
+
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{
+					Azure: &commonv1alpha1.AzureAuth{
+						Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+						TenantID:          "11111111-1111-1111-1111-111111111111",
+						ClientID:          "22222222-2222-2222-2222-222222222222",
+						ServiceAccountRef: &corev1.LocalObjectReference{Name: "registry-federator"},
+					},
+				},
+			},
+		}
+
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err)
+		assert.NotNil(t, credFunc)
+	})
+
+	t.Run("Azure takes precedence over SecretRef when both are set, SecretRef is never consulted", func(t *testing.T) {
+		sa := &corev1.ServiceAccount{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "registry-federator",
+				Namespace:   namespace,
+				Annotations: map[string]string{"azure.falcosecurity.dev/client-id": "22222222-2222-2222-2222-222222222222"},
+			},
+		}
+		// No Secret named "unused-secret-ref" is registered with the fake client. If dispatch
+		// ever fell through to (or merged in) SecretRef, fetchOCIAuthSecret would fail trying to
+		// fetch it -- so this succeeding at all is itself the proof that SecretRef was never
+		// consulted once Azure was set, not just that Azure "also" works.
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).WithObjects(sa).Build(), namespace)
+
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{
+					SecretRef: &commonv1alpha1.SecretRef{Name: "unused-secret-ref"},
+					Azure: &commonv1alpha1.AzureAuth{
+						Method:            commonv1alpha1.AzureMethodWorkloadIdentity,
+						TenantID:          "11111111-1111-1111-1111-111111111111",
+						ClientID:          "22222222-2222-2222-2222-222222222222",
+						ServiceAccountRef: &corev1.LocalObjectReference{Name: "registry-federator"},
+					},
+				},
+			},
+		}
+
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err, "if this fails trying to fetch the SecretRef, precedence has regressed")
+		assert.NotNil(t, credFunc)
+	})
+
+	t.Run("the dispatched Azure CredentialFunc surfaces a resolution error when invoked", func(t *testing.T) {
+		// azure.CredentialFunc resolves lazily: fetchOCICredentials itself succeeds (it only
+		// builds the closure), and a misconfiguration -- here, a missing client secret --
+		// surfaces when the returned CredentialFunc is actually invoked with a registry, not
+		// at dispatch time. Confirms the wiring threads through correctly end to end; the
+		// resolution error itself is proven directly by azure_test.go's own tests.
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(), namespace)
+
+		ociArtifact := &commonv1alpha1.OCIArtifact{
+			Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{
+					Azure: &commonv1alpha1.AzureAuth{
+						Method:          commonv1alpha1.AzureMethodClientSecret,
+						TenantID:        "11111111-1111-1111-1111-111111111111",
+						ClientID:        "22222222-2222-2222-2222-222222222222",
+						ClientSecretRef: &commonv1alpha1.SecretRef{Name: "missing"},
+					},
+				},
+			},
+		}
+
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err)
+		require.NotNil(t, credFunc)
+
+		_, err = credFunc(context.Background(), "myregistry.azurecr.io")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "resolve azure credential")
+	})
+
+	t.Run("falls back to SecretRef when Azure is not set", func(t *testing.T) {
+		manager := NewManager(fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(), namespace)
+
+		ociArtifact := &commonv1alpha1.OCIArtifact{}
+		credFunc, err := manager.fetchOCICredentials(context.Background(), ociArtifact)
+		require.NoError(t, err)
+		assert.NotNil(t, credFunc)
+	})
+}
+
 func TestIsExpectedOCIArtifactType(t *testing.T) {
 	tests := []struct {
 		name     string
