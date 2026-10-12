@@ -41,7 +41,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/testutil"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func getArtifactClientCertificate(t *testing.T, ctx context.Context, namespace, name string) (*unstructured.Unstructured, error) {

@@ -43,11 +43,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
-	"github.com/falcosecurity/falco-operator/controllers/testutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/builders"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/instance"
 	"github.com/falcosecurity/falco-operator/internal/pkg/resources"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 var (
