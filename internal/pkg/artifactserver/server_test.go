@@ -14,17 +14,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package artifactserver_test
+package artifactserver
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -34,39 +32,36 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/go-logr/logr"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	k8sclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 )
 
 func seedPlugin(t *testing.T, cache *artifactcache.Cache, ns, name, goos, goarch string, content []byte) {
 	t.Helper()
-	blobPath := artifactcache.BlobPath(cache.Dir(), "Plugin", ns+"/"+name, "sha256:deadbeef", goos, goarch)
+	blobPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindPlugin), ns+"/"+name, "sha256:deadbeef", goos, goarch)
 	require.NoError(t, cache.Store(blobPath, content, 0o755))
-	require.NoError(t, cache.Set("Plugin", ns, name, goos+"-"+goarch, blobPath))
-}
-
-func seedRulesfile(t *testing.T, cache *artifactcache.Cache, name string, content []byte) {
-	t.Helper()
-	const ns = "default"
-	blobPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", ns+"/"+name, "sha256:deadbeef", "", "")
-	require.NoError(t, cache.Store(blobPath, content, 0o644))
-	require.NoError(t, cache.Set("Rulesfile", ns, name, "", blobPath))
+	require.NoError(t, cache.Set(string(artifact.KindPlugin), ns, name, goos+"-"+goarch, blobPath))
 }
 
 // servePluginCase and serveRulesfileCase share this shape: seed the cache (or don't), issue one
@@ -93,7 +88,7 @@ func runServeCase(t *testing.T, tc *serveCase) {
 		tc.seed(t, cache)
 	}
 
-	ts := httptest.NewServer(artifactserver.New(cache).Handler())
+	ts := httptest.NewServer(New(cache).Handler())
 	defer ts.Close()
 
 	method := tc.method
@@ -179,8 +174,8 @@ func TestServer_ServePlugin(t *testing.T) {
 		{
 			name: "indexed but missing from disk returns 503",
 			seed: func(t *testing.T, cache *artifactcache.Cache) {
-				blobPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "default/json", "sha256:deadbeef", "linux", "amd64")
-				require.NoError(t, cache.Set("Plugin", "default", "json", "linux-amd64", blobPath)) // no Store call
+				blobPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindPlugin), "default/json", "sha256:deadbeef", "linux", "amd64")
+				require.NoError(t, cache.Set(string(artifact.KindPlugin), "default", "json", "linux-amd64", blobPath)) // no Store call
 			},
 			path:       "/v1/artifacts/plugins/default/json?os=linux&arch=amd64",
 			wantStatus: http.StatusServiceUnavailable,
@@ -259,32 +254,6 @@ func TestServer_ServeRulesfile(t *testing.T) {
 	}
 }
 
-// reserveAddr opens a listener on an ephemeral loopback port, closes it immediately, and
-// returns the address it was bound to, for handing to code that wants to bind it itself.
-func reserveAddr(t *testing.T) string {
-	t.Helper()
-	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := l.Addr().String()
-	require.NoError(t, l.Close())
-	return addr
-}
-
-// waitForListening blocks until addr accepts a bare TCP connection (regardless of whatever
-// application-layer protocol, plaintext or TLS, is spoken on top), or fails the test.
-func waitForListening(t *testing.T, addr string) {
-	t.Helper()
-	dialer := &net.Dialer{Timeout: 100 * time.Millisecond}
-	require.Eventually(t, func() bool {
-		conn, dialErr := dialer.DialContext(context.Background(), "tcp", addr)
-		if dialErr != nil {
-			return false
-		}
-		_ = conn.Close()
-		return true
-	}, 2*time.Second, 20*time.Millisecond, "server never started listening")
-}
-
 // TestServer_Start_ListensAndShutsDown starts the server in a goroutine, waits for it to accept
 // connections, then cancels the context and confirms Start returns.
 func TestServer_Start_ListensAndShutsDown(t *testing.T) {
@@ -294,7 +263,7 @@ func TestServer_Start_ListensAndShutsDown(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- artifactserver.New(cache).Start(ctx, addr) }()
+	go func() { errCh <- New(cache).Start(ctx, addr) }()
 
 	waitForListening(t, addr)
 
@@ -318,22 +287,22 @@ func TestServer_Start_PodRouting(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 				Namespace: "operator", Name: "current", UID: "current-uid",
-				Labels: map[string]string{"app": "operator", artifactserver.ServingLabel: servingValue},
+				Labels: map[string]string{"app": "operator", ServingLabel: servingValue},
 			}}
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: "artifacts"},
-				Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "operator", artifactserver.ServingLabel: servingValue}},
+				Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "operator", ServingLabel: servingValue}},
 			}
 			cl := fake.NewClientBuilder().WithObjects(pod, service).Build()
 			cache := artifactcache.NewCache(t.TempDir())
 			require.NoError(t, cache.Load())
 			seedPlugin(t, cache, "tenant", "routing-plugin", "linux", "amd64", []byte("cached-plugin"))
-			srv := artifactserver.New(cache, artifactserver.WithPodRouting(cl, &corev1.ObjectReference{
+			srv := New(cache, WithPodRouting(cl, &corev1.ObjectReference{
 				Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID,
 			}, service.Name, true))
 			require.NoError(t, srv.ResetRouting(t.Context()))
-			require.NoError(t, cl.Get(t.Context(), k8sclient.ObjectKeyFromObject(pod), pod))
-			assert.NotContains(t, pod.Labels, artifactserver.ServingLabel, "restart must clear stale routing before manager startup")
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			assert.NotContains(t, pod.Labels, ServingLabel, "restart must clear stale routing before manager startup")
 
 			addr := reserveAddr(t)
 			if bindFailure {
@@ -341,8 +310,8 @@ func TestServer_Start_PodRouting(t *testing.T) {
 				require.NoError(t, err)
 				defer listener.Close()
 				require.Error(t, srv.Start(t.Context(), listener.Addr().String()))
-				require.NoError(t, cl.Get(t.Context(), k8sclient.ObjectKeyFromObject(pod), pod))
-				assert.NotContains(t, pod.Labels, artifactserver.ServingLabel)
+				require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+				assert.NotContains(t, pod.Labels, ServingLabel)
 				return
 			}
 			ctx, cancel := context.WithCancel(t.Context())
@@ -357,11 +326,11 @@ func TestServer_Start_PodRouting(t *testing.T) {
 				case <-time.After(2 * time.Second):
 					t.Error("server did not stop")
 				}
-				require.NoError(t, cl.Get(context.Background(), k8sclient.ObjectKeyFromObject(pod), pod))
-				assert.NotContains(t, pod.Labels, artifactserver.ServingLabel)
+				require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(pod), pod))
+				assert.NotContains(t, pod.Labels, ServingLabel)
 			})
 			require.Eventually(t, func() bool {
-				return cl.Get(ctx, k8sclient.ObjectKeyFromObject(pod), pod) == nil && pod.Labels[artifactserver.ServingLabel] == servingValue
+				return cl.Get(ctx, client.ObjectKeyFromObject(pod), pod) == nil && pod.Labels[ServingLabel] == servingValue
 			}, 2*time.Second, 10*time.Millisecond)
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet,
 				fmt.Sprintf("http://%s/v1/artifacts/plugins/tenant/routing-plugin?os=linux&arch=amd64", addr), http.NoBody)
@@ -378,12 +347,12 @@ func TestServer_Start_PodRouting(t *testing.T) {
 			previous := pod.DeepCopy()
 			previous.Name, previous.UID, previous.ResourceVersion = "previous", "previous-uid", ""
 			require.NoError(t, cl.Create(ctx, previous))
-			delete(pod.Labels, artifactserver.ServingLabel)
+			delete(pod.Labels, ServingLabel)
 			require.NoError(t, cl.Update(ctx, pod))
 			require.Eventually(t, func() bool {
-				return cl.Get(ctx, k8sclient.ObjectKeyFromObject(pod), pod) == nil &&
-					cl.Get(ctx, k8sclient.ObjectKeyFromObject(previous), previous) == nil &&
-					pod.Labels[artifactserver.ServingLabel] == servingValue && previous.Labels[artifactserver.ServingLabel] == ""
+				return cl.Get(ctx, client.ObjectKeyFromObject(pod), pod) == nil &&
+					cl.Get(ctx, client.ObjectKeyFromObject(previous), previous) == nil &&
+					pod.Labels[ServingLabel] == servingValue && previous.Labels[ServingLabel] == ""
 			}, 7*time.Second, 20*time.Millisecond)
 		})
 	}
@@ -413,7 +382,9 @@ func newRecordingLogger() (logr.Logger, *[]loggedRecord) {
 }
 
 func (s *recordingSink) Init(logr.RuntimeInfo) {}
-func (s *recordingSink) Enabled(int) bool      { return true }
+
+func (s *recordingSink) Enabled(int) bool { return true }
+
 func (s *recordingSink) Error(err error, msg string, keysAndValues ...any) {
 	s.Info(0, msg, append(append([]any{}, keysAndValues...), "error", err)...)
 }
@@ -466,7 +437,7 @@ func TestServer_Start_RequestLogsAreNamedAndCarryNodeHeader(t *testing.T) {
 	ctx, cancel := context.WithCancel(ctrllog.IntoContext(context.Background(), logger))
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- artifactserver.New(cache).Start(ctx, addr) }()
+	go func() { errCh <- New(cache).Start(ctx, addr) }()
 
 	waitForListening(t, addr)
 
@@ -508,79 +479,9 @@ func TestServer_Start_AddressInUse(t *testing.T) {
 	cache := artifactcache.NewCache(t.TempDir())
 	require.NoError(t, cache.Load())
 
-	startErr := artifactserver.New(cache).Start(context.Background(), l.Addr().String())
+	startErr := New(cache).Start(context.Background(), l.Addr().String())
 	require.Error(t, startErr)
 	assert.Contains(t, startErr.Error(), "artifact server")
-}
-
-// --- mTLS test certificate helpers ---
-
-// testCA is a self-signed CA certificate, along with the parsed cert and key needed to sign
-// leaf certificates with it.
-type testCA struct {
-	certPEM []byte
-	cert    *x509.Certificate
-	key     *ecdsa.PrivateKey
-}
-
-func newTestCA(t *testing.T, commonName string) testCA {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(time.Now().UnixNano()),
-		Subject:               pkix.Name{CommonName: commonName},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		IsCA:                  true,
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
-		BasicConstraintsValid: true,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	require.NoError(t, err)
-	cert, err := x509.ParseCertificate(der)
-	require.NoError(t, err)
-
-	return testCA{
-		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		cert:    cert,
-		key:     key,
-	}
-}
-
-// signLeaf issues a leaf certificate signed by ca, returning cert+key PEM bytes. ipSANs is
-// non-nil for a server cert (the IP the client dials); nil for a client cert (client-cert
-// verification doesn't check hostname).
-func signLeaf(t *testing.T, ca testCA, commonName string, ipSANs []net.IP, extKeyUsage x509.ExtKeyUsage) (certPEM, keyPEM []byte) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: commonName},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{extKeyUsage},
-		IPAddresses:  ipSANs,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
-	require.NoError(t, err)
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	require.NoError(t, err)
-
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-}
-
-func certPool(t *testing.T, certPEM []byte) *x509.CertPool {
-	t.Helper()
-	pool := x509.NewCertPool()
-	require.True(t, pool.AppendCertsFromPEM(certPEM))
-	return pool
 }
 
 // TestServer_Start_MTLS covers the full mTLS round trip: a client with no certificate is
@@ -622,7 +523,7 @@ func TestServer_Start_MTLS(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
-			srv := artifactserver.New(cache, artifactserver.WithTLS(certWatcher), artifactserver.WithClientCAs(caWatcher))
+			srv := New(cache, WithTLS(certWatcher), WithClientCAs(caWatcher))
 			errCh := make(chan error, 1)
 			go func() { errCh <- srv.Start(ctx, addr) }()
 
@@ -632,8 +533,8 @@ func TestServer_Start_MTLS(t *testing.T) {
 			rootCAs := certPool(t, ca.certPEM)
 
 			t.Run("no client cert is rejected at handshake", func(t *testing.T) {
-				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs, MinVersion: tc.version, MaxVersion: tc.version}}}
-				resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
+				httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: rootCAs, MinVersion: tc.version, MaxVersion: tc.version}}}
+				resp, doErr := httpClient.Get(url) //nolint:noctx // test-only, short-lived
 				if resp != nil {
 					defer resp.Body.Close()
 				}
@@ -644,11 +545,11 @@ func TestServer_Start_MTLS(t *testing.T) {
 			require.NoError(t, err)
 
 			t.Run("valid client cert succeeds", func(t *testing.T) {
-				client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 					RootCAs: rootCAs, Certificates: []tls.Certificate{clientCert},
 					MinVersion: tc.version, MaxVersion: tc.version,
 				}}}
-				resp, doErr := client.Get(url) //nolint:noctx // test-only, short-lived
+				resp, doErr := httpClient.Get(url) //nolint:noctx // test-only, short-lived
 				require.NoError(t, doErr)
 				defer resp.Body.Close()
 				assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -686,10 +587,10 @@ func TestServer_Start_MTLS(t *testing.T) {
 						DisableKeepAlives: true,
 					}
 					t.Cleanup(transport.CloseIdleConnections)
-					client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+					httpClient := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 					req, reqErr := http.NewRequestWithContext(t.Context(), http.MethodGet, url, http.NoBody)
 					require.NoError(t, reqErr)
-					resp, getErr := client.Do(req)
+					resp, getErr := httpClient.Do(req)
 					require.NoError(t, getErr)
 					defer resp.Body.Close()
 					assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -712,11 +613,11 @@ func TestServer_Start_MTLS(t *testing.T) {
 					// only its ClientCAs trust pool is being rotated, so the test client keeps
 					// trusting the server via the original rootCAs and only swaps its own client
 					// certificate to one signed by the new CA.
-					client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
+					httpClient := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{
 						RootCAs: rootCAs, Certificates: []tls.Certificate{newClientCert},
 						MinVersion: tc.version, MaxVersion: tc.version,
 					}}}
-					resp, getErr := client.Get(url) //nolint:noctx // test-only, short-lived
+					resp, getErr := httpClient.Get(url) //nolint:noctx // test-only, short-lived
 					if getErr != nil {
 						return false
 					}
@@ -752,7 +653,7 @@ func TestServer_Start_ClientCAsWithoutTLS_ReturnsConfigError(t *testing.T) {
 	cache := artifactcache.NewCache(t.TempDir())
 	require.NoError(t, cache.Load())
 
-	srv := artifactserver.New(cache, artifactserver.WithClientCAs(caWatcher))
+	srv := New(cache, WithClientCAs(caWatcher))
 	startErr := srv.Start(context.Background(), reserveAddr(t))
 	require.Error(t, startErr)
 	assert.Contains(t, startErr.Error(), "client CAs configured without a TLS certificate watcher")
@@ -764,9 +665,9 @@ func TestServer_ServeRequestedDigest(t *testing.T) {
 	const expectedDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	const otherDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	for _, variant := range []struct{ artifactType, goos, goarch, platform, path string }{
-		{"Plugin", "linux", amd64Arch, "linux-amd64", "/v1/artifacts/plugins/ns/name?os=linux&arch=amd64"},
-		{"Plugin", "linux", arm64Arch, "linux-arm64", "/v1/artifacts/plugins/ns/name?os=linux&arch=arm64"},
-		{"Rulesfile", "", "", "", "/v1/artifacts/rulesfiles/ns/name?"},
+		{string(artifact.KindPlugin), "linux", amd64Arch, "linux-amd64", "/v1/artifacts/plugins/ns/name?os=linux&arch=amd64"},
+		{string(artifact.KindPlugin), "linux", arm64Arch, "linux-arm64", "/v1/artifacts/plugins/ns/name?os=linux&arch=arm64"},
+		{string(artifact.KindRulesfile), "", "", "", "/v1/artifacts/rulesfiles/ns/name?"},
 	} {
 		t.Run(variant.artifactType+"/"+variant.platform, func(t *testing.T) {
 			cache := artifactcache.NewCache(t.TempDir())
@@ -776,16 +677,16 @@ func TestServer_ServeRequestedDigest(t *testing.T) {
 			require.NoError(t, cache.Store(blob, []byte(content), 0o644))
 			require.NoError(t, cache.Set(variant.artifactType, "ns", "name", variant.platform, blob))
 			// A plugin index digest is shared across platforms, but the extracted binaries are not.
-			if variant.artifactType == "Plugin" {
+			if variant.artifactType == string(artifact.KindPlugin) {
 				otherArch := arm64Arch
 				if variant.goarch == arm64Arch {
 					otherArch = amd64Arch
 				}
-				otherPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "repo:tag", expectedDigest, "linux", otherArch)
+				otherPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindPlugin), "repo:tag", expectedDigest, "linux", otherArch)
 				require.NoError(t, cache.Store(otherPath, []byte("wrong architecture"), 0o755))
-				require.NoError(t, cache.Set("Plugin", "ns", "name", "linux-"+otherArch, otherPath))
+				require.NoError(t, cache.Set(string(artifact.KindPlugin), "ns", "name", "linux-"+otherArch, otherPath))
 			}
-			handler := artifactserver.New(cache).Handler()
+			handler := New(cache).Handler()
 			for _, tc := range []struct {
 				name, query string
 				status      int
@@ -818,6 +719,268 @@ func TestServer_ServeRequestedDigest(t *testing.T) {
 					}
 				})
 			}
+		})
+	}
+}
+
+// TestServer_httpServer_DefaultTimeouts asserts the constructed http.Server carries the
+// baseline hardening timeouts unconditionally.
+func TestServer_httpServer_DefaultTimeouts(t *testing.T) {
+	s := &Server{}
+	srv := s.httpServer(":0", func(net.Listener) context.Context { return context.Background() })
+
+	assert.Equal(t, DefaultReadHeaderTimeout, srv.ReadHeaderTimeout)
+	assert.Equal(t, DefaultReadTimeout, srv.ReadTimeout)
+	assert.Equal(t, DefaultWriteTimeout, srv.WriteTimeout)
+	assert.Equal(t, DefaultIdleTimeout, srv.IdleTimeout)
+	assert.Equal(t, DefaultMaxHeaderBytes, srv.MaxHeaderBytes)
+}
+
+func routingPod(name, namespace, installation string, serving bool) *corev1.Pod {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: namespace, UID: types.UID(namespace + "/" + name),
+		Labels: map[string]string{"app": installation, "unrelated": "preserve"},
+	}}
+	if serving {
+		pod.Labels[ServingLabel] = servingValue
+	}
+	return pod
+}
+
+func routingService() *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "operator", Name: "artifacts"},
+		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app": "operator", ServingLabel: servingValue}},
+	}
+}
+
+func routingReference(pod *corev1.Pod) corev1.ObjectReference {
+	return corev1.ObjectReference{Namespace: pod.Namespace, Name: pod.Name, UID: pod.UID}
+}
+
+func TestPodRouting_Reconcile(t *testing.T) {
+	for _, exclusive := range []bool{true, false} {
+		name := "without leader election"
+		if exclusive {
+			name = "with leader election"
+		}
+		t.Run(name, func(t *testing.T) {
+			own := routingPod("current", "operator", "operator", false)
+			previous := routingPod("previous", "operator", "operator", true)
+			previous.Labels["pod-template-hash"] = "old-replicaset"
+			own.Labels["pod-template-hash"] = "new-replicaset"
+			otherRelease := routingPod("other-release", "operator", "another-installation", true)
+			otherNamespace := routingPod("other-namespace", "elsewhere", "operator", true)
+			service := routingService()
+			patches := 0
+			cl := fake.NewClientBuilder().WithObjects(own, previous, otherRelease, otherNamespace, service).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patches++
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			r := &podRouting{client: cl, pod: routingReference(own), service: service.Name, exclusive: exclusive}
+			require.NoError(t, r.reconcile(t.Context()))
+			for _, pod := range []*corev1.Pod{own, previous, otherRelease, otherNamespace} {
+				require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+				assert.Equal(t, "preserve", pod.Labels["unrelated"])
+				if pod.Name == previous.Name && exclusive {
+					assert.NotContains(t, pod.Labels, ServingLabel)
+				} else {
+					assert.Equal(t, servingValue, pod.Labels[ServingLabel])
+				}
+			}
+			before := patches
+			require.NoError(t, r.reconcile(t.Context()))
+			assert.Equal(t, before, patches, "steady state must not patch Pods")
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(service), service))
+			assert.Equal(t, routingService().Spec.Selector, service.Spec.Selector)
+
+			if exclusive {
+				// A former leader's delayed publish can arrive after the first cleanup.
+				previous.Labels[ServingLabel] = servingValue
+				require.NoError(t, cl.Update(t.Context(), previous))
+				require.NoError(t, r.reconcile(t.Context()))
+				require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(previous), previous))
+				assert.NotContains(t, previous.Labels, ServingLabel)
+			}
+		})
+	}
+}
+
+func TestServer_ResetRouting(t *testing.T) {
+	for _, replaced := range []bool{false, true} {
+		name := "same Pod after container restart"
+		if replaced {
+			name = "replacement Pod must not be modified"
+		}
+		t.Run(name, func(t *testing.T) {
+			pod := routingPod("current", "operator", "operator", true)
+			ref := routingReference(pod)
+			if replaced {
+				pod.UID = "new-uid"
+			}
+			cl := fake.NewClientBuilder().WithObjects(pod).Build()
+			s := New(nil, WithPodRouting(cl, &ref, "artifacts", true))
+			err := s.ResetRouting(t.Context())
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			if replaced {
+				require.ErrorContains(t, err, "has been replaced")
+				assert.Equal(t, servingValue, pod.Labels[ServingLabel])
+			} else {
+				require.NoError(t, err)
+				assert.NotContains(t, pod.Labels, ServingLabel)
+			}
+			assert.Equal(t, "preserve", pod.Labels["unrelated"])
+		})
+	}
+	require.NoError(t, New(nil).ResetRouting(t.Context()))
+	s := New(nil, WithPodRouting(nil, nil, "", true))
+	require.ErrorContains(t, s.ResetRouting(t.Context()), "requires a client")
+}
+
+func TestPodRouting_InvalidService(t *testing.T) {
+	for name, selector := range map[string]map[string]string{
+		"missing serving selector":      {"app": "operator"},
+		"missing installation selector": {ServingLabel: servingValue},
+		"own Pod outside selector":      {"app": "different", ServingLabel: servingValue},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := routingPod("current", "operator", "operator", false)
+			service := routingService()
+			service.Spec.Selector = selector
+			foreign := routingPod("foreign", "operator", "different", true)
+			cl := fake.NewClientBuilder().WithObjects(pod, foreign, service).Build()
+			r := &podRouting{client: cl, pod: routingReference(pod), service: service.Name, exclusive: true}
+			require.Error(t, r.reconcile(t.Context()))
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			assert.NotContains(t, pod.Labels, ServingLabel)
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(foreign), foreign))
+			assert.Equal(t, servingValue, foreign.Labels[ServingLabel], "invalid routing must not disable another installation")
+		})
+	}
+}
+
+func TestPodRouting_APIFailureAndRecovery(t *testing.T) {
+	for _, operation := range []string{"list", "withdraw", "publish"} {
+		t.Run(operation, func(t *testing.T) {
+			pod := routingPod("current", "operator", "operator", false)
+			previous := routingPod("previous", "operator", "operator", true)
+			failure := errors.New("API unavailable")
+			cl := fake.NewClientBuilder().WithObjects(pod, previous, routingService()).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if operation == "list" && failure != nil {
+							return failure
+						}
+						return cl.List(ctx, list, opts...)
+					},
+					Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if failure != nil && ((operation == "withdraw" && obj.GetName() == previous.Name) ||
+							(operation == "publish" && obj.GetName() == pod.Name)) {
+							return failure
+						}
+						return cl.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			r := &podRouting{client: cl, pod: routingReference(pod), service: "artifacts", exclusive: true}
+			require.ErrorIs(t, r.reconcile(t.Context()), failure)
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			assert.NotContains(t, pod.Labels, ServingLabel)
+			failure = nil
+			require.NoError(t, r.reconcile(t.Context()))
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+			assert.Equal(t, servingValue, pod.Labels[ServingLabel])
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(previous), previous))
+			assert.NotContains(t, previous.Labels, ServingLabel)
+		})
+	}
+}
+
+func TestPodRouting_ConflictPreservesConcurrentLabels(t *testing.T) {
+	pod := routingPod("current", "operator", "operator", false)
+	attempts := 0
+	cl := fake.NewClientBuilder().WithObjects(pod, routingService()).WithInterceptorFuncs(interceptor.Funcs{
+		Patch: func(ctx context.Context, cl client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			attempts++
+			if attempts == 1 {
+				var current corev1.Pod
+				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(obj), &current))
+				current.Labels["concurrent"] = "preserve"
+				require.NoError(t, cl.Update(ctx, &current))
+				return k8serrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, errors.New("concurrent edit"))
+			}
+			return cl.Patch(ctx, obj, patch, opts...)
+		},
+	}).Build()
+	r := &podRouting{client: cl, pod: routingReference(pod), service: "artifacts", exclusive: true}
+	require.NoError(t, r.reconcile(t.Context()))
+	assert.Equal(t, 2, attempts)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(pod), pod))
+	assert.Equal(t, servingValue, pod.Labels[ServingLabel])
+	assert.Equal(t, "preserve", pod.Labels["concurrent"])
+}
+
+func TestPodRouting_CancellationDuringAPIRead(t *testing.T) {
+	pod := routingPod("current", "operator", "operator", false)
+	reading := make(chan struct{})
+	cl := fake.NewClientBuilder().WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(ctx context.Context, _ client.WithWatch, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
+			close(reading)
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}).Build()
+	r := &podRouting{client: cl, pod: routingReference(pod), service: "artifacts", exclusive: true}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.run(ctx)
+	}()
+	select {
+	case <-reading:
+	case <-time.After(routingInterval + 2*time.Second):
+		t.Fatal("routing did not start its API read")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("routing did not stop after its API read was canceled")
+	}
+}
+
+func TestPodRouting_CopiesPodIdentity(t *testing.T) {
+	pod := routingPod("current", "operator", "operator", false)
+	ref := routingReference(pod)
+	cl := fake.NewClientBuilder().WithObjects(pod).Build()
+	s := New(nil, WithPodRouting(cl, &ref, "artifacts", true))
+	ref.Name, ref.UID = "replacement", "replacement-uid"
+	assert.Equal(t, routingReference(pod), s.routing.pod)
+}
+
+// TestServer_MetricLabelsAreTheLowercaseKind pins the type label the request metrics carry: dashboards and alerts
+// select on "plugin" and "rulesfile", which the handler derives from the kind.
+func TestServer_MetricLabelsAreTheLowercaseKind(t *testing.T) {
+	handler := New(artifactcache.NewCache(t.TempDir())).Handler()
+	rejected := func(label string) float64 {
+		m := &dto.Metric{}
+		require.NoError(t, requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusMethodNotAllowed)).Write(m))
+		return m.GetCounter().GetValue()
+	}
+	for path, label := range map[string]string{
+		"/v1/artifacts/plugins/ns/name":    "plugin",
+		"/v1/artifacts/rulesfiles/ns/name": "rulesfile",
+	} {
+		t.Run(label, func(t *testing.T) {
+			before := rejected(label)
+
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, http.NoBody))
+
+			assert.InDelta(t, before+1, rejected(label), 0)
 		})
 	}
 }

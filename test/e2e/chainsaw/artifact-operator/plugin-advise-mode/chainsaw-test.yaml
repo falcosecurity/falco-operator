@@ -87,19 +87,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedInstalledAnyway
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedInstalledAnyway
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigProgrammed']):
+                      - status: 'True'
 
     - name: "Step 04: Assert-so-on-filesystem"
       description: The json.so must be present on the node filesystem even though deps are unmet.

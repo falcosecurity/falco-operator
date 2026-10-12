@@ -33,7 +33,7 @@ The `Plugin` Custom Resource manages Falco plugins. Plugin binaries are download
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `conditions` | `[]metav1.Condition` | Aggregated programming, reference, compatibility and deletion-blocked conditions from [ArtifactNode](artifactnode.md) resources |
+| `conditions` | `[]metav1.Condition` | Aggregated programming, reference, compatibility and deletion-blocked conditions from [ArtifactNode](artifactnode.md) resources. See [artifact status](../configuration.md#artifact-status) for the types and reasons |
 | `artifactMeta` | `ArtifactMeta` | Resolved OCI digest, requirements and plugin metadata |
 | `observedGeneration` | `int64` | Latest resource generation fully processed by the instance operator |
 

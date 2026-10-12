@@ -47,8 +47,7 @@ type VersionsFetcher interface {
 // Versions holds the capability versions returned by the Falco REST API at /versions.
 // Values are stored as strings; numeric JSON values are converted automatically.
 type Versions struct {
-	capabilities   map[string]string
-	pluginVersions map[string]string // keys that came from the nested plugin_versions object
+	capabilities map[string]string
 }
 
 // NewVersions copies and combines capabilities and plugin versions into one snapshot.
@@ -57,13 +56,7 @@ func NewVersions(capabilities, pluginVersions map[string]string) *Versions {
 	combined := make(map[string]string, len(capabilities)+len(pluginVersions))
 	maps.Copy(combined, capabilities)
 	maps.Copy(combined, pluginVersions)
-	return &Versions{capabilities: combined, pluginVersions: maps.Clone(pluginVersions)}
-}
-
-// Capability returns the version string for a named capability, and whether it was present.
-func (v *Versions) Capability(name string) (string, bool) {
-	val, ok := v.capabilities[name]
-	return val, ok
+	return &Versions{capabilities: combined}
 }
 
 // All returns a copy of every capability name to its version string, including both top-level
@@ -73,16 +66,6 @@ func (v *Versions) Capability(name string) (string, bool) {
 func (v *Versions) All() map[string]string {
 	out := make(map[string]string, len(v.capabilities))
 	maps.Copy(out, v.capabilities)
-	return out
-}
-
-// PluginVersions returns a copy of just the plugin_versions subset — the set of plugin names
-// Falco currently reports as loaded, each with its version. Unlike All(), this never mixes in
-// unrelated top-level capabilities (e.g. engine_version_semver), so it's safe to treat as "the
-// set of currently loaded plugin names.".
-func (v *Versions) PluginVersions() map[string]string {
-	out := make(map[string]string, len(v.pluginVersions))
-	maps.Copy(out, v.pluginVersions)
 	return out
 }
 

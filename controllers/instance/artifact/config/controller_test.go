@@ -18,8 +18,8 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -42,16 +43,14 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 const testConfigName = "test-config"
-
-func testConfigNodeName() string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName)
-}
 
 func newTestNode() *corev1.Node {
 	return &corev1.Node{
@@ -69,34 +68,9 @@ func newTestConfig(opts ...func(*artifactv1alpha1.Config)) *artifactv1alpha1.Con
 	return c
 }
 
-func withConfigSelector(key, value string) func(*artifactv1alpha1.Config) {
-	return func(c *artifactv1alpha1.Config) {
-		c.Spec.Selector = &metav1.LabelSelector{
-			MatchLabels: map[string]string{key: value},
-		}
-	}
-}
-
-func newTestConfigNode(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	isController := true
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testConfigNodeName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Config",
-				Name:       testConfigName,
-				Controller: &isController,
-			}},
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
+// withConfigConditions sets the conditions the node reports for the test Config.
+func withConfigConditions(conditions []metav1.Condition) func(*artifactv1alpha1.ArtifactNode) {
+	return func(n *artifactv1alpha1.ArtifactNode) { n.Status.Artifacts[0].Conditions = conditions }
 }
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigAggregatorReconciler, client.Client) {
@@ -105,42 +79,9 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigAggregatorRe
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+		WithStatusSubresource(&artifactv1alpha1.Config{}, &artifactv1alpha1.ArtifactNode{}).
 		Build()
 	return NewConfigAggregatorReconciler(cl, s), cl
-}
-
-// addInUseFinalizer adds the node-objects-in-use finalizer to config via server-side apply.
-func addInUseFinalizer(t *testing.T, cl client.Client, config *artifactv1alpha1.Config) {
-	t.Helper()
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), config))
-	require.NoError(t, controllerhelper.EnsureInUseFinalizer(
-		context.Background(), cl,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		config, true,
-	))
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), config))
-}
-
-const testFalcoName = "test-falco"
-
-func newTestFalco() *instancev1alpha1.Falco {
-	return &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{Name: testFalcoName, Namespace: testutil.TestNamespace},
-	}
-}
-
-func newRunningFalcoPod() *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "falco-pod",
-			Namespace: testutil.TestNamespace,
-			Labels:    map[string]string{"app.kubernetes.io/instance": testFalcoName},
-		},
-		Spec:   corev1.PodSpec{NodeName: testutil.TestNodeName},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
 }
 
 func TestReconcile_NotFound(t *testing.T) {
@@ -165,7 +106,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment := &envtest.Environment{
-				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 				ErrorIfCRDPathMissing: true,
 			}
 			cfg, err := environment.Start()
@@ -178,7 +119,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 			})
 			require.NoError(t, err)
-			for _, idx := range index.All {
+			for _, idx := range index.InstanceOperator {
 				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
 			}
 			direct, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -205,16 +146,17 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 			parent := newTestConfig()
 			require.NoError(t, direct.Create(t.Context(), parent))
 			require.NoError(t, direct.Create(t.Context(), newTestNode()))
-			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
-			pod := newRunningFalcoPod()
+			require.NoError(t, direct.Create(t.Context(), testutil.NewTestFalco()))
+			pod := testutil.NewRunningFalcoPod()
 			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
 			require.NoError(t, direct.Create(t.Context(), pod))
 			pod.Status.Phase = corev1.PodRunning
 			require.NoError(t, direct.Status().Update(t.Context(), pod))
-			child := newTestConfigNode()
-			child.OwnerReferences[0].UID = parent.UID
+			child := testutil.NewReportingArtifactNode(artifact.KindConfig, parent.Name)
+			child.Spec.Artifacts[0].UID = string(parent.UID)
 			require.NoError(t, direct.Create(t.Context(), child))
-			child.Status.Conditions = []metav1.Condition{{
+			child.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{Kind: artifact.KindConfig, Name: parent.Name, UID: string(parent.UID)}}
+			child.Status.Artifacts[0].Conditions = []metav1.Condition{{
 				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
 				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
 			}}
@@ -297,7 +239,6 @@ func TestReconcile_GetError(t *testing.T) {
 				return fmt.Errorf("api server error")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewConfigAggregatorReconciler(cl, s)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
@@ -314,13 +255,12 @@ func TestReconcile_NewAssignmentWaitsForStatus(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "config-data", Namespace: config.Namespace},
 		Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: "json_output: true"},
 	}
-	ready := newTestConfigNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Status.Conditions = []metav1.Condition{{
-			Type: "Programmed", Status: metav1.ConditionTrue,
-			Reason: "Programmed", ObservedGeneration: config.Generation,
-		}}
-	})
-	r, cl := newTestReconciler(t, config, cm, newTestNode(), newTestFalco(), newRunningFalcoPod(), ready)
+	programmed := []metav1.Condition{{
+		Type: "Programmed", Status: metav1.ConditionTrue,
+		Reason: "Programmed", ObservedGeneration: config.Generation,
+	}}
+	ready := testutil.NewReportingArtifactNode("Config", testConfigName, withConfigConditions(programmed))
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), ready)
 	_, err := r.Reconcile(ctx, testutil.Request(config.Name))
 	require.NoError(t, err)
 	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
@@ -329,70 +269,26 @@ func TestReconcile_NewAssignmentWaitsForStatus(t *testing.T) {
 	newNode := newTestNode()
 	newNode.Name = "new-node"
 	require.NoError(t, cl.Create(ctx, newNode))
-	newPod := newRunningFalcoPod()
+	newPod := testutil.NewRunningFalcoPod()
 	newPod.Name = "new-falco-pod"
 	newPod.Spec.NodeName = newNode.Name
 	require.NoError(t, cl.Create(ctx, newPod))
 
-	// The real instance reconcile creates the additional assignment and re-aggregates status.
+	// The new node runs Falco but its artifact operator has not reported yet.
 	_, err = r.Reconcile(ctx, testutil.Request(config.Name))
 	require.NoError(t, err)
-	assignment := &artifactv1alpha1.ArtifactNode{}
-	key := client.ObjectKey{
-		Namespace: config.Namespace,
-		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, config.Name, newNode.Name),
-	}
-	require.NoError(t, cl.Get(ctx, key, assignment))
-	require.Empty(t, assignment.Status.Conditions, "the new sidecar has not reported yet")
 	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
 	assert.False(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"),
-		"one ready node must not certify the newly created assignment")
+		"one ready node must not certify the node that has not reported")
 
-	assignment.Status.Conditions = ready.Status.Conditions
-	require.NoError(t, cl.Update(ctx, assignment))
+	// Its ArtifactNode appears and reports.
+	reported := testutil.NewReportingArtifactNode("Config", testConfigName, withConfigConditions(programmed))
+	reported.Name, reported.Spec.NodeName = newNode.Name, newNode.Name
+	require.NoError(t, cl.Create(ctx, reported))
 	_, err = r.Reconcile(ctx, testutil.Request(config.Name))
 	require.NoError(t, err)
 	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
 	assert.True(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"))
-}
-
-func TestReconcile_DeletionNoNodeObjects(t *testing.T) {
-	// A finalizer makes cl.Delete set DeletionTimestamp on the object rather than removing it.
-	config := newTestConfig(func(c *artifactv1alpha1.Config) {
-		c.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	r, cl := newTestReconciler(t, config)
-
-	require.NoError(t, cl.Delete(context.Background(), config))
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// No ConfigNodes should exist.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletionWithNodeObjects(t *testing.T) {
-	// A finalizer makes cl.Delete set DeletionTimestamp on the object rather than removing it.
-	config := newTestConfig(func(c *artifactv1alpha1.Config) {
-		c.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	configNode := newTestConfigNode()
-	r, cl := newTestReconciler(t, config, configNode)
-
-	require.NoError(t, cl.Delete(context.Background(), config))
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// ConfigNode should be deleted.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
 }
 
 func TestReconcile_NoMatchingNodes(t *testing.T) {
@@ -403,125 +299,12 @@ func TestReconcile_NoMatchingNodes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	// No ConfigNodes should exist.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-
 	// Status should have Programmed=Unknown (no nodes assigned).
 	got := &artifactv1alpha1.Config{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
 	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-}
-
-func TestReconcile_CreatesNodeObject(t *testing.T) {
-	config := newTestConfig()
-	node := newTestNode()
-	r, cl := newTestReconciler(t, config, node, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// ConfigNode should be created.
-	configNode := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace},
-		configNode))
-	assert.Equal(t, testutil.TestNodeName, configNode.Spec.NodeName)
-
-	// In-use finalizer should be added to the Config.
-	got := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestReconcile_NodeObjectAlreadyExists(t *testing.T) {
-	config := newTestConfig()
-	node := newTestNode()
-	existingConfigNode := newTestConfigNode()
-	r, cl := newTestReconciler(t, config, node, existingConfigNode, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Exactly one ConfigNode should exist (idempotent).
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Len(t, nodeList.Items, 1)
-}
-
-func TestReconcile_NoFalcoPod_NoNodeObject(t *testing.T) {
-	// Node matches the artifact selector but no Falco pod is running on it.
-	config := newTestConfig()
-	node := newTestNode()
-	r, cl := newTestReconciler(t, config, node) // no Falco CR or pod
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletesStaleNodeObject(t *testing.T) {
-	// Config targets nodes with label env=prod, but the existing ConfigNode is for a plain node.
-	config := newTestConfig(withConfigSelector("env", "prod"))
-	staleNode := newTestConfigNode()
-	// The node exists but does NOT have the env=prod label.
-	plainNode := newTestNode()
-	r, cl := newTestReconciler(t, config, staleNode, plainNode)
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Stale ConfigNode should be gone.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) {
-	config := newTestConfig(
-		withConfigSelector("env", "prod"),
-		func(c *artifactv1alpha1.Config) {
-			c.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-		},
-	)
-	staleNode := newTestConfigNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
-		n.Status.Conditions = []metav1.Condition{{
-			Type:    commonv1alpha1.ConditionProgrammed.String(),
-			Status:  metav1.ConditionTrue,
-			Reason:  "Programmed",
-			Message: "old result",
-		}}
-	})
-	r, cl := newTestReconciler(t, config, staleNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	terminating := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), terminating))
-	assert.False(t, terminating.DeletionTimestamp.IsZero(), "the node-side finalizer keeps the stale child terminating")
-
-	got := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
-		"the parent must stay alive until the terminating child is physically gone")
-	condition := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
-	assert.Equal(t, "NoNodesAssigned", condition.Reason,
-		"the stale child's last successful result must not remain in the aggregate")
 }
 
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
@@ -543,7 +326,6 @@ func TestReconcile_ListMatchingNodesError(t *testing.T) {
 				return c.List(ctx, list, opts...)
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewConfigAggregatorReconciler(cl, s)
 
@@ -552,277 +334,24 @@ func TestReconcile_ListMatchingNodesError(t *testing.T) {
 	assert.Contains(t, err.Error(), "node list failed")
 }
 
-func TestReconcile_ListNodeObjectsError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("config node list failed")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "config node list failed")
-}
-
-func TestReconcile_EnsureNodeObjectCreateError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	node := newTestNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config, node, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
-				return fmt.Errorf("create failed")
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "create failed")
-}
-
 func TestReconcile_EnsureInUseFinalizerError(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	config := newTestConfig()
 	node := newTestNode()
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(config, node, newTestFalco(), newRunningFalcoPod()).
+		WithObjects(config, node, testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Config{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return fmt.Errorf("patch failed")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewConfigAggregatorReconciler(cl, s)
 
 	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
 	require.Error(t, err)
-}
-
-func TestHandleDeletion_NoNodeObjects(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
-					return fmt.Errorf("Falco list should not be called without node objects")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	addInUseFinalizer(t, cl, config)
-
-	r := NewConfigAggregatorReconciler(cl, s)
-	err := r.handleDeletion(context.Background(), config)
-	require.NoError(t, err)
-
-	// Finalizer should be removed.
-	got := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
-	assert.NotContains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestHandleDeletion_NodeObjectsPresent(t *testing.T) {
-	config := newTestConfig()
-	configNode := newTestConfigNode()
-	r, cl := newTestReconciler(t, config, configNode)
-
-	err := r.handleDeletion(context.Background(), config)
-	require.NoError(t, err)
-
-	// ConfigNode should be deleted.
-	node := &artifactv1alpha1.ArtifactNode{}
-	err = cl.Get(context.Background(),
-		types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, node)
-	assert.Error(t, err)
-}
-
-func TestHandleDeletion_NodeObjectsBeingDeleted(t *testing.T) {
-	config := newTestConfig()
-	configNode := newTestConfigNode(func(n *artifactv1alpha1.ArtifactNode) {
-		now := metav1.Now()
-		n.DeletionTimestamp = &now
-		n.Finalizers = []string{"some-finalizer"} // keeps the object in the fake client after deletion
-	})
-	r, _ := newTestReconciler(t, config, configNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
-
-	// Should return nil and wait (not remove finalizer).
-	err := r.handleDeletion(context.Background(), config)
-	require.NoError(t, err)
-}
-
-func TestHandleDeletion_ListError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, _ ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("list error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-
-	err := r.handleDeletion(context.Background(), config)
-	require.Error(t, err)
-}
-
-func TestHandleDeletion_DeleteError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	configNode := newTestConfigNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config, configNode).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
-				return fmt.Errorf("delete error")
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-
-	err := r.handleDeletion(context.Background(), config)
-	require.Error(t, err)
-}
-
-func TestEnsureNodeObject_AlreadyExists(t *testing.T) {
-	config := newTestConfig()
-	existing := newTestConfigNode()
-	r, cl := newTestReconciler(t, config, existing)
-
-	// Should be a no-op.
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, config,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindConfig), controllerhelper.ArtifactKindConfig, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	// Still exactly one ConfigNode.
-	list := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), list))
-	assert.Len(t, list.Items, 1)
-}
-
-func TestEnsureNodeObject_Creates(t *testing.T) {
-	config := newTestConfig()
-	r, cl := newTestReconciler(t, config)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, config,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindConfig), controllerhelper.ArtifactKindConfig, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	created := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, created))
-	assert.Equal(t, testutil.TestNodeName, created.Spec.NodeName)
-	assert.Equal(t, testConfigName, created.Labels[controllerhelper.LabelArtifactParent])
-}
-
-func TestEnsureNodeObject_GetError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("get error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, config,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindConfig), controllerhelper.ArtifactKindConfig, testutil.TestNodeName)
-	require.Error(t, err)
-}
-
-func TestUpdateAggregateConditions_Empty(t *testing.T) {
-	config := newTestConfig()
-	r, cl := newTestReconciler(t, config)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	err := controllerhelper.UpdateAggregateConditions(
-		context.Background(), r.Client, r.Scheme, config, &config.Status.Conditions, nodeList, ControllerName,
-	)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-	assert.Equal(t, "NoNodesAssigned", cond.Reason)
-}
-
-func TestUpdateAggregateConditions_WithNodeConditions(t *testing.T) {
-	config := newTestConfig()
-	r, cl := newTestReconciler(t, config)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{
-		Items: []artifactv1alpha1.ArtifactNode{
-			{
-				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-				Status: artifactv1alpha1.ArtifactNodeStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:    commonv1alpha1.ConditionProgrammed.String(),
-							Status:  metav1.ConditionTrue,
-							Reason:  "Programmed",
-							Message: "ok",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err := controllerhelper.UpdateAggregateConditions(
-		context.Background(), r.Client, r.Scheme, config, &config.Status.Conditions, nodeList, ControllerName,
-	)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Config{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(config), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
 func TestFindConfigsForNode(t *testing.T) {
@@ -847,7 +376,6 @@ func TestFindConfigsForNode_ListError(t *testing.T) {
 				return nil
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 
 	reqs := controllerhelper.EnqueueAllOfType(context.Background(), cl, &artifactv1alpha1.ConfigList{})
@@ -862,55 +390,230 @@ func TestFindConfigsForNode_EmptyList(t *testing.T) {
 
 // ── Reconcile remaining error paths ─────────────────────────────────────────
 
-func TestReconcile_DeleteStaleNodeError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	// Selector requires env=prod; existing ConfigNode is for a node without that label → stale.
-	config := newTestConfig(withConfigSelector("env", "prod"))
-	staleNode := newTestConfigNode()
-	plainNode := newTestNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config, staleNode, plainNode).
-		WithStatusSubresource(&artifactv1alpha1.Config{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("delete failed")
-				}
-				return c.Delete(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewConfigAggregatorReconciler(cl, s)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.Error(t, err)
+func newTestConfigWithSource(uid string) (*artifactv1alpha1.Config, *corev1.ConfigMap) {
+	config := newTestConfig(func(c *artifactv1alpha1.Config) {
+		c.Generation, c.UID = 1, "config-uid"
+		if uid != "" {
+			c.UID = types.UID(uid)
+		}
+		c.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: "config-data"}
+	})
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "config-data", Namespace: config.Namespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: "json_output: true"},
+	}
+	return config, cm
 }
 
-func TestReconcile_SecondListNodeObjectsError(t *testing.T) {
+func TestReconcile_AggregatesFromTheArtifactNode(t *testing.T) {
+	programmed := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: "Programmed", Status: status, Reason: "Programmed", ObservedGeneration: 1}}
+	}
+
+	for name, tc := range map[string]struct {
+		conditions     []metav1.Condition
+		wantProgrammed bool
+	}{
+		"the node reports programmed":   {programmed(metav1.ConditionTrue), true},
+		"the node reports failure":      {programmed(metav1.ConditionFalse), false},
+		"the node reports unknown":      {programmed(metav1.ConditionUnknown), false},
+		"the node has not reported yet": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			config, cm := newTestConfigWithSource("")
+			node := testutil.NewReportingArtifactNode("Config", testConfigName, func(n *artifactv1alpha1.ArtifactNode) {
+				n.Status.Artifacts[0].UID = string(config.UID)
+				n.Status.Artifacts[0].Conditions = tc.conditions
+			})
+			r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+			_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+			require.NoError(t, err)
+
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+			assert.Equal(t, tc.wantProgrammed, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"))
+		})
+	}
+}
+
+func TestReconcile_ANodeWithoutAnArtifactNodeIsPending(t *testing.T) {
+	config, cm := newTestConfigWithSource("")
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod())
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	cond := apimeta.FindStatusCondition(config.Status.Conditions, "Programmed")
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
+	assert.Equal(t, "Pending", cond.Reason)
+}
+
+func TestReconcile_APreviousIncarnationsEntryIsNotCreditedToTheNewArtifact(t *testing.T) {
+	config, cm := newTestConfigWithSource("new-uid")
+	node := testutil.NewReportingArtifactNode("Config", testConfigName, func(n *artifactv1alpha1.ArtifactNode) {
+		n.Spec.Artifacts[0].UID = string(config.UID)
+		n.Status.Artifacts[0].UID = "old-uid"
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
+			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", ObservedGeneration: 1},
+		}
+	})
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	assert.False(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"),
+		"the deleted artifact's success must not make its replacement look programmed")
+}
+
+func TestReconcile_TheParentKeepsItsFinalizerWhileANodeListsIt(t *testing.T) {
+	// The Config selects no node that runs Falco, yet a node still lists it: files may be there.
+	config, cm := newTestConfigWithSource("")
+	config.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"nothing": "matches"}}
+	node := testutil.NewReportingArtifactNode("Config", testConfigName)
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	assert.Contains(t, config.Finalizers, "artifact.falcosecurity.dev/node-objects-in-use")
+}
+
+// A Falco pod being replaced leaves a moment with none on the node. The assignment controller keeps the node's
+// ArtifactNode for a grace period, and the parent must keep reporting from it rather than flap to NoNodesAssigned.
+func TestReconcile_AKeptArtifactNodeIsStillReportedWhileFalcoIsAway(t *testing.T) {
+	config, cm := newTestConfigWithSource("")
+	node := testutil.NewReportingArtifactNode("Config", testConfigName, func(n *artifactv1alpha1.ArtifactNode) {
+		n.Spec.Artifacts[0].UID = string(config.UID)
+		n.Status.Artifacts[0].UID = string(config.UID)
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
+			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", ObservedGeneration: 1},
+		}
+	})
+	// No Falco pod: the node does not run Falco at the moment.
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco(), node)
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	assert.True(t, apimeta.IsStatusConditionTrue(config.Status.Conditions, "Programmed"),
+		"the node's report is still what the parent shows until the ArtifactNode is deleted")
+}
+
+func TestReconcile_ANodeWithoutFalcoAndWithoutAnArtifactNodeIsNotExpected(t *testing.T) {
+	config, cm := newTestConfigWithSource("")
+	r, cl := newTestReconciler(t, config, cm, newTestNode(), testutil.NewTestFalco())
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	cond := apimeta.FindStatusCondition(config.Status.Conditions, "Programmed")
+	require.NotNil(t, cond)
+	assert.Equal(t, "NoNodesAssigned", cond.Reason)
+}
+
+func TestReconcile_DeletionWaitsForNodeCleanup(t *testing.T) {
+	config := newTestConfig(func(c *artifactv1alpha1.Config) {
+		c.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	artifactNode := testutil.NewTestArtifactNode()
+	artifactNode.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{Kind: "Config", Name: config.Name}}
+	r, cl := newTestReconciler(t, config, artifactNode)
+	require.NoError(t, cl.Delete(t.Context(), config))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(config), config))
+	assert.Contains(t, config.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
+		"a node still reports on the config, so its files may remain: the parent must stay")
+
+	// The node removes its files and withdraws the entry.
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(artifactNode), artifactNode))
+	artifactNode.Status.Artifacts = nil
+	require.NoError(t, cl.Status().Update(t.Context(), artifactNode))
+
+	_, err = r.Reconcile(t.Context(), testutil.Request(config.Name))
+	require.NoError(t, err)
+	err = cl.Get(t.Context(), client.ObjectKeyFromObject(config), config)
+	assert.True(t, k8serrors.IsNotFound(err), "with every node clean the parent is released")
+}
+
+var errBoom = errors.New("boom")
+
+func TestHandleDeletion_Errors(t *testing.T) {
+	deleting := func() *artifactv1alpha1.Config {
+		return newTestConfig(func(p *artifactv1alpha1.Config) {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+			p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+		})
+	}
+	tests := []struct {
+		name  string
+		funcs interceptor.Funcs
+	}{
+		{
+			name: "the ArtifactNodes cannot be listed",
+			funcs: interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return errBoom
+			}},
+		},
+		{
+			name: "the finalizer cannot be released",
+			funcs: interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return errBoom
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := deleting()
+			r, cl := newTestReconciler(t, config)
+			r.Client = interceptor.NewClient(cl.(client.WithWatch), tt.funcs)
+
+			_, err := shared.HandleDeletion(t.Context(), r.aggregation(), config)
+
+			require.ErrorIs(t, err, errBoom)
+		})
+	}
+}
+
+func TestSetupWithManager(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	mgr := testutil.NewUnstartedManager(t, testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme))
+
+	require.NoError(t, r.SetupWithManager(mgr))
+}
+
+func TestReconcile_AnUnchangedStatusIsNotWrittenAgain(t *testing.T) {
+	config := newTestConfig(func(c *artifactv1alpha1.Config) { c.Generation = 1 })
+	patches := 0
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	config := newTestConfig()
-	node := newTestNode()
-	configNode := newTestConfigNode() // makes ensureNodeObject a no-op
-	var listCount int
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(config, node, configNode).
+	cl := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(config, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Config{}).
 		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					listCount++
-					if listCount == 2 {
-						return fmt.Errorf("second list error")
-					}
+			SubResourcePatch: func(
+				ctx context.Context, c client.Client, sub string, obj client.Object, p client.Patch, opts ...client.SubResourcePatchOption,
+			) error {
+				if _, isConfig := obj.(*artifactv1alpha1.Config); isConfig {
+					patches++
 				}
-				return c.List(ctx, list, opts...)
+				return c.SubResource(sub).Patch(ctx, obj, p, opts...)
 			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
+		}).Build()
 	r := NewConfigAggregatorReconciler(cl, s)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
-	require.Error(t, err)
+
+	for range 4 {
+		_, err := r.Reconcile(t.Context(), testutil.Request(config.Name))
+		require.NoError(t, err)
+	}
+
+	assert.LessOrEqual(t, patches, 2, "once written, an unchanged status must not cost an API call per reconcile")
 }

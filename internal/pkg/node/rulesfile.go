@@ -28,12 +28,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 )
 
-// rulesfileSourceKey ties dependencies to one installed source, not the desired whole bundle.
-type rulesfileSourceKey struct {
-	Key
-	Medium artifact.Medium
-}
-
 type rulesfileRevision struct {
 	ContentHash string
 	Metadata    *commonv1alpha1.ArtifactMeta
@@ -41,67 +35,67 @@ type rulesfileRevision struct {
 
 // StoreRulesfile writes one source and updates its dependencies under the plugin-removal lock.
 // Failed content writes preserve the previous dependencies.
-func (m *Manager) StoreRulesfile(ctx context.Context, namespace, name string, artifactPriority int32,
+func (n *Node) StoreRulesfile(ctx context.Context, name string, artifactPriority int32,
 	medium artifact.Medium, result artifact.FetchResult, metadata *commonv1alpha1.ArtifactMeta, enforce bool,
 ) (artifact.StoreAction, *artifact.File, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	metadata = metadata.DeepCopy()
 	if metadata == nil {
 		if enforce {
 			return artifact.StoreActionNone, nil, fmt.Errorf("rulesfile metadata is unavailable")
 		}
-	} else if err := m.checkDependenciesLocked(metadata.Dependencies, enforce); err != nil {
+	} else if err := n.checkDependenciesLocked(metadata.Dependencies, enforce); err != nil {
 		return artifact.StoreActionNone, nil, err
 	}
-	key := Key{Kind: KindRulesfile, Namespace: namespace, Name: name}
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: name}
 	revision := rulesfileRevision{ContentHash: result.ContentHash, Metadata: metadata}
-	action, file, err := m.storeLocked(ctx, namespace, name, artifactPriority, artifact.KindRulesfile, medium, result)
+	action, file, err := n.storeLocked(ctx, name, artifactPriority, artifact.KindRulesfile, medium, result)
 	if err != nil {
 		return action, file, err
 	}
-	return action, file, m.commitRulesfileLocked(ctx, key, medium, revision)
+	return action, file, n.commitRulesfileLocked(ctx, key, medium, revision)
 }
 
-// SyncRulesfileDependencies rechecks a verified source with matching known metadata identity.
+// syncRulesfileDependencies rechecks a verified source with matching known metadata identity.
 // A false result without an error requires fetching the source before storing its metadata.
-func (m *Manager) SyncRulesfileDependencies(ctx context.Context, key Key, medium artifact.Medium, metadata *commonv1alpha1.ArtifactMeta, enforce bool) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (n *Node) syncRulesfileDependencies(ctx context.Context, key artifact.Ref, medium artifact.Medium, metadata *commonv1alpha1.ArtifactMeta, enforce bool) (bool, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	metadata = metadata.DeepCopy()
 	if metadata == nil || (medium == artifact.MediumOCI && metadata.Digest == "") {
 		return false, nil
 	}
-	current := artifact.FindInstalled(m.installed[key], medium)
+	current := artifact.FindInstalled(n.filesLocked(key), medium)
 	if current == nil {
 		return false, nil
 	}
-	if !slices.ContainsFunc(m.rulesfiles[rulesfileSourceKey{Key: key, Medium: medium}], func(revision rulesfileRevision) bool {
+	if !slices.ContainsFunc(n.requiresLocked(key, medium), func(revision rulesfileRevision) bool {
 		return revision.ContentHash == current.ContentHash && revision.Metadata != nil && revision.Metadata.Digest == metadata.Digest
 	}) {
 		return false, nil
 	}
-	intact, err := m.store.Verify(ctx, current)
+	intact, err := n.disk.Verify(ctx, current)
 	if err != nil || !intact {
 		return false, err
 	}
-	if err := m.checkDependenciesLocked(metadata.Dependencies, enforce); err != nil {
+	if err := n.checkDependenciesLocked(metadata.Dependencies, enforce); err != nil {
 		return false, err
 	}
 	revision := rulesfileRevision{ContentHash: current.ContentHash, Metadata: metadata}
-	if err := m.commitRulesfileLocked(ctx, key, medium, revision); err != nil {
+	if err := n.commitRulesfileLocked(ctx, key, medium, revision); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 // checkDependenciesLocked uses the same candidate order and version policy as reconciliation.
-func (m *Manager) checkDependenciesLocked(dependencies []commonv1alpha1.ArtifactMetaDependency, enforce bool) error {
+func (n *Node) checkDependenciesLocked(dependencies []commonv1alpha1.ArtifactMetaDependency, enforce bool) error {
 	if !enforce {
 		return nil
 	}
 	for _, dependency := range dependencies {
-		name, _, satisfied, err := m.checkDependencyLocked(dependency, "")
+		name, _, satisfied, err := n.checkDependencyLocked(dependency, "")
 		if err != nil {
 			return err
 		}
@@ -109,22 +103,21 @@ func (m *Manager) checkDependenciesLocked(dependencies []commonv1alpha1.Artifact
 			if name == "" {
 				name = dependency.Name
 			}
-			return &DependencyError{Name: name}
+			return &dependencyError{Name: name}
 		}
 	}
 	return nil
 }
 
 // commitRulesfileLocked protects every remaining file until duplicate cleanup succeeds.
-func (m *Manager) commitRulesfileLocked(ctx context.Context, key Key, medium artifact.Medium,
+func (n *Node) commitRulesfileLocked(ctx context.Context, key artifact.Ref, medium artifact.Medium,
 	revision rulesfileRevision,
 ) error {
-	slot := rulesfileSourceKey{Key: key, Medium: medium}
-	current := artifact.FindInstalled(m.installed[key], medium)
+	current := artifact.FindInstalled(n.filesLocked(key), medium)
 	var committed []rulesfileRevision
 	if revision.Metadata == nil {
 		// Missing metadata cannot erase known dependencies for these same installed bytes.
-		for _, previous := range m.rulesfiles[slot] {
+		for _, previous := range n.requiresLocked(key, medium) {
 			if previous.ContentHash == revision.ContentHash && previous.Metadata != nil {
 				committed = appendUniqueRulesfileRevision(committed, previous)
 			}
@@ -134,28 +127,28 @@ func (m *Manager) commitRulesfileLocked(ctx context.Context, key Key, medium art
 		committed = []rulesfileRevision{revision}
 	}
 	pending := slices.Clone(committed)
-	for _, file := range m.installed[key] {
+	for _, file := range n.filesLocked(key) {
 		if file.Medium != string(medium) || current == nil || file.Path == current.Path {
 			continue
 		}
-		for _, previous := range m.rulesfiles[slot] {
+		for _, previous := range n.requiresLocked(key, medium) {
 			if previous.ContentHash == file.ContentHash {
 				pending = appendUniqueRulesfileRevision(pending, previous)
 			}
 		}
 	}
-	m.rulesfiles[slot] = pending
-	if err := m.removeDuplicatePathsLocked(ctx, key, medium); err != nil {
+	n.setRequiresLocked(key, medium, pending)
+	if err := n.removeDuplicatePathsLocked(ctx, key, medium); err != nil {
 		return err
 	}
-	m.rulesfiles[slot] = committed
+	n.setRequiresLocked(key, medium, committed)
 	return nil
 }
 
-func (m *Manager) removeDuplicatePathsLocked(ctx context.Context, key Key, medium artifact.Medium) error {
-	current := artifact.FindInstalled(m.installed[key], medium)
+func (n *Node) removeDuplicatePathsLocked(ctx context.Context, key artifact.Ref, medium artifact.Medium) error {
+	current := artifact.FindInstalled(n.filesLocked(key), medium)
 	var duplicates []artifactv1alpha1.InstalledArtifact
-	for _, file := range m.installed[key] {
+	for _, file := range n.filesLocked(key) {
 		if file.Medium == string(medium) && current != nil && file.Path != current.Path {
 			duplicates = append(duplicates, file)
 		}
@@ -163,7 +156,7 @@ func (m *Manager) removeDuplicatePathsLocked(ctx context.Context, key Key, mediu
 	if len(duplicates) == 0 {
 		return nil
 	}
-	return m.removeLocked(ctx, key, duplicates)
+	return n.removeLocked(ctx, key, duplicates)
 }
 
 func appendUniqueRulesfileRevision(revisions []rulesfileRevision, revision rulesfileRevision) []rulesfileRevision {
@@ -173,4 +166,20 @@ func appendUniqueRulesfileRevision(revisions []rulesfileRevision, revision rules
 		return revisions
 	}
 	return append(revisions, revision)
+}
+
+// seedRulesfileRequirements records what an installed rulesfile source asks of the node, recovered
+// from the file itself rather than from any CR.
+//
+// It is what a restart needs. The requires side of the dependency graph is otherwise written only
+// when a rulesfile is installed, so after a restart it is empty until every rulesfile has
+// reconciled, and in that window blockedByOthersLocked finds nothing, so removing a plugin an
+// installed rulesfile depends on is not blocked. Warm sync calls this for every rulesfile it
+// recovers from disk, which closes that window.
+func (n *Node) seedRulesfileRequirements(key artifact.Ref, medium artifact.Medium,
+	contentHash string, metadata *commonv1alpha1.ArtifactMeta,
+) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.setRequiresLocked(key, medium, []rulesfileRevision{{ContentHash: contentHash, Metadata: metadata}})
 }

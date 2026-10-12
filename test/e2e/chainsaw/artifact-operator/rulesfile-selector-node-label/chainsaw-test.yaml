@@ -121,12 +121,10 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     - name: "Step 06: Assert-file-on-filesystem"
       use:
@@ -164,13 +162,24 @@ spec:
 
     - name: "Step 08: Wait-for-artifact-node-deletion"
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 09: Assert-no-nodes-assigned-again"
       try:

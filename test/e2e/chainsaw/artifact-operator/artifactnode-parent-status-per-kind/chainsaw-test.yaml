@@ -1,0 +1,471 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-parent-status-per-kind
+spec:
+  description: |
+    Each artifact kind has a controller of its own that aggregates what the nodes report into the parent's
+    Programmed condition, and each watches nodes and ArtifactNodes on its own. This test takes a Plugin, a
+    Rulesfile and a Config through the same node events and asserts the parent of every kind at each one,
+    so a kind whose controller misses an event is caught, not only the Rulesfile.
+
+    It runs on KWOK fake nodes: no artifact operator reports, so an assigned parent is Unknown/Pending and
+    an unassigned one is Unknown/NoNodesAssigned. Every artifact selects nodes by
+    chainsaw-node-group=($namespace), a label only this test's own fake nodes carry.
+
+    Scenarios:
+    1. A node with a Falco pod is selected: every parent is Pending.
+    2. The node is relabeled away, with no artifact touched: every parent is NoNodesAssigned.
+    3. The node is relabeled back: every parent is Pending again.
+    4. A second node joins: it is assigned the three artifacts, and every parent is still Pending.
+    5. Both nodes are deleted: every parent is NoNodesAssigned.
+
+  bindings:
+    - name: plugin_name
+      value: container
+    - name: rulesfile_name
+      value: parent-status-rulesfile
+    - name: config_name
+      value: parent-status-config
+    - name: test_name
+      value: artifactnode-parent-status-per-kind
+    - name: falco_name
+      value: parent-status-falco
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: node_a_name
+      value: (join('-', ['pstatus-node-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['pstatus-node-b', $namespace]))
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-a"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; its name labels the stub pods.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod-on-node-a"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 02: Create-one-artifact-of-each-kind"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw parent status rule
+                    desc: Minimal rule for the per-kind parent status test.
+                    condition: evt.type = execve
+                    output: "cmd=%proc.cmdline"
+                    priority: DEBUG
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                config:
+                  json_output: false
+
+    - name: "Step 03: Assert-assigned-and-every-parent-pending"
+      description: Scenario 1.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_a_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 04: Relabel-the-node-away"
+      description: Scenario 2. Nothing is assigned and nothing is reported, so the ArtifactNode goes.
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_a_name)
+                labels:
+                  chainsaw-node-group: relabeled-away
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 05: Relabel-the-node-back"
+      description: Scenario 3.
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_a_name)
+                labels:
+                  chainsaw-node-group: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_a_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 06: Node-b-joins"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 06b: Create-falco-pod-on-node-b"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 07: Assert-node-b-assigned-and-every-parent-still-pending"
+      description: Scenario 4. No artifact was touched.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_b_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_a_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 08: Delete-both-nodes"
+      description: Scenario 5.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_b_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 09: Delete-the-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort cleanup of the fake Nodes, cluster-scoped, so a mid-test failure must not leave them behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)

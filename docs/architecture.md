@@ -7,13 +7,14 @@ The Falco Operator manages Falco workloads, companion components and runtime art
 ### Falco Operator (Instance Controller)
 
 The instance operator runs as a Deployment, in `falco-operator` by default.
-It registers seven controllers:
+It registers eight controllers:
 
 | Controllers | Responsibility |
 |-------------|----------------|
 | Falco and Component | Manage workloads, base configuration, Services and RBAC |
 | ConfigMap and Secret references | Protect referenced resources with finalizers |
-| Rulesfile, Plugin and Config aggregators | Process metadata, assign ArtifactNodes and aggregate per-node status |
+| Rulesfile, Plugin and Config aggregators | Process metadata and aggregate per-node status |
+| ArtifactNode assignment | Keep one ArtifactNode per namespace and node running Falco, listing the artifacts whose selector selects the node |
 
 For OCI sources, the instance operator resolves metadata and a digest, pulls the
 required files into its local cache, and serves them over the artifact Service
@@ -29,14 +30,17 @@ client Certificate. The chart supplies the server Certificate and trust settings
 
 The Artifact Operator is a regular container in `spec.containers`, not a
 restartable init container. Falco starts alongside it with the base configuration.
-The sidecar waits for Falco's `/versions` API before starting its three artifact
-controllers.
+The sidecar waits for Falco's `/versions` API before starting its four
+controllers: one per artifact kind and one for its node's ArtifactNode. Before any
+of them acts, it recovers what is already installed from the pod's volumes and the
+ArtifactNode status, and it reports Ready only once that is done.
 
-The sidecar reconciles ArtifactNodes assigned to its node and watches their parent
-artifacts in its namespace. It checks compatibility, downloads OCI files from the central server, reads
+The sidecar reads its node's [ArtifactNode](crds/artifactnode.md), whose spec lists
+the artifacts assigned to the node, and reconciles each of them from the artifact
+itself. It checks compatibility, downloads OCI files from the central server, reads
 inline and ConfigMap sources, and writes files to shared `emptyDir` volumes.
-It manages generated plugin configuration and reports per-node installation
-state in operator-owned [ArtifactNode](crds/artifactnode.md) resources.
+It manages generated plugin configuration, removes what the spec no longer lists,
+and reports each artifact's state in the ArtifactNode status.
 
 | Controller | Sources | Falco path |
 |------------|---------|------------|
@@ -52,10 +56,12 @@ User CRs: Falco / Component / Rulesfile / Plugin / Config
                          v
              Instance operator Deployment
              | workloads, metadata, aggregate status
+             | ArtifactNode spec: artifacts assigned to each node
 OCI registry --> local cache --> artifact HTTP(S) Service
                                       |
                                       v
              Falco pod: Artifact Operator sidecar
+             | reads its node's ArtifactNode spec
              | inline/ConfigMap sources from Kubernetes
              | compatibility checks and file installation
              +--> ArtifactNode status --> parent aggregation

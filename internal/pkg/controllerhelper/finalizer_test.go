@@ -19,8 +19,6 @@ package controllerhelper_test
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"slices"
 	"testing"
 
@@ -37,23 +35,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	common "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
-
-const (
-	testFinalizerInUse = "test.example.com/in-use"
-	testFinalizer      = "test.example.com/finalizer"
-)
-
-func newFinalizerScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	s := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(s))
-	return s
-}
 
 func newFinalizerCM(finalizers ...string) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
@@ -86,7 +70,7 @@ func TestEnsureFinalizer(t *testing.T) {
 	}{
 		{
 			name:      "finalizer already present returns false without patching",
-			obj:       newConfigMap(testFinalizer),
+			obj:       newConfigMap(testutil.TestFinalizer),
 			wantAdded: false,
 			wantErr:   false,
 		},
@@ -116,7 +100,7 @@ func TestEnsureFinalizer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.obj)
 			if tt.patchErr != nil {
 				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
@@ -129,7 +113,7 @@ func TestEnsureFinalizer(t *testing.T) {
 
 			live := &corev1.ConfigMap{}
 			require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.obj), live))
-			added, err := controllerhelper.EnsureFinalizer(context.Background(), cl, testFinalizer, live)
+			added, err := controllerhelper.EnsureFinalizer(context.Background(), cl, testutil.TestFinalizer, live)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -143,69 +127,7 @@ func TestEnsureFinalizer(t *testing.T) {
 				// Verify the finalizer was actually persisted.
 				got := &corev1.ConfigMap{}
 				require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(tt.obj), got))
-				assert.True(t, controllerutil.ContainsFinalizer(got, testFinalizer))
-			}
-		})
-	}
-}
-
-func TestReconcileArtifactInUseFinalizer(t *testing.T) {
-	for _, kind := range []string{controllerhelper.ArtifactKindPlugin, controllerhelper.ArtifactKindRulesfile} {
-		t.Run(kind, func(t *testing.T) {
-			for _, tt := range []struct {
-				name          string
-				hasOCI        bool
-				nodesInUse    bool
-				failCleanup   bool
-				wantFinalizer bool
-			}{
-				{name: "cache ownership survives last node", hasOCI: true, wantFinalizer: true},
-				{name: "removed source releases cache and finalizer"},
-				{name: "nodes still require finalizer", nodesInUse: true, wantFinalizer: true},
-				{name: "failed cleanup retains ownership", failCleanup: true, wantFinalizer: true},
-			} {
-				t.Run(tt.name, func(t *testing.T) {
-					ctx := context.Background()
-					scheme := newFinalizerScheme(t)
-					require.NoError(t, artifactv1alpha1.AddToScheme(scheme))
-					meta := metav1.ObjectMeta{
-						Name: "artifact", Namespace: "default",
-						Finalizers: []string{controllerhelper.NodeObjectsInUseFinalizer, testForeignFinalizer},
-					}
-					var source *common.OCIArtifact
-					if tt.hasOCI {
-						source = &common.OCIArtifact{Image: common.ImageSpec{Repository: "example.org/artifact", Tag: "latest"}}
-					}
-					var parent client.Object
-					if kind == controllerhelper.ArtifactKindPlugin {
-						parent = &artifactv1alpha1.Plugin{ObjectMeta: meta, Spec: artifactv1alpha1.PluginSpec{OCIArtifact: source}}
-					} else {
-						parent = &artifactv1alpha1.Rulesfile{ObjectMeta: meta, Spec: artifactv1alpha1.RulesfileSpec{OCIArtifact: source}}
-					}
-					cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent).Build()
-					dir := t.TempDir()
-					cache := artifactcache.NewCache(dir)
-					require.NoError(t, cache.Load())
-					blobPath := filepath.Join(dir, "blobs", "owned")
-					require.NoError(t, cache.Store(blobPath, []byte("blob"), 0o644))
-					require.NoError(t, cache.Set(kind, meta.Namespace, meta.Name, "", blobPath))
-					if tt.failCleanup {
-						require.NoError(t, os.Mkdir(filepath.Join(dir, "index.json.tmp"), 0o755))
-					}
-
-					err := controllerhelper.ReconcileArtifactInUseFinalizer(ctx, cl, parent, cache, tt.nodesInUse)
-					if tt.failCleanup {
-						require.Error(t, err)
-					} else {
-						require.NoError(t, err)
-					}
-					require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(parent), parent))
-					assert.Equal(t, tt.wantFinalizer,
-						controllerutil.ContainsFinalizer(parent, controllerhelper.NodeObjectsInUseFinalizer))
-					assert.Contains(t, parent.GetFinalizers(), testForeignFinalizer)
-					_, owned := cache.Lookup(kind, meta.Namespace, meta.Name, "")
-					assert.Equal(t, tt.hasOCI || tt.failCleanup, owned)
-				})
+				assert.True(t, controllerutil.ContainsFinalizer(got, testutil.TestFinalizer))
 			}
 		})
 	}
@@ -229,7 +151,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 		},
 		{
 			name:          "isReferenced=true, finalizer already present -> no-op, returns nil",
-			initialCM:     newFinalizerCM(testFinalizer),
+			initialCM:     newFinalizerCM(testutil.TestFinalizer),
 			isReferenced:  true,
 			wantFinalizer: true,
 		},
@@ -242,7 +164,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 				require.NoError(t, cl.Get(context.Background(),
 					types.NamespacedName{Name: "my-cm", Namespace: "default"}, cm))
 				require.NoError(t, controllerhelper.EnsureInUseFinalizer(
-					context.Background(), cl, testFinalizer, cm, true))
+					context.Background(), cl, testutil.TestFinalizer, cm, true))
 			},
 			isReferenced:  false,
 			wantFinalizer: false,
@@ -266,7 +188,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.initialCM)
 			if tt.interceptPatch != nil {
 				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
@@ -285,7 +207,7 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 				types.NamespacedName{Name: tt.initialCM.Name, Namespace: tt.initialCM.Namespace}, fetched))
 
 			err := controllerhelper.EnsureInUseFinalizer(
-				context.Background(), cl, testFinalizer, fetched, tt.isReferenced)
+				context.Background(), cl, testutil.TestFinalizer, fetched, tt.isReferenced)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -298,35 +220,31 @@ func TestEnsureInUseFinalizer(t *testing.T) {
 			require.NoError(t, cl.Get(context.Background(),
 				types.NamespacedName{Name: tt.initialCM.Name, Namespace: tt.initialCM.Namespace}, result))
 
-			hasFinalizer := slices.Contains(result.Finalizers, testFinalizer)
+			hasFinalizer := slices.Contains(result.Finalizers, testutil.TestFinalizer)
 			assert.Equal(t, tt.wantFinalizer, hasFinalizer)
 		})
 	}
 }
 
 func TestEnsureInUseFinalizer_GetNotFound(t *testing.T) {
-	s := newFinalizerScheme(t)
+	s := testutil.Scheme(t)
 	cl := fake.NewClientBuilder().WithScheme(s).Build() // object never created
 
 	err := controllerhelper.EnsureInUseFinalizer(
-		context.Background(), cl, testFinalizer, newFinalizerCM(), true)
+		context.Background(), cl, testutil.TestFinalizer, newFinalizerCM(), true)
 	require.NoError(t, err, "object already gone is treated as nothing to do, not an error")
 }
 
 func TestEnsureInUseFinalizer_GetOtherError(t *testing.T) {
-	s := newFinalizerScheme(t)
+	s := testutil.Scheme(t)
 	cm := newFinalizerCM()
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(cm).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return fmt.Errorf("api server unavailable")
-			},
-		}).
+		WithInterceptorFuncs(testutil.FailGet(fmt.Errorf("api server unavailable"))).
 		Build()
 
-	err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+	err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testutil.TestFinalizer, cm, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
@@ -341,7 +259,7 @@ func TestEnsureInUseFinalizer_PatchErrors(t *testing.T) {
 		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict")), true},
 	} {
 		t.Run(mkErr.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			cm := newFinalizerCM()
 			cl := fake.NewClientBuilder().
 				WithScheme(s).
@@ -353,7 +271,7 @@ func TestEnsureInUseFinalizer_PatchErrors(t *testing.T) {
 				}).
 				Build()
 
-			err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+			err := controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testutil.TestFinalizer, cm, true)
 			if mkErr.wantErr {
 				require.Error(t, err)
 				assert.True(t, k8serrors.IsConflict(err), "Conflict must be returned so the reconcile is retried")
@@ -372,20 +290,20 @@ func TestInUseFinalizerPatchesUseOptimisticLock(t *testing.T) {
 		{
 			name: "EnsureInUseFinalizer",
 			run: func(cl client.Client, cm *corev1.ConfigMap) error {
-				return controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testFinalizer, cm, true)
+				return controllerhelper.EnsureInUseFinalizer(context.Background(), cl, testutil.TestFinalizer, cm, true)
 			},
 		},
 		{
 			name: "ReconcileInUseFinalizer",
 			run: func(cl client.Client, cm *corev1.ConfigMap) error {
-				return controllerhelper.ReconcileInUseFinalizer(context.Background(), cl, cm, testFinalizer, true)
+				return controllerhelper.ReconcileInUseFinalizer(context.Background(), cl, cm, testutil.TestFinalizer, true)
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			cm := newFinalizerCM()
 			sawResourceVersion := false
 			cl := fake.NewClientBuilder().
@@ -408,16 +326,9 @@ func TestInUseFinalizerPatchesUseOptimisticLock(t *testing.T) {
 	}
 }
 
-const (
-	testLegacyRulesfileFinalizer = "rulesfile.artifact.falcosecurity.dev/finalizer-node-1"
-	testLegacyPluginFinalizer    = "plugin.artifact.falcosecurity.dev/finalizer-node-2"
-	testLegacyConfigFinalizer    = "config.artifact.falcosecurity.dev/finalizer-node-3"
-	testForeignFinalizer         = "other.example.com/keep-me"
-)
-
 func TestReconcileInUseFinalizer(t *testing.T) {
 	// NOTE: finalizer removal and the no-op guard are also verified against a real API
-	// server in finalizer_envtest_test.go, since fake-client patch behavior is not a
+	// server in test/envtest/controllerhelper_finalizer_test.go, since fake-client patch behavior is not a
 	// complete substitute for apiserver semantics.
 	tests := []struct {
 		name           string
@@ -431,17 +342,17 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 			name:           "isReferenced=true, no finalizer -> adds finalizer",
 			initialCM:      newFinalizerCM(),
 			isReferenced:   true,
-			wantFinalizers: []string{testFinalizer},
+			wantFinalizers: []string{testutil.TestFinalizer},
 		},
 		{
 			name:           "isReferenced=true, finalizer already present -> no-op, returns nil",
-			initialCM:      newFinalizerCM(testFinalizer),
+			initialCM:      newFinalizerCM(testutil.TestFinalizer),
 			isReferenced:   true,
-			wantFinalizers: []string{testFinalizer},
+			wantFinalizers: []string{testutil.TestFinalizer},
 		},
 		{
 			name:           "isReferenced=false, finalizer present -> removes finalizer, list left empty",
-			initialCM:      newFinalizerCM(testFinalizer),
+			initialCM:      newFinalizerCM(testutil.TestFinalizer),
 			isReferenced:   false,
 			wantFinalizers: nil,
 		},
@@ -454,27 +365,27 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 		{
 			name: "strips all legacy per-node finalizers, keeps foreign and in-use",
 			initialCM: newFinalizerCM(
-				testLegacyRulesfileFinalizer, testFinalizer,
-				testLegacyPluginFinalizer, testForeignFinalizer, testLegacyConfigFinalizer),
+				testutil.TestLegacyRulesfileFinalizer, testutil.TestFinalizer,
+				testutil.TestLegacyPluginFinalizer, testutil.TestForeignFinalizer, testutil.TestLegacyConfigFinalizer),
 			isReferenced:   true,
-			wantFinalizers: []string{testForeignFinalizer, testFinalizer},
+			wantFinalizers: []string{testutil.TestForeignFinalizer, testutil.TestFinalizer},
 		},
 		{
 			name:           "strips legacy finalizer and adds in-use in one reconcile",
-			initialCM:      newFinalizerCM(testLegacyPluginFinalizer),
+			initialCM:      newFinalizerCM(testutil.TestLegacyPluginFinalizer),
 			isReferenced:   true,
-			wantFinalizers: []string{testFinalizer},
+			wantFinalizers: []string{testutil.TestFinalizer},
 		},
 		{
 			name:           "strips the last (legacy) finalizer, list left empty",
-			initialCM:      newFinalizerCM(testLegacyConfigFinalizer),
+			initialCM:      newFinalizerCM(testutil.TestLegacyConfigFinalizer),
 			isReferenced:   false,
 			wantFinalizers: nil,
 		},
 		{
 			// Removal takes the MergeFrom path (c.Patch), so the Patch interceptor fires.
 			name:      "patch error propagates on removal",
-			initialCM: newFinalizerCM(testFinalizer),
+			initialCM: newFinalizerCM(testutil.TestFinalizer),
 			interceptPatch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return fmt.Errorf("server unavailable")
 			},
@@ -485,7 +396,7 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			builder := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.initialCM)
 			if tt.interceptPatch != nil {
 				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
@@ -495,7 +406,7 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 			cl := builder.Build()
 
 			err := controllerhelper.ReconcileInUseFinalizer(
-				context.Background(), cl, tt.initialCM, testFinalizer, tt.isReferenced)
+				context.Background(), cl, tt.initialCM, testutil.TestFinalizer, tt.isReferenced)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -512,8 +423,8 @@ func TestReconcileInUseFinalizer(t *testing.T) {
 }
 
 func TestReconcileInUseFinalizer_NoOpGuardSkipsPatch(t *testing.T) {
-	s := newFinalizerScheme(t)
-	cm := newFinalizerCM(testFinalizer, testForeignFinalizer)
+	s := testutil.Scheme(t)
+	cm := newFinalizerCM(testutil.TestFinalizer, testutil.TestForeignFinalizer)
 	patchCalls := 0
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
@@ -527,35 +438,31 @@ func TestReconcileInUseFinalizer_NoOpGuardSkipsPatch(t *testing.T) {
 		Build()
 
 	err := controllerhelper.ReconcileInUseFinalizer(
-		context.Background(), cl, cm, testFinalizer, true)
+		context.Background(), cl, cm, testutil.TestFinalizer, true)
 	require.NoError(t, err)
 	assert.Equal(t, 0, patchCalls, "no API call expected when finalizer state already matches")
 }
 
 func TestReconcileInUseFinalizer_GetNotFound(t *testing.T) {
-	s := newFinalizerScheme(t)
+	s := testutil.Scheme(t)
 	cl := fake.NewClientBuilder().WithScheme(s).Build() // object never created
 
 	err := controllerhelper.ReconcileInUseFinalizer(
-		context.Background(), cl, newFinalizerCM(), testFinalizer, true)
+		context.Background(), cl, newFinalizerCM(), testutil.TestFinalizer, true)
 	require.NoError(t, err, "object already gone is treated as nothing to do, not an error")
 }
 
 func TestReconcileInUseFinalizer_GetOtherError(t *testing.T) {
-	s := newFinalizerScheme(t)
+	s := testutil.Scheme(t)
 	cm := newFinalizerCM()
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(cm).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return fmt.Errorf("api server unavailable")
-			},
-		}).
+		WithInterceptorFuncs(testutil.FailGet(fmt.Errorf("api server unavailable"))).
 		Build()
 
 	err := controllerhelper.ReconcileInUseFinalizer(
-		context.Background(), cl, cm, testFinalizer, true)
+		context.Background(), cl, cm, testutil.TestFinalizer, true)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "api server unavailable")
 }
@@ -570,7 +477,7 @@ func TestReconcileInUseFinalizer_PatchErrors(t *testing.T) {
 		{"Conflict", k8serrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, "my-cm", fmt.Errorf("conflict")), true},
 	} {
 		t.Run(mkErr.name, func(t *testing.T) {
-			s := newFinalizerScheme(t)
+			s := testutil.Scheme(t)
 			cm := newFinalizerCM()
 			cl := fake.NewClientBuilder().
 				WithScheme(s).
@@ -583,7 +490,7 @@ func TestReconcileInUseFinalizer_PatchErrors(t *testing.T) {
 				Build()
 
 			err := controllerhelper.ReconcileInUseFinalizer(
-				context.Background(), cl, cm, testFinalizer, true)
+				context.Background(), cl, cm, testutil.TestFinalizer, true)
 			if mkErr.wantErr {
 				require.Error(t, err)
 				assert.True(t, k8serrors.IsConflict(err), "Conflict must be returned so the reconcile is retried")

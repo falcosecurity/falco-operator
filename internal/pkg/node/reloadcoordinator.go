@@ -30,34 +30,34 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 )
 
-// DefaultReloadRetryInterval is the delay before retrying a failed PID-find or kill attempt.
-const DefaultReloadRetryInterval = 5 * time.Second
+// defaultReloadRetryInterval is the delay before retrying a failed PID-find or kill attempt.
+const defaultReloadRetryInterval = 5 * time.Second
 
 // DefaultReloadCooldown is the minimum pause after SIGHUP before checking HTTP availability
 // or sending a follow-up signal. It limits repeated signals; it does not confirm a completed reload.
 const DefaultReloadCooldown = 5 * time.Second
 
-// DefaultWaitForReadyTimeout is the maximum time to wait for Falco to become ready after a
+// defaultWaitForReadyTimeout is the maximum time to wait for Falco to become ready after a
 // SIGHUP before giving up and continuing the loop. This prevents the coordinator from stalling
 // indefinitely if Falco crashes (OOM kill, reload bug) and never recovers: after the timeout the
 // coordinator logs a warning and re-enters the main loop so any queued write can be processed.
-const DefaultWaitForReadyTimeout = 5 * time.Minute
+const defaultWaitForReadyTimeout = 5 * time.Minute
 
-// ProcFinder locates a running process by name.
-type ProcFinder interface {
+// processFinder locates a running process by name.
+type processFinder interface {
 	FindPID(name string) (int, error)
 }
 
-// OSProcFinder implements ProcFinder using the Linux /proc filesystem. Requires the sidecar and
+// osProcessFinder implements processFinder using the Linux /proc filesystem. Requires the sidecar and
 // Falco to share a PID namespace (shareProcessNamespace: true on the Pod spec).
-type OSProcFinder struct {
+type osProcessFinder struct {
 	// procPath overrides the /proc root; empty means /proc. Set by tests only.
 	procPath string
 }
 
 // FindPID scans /proc/[0-9]+/comm for a process whose name matches name (trimmed of whitespace).
 // Returns an error when no match is found or /proc cannot be read.
-func (f *OSProcFinder) FindPID(name string) (int, error) {
+func (f *osProcessFinder) FindPID(name string) (int, error) {
 	root := f.procPath
 	if root == "" {
 		root = "/proc"
@@ -85,14 +85,14 @@ func (f *OSProcFinder) FindPID(name string) (int, error) {
 	return 0, fmt.Errorf("process %q not found in /proc", name)
 }
 
-// ReloadCoordinator sends SIGHUP to the Falco process after all pending writes have landed on
+// reloadCoordinator sends SIGHUP to the Falco process after all pending writes have landed on
 // disk, then waits for Falco to come back up before processing the next reload request.
 //
 // It coordinates operator-controlled reloads on top of Falco's own inotify-based file watching
 // (watch_config_files: true), requesting a follow-up reload for writes made while Falco's
 // filesystem watches are being re-registered.
 //
-// Any number of concurrent NotifyWrite() calls collapse into at most one pending reload signal:
+// Any number of concurrent notifyWrite() calls collapse into at most one pending reload signal:
 // the buffered pending channel has capacity 1. Writes that arrive while a reload is in flight are
 // already on disk by the time the coordinator fires the follow-up SIGHUP after WaitAndFetch
 // returns. HTTP availability alone does not confirm that the requested configuration was applied.
@@ -101,41 +101,41 @@ func (f *OSProcFinder) FindPID(name string) (int, error) {
 // On FindPID or kill failure the coordinator arms a retry timer (retryInterval) so a reload is
 // never permanently deferred if no new write ever arrives.
 //
-// ReloadCoordinator implements manager.Runnable.
-type ReloadCoordinator struct {
+// reloadCoordinator implements manager.Runnable.
+type reloadCoordinator struct {
 	pending       chan struct{}
 	falcoURL      string
-	procFinder    ProcFinder
+	procFinder    processFinder
 	killFn        func(pid int, sig syscall.Signal) error
 	retryInterval time.Duration
 	cooldown      time.Duration
 	waitTimeout   time.Duration // max time to wait for Falco to become ready after SIGHUP
 }
 
-// NewReloadCoordinator returns a ReloadCoordinator that sends SIGHUP to the process named "falco"
+// newReloadCoordinator returns a reloadCoordinator that sends SIGHUP to the process named "falco"
 // and waits for falcoURL's /versions endpoint to become available.
-func NewReloadCoordinator(falcoURL string) *ReloadCoordinator {
-	return &ReloadCoordinator{
+func newReloadCoordinator(falcoURL string) *reloadCoordinator {
+	return &reloadCoordinator{
 		pending:       make(chan struct{}, 1),
 		falcoURL:      falcoURL,
-		procFinder:    &OSProcFinder{},
+		procFinder:    &osProcessFinder{},
 		killFn:        syscall.Kill,
-		retryInterval: DefaultReloadRetryInterval,
+		retryInterval: defaultReloadRetryInterval,
 		cooldown:      DefaultReloadCooldown,
-		waitTimeout:   DefaultWaitForReadyTimeout,
+		waitTimeout:   defaultWaitForReadyTimeout,
 	}
 }
 
-// WithCooldown sets the positive pause after a successful SIGHUP. Call before Start.
-func (rc *ReloadCoordinator) WithCooldown(cooldown time.Duration) *ReloadCoordinator {
+// withCooldown sets the positive pause after a successful SIGHUP. Call before Start.
+func (rc *reloadCoordinator) withCooldown(cooldown time.Duration) *reloadCoordinator {
 	rc.cooldown = cooldown
 	return rc
 }
 
-// NotifyWrite signals that at least one file has been written to disk and Falco should reload.
+// notifyWrite signals that at least one file has been written to disk and Falco should reload.
 // It is safe to call from multiple goroutines concurrently. If a request is already pending,
 // the call is a no-op. Writes during the wait queue a follow-up signal.
-func (rc *ReloadCoordinator) NotifyWrite() {
+func (rc *reloadCoordinator) notifyWrite() {
 	select {
 	case rc.pending <- struct{}{}:
 	default:
@@ -144,7 +144,11 @@ func (rc *ReloadCoordinator) NotifyWrite() {
 
 // Start implements manager.Runnable. It blocks until ctx is canceled, sending SIGHUP to Falco
 // whenever a write is pending and waiting for Falco to become ready before the next SIGHUP.
-func (rc *ReloadCoordinator) Start(ctx context.Context) error {
+// NeedLeaderElection reports that the reloadCoordinator runs on every pod, not just the leader:
+// it asks the Falco it shares a pod with to reload, which no other replica can do for it.
+func (rc *reloadCoordinator) NeedLeaderElection() bool { return false }
+
+func (rc *reloadCoordinator) Start(ctx context.Context) error {
 	if rc.cooldown <= 0 {
 		return fmt.Errorf("reload cooldown must be positive, got %s", rc.cooldown)
 	}

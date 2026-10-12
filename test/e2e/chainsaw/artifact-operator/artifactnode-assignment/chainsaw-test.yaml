@@ -1,0 +1,626 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-assignment
+spec:
+  description: |
+    Exercises the instance operator's assignment controller: one ArtifactNode per (namespace, node)
+    that runs a Falco pod, listing the artifacts whose selector selects the node. It runs on KWOK fake
+    nodes, so no artifact operator ever reports on the ArtifactNodes. Their status stays empty, which is what
+    lets an ArtifactNode be deleted as soon as nothing is assigned to it, and a parent be deleted without waiting
+    for a node to clean up.
+
+    Every artifact selects nodes by chainsaw-node-group=($namespace), a label only this test's own fake
+    nodes carry, so matching is isolated from the real nodes and from other tests.
+
+    A node gets an ArtifactNode only while a Falco pod runs on it, not merely because its labels match a
+    selector (scenario 3).
+
+    Scenarios:
+    1. A Falco pod on fake-node-a and three artifacts selecting it: its ArtifactNode lists them all, sorted by
+       kind and name, with the node name in the spec.
+    2. A second node joins with its own Falco pod: it gets its own ArtifactNode with the same assignment, and the
+       first ArtifactNode is untouched.
+    3. A third node matches every selector but runs no Falco pod: it gets no ArtifactNode. Once a Falco pod runs on
+       it, it gets one.
+    4. A Rulesfile is deleted. Its deletion is not held up (no node reports it) and it leaves every ArtifactNode.
+    5. A Config's own selector is changed to select nothing: it leaves every ArtifactNode, and comes back when the
+       selector is restored.
+    6. A node is relabeled so it no longer matches: nothing is assigned to it and its status is empty, so
+       its ArtifactNode is deleted.
+    7. A second Falco pod appears on fake-node-a: the unsupported situation is reported as a Warning
+       Event on the ArtifactNode, and the assignment carries on.
+    8. The node is deleted: its ArtifactNode is deleted with it.
+
+  bindings:
+    - name: rulesfile_one
+      value: assignment-rulesfile-one
+    - name: rulesfile_two
+      value: assignment-rulesfile-two
+    - name: config_name
+      value: assignment-config
+    - name: test_name
+      value: artifactnode-assignment
+    - name: falco_name
+      value: assignment-falco
+    - name: node_a_name
+      value: (join('-', ['assign-node-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['assign-node-b', $namespace]))
+    - name: node_c_name
+      value: (join('-', ['assign-node-c', $namespace]))
+    - name: falco_pod_c_name
+      value: (join('-', ['falco-pod-c', $namespace]))
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_a2_name
+      value: (join('-', ['falco-pod-a2', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-a-falco-and-pod"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      description: Minimal Falco CR, no actual Falco runs; its name labels the stub pods.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod-on-node-a"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 02: Create-artifacts"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_one)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw assignment rule one
+                    desc: Rule used to verify node assignment.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=assignment-one"
+                    priority: DEBUG
+                    tags: [test]
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_two)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw assignment rule two
+                    desc: Rule used to verify node assignment.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=assignment-two"
+                    priority: DEBUG
+                    tags: [test]
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                config:
+                  json_output: false
+
+    - name: "Step 03: Assert-node-a-ArtifactNode-lists-every-artifact"
+      description: The ArtifactNode is named after the node, and its list is sorted by kind then name.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_a_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Rulesfile
+                  - Rulesfile
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+                  - ($rulesfile_two)
+
+    - name: "Step 04: Node-b-joins"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 04b: Create-falco-pod-on-node-b"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 05: Assert-node-b-gets-its-own-ArtifactNode"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_b_name)
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+                  - ($rulesfile_two)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 3
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_one)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_two)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 05b: Node-c-matches-but-runs-no-falco-pod"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_c_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 05c: Assert-node-c-gets-no-artifactnode"
+      description: A matching label is not enough. Only a node that runs a Falco pod has an artifact operator to act on the assignment.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_c_name)
+                namespace: ($namespace)
+
+    - name: "Step 05d: Falco-pod-on-node-c"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_c_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_c_name)
+
+    - name: "Step 05e: Assert-node-c-now-has-one"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_c_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_c_name)
+                (length(artifacts)): 3
+
+    - name: "Step 06: Delete-a-rulesfile"
+      description: |
+        No node reports on the Rulesfile, so nothing holds its deletion. The delete only returns once the
+        object is gone.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($node_a_name)
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: node_a_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($node_b_name)
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: node_b_uid
+                value: (json_parse($stdout).uid)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_two)
+              namespace: ($namespace)
+        # One artifact leaving must update the ArtifactNodes in place: the same objects, still listing the others.
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                uid: ($node_a_uid)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+                uid: ($node_b_uid)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+
+    - name: "Step 07: Assert-the-rulesfile-left-both-ArtifactNodes"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+
+    - name: "Step 07b: Change-a-configs-own-selector"
+      description: The Config now selects no node, though the nodes are unchanged.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: selects-nothing
+
+    - name: "Step 07c: Assert-the-config-left-every-ArtifactNode"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 07d: Restore-the-selector"
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+                  - ($rulesfile_one)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 08: Relabel-node-b-away"
+      description: Node b still exists and still runs a Falco pod, but no artifact selects it any longer.
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_b_name)
+                labels:
+                  chainsaw-node-group: relabeled-away
+
+    - name: "Step 09: Wait-for-node-b-ArtifactNode-deleted"
+      description: Nothing is assigned and its status is empty, so the ArtifactNode has no reason to exist.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_b_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 2
+
+    - name: "Step 10: Second-falco-pod-on-node-a"
+      description: More than one Falco pod on a node in a namespace is unsupported and reported, not prevented.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a2_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 11: Assert-the-warning-and-the-assignment"
+      try:
+        - assert:
+            resource:
+              apiVersion: events.k8s.io/v1
+              kind: Event
+              metadata:
+                namespace: ($namespace)
+              type: Warning
+              reason: MultipleSidecarsOnNode
+              regarding:
+                kind: ArtifactNode
+                name: ($node_a_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 2
+
+    - name: "Step 12: Delete-node-a"
+      description: The node is gone, so nothing will ever run there again and its ArtifactNode goes with it.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 13: Delete-node-b-node-c-and-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_c_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not leave
+        either behind for the next run.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_c_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

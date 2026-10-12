@@ -264,9 +264,9 @@ func TestGenerateRole(t *testing.T) {
 		wantRuleCount int
 	}{
 		{
-			name:          "falco role has 6 rules",
+			name:          "falco role has 5 rules",
 			defs:          FalcoDefaults,
-			wantRuleCount: 6,
+			wantRuleCount: 5,
 		},
 		{
 			name:          "metacollector role has no rules",
@@ -304,19 +304,26 @@ func TestGenerateRole(t *testing.T) {
 	}
 }
 
-func TestFalcoRoleAllowsArtifactNodeCache(t *testing.T) {
+func TestFalcoRoleAllowsArtifactNodeReadAndStatusPatch(t *testing.T) {
 	role := GenerateRole(testObject(), FalcoDefaults).(*rbacv1.Role) //nolint:forcetypeassert // generator contract
 
-	var resourceRule *rbacv1.PolicyRule
-	for i := range role.Rules {
-		rule := &role.Rules[i]
-		if slices.Contains(rule.Resources, "artifactnodes") {
-			resourceRule = rule
+	verbsFor := func(resource string) []string {
+		var verbs []string
+		for i := range role.Rules {
+			if slices.Contains(role.Rules[i].Resources, resource) {
+				verbs = append(verbs, role.Rules[i].Verbs...)
+			}
 		}
+		return verbs
 	}
 
-	require.NotNil(t, resourceRule, "the artifact-operator cache needs list/watch access to ArtifactNodes")
-	assert.Subset(t, resourceRule.Verbs, []string{"get", "list", "watch"})
+	assert.Subset(t, verbsFor("artifactnodes"), []string{"get", "list", "watch"},
+		"the sidecar's cache needs to read its node's ArtifactNode")
+	assert.Contains(t, verbsFor("artifactnodes"), "patch", "the sidecar holds a finalizer on its node's object")
+	assert.Subset(t, verbsFor("artifactnodes/status"), []string{"get", "patch"},
+		"the sidecar publishes its node's status")
+	assert.NotContains(t, verbsFor("artifactnodes"), "delete", "the sidecar never creates or deletes its node's object")
+	assert.NotContains(t, verbsFor("artifactnodes"), "create")
 }
 
 func TestGenerateRoleBinding(t *testing.T) {

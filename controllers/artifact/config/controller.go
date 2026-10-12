@@ -18,371 +18,66 @@ package config
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	kerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
-const (
-	// configNodeFinalizer is the finalizer placed on ConfigNode objects by this controller.
-	configNodeFinalizer = "confignode.artifact.falcosecurity.dev/finalizer"
-	// fieldManager is the SSA field manager identifier for this controller.
-	fieldManager = "artifact-config"
-)
+// kind is the artifact kind this reconciler handles.
+const kind = artifact.KindConfig
 
 // NewConfigReconciler returns a new ConfigReconciler.
-func NewConfigReconciler(
-	cl client.Client,
-	scheme *runtime.Scheme,
-	recorder events.EventRecorder,
-	nodeName, namespace string,
-	nodeManager *node.Manager,
-) *ConfigReconciler {
-	return &ConfigReconciler{
-		Client:   cl,
-		Scheme:   scheme,
-		recorder: recorder,
-		fetcher: &artifact.Fetcher{
-			HTTPClient: &http.Client{},
-			K8sClient:  cl,
-			NodeName:   nodeName,
-		},
-		store:     nodeManager,
-		nodeName:  nodeName,
-		namespace: namespace,
-	}
+func NewConfigReconciler(cl client.Client, n *node.Node) *ConfigReconciler {
+	return &ConfigReconciler{Client: cl, node: n}
 }
 
-// ConfigReconciler reconciles a ConfigNode object assigned to this node.
+// ConfigReconciler reconciles the Configs assigned to this node by its ArtifactNode.
 type ConfigReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	recorder  events.EventRecorder
-	fetcher   artifact.ArtifactFetcher
-	store     *node.Manager
-	nodeName  string
-	namespace string
+	node *node.Node
 }
 
-// Reconcile reconciles the ConfigNode assigned to this node.
-// It reads the parent Config for spec, applies local filesystem changes,
-// and writes resulting conditions to the ConfigNode status only.
-func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
-	logger := log.FromContext(ctx)
-
-	nodeObj := &artifactv1alpha1.ArtifactNode{}
-	if err := r.Get(ctx, req.NamespacedName, nodeObj); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-	oldStatus := nodeObj.Status.DeepCopy()
-
-	// Handle deletion: clean up local resources then release the finalizer.
-	if ok, err := r.handleDeletion(ctx, nodeObj); ok || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Ensure our finalizer is set on the node object.
-	if ok, err := controllerhelper.EnsureFinalizer(ctx, r.Client, configNodeFinalizer, nodeObj); ok || err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Fetch the parent Config to get the spec.
-	config, err := r.getParentConfig(ctx, nodeObj)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if config == nil {
-		logger.V(2).Info("Parent Config not found; waiting for GC")
-		return ctrl.Result{}, nil
-	}
-
-	// Patch node object status via defer to ensure it's always called.
-	// Programmed is derived here as a gateway: True only when all other conditions are True.
-	defer func() {
-		key := node.KeyFromObj(node.KindConfig, config)
-		r.store.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumInline, artifact.MediumConfigMap}, &nodeObj.Status.InstalledArtifacts)
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
-			nodeObj.Status.Conditions, nil,
-			artifact.ReasonProgrammed, artifact.MessageProgrammed, artifact.ReasonProgramFailed,
-			config.GetGeneration(), config.Status.ObservedGeneration,
-		))
-		var patchErr error
-		if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {
-			patchErr = controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager)
-			if patchErr != nil {
-				logger.Error(patchErr, "unable to patch ConfigNode status")
-			}
-		}
-		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
-	}()
-
-	// Enforce reference resolution before the generation gate below.
-	if err := r.enforceReferenceResolution(ctx, config, nodeObj); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Wait until the instance operator has processed the current spec generation before proceeding.
-	// Placed after the status-patch defer above, so ArtifactNode status is still patched while waiting.
-	if controllerhelper.WaitForObservedGeneration(logger, config.Status.ObservedGeneration, config.Generation) {
-		return ctrl.Result{}, nil
-	}
-
-	// Ensure the configuration is written to the filesystem.
-	if err := r.ensureConfig(ctx, config, nodeObj); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+// Reconcile reconciles the Config named by req, on this node. When the spec of the node's ArtifactNode lists it,
+// it is installed. When it does not, or the Config is gone, whatever this node holds for it is removed: the node
+// controller asks for that whenever the spec stops listing an artifact, and a single reconcile per artifact at a
+// time is what keeps an install and a removal from overlapping.
+func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	return shared.ReconcileArtifact(ctx, r.Client, r.node, req, &artifactv1alpha1.Config{}, r.Cleanup)
 }
 
-// getParentConfig retrieves the parent Config via the node object's ownerRef, verifying by UID
-// that it's still the generation nodeObj was created for (see GetVerifiedOwner's doc).
-func (r *ConfigReconciler) getParentConfig(ctx context.Context, nodeObj *artifactv1alpha1.ArtifactNode) (*artifactv1alpha1.Config, error) {
-	cfg := &artifactv1alpha1.Config{}
-	ok, err := controllerhelper.GetVerifiedOwner(ctx, r.Client, nodeObj, controllerhelper.KindConfig, cfg)
-	if err != nil || !ok {
-		return nil, err
-	}
-	return cfg, nil
+// Cleanup removes everything installed for the Config named name. It is idempotent.
+func (r *ConfigReconciler) Cleanup(ctx context.Context, name string) error {
+	return shared.Remove(ctx, r.node, kind, name)
 }
 
-// handleDeletion cleans up local filesystem resources, then removes the finalizer from the ConfigNode.
-func (r *ConfigReconciler) handleDeletion(ctx context.Context, nodeObj *artifactv1alpha1.ArtifactNode) (bool, error) {
-	if nodeObj.DeletionTimestamp.IsZero() {
-		return false, nil
-	}
-	logger := log.FromContext(ctx)
-
-	if !controllerutil.ContainsFinalizer(nodeObj, configNodeFinalizer) {
-		return true, nil
-	}
-
-	logger.Info("ConfigNode marked for deletion, cleaning up")
-
-	var configName string
-	for _, ref := range nodeObj.OwnerReferences {
-		if ref.Kind == controllerhelper.KindConfig {
-			configName = ref.Name
-			break
-		}
-	}
-	// OwnerReferences never carry a namespace; nodeObj's own namespace is the config's.
-	key := node.Key{Kind: node.KindConfig, Namespace: nodeObj.Namespace, Name: configName}
-
-	if err := r.store.Remove(ctx, key); err != nil {
-		logger.Error(err, "unable to remove installed config artifacts from disk")
-		return false, err
-	}
-
-	patch := client.MergeFrom(nodeObj.DeepCopy())
-	controllerutil.RemoveFinalizer(nodeObj, configNodeFinalizer)
-	if err := r.Patch(ctx, nodeObj, patch); err != nil {
-		logger.Error(err, "unable to remove finalizer from ConfigNode")
-		return false, err
-	}
-	return true, nil
-}
-
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager registers the controller: one reconcile per Config, woken by the Config itself, by its
+// assignment on this node, by the ConfigMap it references, and by the node controller asking for its removal.
 func (r *ConfigReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	nodeFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		n, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || n.Spec.NodeName != r.nodeName {
-			return false
-		}
-		for _, ref := range n.GetOwnerReferences() {
-			if ref.Controller != nil && *ref.Controller && ref.Kind == controllerhelper.KindConfig {
-				return true
-			}
-		}
-		return false
-	})
-
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&artifactv1alpha1.ArtifactNode{}, builder.WithPredicates(nodeFilter)).
-		Watches(
-			&artifactv1alpha1.Config{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodeObjectForConfig),
-		).
-		Watches(
-			&corev1.ConfigMap{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodeObjectsForConfigMap),
-		).
+		For(&artifactv1alpha1.Config{}, builder.WithPredicates(shared.ParentChanged())).
+		Watches(&artifactv1alpha1.ArtifactNode{}, shared.AssignmentHandler(kind)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.findConfigsForConfigMap)).
+		// The node controller asks for the removal of what the node holds for an artifact the spec of its ArtifactNode no
+		// longer lists.
+		WatchesRawSource(source.Channel(r.node.RemovalRequests(kind), &handler.EnqueueRequestForObject{})).
 		Named("artifact-config").
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "artifact-config", &artifactv1alpha1.ArtifactNode{})).
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "artifact-config", &artifactv1alpha1.Config{})).
 		Complete(r)
 }
 
-// findNodeObjectForConfig maps a Config event to this node's ConfigNode request.
-func (r *ConfigReconciler) findNodeObjectForConfig(_ context.Context, obj client.Object) []reconcile.Request {
-	name := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, obj.GetName(), r.nodeName)
-	return []reconcile.Request{
-		{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: name}},
-	}
-}
-
-// findNodeObjectsForConfigMap maps a ConfigMap event to ConfigNode requests on this node.
-func (r *ConfigReconciler) findNodeObjectsForConfigMap(ctx context.Context, configMap client.Object) []reconcile.Request {
-	logger := log.FromContext(ctx)
-	configList := &artifactv1alpha1.ConfigList{}
-
-	indexKey := configMap.GetNamespace() + "/" + configMap.GetName()
-	if err := r.List(ctx, configList, client.MatchingFields{index.ConfigMapOnConfig: indexKey}); err != nil {
-		logger.Error(err, "unable to list Configs by ConfigMap index")
-		return nil
-	}
-
-	reqs := make([]reconcile.Request, len(configList.Items))
-	for i := range configList.Items {
-		name := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, configList.Items[i].Name, r.nodeName)
-		reqs[i] = reconcile.Request{
-			NamespacedName: client.ObjectKey{Namespace: configList.Items[i].Namespace, Name: name},
-		}
-	}
-	return reqs
-}
-
-// enforceReferenceResolution checks that all referenced resources exist.
-func (r *ConfigReconciler) enforceReferenceResolution(
-	ctx context.Context, config *artifactv1alpha1.Config, nodeObj *artifactv1alpha1.ArtifactNode,
-) error {
-	var checks []controllerhelper.ReferenceCheck
-	if config.Spec.ConfigMapRef != nil {
-		checks = append(checks, controllerhelper.ConfigMapReferenceCheck(config.Namespace, config.Spec.ConfigMapRef.Name))
-	}
-	return controllerhelper.ResolveReferences(ctx, r.Client, r.recorder, config, &nodeObj.Status.Conditions, checks...)
-}
-
-// ensureConfig ensures the configuration is written to the filesystem.
-// For each source medium (inline, configmap), if the source is no longer in spec
-// but a tracked file exists, it is removed first (stale cleanup).
-func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1alpha1.Config, nodeObj *artifactv1alpha1.ArtifactNode) error {
-	gen := config.GetGeneration()
-	logger := log.FromContext(ctx)
-	p := config.Spec.Priority
-	key := node.KeyFromObj(node.KindConfig, config)
-
-	// Stale-entry cleanup: remove files and conditions for mediums no longer in spec.
-	if config.Spec.Config == nil {
-		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumInline); err != nil {
-			logger.Error(err, "unable to remove stale inline config")
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, err.Error(), gen,
-			))
-			return err
-		} else if removed {
-			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
-		}
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
-	}
-	if config.Spec.ConfigMapRef == nil {
-		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumConfigMap); err != nil {
-			logger.Error(err, "unable to remove stale configmap config")
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, err.Error(), gen,
-			))
-			return err
-		} else if removed {
-			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumConfigMap)
-		}
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigMapArtifactProgrammed.String())
-	}
-
-	// Store inline config if specified.
-	// spec.config is stored as JSON by the API server; convert to YAML before writing to disk.
-	if config.Spec.Config != nil {
-		configData, err := common.JSONRawToYAML(config.Spec.Config)
-		if err != nil {
-			logger.Error(err, "unable to convert inline config to YAML")
-			artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonInlineArtifactProgramFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
-		if configData != nil {
-			result, err := r.fetcher.FetchInline(ctx, []byte(*configData))
-			if err != nil {
-				logger.Error(err, "unable to prepare inline config content")
-				artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
-					metav1.ConditionFalse, artifact.ReasonInlineArtifactProgramFailed,
-					fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
-				))
-				return err
-			}
-			inlineAction, _, err := r.store.StoreConfig(ctx, config.Namespace, config.Name, p, artifact.MediumInline, result)
-			if err != nil {
-				logger.Error(err, "unable to store inline config")
-				artifact.RecordWarning(r.recorder, config, artifact.ReasonInlineConfigStoreFailed, artifact.MessageFormatConfigStoreFailed, err.Error())
-				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
-					metav1.ConditionFalse, artifact.ReasonInlineArtifactProgramFailed,
-					fmt.Sprintf(artifact.MessageFormatConfigStoreFailed, err.Error()), gen,
-				))
-				return err
-			}
-			r.store.SyncInstalledStatus(key, artifact.MediumInline, &nodeObj.Status.InstalledArtifacts)
-			artifact.RecordStoreEvent(r.recorder, config, inlineAction, artifact.MediumInline)
-		}
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewInlineArtifactProgrammedCondition(
-			metav1.ConditionTrue, artifact.ReasonInlineArtifactProgrammed, artifact.MessageInlineArtifactProgrammed, gen,
-		))
-	}
-
-	// Store ConfigMap config if specified.
-	if config.Spec.ConfigMapRef != nil {
-		result, err := r.fetcher.FetchConfigMap(ctx, config.Namespace, config.Spec.ConfigMapRef, artifact.KindConfig)
-		if err != nil {
-			logger.Error(err, "unable to fetch config from ConfigMap reference")
-			artifact.RecordWarning(r.recorder, config,
-				artifact.ReasonConfigMapConfigStoreFailed, artifact.MessageFormatConfigMapConfigStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonConfigMapArtifactProgramFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapConfigStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
-		cmAction, _, err := r.store.StoreConfig(ctx, config.Namespace, config.Name, p, artifact.MediumConfigMap, result)
-		if err != nil {
-			logger.Error(err, "unable to store config from ConfigMap reference")
-			artifact.RecordWarning(r.recorder, config,
-				artifact.ReasonConfigMapConfigStoreFailed, artifact.MessageFormatConfigMapConfigStoreFailed, err.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
-				metav1.ConditionFalse, artifact.ReasonConfigMapArtifactProgramFailed,
-				fmt.Sprintf(artifact.MessageFormatConfigMapConfigStoreFailed, err.Error()), gen,
-			))
-			return err
-		}
-		r.store.SyncInstalledStatus(key, artifact.MediumConfigMap, &nodeObj.Status.InstalledArtifacts)
-		artifact.RecordStoreEvent(r.recorder, config, cmAction, artifact.MediumConfigMap)
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigMapArtifactProgrammedCondition(
-			metav1.ConditionTrue, artifact.ReasonConfigMapArtifactProgrammed, artifact.MessageConfigMapArtifactProgrammed, gen,
-		))
-	}
-
-	return nil
+// findConfigsForConfigMap maps a ConfigMap event to the Configs that reference it.
+func (r *ConfigReconciler) findConfigsForConfigMap(ctx context.Context, configMap client.Object) []reconcile.Request {
+	return controllerhelper.RequestsReferencing(ctx, r.Client, &artifactv1alpha1.ConfigList{}, index.ConfigMapOnConfig, configMap)
 }

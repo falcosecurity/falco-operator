@@ -82,8 +82,9 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
   catch:
     - description: Capture debug snapshot on failure

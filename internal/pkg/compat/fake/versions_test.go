@@ -30,9 +30,7 @@ func TestMockVersionsFetcher(t *testing.T) {
 		m := NewMockVersionsFetcher(map[string]string{"falco_version": "0.44.1"})
 		v, err := m.Fetch(context.Background())
 		require.NoError(t, err)
-		val, found := v.Capability("falco_version")
-		assert.True(t, found)
-		assert.Equal(t, "0.44.1", val)
+		assert.Equal(t, map[string]string{"falco_version": "0.44.1"}, v.All())
 	})
 
 	t.Run("returns configured error", func(t *testing.T) {
@@ -47,8 +45,6 @@ func TestNewMockVersionsFetcherWithPlugins(t *testing.T) {
 	v, err := m.Fetch(context.Background())
 	require.NoError(t, err)
 
-	assert.Equal(t, map[string]string{"container": "0.7.1"}, v.PluginVersions())
-	val, found := v.Capability("container")
-	assert.True(t, found, "plugin entries must also be flattened into capabilities, matching real Fetch behavior")
-	assert.Equal(t, "0.7.1", val)
+	assert.Equal(t, map[string]string{"container": "0.7.1"}, v.All(),
+		"plugin entries must be flattened into capabilities, matching real Fetch behavior")
 }

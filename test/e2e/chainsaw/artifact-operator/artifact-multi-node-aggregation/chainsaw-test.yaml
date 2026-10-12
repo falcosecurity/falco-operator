@@ -12,11 +12,11 @@ spec:
     Both fake nodes match a selector scoped to chainsaw-node-group=($namespace), isolating this
     test from the real cluster node and from other tests' fake nodes running in parallel.
 
-    Most scenarios below directly status-patch (or metadata-patch) the ArtifactNode objects to
-    simulate what a real per-node sidecar would report, then rely on each parent CR's own
-    ArtifactNode watch (EnqueueRequestForOwner) to trigger a real reconcile: no manual
-    reconcile trigger is needed, the assert steps' own retry/poll is what waits for that
-    reconcile to land.
+    All scenarios below write the status of each node's ArtifactNode (see
+    common/scripts/simulate_sidecar_report.sh) to simulate what the artifact operator on that node
+    would report, then rely on the parent aggregators' watch of ArtifactNodes to trigger a real
+    reconcile: no manual reconcile trigger is needed, the assert steps' own retry/poll is what
+    waits for that reconcile to land.
 
     Scenario 1: False beats True (AggregateConditions, internal/pkg/controllerhelper/
     aggregate.go): status-patch node-a to Programmed=True and node-b to Programmed=False, then
@@ -40,21 +40,20 @@ spec:
 
     Scenario 4: independent condition types (byType map in AggregateConditions): add a second
     condition type, DeletionBlocked (the same type name a real per-node sidecar sets in
-    rulesfile-oci-plugin-dep-finalizer), on both nodes' Plugin ArtifactNode alongside the
+    rulesfile-oci-plugin-dep-finalizer), on both nodes' Plugin entry alongside the
     existing Programmed condition, and assert the parent Plugin aggregates BOTH types
     independently; Programmed keeps reflecting Scenario 3's Unknown, DeletionBlocked
     aggregates separately to True. Then remove DeletionBlocked from both nodes and assert it
     disappears from the parent entirely (ApplyAggregateConditions' condition-type removal,
     aggregate.go's RemoveStatusCondition call) rather than lingering stale.
 
-    Scenario 5: NodeObjectsInUseFinalizer actually gates deletion (nodeobject.go:62-65,
-    DeleteNodeObjectsForParentDeletion in ownednodes.go:122-148): inject a simulated finalizer
-    (the same technique artifact-node-lifecycle uses) onto only ONE of the two ArtifactNodes,
-    then delete all three parent CRs. Assert each parent CR persists (deletionTimestamp set,
-    finalizer still present) as long as that one ArtifactNode remains, and the OTHER
-    (unheld) ArtifactNode is already gone, proving the finalizer really is driven by "any
-    owned ArtifactNode still exists", not e.g. an unconditional grace period. Then release the
-    simulated finalizer and assert the parent CRs actually finish deleting.
+    Scenario 5: NodeObjectsInUseFinalizer actually gates deletion: delete all three parent CRs
+    while both nodes report on them. The assignment controller drops the deleted artifacts from
+    both nodes' specs, but a parent is released only once no node lists it or reports on it.
+    Simulate the artifact operator of node a finishing its cleanup (it withdraws its entries)
+    while node b's keeps holding them: assert each parent persists (deletionTimestamp set,
+    finalizer still present), node a's ArtifactNode, with nothing left to say, is deleted, and
+    node b's stays. Then let node b's artifact operator finish and assert the parents are deleted.
 
     Scenario 5 uses `kubectl delete --wait=false` (not chainsaw's native delete step, which
     polls for actual removal and would time out against the intentionally-blocked deletion) to
@@ -77,8 +76,6 @@ spec:
       value: (join('-', ['agg-node-a', $namespace]))
     - name: node_b_name
       value: (join('-', ['agg-node-b', $namespace]))
-    - name: hold_finalizer
-      value: chainsaw.kyverno.io/simulated-node-hold
     - name: falco_name
       value: multi-node-agg-falco
     - name: falco_pod_a_name
@@ -207,66 +204,37 @@ spec:
                 config:
                   json_output: false
 
-    - name: "Step 06: Assert-both-artifact-nodes-exist-per-kind"
+    - name: "Step 06: Assert-both-nodes-list-every-artifact"
       description: |
-        Both fake nodes match all three selectors, so the aggregator creates two ArtifactNodes
-        per CR. Names are the deterministic NodeObjectName format:
-        "<kind>--<artifactName>--<nodeName>".
+        Both fake nodes match all three selectors, so the assignment controller creates an ArtifactNode
+        for each of them, named after the node and listing the three artifacts sorted by kind and name.
       try:
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                name: ($node_a_name)
                 namespace: ($namespace)
               spec:
                 nodeName: ($node_a_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                name: ($node_b_name)
                 namespace: ($namespace)
               spec:
                 nodeName: ($node_b_name)
-        - assert:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_a_name]))
-                namespace: ($namespace)
-              spec:
-                nodeName: ($node_a_name)
-        - assert:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-              spec:
-                nodeName: ($node_b_name)
-        - assert:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_a_name]))
-                namespace: ($namespace)
-              spec:
-                nodeName: ($node_a_name)
-        - assert:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-              spec:
-                nodeName: ($node_b_name)
+                (artifacts[*].kind):
+                  - Config
+                  - Plugin
+                  - Rulesfile
 
     - name: "Step 07: Patch-node-a-artifactnodes-to-programmed-true"
       description: |
@@ -274,106 +242,36 @@ spec:
         ArtifactNode has +kubebuilder:subresource:status; a plain patch to the main resource
         would silently be ignored for status fields.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthy
-                    message: Simulated healthy per-node sidecar for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthy
-                    message: Simulated healthy per-node sidecar for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthy
-                    message: Simulated healthy per-node sidecar for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 08: Patch-node-b-artifactnodes-to-programmed-false"
       description: Simulates a failing per-node sidecar on fake-node-b, alongside node-a's healthy one.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "False"
-                    reason: SimulatedFailure
-                    message: Simulated per-node failure for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "False"
-                    reason: SimulatedFailure
-                    message: Simulated per-node failure for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "False"
-                    reason: SimulatedFailure
-                    message: Simulated per-node failure for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: CONDITIONS
+                value: Programmed:False:SimulatedFailure
+              - name: MESSAGE
+                value: Simulated per-node failure for aggregation test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 09: Assert-aggregate-reflects-worst-status"
       description: |
@@ -425,102 +323,34 @@ spec:
         assertion below correct regardless of that order, while still proving the transition
         from Scenario 1's False back to a clean True.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthyAll
+              - name: MESSAGE
+                value: All nodes healthy for aggregation test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthyAll
+              - name: MESSAGE
+                value: All nodes healthy for aggregation test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 11: Assert-aggregate-all-true-message-has-no-failing-nodes-suffix"
       description: |
@@ -671,54 +501,20 @@ spec:
     - name: "Step 12: Patch-node-b-artifactnodes-to-programmed-unknown"
       description: Scenario 3. Only fake-node-b changes; fake-node-a stays True from Step 10.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "Unknown"
-                    reason: SimulatedPending
-                    message: Simulated per-node initialization pending for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "Unknown"
-                    reason: SimulatedPending
-                    message: Simulated per-node initialization pending for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "Unknown"
-                    reason: SimulatedPending
-                    message: Simulated per-node initialization pending for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: CONDITIONS
+                value: Programmed:Unknown:SimulatedPending
+              - name: MESSAGE
+                value: Simulated per-node initialization pending for aggregation test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 13: Assert-aggregate-unknown-wins-over-true"
       description: |
@@ -773,50 +569,30 @@ spec:
         array, so omitting Programmed here would silently wipe it. Both nodes get the same
         DeletionBlocked reason/message for the same List-order-independence reason as Step 10.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: DeletionBlocked
-                    status: "True"
-                    reason: SimulatedNodeBlock
-                    message: Simulated node-level deletion block for aggregation type test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "Unknown"
-                    reason: SimulatedPending
-                    message: Simulated per-node initialization pending for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: DeletionBlocked
-                    status: "True"
-                    reason: SimulatedNodeBlock
-                    message: Simulated node-level deletion block for aggregation type test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthyAll,DeletionBlocked:True:SimulatedNodeBlock,ConfigProgrammed:True:SimulatedConfig
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: Programmed:Unknown:SimulatedPending,DeletionBlocked:True:SimulatedNodeBlock,ConfigProgrammed:True:SimulatedConfig
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 15: Assert-plugin-aggregates-both-condition-types-independently"
       description: |
@@ -839,42 +615,41 @@ spec:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
                     reason: SimulatedNodeBlock
+                # DeletionBlocked has an aggregation of its own. ConfigProgrammed is an ordinary type,
+                # so it is the one that goes through the per-type aggregation next to Programmed.
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+                    reason: SimulatedConfig
 
     - name: "Step 16: Remove-deletionblocked-condition-from-plugin-artifactnodes"
       description: Scenario 4. Both nodes drop back to reporting only Programmed.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedHealthyAll
-                    message: All nodes healthy for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: Programmed
-                    status: "Unknown"
-                    reason: SimulatedPending
-                    message: Simulated per-node initialization pending for aggregation test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthyAll
+              - name: MESSAGE
+                value: All nodes healthy for aggregation test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: Programmed:Unknown:SimulatedPending
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 17: Assert-deletionblocked-condition-removed-from-plugin-parent"
       description: |
@@ -892,52 +667,17 @@ spec:
                 namespace: ($namespace)
               status:
                 (conditions[?type == 'DeletionBlocked']): []
+                (conditions[?type == 'ConfigProgrammed']): []
                 (conditions[?type == 'Programmed']):
                   - status: 'Unknown'
                     reason: SimulatedPending
-
-    - name: "Step 18: Add-simulated-finalizer-to-node-b-artifactnodes"
-      description: |
-        Scenario 5. Simulates a real per-node sidecar having claimed only fake-node-b's
-        ArtifactNodes (fake-node-a's are left untouched, with no finalizer): see
-        artifact-node-lifecycle's Step 06 for why EnsureNodeObject itself never sets one.
-        This is what makes Scenario 5's deletion-blocked window observable and deterministic:
-        fake-node-a's ArtifactNodes will delete immediately once parent deletion is requested,
-        while fake-node-b's stay stuck until Step 22 releases this finalizer.
-      try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers:
-                  - ($hold_finalizer)
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers:
-                  - ($hold_finalizer)
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers:
-                  - ($hold_finalizer)
 
     - name: "Step 19: Request-parent-cr-deletion-non-blocking"
       description: |
         Scenario 5. Uses kubectl --wait=false, not chainsaw's native delete step: that step
         polls for actual removal and would time out here, since deletion is intentionally
-        blocked by Step 18's simulated finalizer until Step 22 releases it.
+        blocked while node b's artifact operator keeps reporting on the artifacts, until Step 22
+        lets it finish.
       try:
         - script:
             env:
@@ -956,10 +696,9 @@ spec:
 
     - name: "Step 20: Assert-parents-still-present-and-blocked"
       description: |
-        Scenario 5. artifact.falcosecurity.dev/node-objects-in-use only releases once every
-        owned ArtifactNode is actually gone (DeleteNodeObjectsForParentDeletion), with
-        fake-node-b's ArtifactNodes stuck, that never happens yet, so each parent must persist
-        with a deletionTimestamp and the finalizer still present.
+        Scenario 5. artifact.falcosecurity.dev/node-objects-in-use only releases once no node
+        lists the artifact or reports on it, and both nodes still report on it, so each parent
+        must persist with a deletionTimestamp and the finalizer still present.
       try:
         - assert:
             resource:
@@ -969,7 +708,7 @@ spec:
                 name: ($plugin_name)
                 namespace: ($namespace)
                 (deletionTimestamp != null): true
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -978,7 +717,7 @@ spec:
                 name: ($rulesfile_name)
                 namespace: ($namespace)
                 (deletionTimestamp != null): true
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -987,94 +726,92 @@ spec:
                 name: ($config_name)
                 namespace: ($namespace)
                 (deletionTimestamp != null): true
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
 
-    - name: "Step 21: Assert-node-a-gone-node-b-stuck-terminating"
+    - name: "Step 21: Node-a-finishes-cleanup"
       description: |
-        Scenario 5. fake-node-a's ArtifactNodes had no finalizer, so
-        DeleteNodeObjectsForParentDeletion's plain Delete already removed them. fake-node-b's
-        are held open by Step 18's simulated finalizer, present but Terminating, not yet
-        actually removed.
+        Scenario 5. The artifact operator of fake-node-a has removed the artifacts and withdraws its
+        entries. Nothing is assigned to node a and nothing is reported, so its ArtifactNode is deleted.
+        fake-node-b's artifact operator still holds its entries, so its ArtifactNode stays, and so do
+        the parents.
       try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-        - error:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_a_name]))
-                namespace: ($namespace)
-        - error:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_a_name]))
+                name: ($node_a_name)
                 namespace: ($namespace)
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                name: ($node_b_name)
                 namespace: ($namespace)
-                (deletionTimestamp != null): true
+              status:
+                (length(artifacts)): 3
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
+              kind: Plugin
               metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
+                name: ($plugin_name)
                 namespace: ($namespace)
                 (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
+              kind: Rulesfile
               metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
+                name: ($rulesfile_name)
                 namespace: ($namespace)
                 (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
 
-    - name: "Step 22: Release-simulated-finalizer-from-node-b-artifactnodes"
-      description: Scenario 5. Simulates the per-node sidecar finishing cleanup and releasing its hold.
+    - name: "Step 22: Node-b-finishes-cleanup"
+      description: Scenario 5. Simulates the artifact operator of fake-node-b finishing its cleanup.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers: []
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['rulesfile', $rulesfile_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers: []
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['config', $config_name, $node_b_name]))
-                namespace: ($namespace)
-                finalizers: []
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin,Rulesfile,Config
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 23: Wait-for-parent-crs-fully-deleted"
       description: |
-        Scenario 5. With fake-node-b's ArtifactNodes now actually removable, the next reconcile
-        sees zero remaining owned ArtifactNodes, releases the in-use finalizer, and the parent
-        CRs, held only by that finalizer since Step 19's delete request, finish deleting.
+        Scenario 5. With no node listing or reporting on the artifacts any longer, the next
+        reconcile releases the in-use finalizer, and the parent CRs, held only by that finalizer
+        since Step 19's delete request, finish deleting.
       try:
         - wait:
             apiVersion: artifact.falcosecurity.dev/v1alpha1
@@ -1133,18 +870,18 @@ spec:
         content: |
           bash ../../common/scripts/debug_snapshot.sh
     - description: |
-        Best-effort release of the simulated hold finalizer on fake-node-b's ArtifactNodes.
-        Without this, a failure between Steps 18 and 22 would leave the parent CRs (and this
-        test's namespace) stuck deleting forever, since nothing else will ever remove that
-        finalizer once fake-node-b's KWOK node is torn down below.
+        Best-effort withdrawal of the simulated entries. Without this, a failure between Steps 19 and 22
+        would leave the parent CRs (and this test's namespace) stuck deleting forever, since no artifact
+        operator runs on the fake nodes to withdraw them.
       script:
         env:
           - name: NAMESPACE
             value: ($namespace)
-        content: |
-          kubectl get artifactnodes.artifact.falcosecurity.dev -n "$NAMESPACE" -o name 2>/dev/null | while read -r an; do
-            kubectl patch "$an" -n "$NAMESPACE" --type=merge -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-          done
+          - name: KINDS
+            value: Plugin,Rulesfile,Config
+          - name: WITHDRAW
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
     - description: |
         Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not
         leave either behind for the next run.

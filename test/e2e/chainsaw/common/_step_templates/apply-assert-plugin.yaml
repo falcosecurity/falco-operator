@@ -61,19 +61,16 @@ spec:
           kind: ArtifactNode
           metadata:
             namespace: ($namespace)
-            labels:
-              artifact.falcosecurity.dev/parent: ($plugin_name)
-              artifact.falcosecurity.dev/kind: plugin
           status:
-            (installedArtifacts[0].medium): oci
-            # installedArtifacts[0].path is null until the per-node sidecar's status patch
-            # lands (a real race, not a bug: Programmed=True above and installedArtifacts
-            # arrive in separate reconciles/patches). contains(null, ...) is a hard JMESPath
-            # type error, not a mismatch; chainsaw does not retry those the way it retries
-            # an ordinary "doesn't match yet" comparison, so it fails on the very first
-            # evaluation instead of polling. The `|| ''` fallback keeps this an ordinary
-            # (retryable) false rather than an error while the field is still empty.
-            (contains(installedArtifacts[0].path || '', $plugin_name)): true
-            (contains(installedArtifacts[0].config.path || '', 'plugins-config')): true
-            (conditions[?type == 'ConfigProgrammed']):
-              - status: 'True'
+            (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+              - (installedArtifacts[0].medium): oci
+                # installedArtifacts[0].path is null until the per-node sidecar's status patch
+                # lands (a real race, not a bug: Programmed=True above and installedArtifacts
+                # arrive in separate reconciles/patches). contains(null, ...) is a hard JMESPath
+                # type error, not a mismatch; chainsaw does not retry those the way it retries
+                # an ordinary "doesn't match yet" comparison, so it fails on the very first
+                # evaluation instead of polling. The `|| ''` fallback keeps this an ordinary
+                # (retryable) false rather than an error while the field is still empty.
+                (contains(installedArtifacts[0].path || '', $plugin_name)): true
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'

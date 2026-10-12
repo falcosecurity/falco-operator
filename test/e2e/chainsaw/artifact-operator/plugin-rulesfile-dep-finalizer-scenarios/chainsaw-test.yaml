@@ -13,17 +13,18 @@ spec:
       which stays set for as long as the Plugin still owns any ArtifactNode
       object. Each ArtifactNode's own per-node artifact operator independently
       refuses to remove the plugin's on-disk config/binary, and therefore its
-      own ArtifactNode finalizer, while a Rulesfile on that specific node still
+      own ArtifactNode status entry, while a Rulesfile on that specific node still
       structurally depends on it (tracked authoritatively, in-memory, by that
       node's node.Manager). When blocked this way, the per-node operator
       sets a DeletionBlocked=True condition (reason PluginConfigStillRequired) on
       the ArtifactNode, which the instance-level Plugin controller aggregates
       onto the parent Plugin's own status.
 
-    Scenario A. Plugin never programmed: no owned ArtifactNode, immediate delete
-      A Plugin with a non-existent OCI tag can never be fetched, so the instance
-      operator never creates an ArtifactNode for it. With no owned ArtifactNode,
-      node-objects-in-use is never set and the Plugin can be deleted immediately.
+    Scenario A. Plugin never programmed: assigned but never installed, deletion not blocked
+      A Plugin with a non-existent OCI tag can never be fetched, so the per-node
+      artifact operators stay deferred and install nothing for it, although the
+      ArtifactNodes list it. With no file on any node, nothing keeps the Plugin
+      once the assignment controller drops it and the operators withdraw their entries.
 
     Scenario B. Real structural dependency: deletion blocked, then resolves
       Once the plugin is installed, loaded by Falco, and the Rulesfile's
@@ -124,7 +125,7 @@ spec:
                   - version: "0.4.0"
 
     # ──────────────────────────────────────────────────────────────────
-    # Scenario A: Plugin never programmed → no owned ArtifactNode → immediate delete
+    # Scenario A: Plugin never programmed → assigned, never installed → deletion not blocked
     # ──────────────────────────────────────────────────────────────────
 
     - name: "Step 04: A-Create-plugin-bad-tag"
@@ -175,27 +176,61 @@ spec:
                 (conditions[?type == 'Programmed']):
                   - status: 'False'
 
-    - name: "Step 06: A-Assert-no-node-object"
+    - name: "Step 06: A-Assert-assigned-but-not-installed"
       description: |
-        fetchAndCacheArtifactMeta failed before any ArtifactNode was created for
-        this Plugin, so node-objects-in-use is never set: there is nothing for
-        deletion to block on.
+        fetchAndCacheArtifactMeta failed, so the per-node operators are deferred and
+        no node reports anything installed for the Plugin, which the ArtifactNodes
+        nevertheless list: assignment only follows the selector.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`]):
+                  - kind: Plugin
+
+    - name: "Step 06b: A-Assert-no-binary-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
 
     - name: "Step 07: A-Delete-plugin-unblocked"
       description: |
-        With no owned ArtifactNode, node-objects-in-use is never set and the
-        deletion completes immediately: the Plugin is gone within the default
-        wait timeout.
+        Nothing is installed for it, so the deletion completes as soon as the
+        assignment controller drops it from the nodes and their artifact operators
+        withdraw their entries: the Plugin is gone within a minute.
       try:
         - delete:
             ref:
@@ -208,6 +243,7 @@ spec:
             kind: Plugin
             name: ($plugin_name)
             namespace: ($namespace)
+            timeout: 60s
             for:
               deletion: {}
 
@@ -324,8 +360,8 @@ spec:
       description: |
         Delete the Rulesfile. Its removal drops the structural dependency the
         per-node node.Manager was tracking, so the per-node artifact
-        operator can now remove the plugin config and release its own
-        ArtifactNode finalizer.
+        operator can now remove the plugin config and withdraw its own
+        ArtifactNode status entry.
         kubectl --wait=false fires the delete without blocking: the ArtifactNode
         wait below is the actual completion signal, avoiding chainsaw's implicit
         object-gone wait which could time out if Rulesfile cleanup is slow.
@@ -339,29 +375,51 @@ spec:
             content: |
               kubectl delete rulesfiles.artifact.falcosecurity.dev \
                 "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 14: B-Wait-plugin-node-object-deleted"
       description: |
         Isolates per-node cleanup from the final parent deletion below. If THIS
         step is the one that stalls, the artifact-operator sidecar on the node
-        isn't removing its ArtifactNode finalizer (config/binary cleanup or the
-        finalizer-removing Patch is failing/erroring). Check that container's
+        isn't withdrawing its entry from the ArtifactNode's status (config/binary cleanup or the
+        status patch is failing/erroring). Check that container's
         logs, not the instance-operator's.
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
 
     - name: "Step 15: B-Wait-plugin-deleted"
       description: |
@@ -521,13 +579,24 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_name_a)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name_a]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name_a]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name_a]):
+                  - kind: Rulesfile
 
     - name: "Step 23: C-Assert-plugin-still-blocked-after-partial-cleanup"
       description: |
@@ -544,7 +613,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -558,7 +627,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -568,7 +637,7 @@ spec:
       description: |
         Delete the last remaining requirer. With no Rulesfile left depending on
         it, the per-node artifact operator can now remove the plugin config and
-        release its own ArtifactNode finalizer.
+        withdraw its own ArtifactNode status entry.
         kubectl --wait=false fires the delete without blocking: the ArtifactNode
         wait below is the actual completion signal, avoiding chainsaw's implicit
         object-gone wait which could time out if Rulesfile cleanup is slow.
@@ -582,29 +651,51 @@ spec:
             content: |
               kubectl delete rulesfiles.artifact.falcosecurity.dev \
                 "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name_b]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name_b]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name_b]):
+                  - kind: Rulesfile
 
     - name: "Step 25: C-Wait-plugin-node-object-deleted"
       description: |
         Isolates per-node cleanup from the final parent deletion below. If THIS
         step is the one that stalls, the artifact-operator sidecar on the node
-        isn't removing its ArtifactNode finalizer (config/binary cleanup or the
-        finalizer-removing Patch is failing/erroring). Check that container's
+        isn't withdrawing its entry from the ArtifactNode's status (config/binary cleanup or the
+        status patch is failing/erroring). Check that container's
         logs, not the instance-operator's.
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
 
     - name: "Step 26: C-Wait-plugin-deleted"
       description: |

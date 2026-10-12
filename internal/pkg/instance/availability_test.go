@@ -25,24 +25,15 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
-func availabilityScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	s := runtime.NewScheme()
-	require.NoError(t, appsv1.AddToScheme(s))
-	return s
-}
-
-//go:fix inline
-func int32Ptr(n int32) *int32 { return new(n) }
-
 func TestComputeDeploymentAvailability(t *testing.T) {
-	scheme := availabilityScheme(t)
+	scheme := testutil.Scheme(t)
 
 	tests := []struct {
 		name            string
@@ -62,7 +53,7 @@ func TestComputeDeploymentAvailability(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2, UnavailableReplicas: 0},
 			},
-			specReplicas:    int32Ptr(2),
+			specReplicas:    new(int32(2)),
 			wantStatus:      metav1.ConditionTrue,
 			wantReason:      ReasonDeploymentAvailable,
 			wantDesired:     2,
@@ -75,7 +66,7 @@ func TestComputeDeploymentAvailability(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: "default"},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 2},
 			},
-			specReplicas:    int32Ptr(3),
+			specReplicas:    new(int32(3)),
 			wantStatus:      metav1.ConditionFalse,
 			wantReason:      ReasonDeploymentUnavailable,
 			wantDesired:     3,
@@ -84,7 +75,7 @@ func TestComputeDeploymentAvailability(t *testing.T) {
 		},
 		{
 			name:            "not found",
-			specReplicas:    int32Ptr(1),
+			specReplicas:    new(int32(1)),
 			wantStatus:      metav1.ConditionFalse,
 			wantReason:      ReasonDeploymentNotFound,
 			wantDesired:     1,
@@ -106,7 +97,7 @@ func TestComputeDeploymentAvailability(t *testing.T) {
 		},
 		{
 			name:            "fetch error",
-			specReplicas:    int32Ptr(1),
+			specReplicas:    new(int32(1)),
 			getErr:          fmt.Errorf("injected get error"),
 			wantErr:         "unable to fetch deployment",
 			wantStatus:      metav1.ConditionUnknown,
@@ -156,7 +147,7 @@ func TestComputeDeploymentAvailability(t *testing.T) {
 }
 
 func TestComputeDaemonSetAvailability(t *testing.T) {
-	scheme := availabilityScheme(t)
+	scheme := testutil.Scheme(t)
 
 	tests := []struct {
 		name            string

@@ -21,67 +21,31 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 )
 
-const falcoInstanceLabel = "app.kubernetes.io/instance"
+// FalcoInstanceLabel is the label a Falco pod carries with the name of its Falco CR as value. It is what a pod is
+// recognized as a Falco pod by, whoever created it.
+const FalcoInstanceLabel = "app.kubernetes.io/instance"
 
-// ClearFinalizersIfNodeOrPodGone checks whether the per-node artifact operator that
-// owns obj's finalizers can still perform cleanup. When either the Kubernetes Node no
-// longer exists or no Running Falco pod is present on it, all finalizers are removed
-// via a Patch so the API server can complete the pending deletion.
-//
-// This covers both a deleted Kubernetes Node and a Falco pod disappearing from a
-// still-existing node. In either case no per-node artifact operator remains to remove
-// its finalizer, and there is no remaining node-side cleanup to perform. Without this
-// call the ArtifactNode would remain stuck in Terminating indefinitely, blocking its
-// parent artifact cleanup.
-func ClearFinalizersIfNodeOrPodGone(
-	ctx context.Context,
-	cl client.Client,
-	nodeName string,
-	runningFalcoNodes map[string]struct{},
-	obj client.Object,
-) error {
-	if len(obj.GetFinalizers()) == 0 {
-		return nil
-	}
-
-	reason := "Falco pod gone"
-	if _, podRunning := runningFalcoNodes[nodeName]; podRunning {
-		node := &corev1.Node{}
-		err := cl.Get(ctx, client.ObjectKey{Name: nodeName}, node)
-		if err == nil {
-			return nil // Node and per-node artifact operator still exist; let it clean up normally.
-		}
-		if !k8serrors.IsNotFound(err) {
-			return err
-		}
-		reason = "Node gone"
-	}
-
-	log.FromContext(ctx).Info("Force-clearing finalizers on orphaned node object",
-		"node", nodeName, "object", obj.GetName(), "reason", reason)
-	patch := client.MergeFrom(obj.DeepCopyObject().(client.Object)) //nolint:forcetypeassert // client.Object always satisfies this
-	obj.SetFinalizers(nil)
-	if pErr := cl.Patch(ctx, obj, patch); pErr != nil && !k8serrors.IsNotFound(pErr) {
-		return pErr
-	}
-	return nil
-}
+// appNameLabel is the label that tells a Falco pod from another workload whose instance label happens to carry the
+// same value, such as a pod of a Helm release named like the Falco CR. The operator gives a Falco pod its Falco CR's
+// name in both labels. A pod that carries only the instance label still counts as a Falco pod; one whose name label
+// says something else does not.
+const appNameLabel = "app.kubernetes.io/name"
 
 // ListMatchingNodes returns all nodes matching the given label selector.
-// A nil selector matches all nodes.
+// A nil selector matches all nodes. The nodes are not copied out of the informer cache, which on a large cluster
+// is a copy of every node for every reconcile: callers must not modify them.
 func ListMatchingNodes(ctx context.Context, cl client.Client, sel *metav1.LabelSelector) ([]corev1.Node, error) {
 	nodeList := &corev1.NodeList{}
-	var listOpts []client.ListOption
+	listOpts := []client.ListOption{client.UnsafeDisableDeepCopy}
 	if sel != nil {
 		selector, err := metav1.LabelSelectorAsSelector(sel)
 		if err != nil {
@@ -111,38 +75,86 @@ func FilterNodesByName(nodes []corev1.Node, desired map[string]struct{}) []corev
 // ListFalcoRunningNodeNames lists all Falco CRs in namespace and returns the set of node names
 // that currently have a Running pod for any of them.
 func ListFalcoRunningNodeNames(ctx context.Context, cl client.Client, namespace string) (map[string]struct{}, error) {
+	counts, err := countFalcoRunningPods(ctx, cl, namespace)
+	if err != nil {
+		return nil, err
+	}
+	running := make(map[string]struct{}, len(counts))
+	for node := range counts {
+		running[node] = struct{}{}
+	}
+	return running, nil
+}
+
+// CountFalcoRunningPodsOnNode returns how many Running pods of any Falco CR in namespace run on nodeName. More
+// than one is not supported: their sidecars would share one ArtifactNode. A pod being deleted does not count (see
+// falcoPodRunning). It reads the pods of that node alone, through the index.PodNodeName field
+// index, so that a per-node reconcile does not go through every pod of the namespace: every artifact change
+// reconciles every node.
+func CountFalcoRunningPodsOnNode(ctx context.Context, cl client.Client, namespace, nodeName string) (int, error) {
+	counts, err := countFalcoRunningPods(ctx, cl, namespace, client.MatchingFields{index.PodNodeName: nodeName})
+	if err != nil {
+		return 0, fmt.Errorf("count Falco pods on node %q: %w", nodeName, err)
+	}
+	return counts[nodeName], nil
+}
+
+// countFalcoRunningPods counts, per node, the Running pods of every Falco CR in namespace among those that
+// podFilter selects; a pod being deleted does not count (see falcoPodRunning). It is the one place that decides
+// which pods count as a running Falco pod, for ListFalcoRunningNodeNames and CountFalcoRunningPodsOnNode alike.
+// Only names, phases and timestamps are read, so nothing is copied out of the informer cache.
+func countFalcoRunningPods(
+	ctx context.Context, cl client.Client, namespace string, podFilter ...client.ListOption,
+) (map[string]int, error) {
 	falcoList := &instancev1alpha1.FalcoList{}
-	if err := cl.List(ctx, falcoList, client.InNamespace(namespace)); err != nil {
+	if err := cl.List(ctx, falcoList, client.InNamespace(namespace), client.UnsafeDisableDeepCopy); err != nil {
 		return nil, fmt.Errorf("list Falco CRs for node filtering: %w", err)
 	}
 
-	running := make(map[string]struct{})
+	running := make(map[string]int)
 	for i := range falcoList.Items {
 		name := falcoList.Items[i].Name
 		podList := &corev1.PodList{}
-		if err := cl.List(ctx, podList,
+		opts := append([]client.ListOption{
 			client.InNamespace(namespace),
-			client.MatchingLabels{falcoInstanceLabel: name},
-		); err != nil {
+			client.MatchingLabels{FalcoInstanceLabel: name},
+			client.UnsafeDisableDeepCopy,
+		}, podFilter...)
+		if err := cl.List(ctx, podList, opts...); err != nil {
 			return nil, fmt.Errorf("list pods for Falco %q: %w", name, err)
 		}
 		for j := range podList.Items {
-			pod := &podList.Items[j]
-			if pod.Status.Phase == corev1.PodRunning && pod.Spec.NodeName != "" {
-				running[pod.Spec.NodeName] = struct{}{}
+			if pod := &podList.Items[j]; isFalcoPod(pod, name) && falcoPodRunning(pod) {
+				running[pod.Spec.NodeName]++
 			}
 		}
 	}
 	return running, nil
 }
 
+// isFalcoPod reports whether pod, which carries the instance label of the Falco CR called falcoName, is a pod of
+// that Falco and not of another workload labeled alike: see appNameLabel.
+func isFalcoPod(pod *corev1.Pod, falcoName string) bool {
+	appName, labeled := pod.Labels[appNameLabel]
+	return !labeled || appName == falcoName
+}
+
+// falcoPodRunning reports whether pod is a Falco pod with a sidecar at work: scheduled, Running, and not
+// being deleted. A pod being deleted is on its way out, whatever its phase still says: it is the old pod of
+// a replacement, and counting it would make the replacement look like a second sidecar on the node.
+func falcoPodRunning(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodRunning && pod.Spec.NodeName != "" && pod.DeletionTimestamp.IsZero()
+}
+
 // FalcoPodChangePredicate accepts exactly the Pod events that can change the result of
 // ListFalcoRunningNodeNames: a labeled Pod appearing or disappearing, or an update to its
-// Falco instance label, node assignment, or phase. In particular, checking both sides of an
-// update ensures that removing the instance label still triggers stale ArtifactNode cleanup.
+// Falco instance or name label, node assignment, phase, or its deletion starting (falcoPodRunning stops
+// counting a pod the moment its deletionTimestamp is set, whatever its phase still says). In
+// particular, checking both sides of an update ensures that removing the instance label still
+// triggers stale ArtifactNode cleanup.
 func FalcoPodChangePredicate() predicate.Predicate {
 	hasFalcoInstance := func(obj client.Object) bool {
-		_, ok := obj.GetLabels()[falcoInstanceLabel]
+		_, ok := obj.GetLabels()[FalcoInstanceLabel]
 		return ok
 	}
 
@@ -154,12 +166,13 @@ func FalcoPodChangePredicate() predicate.Predicate {
 			return hasFalcoInstance(e.Object)
 		},
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			oldInstance, oldTracked := e.ObjectOld.GetLabels()[falcoInstanceLabel]
-			newInstance, newTracked := e.ObjectNew.GetLabels()[falcoInstanceLabel]
+			oldInstance, oldTracked := e.ObjectOld.GetLabels()[FalcoInstanceLabel]
+			newInstance, newTracked := e.ObjectNew.GetLabels()[FalcoInstanceLabel]
 			if !oldTracked && !newTracked {
 				return false
 			}
-			if oldTracked != newTracked || oldInstance != newInstance {
+			if oldTracked != newTracked || oldInstance != newInstance ||
+				e.ObjectOld.GetLabels()[appNameLabel] != e.ObjectNew.GetLabels()[appNameLabel] {
 				return true
 			}
 
@@ -169,28 +182,11 @@ func FalcoPodChangePredicate() predicate.Predicate {
 				return true
 			}
 			return oldPod.Spec.NodeName != newPod.Spec.NodeName ||
-				oldPod.Status.Phase != newPod.Status.Phase
+				oldPod.Status.Phase != newPod.Status.Phase ||
+				oldPod.DeletionTimestamp.IsZero() != newPod.DeletionTimestamp.IsZero()
 		},
 		GenericFunc: func(e event.GenericEvent) bool {
 			return hasFalcoInstance(e.Object)
 		},
 	}
-}
-
-// IsBeingDeleted re-fetches obj and reports whether it now has a DeletionTimestamp set, or is
-// gone entirely, which is treated the same way since there is nothing left to create against.
-//
-// Use this as a final check immediately before creating a child object, after any slow,
-// network-bound work (OCI registry calls, blob pulls) that ran since the initial
-// DeletionTimestamp check at the top of Reconcile (that earlier check can go stale if an
-// external delete lands while the reconcile is busy).
-func IsBeingDeleted(ctx context.Context, cl client.Client, obj client.Object) (bool, error) {
-	fresh := obj.DeepCopyObject().(client.Object) //nolint:forcetypeassert // client.Object always satisfies this
-	if err := cl.Get(ctx, client.ObjectKeyFromObject(obj), fresh); err != nil {
-		if k8serrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	}
-	return !fresh.GetDeletionTimestamp().IsZero(), nil
 }

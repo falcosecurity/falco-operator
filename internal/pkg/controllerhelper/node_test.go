@@ -31,128 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
+	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
-// newNodeScheme returns a scheme with only corev1 registered, for node-only tests.
-func newNodeScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	s := runtime.NewScheme()
-	require.NoError(t, corev1.AddToScheme(s))
-	return s
-}
-
-func newConfigMapWithFinalizer() *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:       "obj",
-			Namespace:  "default",
-			Finalizers: []string{"test.example.com/my-finalizer"},
-		},
-	}
-}
-
-func TestClearFinalizersIfNodeOrPodGone_NoFinalizers(t *testing.T) {
-	s := newNodeScheme(t)
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
-
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
-	require.NoError(t, err)
-	// Object had no finalizers, so Patch was never called.
-	got := &corev1.ConfigMap{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
-	assert.Empty(t, got.Finalizers)
-}
-
-func TestClearFinalizersIfNodeOrPodGone_NodeAndPodExist(t *testing.T) {
-	s := newNodeScheme(t)
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
-	cm := newConfigMapWithFinalizer()
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
-
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
-		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
-	)
-	require.NoError(t, err)
-	// Both the node and its artifact operator still exist, so finalizers must be preserved.
-	got := &corev1.ConfigMap{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
-	assert.NotEmpty(t, got.Finalizers)
-}
-
-func TestClearFinalizersIfNodeOrPodGone_PodGone(t *testing.T) {
-	s := newNodeScheme(t)
-	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-1"}}
-	cm := newConfigMapWithFinalizer()
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(node, cm).Build()
-
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
-	require.NoError(t, err)
-	// The node still exists, but no artifact operator can release its finalizer.
-	got := &corev1.ConfigMap{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
-	assert.Empty(t, got.Finalizers)
-}
-
-func TestClearFinalizersIfNodeOrPodGone_NodeGone(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := newConfigMapWithFinalizer()
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build() // node NOT created
-
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
-		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
-	)
-	require.NoError(t, err)
-	// Finalizers are cleared once the node is gone.
-	got := &corev1.ConfigMap{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(cm), got))
-	assert.Empty(t, got.Finalizers)
-}
-
-func TestClearFinalizersIfNodeOrPodGone_GetNodeError(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := newConfigMapWithFinalizer()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(cm).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*corev1.Node); ok {
-					return fmt.Errorf("api server error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		Build()
-
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(
-		context.Background(), cl, "worker-1", map[string]struct{}{"worker-1": {}}, cm,
-	)
-	require.Error(t, err)
-}
-
-func TestClearFinalizersIfNodeOrPodGone_PatchError(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := newConfigMapWithFinalizer()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(cm).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				return fmt.Errorf("patch error")
-			},
-		}).
-		Build()
-
-	// Patch is attempted when the Falco pod is gone, and its error is returned.
-	err := controllerhelper.ClearFinalizersIfNodeOrPodGone(context.Background(), cl, "worker-1", nil, cm)
-	require.Error(t, err)
-}
-
 func TestListMatchingNodes_NilSelectorMatchesAll(t *testing.T) {
-	s := newNodeScheme(t)
+	s := testutil.Scheme(t)
 	n1 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1"}}
 	n2 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2", Labels: map[string]string{"pool": "gpu"}}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(n1, n2).Build()
@@ -163,7 +49,7 @@ func TestListMatchingNodes_NilSelectorMatchesAll(t *testing.T) {
 }
 
 func TestListMatchingNodes_SelectorMatchesSubset(t *testing.T) {
-	s := newNodeScheme(t)
+	s := testutil.Scheme(t)
 	n1 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node1", Labels: map[string]string{"pool": "gpu"}}}
 	n2 := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node2", Labels: map[string]string{"pool": "cpu"}}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(n1, n2).Build()
@@ -176,7 +62,7 @@ func TestListMatchingNodes_SelectorMatchesSubset(t *testing.T) {
 }
 
 func TestListMatchingNodes_InvalidSelector(t *testing.T) {
-	s := newNodeScheme(t)
+	s := testutil.Scheme(t)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 
 	_, err := controllerhelper.ListMatchingNodes(context.Background(), cl, &metav1.LabelSelector{
@@ -189,7 +75,7 @@ func TestListMatchingNodes_InvalidSelector(t *testing.T) {
 }
 
 func TestListMatchingNodes_ListError(t *testing.T) {
-	s := newNodeScheme(t)
+	s := testutil.Scheme(t)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -261,57 +147,201 @@ func TestFalcoPodChangePredicate(t *testing.T) {
 	})
 }
 
-func TestIsBeingDeleted_NotDeleted(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
-
-	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
-	require.NoError(t, err)
-	assert.False(t, deleting)
-}
-
-func TestIsBeingDeleted_DeletionTimestampSet(t *testing.T) {
-	s := newNodeScheme(t)
-	now := metav1.Now()
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "obj", Namespace: "default",
-			Finalizers:        []string{"test.example.com/finalizer"}, // a DeletionTimestamp requires a finalizer to be set
-			DeletionTimestamp: &now,
-		},
+func TestFilterNodesByName(t *testing.T) {
+	nodes := []corev1.Node{{ObjectMeta: metav1.ObjectMeta{Name: "a"}}, {ObjectMeta: metav1.ObjectMeta{Name: "b"}}, {ObjectMeta: metav1.ObjectMeta{Name: "c"}}}
+	tests := []struct {
+		name    string
+		desired map[string]struct{}
+		want    []string
+	}{
+		{name: "the desired nodes, in order", desired: map[string]struct{}{"c": {}, "a": {}}, want: []string{"a", "c"}},
+		{name: "a desired node that is not in the list is ignored", desired: map[string]struct{}{"z": {}}},
+		{name: "nothing desired", desired: nil},
 	}
-	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(cm).Build()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got []string
+			for _, n := range controllerhelper.FilterNodesByName(nodes, tt.desired) {
+				got = append(got, n.Name)
+			}
 
-	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
-	require.NoError(t, err)
-	assert.True(t, deleting)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+	assert.Len(t, nodes, 3, "the list given is left as it was")
 }
 
-func TestIsBeingDeleted_ObjectGone(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
-	cl := fake.NewClientBuilder().WithScheme(s).Build() // never created
+func TestListFalcoRunningPods(t *testing.T) {
+	const ns = "falco"
+	falco := func(name string) *instancev1alpha1.Falco {
+		return &instancev1alpha1.Falco{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	}
+	pod := func(name, instance, node string, phase corev1.PodPhase) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, Labels: map[string]string{"app.kubernetes.io/instance": instance}},
+			Spec:       corev1.PodSpec{NodeName: node},
+			Status:     corev1.PodStatus{Phase: phase},
+		}
+	}
+	tests := []struct {
+		name       string
+		objects    []client.Object
+		listFailOn string // "Falco" or "Pod"
+		want       map[string]int
+		wantErr    string
+	}{
+		{name: "nothing runs", objects: []client.Object{falco("f")}, want: map[string]int{}},
+		{
+			name:    "running pods of a Falco, by node",
+			objects: []client.Object{falco("f"), pod("p1", "f", "n1", corev1.PodRunning), pod("p2", "f", "n2", corev1.PodRunning)},
+			want:    map[string]int{"n1": 1, "n2": 1},
+		},
+		{
+			name:    "pods that are not running or not scheduled do not count",
+			objects: []client.Object{falco("f"), pod("p1", "f", "n1", corev1.PodPending), pod("p2", "f", "", corev1.PodRunning), pod("p3", "f", "n3", corev1.PodFailed)},
+			want:    map[string]int{},
+		},
+		{
+			name:    "pods of something that is not a Falco do not count",
+			objects: []client.Object{falco("f"), pod("p1", "other", "n1", corev1.PodRunning)},
+			want:    map[string]int{},
+		},
+		{
+			name: "a pod being deleted does not count",
+			objects: []client.Object{falco("f"), pod("p1", "f", "n1", corev1.PodRunning), func() *corev1.Pod {
+				p := pod("p2", "f", "n1", corev1.PodRunning)
+				now := metav1.Now()
+				p.DeletionTimestamp, p.Finalizers = &now, []string{"test/finalizer"}
+				return p
+			}()},
+			want: map[string]int{"n1": 1},
+		},
+		{
+			name:    "two Falcos on one node count twice",
+			objects: []client.Object{falco("f"), falco("g"), pod("p1", "f", "n1", corev1.PodRunning), pod("p2", "g", "n1", corev1.PodRunning)},
+			want:    map[string]int{"n1": 2},
+		},
+		{name: "the Falcos cannot be listed", listFailOn: "Falco", wantErr: "list Falco CRs"},
+		{name: "the pods cannot be listed", objects: []client.Object{falco("f")}, listFailOn: "Pod", wantErr: `list pods for Falco "f"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(s))
+			require.NoError(t, instancev1alpha1.AddToScheme(s))
+			cl := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.objects...).
+				WithIndex(&corev1.Pod{}, index.PodNodeName, index.PodByNodeName).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					switch list.(type) {
+					case *instancev1alpha1.FalcoList:
+						if tt.listFailOn == "Falco" {
+							return fmt.Errorf("boom")
+						}
+					case *corev1.PodList:
+						if tt.listFailOn == "Pod" {
+							return fmt.Errorf("boom")
+						}
+					}
+					return cl.List(ctx, list, opts...)
+				},
+			}).Build()
 
-	deleting, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
-	require.NoError(t, err)
-	assert.True(t, deleting, "a gone object is treated the same as being deleted")
+			names, err := controllerhelper.ListFalcoRunningNodeNames(t.Context(), cl, ns)
+			_, countErr := controllerhelper.CountFalcoRunningPodsOnNode(t.Context(), cl, ns, "n1")
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				require.ErrorContains(t, countErr, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Len(t, names, len(tt.want))
+			for node, want := range tt.want {
+				assert.Contains(t, names, node)
+				got, err := controllerhelper.CountFalcoRunningPodsOnNode(t.Context(), cl, ns, node)
+				require.NoError(t, err)
+				assert.Equal(t, want, got, "node %s", node)
+			}
+		})
+	}
 }
 
-func TestIsBeingDeleted_GetError(t *testing.T) {
-	s := newNodeScheme(t)
-	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "obj", Namespace: "default"}}
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(cm).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				return fmt.Errorf("api server unavailable")
-			},
-		}).
-		Build()
+func TestCountFalcoRunningPodsOnNode(t *testing.T) {
+	const ns = "falco"
+	falco := func(name string) *instancev1alpha1.Falco {
+		return &instancev1alpha1.Falco{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
+	}
+	pod := func(name, instance, node string, mods ...func(*corev1.Pod)) *corev1.Pod {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, Labels: map[string]string{"app.kubernetes.io/instance": instance}},
+			Spec:       corev1.PodSpec{NodeName: node},
+			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+		for _, mod := range mods {
+			mod(p)
+		}
+		return p
+	}
+	pending := func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending }
+	named := func(app string) func(*corev1.Pod) {
+		return func(p *corev1.Pod) { p.Labels["app.kubernetes.io/name"] = app }
+	}
+	deleting := func(p *corev1.Pod) {
+		now := metav1.Now()
+		p.DeletionTimestamp, p.Finalizers = &now, []string{"test/finalizer"}
+	}
+	tests := []struct {
+		name    string
+		objects []client.Object
+		want    int
+	}{
+		{name: "no Falco", objects: []client.Object{pod("p1", "f", "n1")}},
+		{name: "one pod on the node", objects: []client.Object{falco("f"), pod("p1", "f", "n1"), pod("p2", "f", "n2")}, want: 1},
+		{name: "two Falcos on the node", objects: []client.Object{falco("f"), falco("g"), pod("p1", "f", "n1"), pod("p2", "g", "n1")}, want: 2},
+		{name: "pending, deleting and foreign pods do not count", objects: []client.Object{falco("f"),
+			pod("p1", "f", "n1", pending), pod("p2", "f", "n1", deleting), pod("p3", "other", "n1")}},
+		// A pod of another workload whose instance label carries the Falco's name, a Helm release called like it,
+		// is told apart by its name label. The operator gives its own pods the Falco's name in both.
+		{name: "a pod named as another app is not a Falco pod", objects: []client.Object{falco("f"),
+			pod("p1", "f", "n1", named("f")), pod("p2", "f", "n1", named("falcosidekick"))}, want: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(s))
+			require.NoError(t, instancev1alpha1.AddToScheme(s))
+			cl := fake.NewClientBuilder().WithScheme(s).WithObjects(tt.objects...).
+				WithIndex(&corev1.Pod{}, index.PodNodeName, index.PodByNodeName).Build()
 
-	_, err := controllerhelper.IsBeingDeleted(context.Background(), cl, cm)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "api server unavailable")
+			got, err := controllerhelper.CountFalcoRunningPodsOnNode(t.Context(), cl, ns, "n1")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestCountFalcoRunningPodsOnNode_Errors(t *testing.T) {
+	s := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(s))
+	require.NoError(t, instancev1alpha1.AddToScheme(s))
+	falco := &instancev1alpha1.Falco{ObjectMeta: metav1.ObjectMeta{Namespace: "falco", Name: "f"}}
+	for name, failFalcos := range map[string]bool{"the Falcos cannot be listed": true, "the pods cannot be listed": false} {
+		t.Run(name, func(t *testing.T) {
+			cl := fake.NewClientBuilder().WithScheme(s).WithObjects(falco).
+				WithIndex(&corev1.Pod{}, index.PodNodeName, index.PodByNodeName).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if _, isFalco := list.(*instancev1alpha1.FalcoList); isFalco == failFalcos {
+							return fmt.Errorf("boom")
+						}
+						return cl.List(ctx, list, opts...)
+					},
+				}).Build()
+
+			_, err := controllerhelper.CountFalcoRunningPodsOnNode(t.Context(), cl, "falco", "n1")
+
+			require.ErrorContains(t, err, "boom")
+		})
+	}
 }

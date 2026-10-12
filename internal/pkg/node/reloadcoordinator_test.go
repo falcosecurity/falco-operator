@@ -37,7 +37,7 @@ import (
 
 const versionsPath = "/versions"
 
-// fakeProcFinder implements ProcFinder for tests.
+// fakeProcFinder implements processFinder for tests.
 type fakeProcFinder struct {
 	pid   int
 	err   error
@@ -49,9 +49,9 @@ func (f *fakeProcFinder) FindPID(_ string) (int, error) {
 	return f.pid, f.err
 }
 
-// newTestCoordinator builds a ReloadCoordinator with injected fakes and a short retry interval.
-func newTestCoordinator(falcoURL string, finder ProcFinder, killFn func(int, syscall.Signal) error) *ReloadCoordinator {
-	return &ReloadCoordinator{
+// newTestCoordinator builds a reloadCoordinator with injected fakes and a short retry interval.
+func newTestCoordinator(falcoURL string, finder processFinder, killFn func(int, syscall.Signal) error) *reloadCoordinator {
+	return &reloadCoordinator{
 		pending:       make(chan struct{}, 1),
 		falcoURL:      falcoURL,
 		procFinder:    finder,
@@ -97,15 +97,15 @@ func TestNewReloadCoordinator(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rc := NewReloadCoordinator(tc.falcoURL)
+			rc := newReloadCoordinator(tc.falcoURL)
 			require.NotNil(t, rc)
 			assert.Equal(t, tc.falcoURL, rc.falcoURL)
-			assert.Equal(t, DefaultReloadRetryInterval, rc.retryInterval)
+			assert.Equal(t, defaultReloadRetryInterval, rc.retryInterval)
 			assert.Equal(t, 5*time.Second, rc.cooldown)
-			assert.Equal(t, DefaultWaitForReadyTimeout, rc.waitTimeout)
+			assert.Equal(t, defaultWaitForReadyTimeout, rc.waitTimeout)
 			assert.Equal(t, 1, cap(rc.pending))
-			_, isOSFinder := rc.procFinder.(*OSProcFinder)
-			assert.True(t, isOSFinder, "procFinder should be *OSProcFinder")
+			_, isOSFinder := rc.procFinder.(*osProcessFinder)
+			assert.True(t, isOSFinder, "procFinder should be *osProcessFinder")
 			require.NotNil(t, rc.killFn)
 			// Exercise the closure: signal 0 probes existence without delivering a signal.
 			assert.NoError(t, rc.killFn(os.Getpid(), syscall.Signal(0)))
@@ -114,8 +114,8 @@ func TestNewReloadCoordinator(t *testing.T) {
 }
 
 func TestReloadCoordinator_WithCooldown(t *testing.T) {
-	rc := NewReloadCoordinator("http://falco:8765")
-	assert.Same(t, rc, rc.WithCooldown(7*time.Second))
+	rc := newReloadCoordinator("http://falco:8765")
+	assert.Same(t, rc, rc.withCooldown(7*time.Second))
 	assert.Equal(t, 7*time.Second, rc.cooldown)
 
 	for _, cooldown := range []time.Duration{0, -time.Second} {
@@ -125,8 +125,8 @@ func TestReloadCoordinator_WithCooldown(t *testing.T) {
 			rc := newTestCoordinator("", finder, func(int, syscall.Signal) error {
 				signals.Add(1)
 				return nil
-			}).WithCooldown(cooldown)
-			rc.NotifyWrite()
+			}).withCooldown(cooldown)
+			rc.notifyWrite()
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
 			require.ErrorContains(t, rc.Start(ctx), "reload cooldown must be positive")
@@ -191,7 +191,7 @@ func TestOSProcFinder_FindPID(t *testing.T) {
 			if procPath == "" && runtime.GOOS != "linux" {
 				t.Skip("requires the Linux /proc filesystem")
 			}
-			f := &OSProcFinder{procPath: procPath}
+			f := &osProcessFinder{procPath: procPath}
 			pid, err := f.FindPID(tc.search)
 			if tc.wantErr {
 				require.Error(t, err)
@@ -234,7 +234,7 @@ func TestReloadCoordinator_DoesNotRequireMetrics(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- rc.Start(ctx) }()
 	defer func() { cancel(); require.NoError(t, <-done) }()
-	rc.NotifyWrite()
+	rc.notifyWrite()
 	require.Eventually(t, func() bool { return versionsRequests.Load() > 0 }, time.Second, time.Millisecond)
 	assert.Equal(t, int32(1), signals.Load(), "SIGHUP must not depend on metrics availability")
 	assert.Zero(t, unexpectedRequests.Load(), "the coordinator must only query /versions")
@@ -256,13 +256,13 @@ func TestReloadCoordinator_Cooldown(t *testing.T) {
 			signals <- time.Now()
 			return nil
 		})
-		rc.WithCooldown(80 * time.Millisecond)
+		rc.withCooldown(80 * time.Millisecond)
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan error, 1)
 		go func() { done <- rc.Start(ctx) }()
 		defer func() { cancel(); require.NoError(t, <-done) }()
 
-		rc.NotifyWrite()
+		rc.notifyWrite()
 		var previousSignal time.Time
 		for i := range 3 {
 			var sent time.Time
@@ -277,7 +277,7 @@ func TestReloadCoordinator_Cooldown(t *testing.T) {
 			previousSignal = sent
 			if i < 2 {
 				for range 20 {
-					rc.NotifyWrite()
+					rc.notifyWrite()
 				}
 			}
 			select {
@@ -303,15 +303,15 @@ func TestReloadCoordinator_Cooldown(t *testing.T) {
 			signals.Add(1)
 			return nil
 		})
-		rc.WithCooldown(time.Hour)
+		rc.withCooldown(time.Hour)
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		done := make(chan error, 1)
 		go func() { done <- rc.Start(ctx) }()
-		rc.NotifyWrite()
+		rc.notifyWrite()
 		require.Eventually(t, func() bool { return signals.Load() == 1 }, time.Second, time.Millisecond,
 			"the first signal must not wait for cooldown")
-		rc.NotifyWrite()
+		rc.notifyWrite()
 		cancel()
 		select {
 		case err := <-done:
@@ -356,7 +356,7 @@ func TestReloadCoordinator_Start(t *testing.T) {
 				})
 				rc.retryInterval = 20 * time.Millisecond
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return finder.calls.Load() >= 2 }, time.Second, time.Millisecond,
 					"PID lookup must retry without another write")
 				assert.Equal(t, int32(0), calls.Load(), "kill should not be called when PID is not found")
@@ -373,7 +373,7 @@ func TestReloadCoordinator_Start(t *testing.T) {
 				rc.retryInterval = 20 * time.Millisecond
 				rc.cooldown = time.Hour // failed signals must not start the cooldown
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return killCalls.Load() >= 2 }, 500*time.Millisecond, 10*time.Millisecond,
 					"expected ≥2 kill attempts via retry")
 			},
@@ -390,7 +390,7 @@ func TestReloadCoordinator_Start(t *testing.T) {
 					return nil
 				})
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return killedPID.Load() == 76 }, 3*time.Second, 10*time.Millisecond,
 					"SIGHUP was not sent within 3 seconds")
 				assert.Equal(t, int32(syscall.SIGHUP), killedSig.Load())
@@ -407,11 +407,13 @@ func TestReloadCoordinator_Start(t *testing.T) {
 					return nil
 				})
 				for range 20 {
-					rc.NotifyWrite()
+					rc.notifyWrite()
 				}
 				go func() { _ = rc.Start(t.Context()) }()
-				time.Sleep(300 * time.Millisecond)
-				assert.Equal(t, int32(1), killCalls.Load(), "20 pending writes should coalesce to a single SIGHUP")
+				require.Eventually(t, func() bool { return killCalls.Load() > 0 }, 3*time.Second, 5*time.Millisecond,
+					"SIGHUP was not sent within 3 seconds")
+				assert.Never(t, func() bool { return killCalls.Load() > 1 }, 150*time.Millisecond, 5*time.Millisecond,
+					"20 pending writes should coalesce to a single SIGHUP")
 			},
 		},
 		{
@@ -434,11 +436,11 @@ func TestReloadCoordinator_Start(t *testing.T) {
 					return nil
 				})
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return requests.Load() >= 1 }, 2*time.Second, time.Millisecond,
 					"WaitAndFetch must start before the second write")
 				assert.Equal(t, int32(1), killCalls.Load())
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				ready <- struct{}{}
 				require.Eventually(t, func() bool { return killCalls.Load() >= 2 }, 3*time.Second, 10*time.Millisecond,
 					"second write during WaitAndFetch should produce a follow-up SIGHUP")
@@ -470,7 +472,7 @@ func TestReloadCoordinator_Start(t *testing.T) {
 				})
 				done := make(chan error, 1)
 				go func() { done <- rc.Start(ctx) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return requests.Load() >= 1 }, 2*time.Second, time.Millisecond,
 					"WaitAndFetch must start before context cancellation")
 				assert.Equal(t, int32(1), killCalls.Load())
@@ -501,10 +503,10 @@ func TestReloadCoordinator_Start(t *testing.T) {
 				})
 				rc.waitTimeout = 50 * time.Millisecond
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return killCalls.Load() >= 1 }, 2*time.Second, 10*time.Millisecond,
 					"first SIGHUP should be sent")
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				require.Eventually(t, func() bool { return killCalls.Load() >= 2 }, 2*time.Second, 10*time.Millisecond,
 					"coordinator should unblock after WaitAndFetch timeout and process the pending write")
 			},
@@ -526,9 +528,9 @@ func TestReloadCoordinator_Start(t *testing.T) {
 				})
 				rc.retryInterval = 5 * time.Second // long enough that the retry timer won't fire on its own
 				go func() { _ = rc.Start(t.Context()) }()
-				rc.NotifyWrite()
+				rc.notifyWrite()
 				<-firstKillDone  // wait for first (failing) kill attempt
-				rc.NotifyWrite() // should supersede the 5-second retry timer
+				rc.notifyWrite() // should supersede the 5-second retry timer
 				require.Eventually(t, func() bool { return killCalls.Load() >= 2 }, 2*time.Second, 10*time.Millisecond,
 					"second write should supersede the retry timer and trigger an immediate SIGHUP")
 			},

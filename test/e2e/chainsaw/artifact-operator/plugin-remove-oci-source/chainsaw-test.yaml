@@ -145,16 +145,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
-                (length(conditions[?type == 'ConfigProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                    (length(conditions[?type == 'ConfigProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "Step 07: Assert-binary-absent"
       use:

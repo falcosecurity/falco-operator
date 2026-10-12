@@ -210,13 +210,24 @@ spec:
             content: |
               kubectl delete rulesfiles.artifact.falcosecurity.dev \
                 "${RULESFILE_NAME}" -n "${NAMESPACE}" --wait=false
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 10: Wait-plugin-node-object-deleted"
       description: |
@@ -224,13 +235,24 @@ spec:
         this hangs, the artifact-operator sidecar isn't releasing the node
         object, not the instance-operator's finalizer logic.
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
 
     - name: "Step 11: Wait-plugin-deleted"
       try:

@@ -79,20 +79,18 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/30-03-rulesfile-update-priority-single-test-inline.yaml
-                    priority: 30
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/30-03-rulesfile-update-priority-single-test-inline.yaml
+                        priority: 30
 
     - name: "Step 04: Assert-prio30-file-on-filesystem"
       use:
@@ -166,20 +164,18 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/70-03-rulesfile-update-priority-single-test-inline.yaml
-                    priority: 70
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/70-03-rulesfile-update-priority-single-test-inline.yaml
+                        priority: 70
 
     - name: "Step 08: Assert-old-prio30-file-gone"
       use:

@@ -126,6 +126,15 @@ kubectl delete namespace falco-operator
 
 > **Important**: Deleting Falco instances before artifacts will terminate the Artifact Operator sidecar, leaving artifact finalizers unresolved. Always delete artifact resources first.
 
+> **Important**: Uninstall the operator last. An `ArtifactNode` carries the sidecar's finalizer, and once the sidecar is gone with its Falco pod only the operator releases it. If the operator was removed first, the ArtifactNodes, and the namespace holding them, stay `Terminating`; release them by hand:
+>
+> ```bash
+> kubectl get artifactnodes -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name |
+>   while read -r ns name; do
+>     kubectl patch artifactnode "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}'
+>   done
+> ```
+
 > **Note on CRDs**: Helm does not delete CRDs that are installed from a chart's `crds/` directory. If you want to fully remove the operator's API surface from the cluster, delete the CRDs manually after `helm uninstall`:
 >
 > ```bash
@@ -220,6 +229,15 @@ kubectl delete namespace falco-operator
 ```
 
 > **Important**: Deleting Falco instances before artifacts will terminate the Artifact Operator sidecar, leaving artifact finalizers unresolved. Always delete artifact resources first.
+
+> **Important**: Uninstall the operator last. An `ArtifactNode` carries the sidecar's finalizer, and once the sidecar is gone with its Falco pod only the operator releases it. If the operator was removed first, the ArtifactNodes, and the namespace holding them, stay `Terminating`; release them by hand:
+>
+> ```bash
+> kubectl get artifactnodes -A --no-headers -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name |
+>   while read -r ns name; do
+>     kubectl patch artifactnode "$name" -n "$ns" --type=merge -p '{"metadata":{"finalizers":null}}'
+>   done
+> ```
 
 ## Artifact transport and mTLS
 

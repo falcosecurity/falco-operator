@@ -4,9 +4,10 @@ metadata:
   name: rulesfile-oci-plugin-dep-not-programmed
 spec:
   description: |
-    Validates that a Plugin which can never be programmed (bad OCI tag) never
-    acquires any owned ArtifactNode, and can therefore be deleted immediately:
-    there is nothing for the node-objects-in-use finalizer to wait on.
+    Validates that a Plugin which can never be programmed (bad OCI tag) is assigned
+    to the nodes like any selected Plugin, but is never installed on them, and that
+    it can still be deleted: the nodes' artifact operators have no files to remove
+    and simply drop their entries, which releases the node-objects-in-use finalizer.
 
     The OCI artifact (falco-test/rulesfile-official) declares a container plugin
     dependency. The container Plugin is created with a nonexistent OCI tag so it
@@ -20,11 +21,12 @@ spec:
          programmed (ArtifactMeta cannot be fetched).
       4. Assert the Rulesfile is not programmed and the Plugin is not programmed
          with reason OCIArtifactProgramFailed.
-      5. Assert the Plugin has NO owned ArtifactNode objects: fetchAndCacheArtifactMeta
-         fails before any ArtifactNode is ever created for this Plugin, so there is
-         nothing for the deletion-blocking mechanism to hold on to.
-      6. Delete the Plugin: deletion must complete immediately (no blocking
-         finalizer).
+      5. Assert the nodes' ArtifactNodes list the Plugin (assignment follows the
+         selector, not whether the Plugin could be fetched) and that no node reports
+         any file installed for it: fetchAndCacheArtifactMeta fails, so ObservedGeneration
+         is never advanced and the artifact operators stay deferred.
+      6. Delete the Plugin: the assignment controller drops it from the nodes, the
+         artifact operators withdraw their entries, and the deletion completes.
 
   bindings:
     - name: falco_name
@@ -122,26 +124,62 @@ spec:
                   - status: 'False'
                     reason: OCIArtifactProgramFailed
 
-    - name: "Step 05: Assert-no-node-object-for-plugin"
+    - name: "Step 05: Assert-plugin-assigned-but-not-installed"
       description: |
-        fetchAndCacheArtifactMeta failed (bad OCI tag), so the instance operator
-        returned before ever creating an ArtifactNode for this Plugin. With no
-        owned ArtifactNode, node-objects-in-use has nothing to hold deletion open for.
+        fetchAndCacheArtifactMeta failed (bad OCI tag), so the Plugin's ObservedGeneration
+        is not stamped and the per-node artifact operators stay deferred. The Plugin is
+        nevertheless assigned, because assignment only follows the selector, and no node
+        reports anything installed for it.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`]):
+                  - kind: Plugin
+
+    - name: "Step 05b: Assert-no-binary-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /usr/share/falco/plugins
+            - name: expected_file
+              value: (join('', [$plugin_name, '.so']))
+            - name: should_exist
+              value: "false"
 
     - name: "Step 06: Delete-plugin-succeeds"
       description: |
-        Delete the plugin. With no owned ArtifactNode objects, node-objects-in-use
-        is never set and the deletion must complete without being blocked.
+        Delete the plugin. Nothing is installed for it, so the artifact operators only
+        drop their entries once the assignment controller removes it from the nodes, and
+        the node-objects-in-use finalizer is released within seconds.
       try:
         - delete:
             ref:
@@ -154,6 +192,7 @@ spec:
             kind: Plugin
             name: ($plugin_name)
             namespace: ($namespace)
+            timeout: 60s
             for:
               deletion: {}
 

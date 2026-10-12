@@ -108,17 +108,15 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_inline_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedInstalledAnyway
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_inline_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedInstalledAnyway
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
 
     - name: "Step 05: Assert-inline-file-on-filesystem"
       try:
@@ -182,17 +180,15 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_oci_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedInstalledAnyway
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_oci_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedInstalledAnyway
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
 
     - name: "Step 08: Assert-oci-file-on-filesystem"
       try:
@@ -249,17 +245,15 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_cm_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedInstalledAnyway
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_cm_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedInstalledAnyway
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                      - status: 'True'
 
     - name: "Step 11: Assert-configmap-file-on-filesystem"
       try:
@@ -340,21 +334,19 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_all_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedInstalledAnyway
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_all_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedInstalledAnyway
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                      - status: 'True'
 
     - name: "Step 14: Assert-all-sources-file-on-filesystem"
       try:

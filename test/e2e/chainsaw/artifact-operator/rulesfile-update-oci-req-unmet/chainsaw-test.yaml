@@ -156,20 +156,18 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                    observedGeneration: 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    observedGeneration: 2
-                    reason: DependenciesNotSatisfiedUpdateRejected
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    observedGeneration: 2
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                        observedGeneration: 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        observedGeneration: 2
+                        reason: DependenciesNotSatisfiedUpdateRejected
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        observedGeneration: 2
 
     - name: "Step 07: Assert-old-file-preserved"
       description: A rejected update must never remove the previously installed file.

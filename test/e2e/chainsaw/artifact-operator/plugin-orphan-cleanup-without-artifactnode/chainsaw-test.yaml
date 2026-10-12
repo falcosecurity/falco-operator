@@ -1,0 +1,218 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-orphan-cleanup-without-artifactnode
+spec:
+  description: |
+    A sidecar that restarts on a node with installed plugin files but no ArtifactNode removes them as
+    orphans, entry in the shared plugins-config included, so that Falco is never told to load a binary
+    that is not there.
+
+    The state is reached the way an outage reaches it: the artifact-operator container is taken down in
+    place (its emptyDir files survive) and, behind its back, the Plugin and the node's ArtifactNode are
+    deleted with their finalizers stripped, as an operator in a hurry does. Nothing is assigned any longer,
+    so the assignment controller does not create the ArtifactNode again. The restarted sidecar finds the
+    plugin's binary and its config entry on disk and no ArtifactNode.
+
+    Scenarios:
+    1. The json plugin is installed, configured and loaded by Falco.
+    2. The sidecar is down, the Plugin and the ArtifactNode are gone, and the files are still there.
+    3. The sidecar is back: the binary is gone, plugins-config has no entry for json, and there is
+       still no ArtifactNode.
+
+  bindings:
+    - name: falco_name
+      value: falco-orphan-cleanup-test
+    - name: plugin_name
+      value: json
+    - name: test_name
+      value: plugin-orphan-cleanup-without-artifactnode
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: plugin_config_path
+      value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: One Deployment pod, so that the sidecar restarted in place is the only one.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Assert-installed-and-loaded"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 04: Delete-everything-while-the-sidecar-is-down"
+      description: |
+        The sidecar is taken down and held back by kubelet. The Plugin and the ArtifactNode are deleted
+        with their finalizers stripped, so nothing cleans up after them. The sidecar must still be down
+        once that is done, or the test did not exercise a restart over the leftovers.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/stop_artifact_operator_container.sh
+            check:
+              (json_parse($stdout).status): success
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/force_delete_resource.sh
+            check:
+              (json_parse($stdout).status): success
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: ALL
+                value: "true"
+            content: bash ../../common/scripts/force_delete_resource.sh
+            check:
+              (json_parse($stdout).status): success
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RESOURCE
+                value: pods
+              - name: SELECTOR
+                value: (join('', ['app.kubernetes.io/name=', $falco_name]))
+              - name: JSONPATH
+                value: '{.items[0].status.containerStatuses[?(@.name=="artifact-operator")].state.waiting.reason}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            check:
+              ($stdout): CrashLoopBackOff
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/usr/share/falco/plugins/', $plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 05: Wait-for-the-sidecar"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/wait_artifact_operator_ready.sh
+            check:
+              (json_parse($stdout).status): success
+
+    - name: "Step 06: Assert-orphans-removed"
+      description: |
+        With no ArtifactNode to say otherwise, everything the node holds is an orphan. The binary goes and
+        so does its entry in plugins-config, which the sidecar observed on disk at startup without an
+        assignment to attribute it to. Nothing is assigned, so no ArtifactNode is created either.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: DIR
+                value: /usr/share/falco/plugins
+              - name: FILE_PATTERN
+                value: (join('', [$plugin_name, '.so']))
+            content: bash ../../common/scripts/check_file_absent_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

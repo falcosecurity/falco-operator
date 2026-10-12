@@ -1,0 +1,153 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-deletion-bulk-removal
+spec:
+  description: |
+    Deleting an ArtifactNode makes the artifact operator (sidecar) of its node remove everything it installed,
+    although the spec of the ArtifactNode still lists it all. That is a bulk removal like a wide drop from the spec
+    (see artifactnode-bulk-removal), so it must be as visible: the sidecar records a BulkRemoval Warning Event on
+    the ArtifactNode. The operator then creates the ArtifactNode again and the artifacts come back.
+
+    Scenarios:
+    1. 10 Configs are assigned, installed and reported Programmed, on a real Falco with a real sidecar.
+    2. The ArtifactNodes of the namespace are deleted. Each sidecar warns with BulkRemoval.
+    3. The ArtifactNodes are created again, and the Configs are installed and reported Programmed again.
+
+  bindings:
+    - name: falco_name
+      value: falco-deletion-bulk-removal-test
+    - name: test_name
+      value: artifactnode-deletion-bulk-removal
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-the-configs"
+      description: Ten Configs with no selector, so every node running this test's Falco is assigned all of them.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: KIND
+                value: Config
+              - name: PREFIX
+                value: deletion-config-0
+              - name: FIRST
+                value: "0"
+              - name: LAST
+                value: "9"
+            content: bash ../../common/scripts/apply_numbered_artifacts.sh
+
+    - name: "Step 03: Assert-assigned-installed-and-reported"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length(artifacts[?kind == 'Config'])): 10
+              status:
+                (length(artifacts[?kind == 'Config' && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`])): 10
+
+    - name: "Step 04: Assert-a-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-deletion-config-00-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 05: Delete-the-artifactnodes"
+      description: |
+        Nothing was dropped from any spec. The sidecars remove what they hold because their ArtifactNode is going,
+        and the operator creates the ArtifactNodes again.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: bash ../../common/scripts/delete_artifactnodes_and_wait_recreated.sh
+
+    - name: "Step 06: Assert-the-warning"
+      try:
+        - assert:
+            resource:
+              apiVersion: events.k8s.io/v1
+              kind: Event
+              metadata:
+                namespace: ($namespace)
+              type: Warning
+              reason: BulkRemoval
+              regarding:
+                kind: ArtifactNode
+
+    - name: "Step 07: Assert-everything-is-back"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length(artifacts[?kind == 'Config'])): 10
+              status:
+                (length(artifacts[?kind == 'Config' && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`])): 10
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: configs.artifact.falcosecurity.dev
+              - name: EXPECTED_COUNT
+                value: "10"
+            content: bash ../../common/scripts/wait_all_programmed.sh
+
+    - name: "Step 08: Assert-the-file-is-back"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-deletion-config-00-inline.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

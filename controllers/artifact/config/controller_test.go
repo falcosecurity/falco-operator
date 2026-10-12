@@ -18,8 +18,7 @@ package config
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -32,62 +31,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
+	"github.com/falcosecurity/falco-operator/internal/testutil/nodetest"
 )
-
-// testFetcher implements artifact.ArtifactFetcher for controller unit tests.
-// ConfigMap and Inline use the real artifact.Fetcher backed by the fake k8s client.
-// FetchOCI returns in-memory bytes to avoid HTTP calls to a real artifact server.
-type testFetcher struct {
-	delegate *artifact.Fetcher
-	ociErr   error
-	ociBytes []byte
-}
-
-func newTestFetcher(cl client.Client) *testFetcher {
-	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
-}
-
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, _ string) (artifact.FetchResult, error) {
-	if f.ociErr != nil {
-		return artifact.FetchResult{}, f.ociErr
-	}
-	content := f.ociBytes
-	if content == nil {
-		content = []byte("mock-oci-content")
-	}
-	h := sha256.Sum256(content)
-	return artifact.FetchResult{
-		Content:     content,
-		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        0o755,
-	}, nil
-}
-
-func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact.FetchResult, error) {
-	return f.delegate.FetchInline(ctx, content)
-}
-
-func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
-) (artifact.FetchResult, error) {
-	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
-}
 
 const testConfigName = "test-config"
 
@@ -104,189 +66,99 @@ falco_libs:
   thread_table_size: 262144
 `
 
-func testConfigNodeName() string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName)
+// testReconciler is a ConfigReconciler with the recorder its node emits Events to.
+type testReconciler struct {
+	*ConfigReconciler
+	recorder events.EventRecorder
 }
 
-func newTestConfigNodeObj(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testConfigNodeName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindConfig, testConfigName, testutil.TestNodeName),
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
-}
-
-func withConfigOwnerRef() func(*artifactv1alpha1.ArtifactNode) {
-	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: artifactv1alpha1.GroupVersion.String(),
-			Kind:       "Config",
-			Name:       testConfigName,
-		}}
-	}
-}
-
-func withConfigFinalizer() func(*artifactv1alpha1.ArtifactNode) {
-	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{configNodeFinalizer}
-	}
-}
-
-func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, client.Client) {
+func newTestReconciler(t *testing.T, objs ...client.Object) (*testReconciler, client.Client) {
 	t.Helper()
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(objs...).
+		WithObjects(testutil.EnsureArtifactNode(objs)...).
 		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
-	store := node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-	seedInstalledCacheFromObjs(store, objs)
-
-	return &ConfigReconciler{
-		Client:    cl,
-		Scheme:    s,
-		recorder:  events.NewFakeRecorder(100),
-		fetcher:   newTestFetcher(cl),
-		store:     store,
-		nodeName:  testutil.TestNodeName,
-		namespace: testutil.TestNamespace,
-	}, cl
+	recorder := events.NewFakeRecorder(100)
+	store := nodetest.NewTestNodeOn(t, cl, mockFS, recorder, nodetest.WithFetcher(testutil.NewFakeFetcher(cl)))
+	r := &testReconciler{ConfigReconciler: &ConfigReconciler{Client: cl, node: store}, recorder: recorder}
+	useNode(t, r, store, objs)
+	return r, cl
 }
 
-// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
-// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
-// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
-// from that cache, never from status, so a test simulating "this was already installed" must
-// seed the cache the same way a real restart would, not just set status on the object.
-func seedInstalledCacheFromObjs(store *node.Manager, objs []client.Object) {
-	for _, obj := range objs {
-		artifactNode, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || len(artifactNode.Status.InstalledArtifacts) == 0 {
-			continue
-		}
-		for _, ref := range artifactNode.OwnerReferences {
-			var kind node.Kind
-			switch ref.Kind {
-			case controllerhelper.KindRulesfile:
-				kind = node.KindRulesfile
-			case controllerhelper.KindPlugin:
-				kind = node.KindPlugin
-			case controllerhelper.KindConfig:
-				kind = node.KindConfig
-			default:
-				continue
-			}
-			store.SeedInstalled(node.Key{Kind: kind, Namespace: artifactNode.Namespace, Name: ref.Name}, artifactNode.Status.InstalledArtifacts)
-			break
-		}
-	}
+// useNode makes r use n, as after a restart: what the ArtifactNodes among objs say is installed is
+// recovered into it, and it publishes through the client n was built over.
+func useNode(t *testing.T, r *testReconciler, n *node.Node, objs []client.Object) {
+	t.Helper()
+	r.node = n
+	nodetest.Prime(n, objs)
 }
 
 func TestNewConfigReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	store := node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-		compatfake.NewMockVersionsFetcher(nil))
-	r := NewConfigReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", store)
+	n := nodetest.NewTestNodeOn(t, cl, fsfake.NewMockFileSystem(), events.NewFakeRecorder(10))
+	r := NewConfigReconciler(cl, n)
 
 	require.NotNil(t, r)
-	assert.Equal(t, "my-node", r.nodeName)
-	assert.Equal(t, "my-namespace", r.namespace)
-	assert.NotNil(t, r.fetcher)
-	assert.NotNil(t, r.store)
-	assert.NotNil(t, r.recorder)
+	assert.Same(t, n, r.node, "the reconciler works through the node it was given")
+	assert.Equal(t, testutil.TestNodeName, r.node.Name())
+	assert.Equal(t, testutil.TestNamespace, r.node.Namespace())
 }
 
 func TestReconcile(t *testing.T) {
+	inlineConfig := func(mods ...func(*artifactv1alpha1.Config)) *artifactv1alpha1.Config {
+		c := &artifactv1alpha1.Config{
+			ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
+			Spec: artifactv1alpha1.ConfigSpec{
+				Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+				Priority: 50,
+			},
+		}
+		for _, m := range mods {
+			m(c)
+		}
+		return c
+	}
+	configMapConfig := func(name string) *artifactv1alpha1.Config {
+		return &artifactv1alpha1.Config{
+			ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
+			Spec:       artifactv1alpha1.ConfigSpec{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: name}},
+		}
+	}
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-config-cm", Namespace: testutil.TestNamespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: testConfigData},
+	}
+
 	tests := []struct {
-		name            string
-		objects         []client.Object
-		req             ctrl.Request
-		triggerDeletion bool
-		writeErr        error
-		wantErr         bool
-		wantFinalizer   *bool
-		wantConditions  []testutil.ConditionExpect
+		name           string
+		objects        []client.Object
+		req            ctrl.Request
+		writeErr       error
+		wantErr        bool
+		wantConditions []testutil.ConditionExpect
 	}{
 		{
 			name: "resource not found returns no error",
 			req:  testutil.Request("nonexistent"),
 		},
 		{
-			name: "deletion with finalizer removes artifacts and finalizer",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req:             testutil.Request(testConfigNodeName()),
-			triggerDeletion: true,
-			wantFinalizer:   new(false),
-		},
-		{
-			name: "sets finalizer on first reconcile and returns early",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-					},
-				},
-				newTestConfigNodeObj(withConfigOwnerRef()),
-			},
-			req:           testutil.Request(testConfigNodeName()),
-			wantFinalizer: new(true),
-		},
-		{
-			name: "happy path with inline config stores config and sets conditions",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-						Priority: 50,
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req: testutil.Request(testConfigNodeName()),
+			name:    "happy path with inline config stores config and sets conditions",
+			objects: []client.Object{inlineConfig(), testutil.NewAssigningArtifactNode("Config", testConfigName, "")},
+			req:     testutil.Request(testConfigName),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
 		},
 		{
-			name: "happy path with configmap ref stores config and sets conditions",
-			objects: []client.Object{
-				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-config-cm", Namespace: testutil.TestNamespace},
-					Data: map[string]string{
-						commonv1alpha1.ConfigMapConfigKey: testConfigData,
-					},
-				},
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req: testutil.Request(testConfigNodeName()),
+			name:    "happy path with configmap ref stores config and sets conditions",
+			objects: []client.Object{configMap, configMapConfig("my-config-cm"), testutil.NewAssigningArtifactNode("Config", testConfigName, "")},
+			req:     testutil.Request(testConfigName),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{
@@ -297,17 +169,9 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "configmap ref not found fails reference resolution",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"},
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req:     testutil.Request(testConfigNodeName()),
+			name:    "configmap ref not found fails reference resolution",
+			objects: []client.Object{configMapConfig("missing-cm"), testutil.NewAssigningArtifactNode("Config", testConfigName, "")},
+			req:     testutil.Request(testConfigName),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
@@ -315,28 +179,9 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "deletion without our finalizer is no-op",
-			objects: []client.Object{
-				newTestConfigNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{"some-other-finalizer"}
-				}),
-			},
-			req:             testutil.Request(testConfigNodeName()),
-			triggerDeletion: true,
-		},
-		{
-			name: "ensureConfig failure sets error conditions on status",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
-						Priority: 50,
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req:      testutil.Request(testConfigNodeName()),
+			name:     "ensureConfig failure sets error conditions on status",
+			objects:  []client.Object{inlineConfig(), testutil.NewAssigningArtifactNode("Config", testConfigName, "")},
+			req:      testutil.Request(testConfigName),
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
@@ -348,23 +193,9 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "references resolved but configmap store fails sets ResolvedRefs true and Programmed false",
-			objects: []client.Object{
-				&corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-config-cm", Namespace: testutil.TestNamespace},
-					Data: map[string]string{
-						commonv1alpha1.ConfigMapConfigKey: testConfigData,
-					},
-				},
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-					Spec: artifactv1alpha1.ConfigSpec{
-						ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
-					},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			req:      testutil.Request(testConfigNodeName()),
+			name:     "references resolved but configmap store fails sets ResolvedRefs true and Programmed false",
+			objects:  []client.Object{configMap, configMapConfig("my-config-cm"), testutil.NewAssigningArtifactNode("Config", testConfigName, "")},
+			req:      testutil.Request(testConfigName),
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
@@ -385,13 +216,7 @@ func TestReconcile(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS := fsfake.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-			}
-
-			if tt.triggerDeletion {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
-				require.NoError(t, cl.Delete(context.Background(), nodeObj))
+				useNode(t, r, nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(testutil.NewFakeFetcher(cl))), tt.objects)
 			}
 
 			result, err := r.Reconcile(context.Background(), tt.req)
@@ -403,131 +228,12 @@ func TestReconcile(t *testing.T) {
 				assert.Equal(t, ctrl.Result{}, result)
 			}
 
-			if tt.wantFinalizer != nil {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				if err := cl.Get(context.Background(), tt.req.NamespacedName, nodeObj); err == nil {
-					assert.Equal(t, *tt.wantFinalizer, controllerutil.ContainsFinalizer(nodeObj, configNodeFinalizer))
-				}
-			}
-
 			if len(tt.wantConditions) > 0 {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+				entry, ok := r.node.StatusEntry(artifact.KindConfig, testConfigName)
+				require.True(t, ok, "the flow's status must reach the publisher")
+				testutil.RequireConditions(t, entry.Conditions, tt.wantConditions)
 			}
 		})
-	}
-}
-
-func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
-	for _, tc := range []struct {
-		medium        artifact.Medium
-		conditionType commonv1alpha1.ConditionType
-	}{
-		{artifact.MediumInline, commonv1alpha1.ConditionInlineArtifactProgrammed},
-		{artifact.MediumConfigMap, commonv1alpha1.ConditionConfigMapArtifactProgrammed},
-	} {
-		for _, missingCondition := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/missing-condition=%t", tc.medium, missingCondition), func(t *testing.T) {
-				ctx := t.Context()
-				cm := &corev1.ConfigMap{
-					ObjectMeta: metav1.ObjectMeta{Name: "config", Namespace: testutil.TestNamespace},
-					Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: testConfigData},
-				}
-				config := &artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace, Generation: 1},
-					Spec:       artifactv1alpha1.ConfigSpec{Priority: 50},
-				}
-				if tc.medium == artifact.MediumInline {
-					config.Spec.Config = &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)}
-				} else {
-					config.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
-				}
-				config.Status.ObservedGeneration = config.Generation
-				artifactNode := newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef())
-				r, cl := newTestReconciler(t, config, cm, artifactNode)
-				fs := fsfake.NewMockFileSystem()
-				r.store = node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-				key := node.KeyFromObj(node.KindConfig, config)
-				req := testutil.Request(artifactNode.Name)
-				_, err := r.Reconcile(ctx, req)
-				require.NoError(t, err)
-				require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
-				previousInstalled := artifactNode.Status.DeepCopy().InstalledArtifacts
-				require.Len(t, previousInstalled, 1)
-				previousPath := previousInstalled[0].Path
-				previousContent := append([]byte(nil), fs.Files[previousPath]...)
-				if missingCondition {
-					apimeta.RemoveStatusCondition(&artifactNode.Status.Conditions, tc.conditionType.String())
-					require.NoError(t, cl.Status().Update(ctx, artifactNode))
-				}
-
-				// Change sources only once. Cleanup must succeed before the replacement is written.
-				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(config), config))
-				config.Generation++
-				config.Status.ObservedGeneration = config.Generation
-				nextMedium := artifact.MediumInline
-				nextContent := testConfigYAML
-				config.Spec.Config = &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)}
-				config.Spec.ConfigMapRef = nil
-				if tc.medium == artifact.MediumInline {
-					config.Spec.Config = nil
-					config.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
-					nextMedium, nextContent = artifact.MediumConfigMap, testConfigData
-				}
-				require.NoError(t, cl.Update(ctx, config))
-				nextPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), config.Name, config.Spec.Priority, nextMedium, artifact.KindConfig)
-				removeErr := fmt.Errorf("injected stale config removal failure")
-				fs.RemoveErr = removeErr
-				for range 2 {
-					_, err = r.Reconcile(ctx, req)
-					require.ErrorIs(t, err, removeErr)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-					assert.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()),
-						"%+v", artifactNode.Status.Conditions)
-					condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String())
-					require.NotNil(t, condition)
-					assert.Equal(t, metav1.ConditionFalse, condition.Status)
-					assert.Equal(t, artifact.ReasonArtifactRemoveFailed, condition.Reason)
-					assert.Equal(t, config.Generation, condition.ObservedGeneration)
-					assert.Contains(t, condition.Message, removeErr.Error())
-					assert.Equal(t, previousContent, fs.Files[previousPath])
-					assert.NotContains(t, fs.Files, nextPath)
-					assert.Equal(t, previousInstalled, artifactNode.Status.InstalledArtifacts)
-					assert.Equal(t, previousInstalled, r.store.GetInstalled(key))
-				}
-
-				fs.RemoveErr = nil
-				_, err = r.Reconcile(ctx, req)
-				require.NoError(t, err)
-				require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-				assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String()))
-				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
-				assert.NotContains(t, fs.Files, previousPath)
-				assert.Equal(t, []byte(nextContent), fs.Files[nextPath])
-				require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
-				assert.Equal(t, nextPath, artifactNode.Status.InstalledArtifacts[0].Path)
-				assert.Equal(t, artifactNode.Status.InstalledArtifacts, r.store.GetInstalled(key))
-
-				stableStatus := artifactNode.Status.DeepCopy()
-				writes, removes := len(fs.WriteCalls), len(fs.RemoveCalls)
-				for _, staleCondition := range []bool{false, true} {
-					if staleCondition {
-						// A stale status condition must also clear when nothing remains installed.
-						apimeta.SetStatusCondition(&artifactNode.Status.Conditions, common.NewCondition(tc.conditionType,
-							metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, removeErr.Error(), config.Generation))
-						require.NoError(t, cl.Status().Update(ctx, artifactNode))
-					}
-					_, err = r.Reconcile(ctx, req)
-					require.NoError(t, err)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-					assert.Equal(t, *stableStatus, artifactNode.Status)
-					assert.Len(t, fs.WriteCalls, writes)
-					assert.Len(t, fs.RemoveCalls, removes)
-				}
-			})
-		}
 	}
 }
 
@@ -542,18 +248,13 @@ func TestReconcile_GetErrorPropagates(t *testing.T) {
 		}).
 		Build()
 
+	recorder := events.NewFakeRecorder(100)
 	r := &ConfigReconciler{
-		Client:   cl,
-		Scheme:   s,
-		recorder: events.NewFakeRecorder(100),
-		fetcher:  newTestFetcher(cl),
-		store: node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-			compatfake.NewMockVersionsFetcher(nil)),
-		nodeName:  testutil.TestNodeName,
-		namespace: testutil.TestNamespace,
+		Client: cl,
+		node:   nodetest.NewTestNodeOn(t, cl, fsfake.NewMockFileSystem(), recorder, nodetest.WithFetcher(testutil.NewFakeFetcher(cl))),
 	}
 
-	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigNodeName()))
+	_, err := r.Reconcile(context.Background(), testutil.Request(testConfigName))
 	require.Error(t, err)
 }
 
@@ -578,11 +279,14 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		{
 			name: "configmap exists sets ResolvedRefs true",
 			objects: []client.Object{
+				// The data key is present because resolving references is part of applying
+				// the artifact: the source is read straight afterwards, in the same call.
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      "my-config-cm",
 						Namespace: testutil.TestNamespace,
 					},
+					Data: map[string]string{commonv1alpha1.ConfigMapConfigKey: testConfigData},
 				},
 			},
 			config: &artifactv1alpha1.Config{
@@ -593,6 +297,12 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				// Resolution is the first half of applying the artifact; the source it resolved
+				// is written in the same call.
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
+				},
 			},
 		},
 		{
@@ -613,16 +323,19 @@ func TestEnforceReferenceResolution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newTestReconciler(t, tt.objects...)
-			nodeObj := newTestConfigNodeObj()
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 
 			// Pre-seed a stale ResolvedRefs condition to verify it's removed when no refs.
 			if tt.config.Spec.ConfigMapRef == nil {
-				nodeObj.Status.Conditions = []metav1.Condition{
+				status.Conditions = []metav1.Condition{
 					common.NewResolvedRefsCondition(metav1.ConditionTrue, artifact.ReasonReferenceResolved, "", 1),
 				}
 			}
 
-			err := r.enforceReferenceResolution(context.Background(), tt.config, nodeObj)
+			// The generation gate lives inside the apply, after reference resolution, so a
+			// fixture has to look like one the instance operator has already processed.
+			tt.config.Status.ObservedGeneration = tt.config.Generation
+			err := r.node.ApplyArtifact(context.Background(), tt.config, status)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -630,7 +343,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+			testutil.RequireConditions(t, status.Conditions, tt.wantConditions)
 		})
 	}
 }
@@ -644,6 +357,7 @@ func TestEnsureConfig(t *testing.T) {
 		wantErr        bool
 		wantConditions []testutil.ConditionExpect
 		wantFiles      []string
+		wantNoFiles    bool
 		wantEvents     []string
 	}{
 		{
@@ -663,7 +377,7 @@ func TestEnsureConfig(t *testing.T) {
 				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 			},
 			wantFiles:  []string{testConfigYAML},
-			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
+			wantEvents: []string{"Normal ArtifactStored inline artifact stored successfully"},
 		},
 		{
 			name: "no sources sets Programmed true",
@@ -723,13 +437,17 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
+				// Reference resolution is part of applying the artifact, so its condition
+				// is set on the same pass.
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{
 					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
 					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
 				},
 			},
-			wantFiles:  []string{testConfigData},
-			wantEvents: []string{"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully"},
+			wantFiles: []string{testConfigData},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully", "Normal ArtifactStored configmap artifact stored successfully"},
 		},
 		{
 			name: "both inline and configmap sources write two files",
@@ -757,6 +475,9 @@ func TestEnsureConfig(t *testing.T) {
 				},
 			},
 			wantConditions: []testutil.ConditionExpect{
+				// Reference resolution is part of applying the artifact, so its condition
+				// is set on the same pass.
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 				{
 					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
@@ -765,8 +486,9 @@ func TestEnsureConfig(t *testing.T) {
 			},
 			wantFiles: []string{testConfigYAML, testConfigData},
 			wantEvents: []string{
-				"Normal InlineArtifactStored Inline artifact stored successfully",
-				"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully",
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Normal ArtifactStored inline artifact stored successfully",
+				"Normal ArtifactStored configmap artifact stored successfully",
 			},
 		},
 		{
@@ -840,27 +562,76 @@ func TestEnsureConfig(t *testing.T) {
 			writeErr: fmt.Errorf("disk full"),
 			wantErr:  true,
 			wantConditions: []testutil.ConditionExpect{
+				// Reference resolution is part of applying the artifact, so its condition
+				// is set on the same pass.
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{
 					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
 					Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapArtifactProgramFailed,
 				},
 			},
-			wantEvents: []string{"Warning ConfigMapConfigStoreFailed Failed to store ConfigMap config: disk full"},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Warning ConfigMapConfigStoreFailed Failed to store ConfigMap config: disk full",
+			},
+		},
+		{
+			// The ConfigMap is read before anything is written, so a read that fails holds back the
+			// inline source too: nothing lands until both can.
+			name: "configmap without the config key fails before anything is written",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "my-config-cm",
+						Namespace: testutil.TestNamespace,
+					},
+					Data: map[string]string{"other": testConfigData},
+				},
+			},
+			config: &artifactv1alpha1.Config{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       testConfigName,
+					Namespace:  testutil.TestNamespace,
+					Generation: 1,
+				},
+				Spec: artifactv1alpha1.ConfigSpec{
+					Config:       &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+					Priority:     50,
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{
+					Type:   commonv1alpha1.ConditionConfigMapArtifactProgrammed.String(),
+					Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapArtifactProgramFailed,
+				},
+			},
+			wantNoFiles: true,
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully",
+				`Warning ConfigMapConfigStoreFailed Failed to store ConfigMap config: ConfigMap ` + testutil.TestNamespace +
+					`/my-config-cm missing expected key "` + commonv1alpha1.ConfigMapConfigKey + `"`,
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t, tt.objects...)
-			nodeObj := newTestConfigNodeObj()
+			r, cl := newTestReconciler(t, tt.objects...)
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 
 			mockFS := fsfake.NewMockFileSystem()
 			if tt.writeErr != nil {
 				mockFS.WriteErr = tt.writeErr
 			}
-			r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			r.node = nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(testutil.NewFakeFetcher(cl)))
 
-			err := r.ensureConfig(context.Background(), tt.config, nodeObj)
+			// The generation gate lives inside the apply, after reference resolution, so a
+			// fixture has to look like one the instance operator has already processed.
+			tt.config.Status.ObservedGeneration = tt.config.Generation
+			err := r.node.ApplyArtifact(context.Background(), tt.config, status)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -868,9 +639,12 @@ func TestEnsureConfig(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+			testutil.RequireConditions(t, status.Conditions, tt.wantConditions)
 			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 
+			if tt.wantNoFiles {
+				assert.Empty(t, mockFS.Files, "no file may be written")
+			}
 			if len(tt.wantFiles) > 0 {
 				require.Len(t, mockFS.Files, len(tt.wantFiles), "unexpected number of files written")
 				gotContents := make([]string, 0, len(mockFS.Files))
@@ -883,23 +657,23 @@ func TestEnsureConfig(t *testing.T) {
 	}
 }
 
-// TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty covers the case where the
-// manager's cache (seeded from disk by WarmSync, or surviving a status patch dropped by an SSA
+// TestEnsureConfig_PublishesFromTheNodesRecordEvenWhenStatusStartsEmpty covers the case where the
+// node's record (seeded from disk by the warm sync, or surviving a status patch dropped by an SSA
 // conflict) already considers the inline config installed and unchanged, but this specific
-// ArtifactNode's own Status.InstalledArtifacts starts empty. ensureConfig must still populate
-// status from the cache, not only when Store returns a fresh Added/Updated action.
-func TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T) {
-	r, _ := newTestReconciler(t)
+// status's InstalledArtifacts starts empty. The apply must still populate status from the
+// node's record, not only when Store returns a fresh Added/Updated action.
+func TestEnsureConfig_PublishesFromTheNodesRecordEvenWhenStatusStartsEmpty(t *testing.T) {
+	r, cl := newTestReconciler(t)
 	mockFS := fsfake.NewMockFileSystem()
-	r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	r.node = nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(testutil.NewFakeFetcher(cl)))
 
 	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), testConfigName, 50, artifact.MediumInline, artifact.KindConfig)
 	content := []byte(testConfigYAML)
-	hash := sha256hexForTest(content)
+	hash := testutil.SHA256Hex(content)
 	mockFS.Files[path] = content
 
-	key := node.Key{Kind: node.KindConfig, Namespace: testutil.TestNamespace, Name: testConfigName}
-	r.store.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
+	key := artifact.Ref{Kind: artifact.KindConfig, Name: testConfigName}
+	r.node.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
 		{Path: path, Medium: string(artifact.MediumInline), Priority: 50, ContentHash: hash},
 	})
 
@@ -910,19 +684,17 @@ func TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T
 			Priority: 50,
 		},
 	}
-	nodeObj := newTestConfigNodeObj() // Status.InstalledArtifacts starts nil, unlike the cache.
+	status := &artifactv1alpha1.NodeArtifactStatus{} // InstalledArtifacts starts nil, unlike the node's record.
 
-	require.NoError(t, r.ensureConfig(context.Background(), config, nodeObj))
+	config.Status.ObservedGeneration = config.Generation
+	require.NoError(t, r.node.ApplyArtifact(context.Background(), config, status))
+	// What a reconcile publishes on its way out, which is where the installed files are derived.
+	r.node.PublishStatus(artifact.KindConfig, config, status)
 
-	entry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumInline)
-	require.NotNil(t, entry, "status must be synced from the cache even when Store returns Unchanged")
+	entry := artifact.FindInstalled(status.InstalledArtifacts, artifact.MediumInline)
+	require.NotNil(t, entry, "status must be derived from the node's record even when Store returns Unchanged")
 	assert.Equal(t, path, entry.Path)
 	assert.Equal(t, hash, entry.ContentHash)
-}
-
-func sha256hexForTest(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
 }
 
 // TestEnsureConfig_ProgrammedLastTransitionTime verifies LastTransitionTime stays put on a
@@ -948,8 +720,8 @@ func TestEnsureConfig_ProgrammedLastTransitionTime(t *testing.T) {
 					Priority: 50,
 				},
 			}
-			nodeObj := newTestConfigNodeObj()
-			nodeObj.Status.Conditions = []metav1.Condition{{
+			status := &artifactv1alpha1.NodeArtifactStatus{}
+			status.Conditions = []metav1.Condition{{
 				Type:               commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
 				Status:             tt.initialStatus,
 				Reason:             artifact.ReasonInlineArtifactProgrammed,
@@ -957,9 +729,10 @@ func TestEnsureConfig_ProgrammedLastTransitionTime(t *testing.T) {
 				LastTransitionTime: pinned,
 			}}
 
-			require.NoError(t, r.ensureConfig(context.Background(), config, nodeObj))
+			config.Status.ObservedGeneration = config.Generation
+			require.NoError(t, r.node.ApplyArtifact(context.Background(), config, status))
 
-			cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
+			cond := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 			require.NotNil(t, cond)
 			require.Equal(t, metav1.ConditionTrue, cond.Status)
 			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
@@ -967,145 +740,313 @@ func TestEnsureConfig_ProgrammedLastTransitionTime(t *testing.T) {
 	}
 }
 
-func TestFindNodeObjectsForConfigMap(t *testing.T) {
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "my-config-cm",
-			Namespace: testutil.TestNamespace,
-		},
-	}
-	config := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testConfigName,
-			Namespace: testutil.TestNamespace,
-		},
+const assignedUID = "config-uid"
+
+func assignedConfig(uid string) *artifactv1alpha1.Config {
+	return &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace, UID: types.UID(uid), Generation: 1},
 		Spec: artifactv1alpha1.ConfigSpec{
-			ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-config-cm"},
+			Config:   &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)},
+			Priority: 50,
 		},
+		Status: artifactv1alpha1.ConfigStatus{ObservedGeneration: 1},
 	}
+}
 
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+func configKey() artifact.Ref {
+	return artifact.Ref{Kind: artifact.KindConfig, Name: testConfigName}
+}
+
+func TestReconcile_InstallsAndPublishesWhenAssigned(t *testing.T) {
+	r, cl := newTestReconciler(t, assignedConfig(assignedUID), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	assert.NotEmpty(t, r.node.GetInstalled(configKey()), "the config is on disk")
+	got := testutil.RequirePublishedWhere(t, cl, "Config", testConfigName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.IsStatusConditionTrue(e.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	})
+	assert.Equal(t, assignedUID, got.UID)
+}
+
+func TestReconcile_DoesNothingWhenNotAssigned(t *testing.T) {
+	for name, objs := range map[string][]client.Object{
+		"the ArtifactNode lists nothing": {assignedConfig(assignedUID), testutil.NewTestArtifactNode()},
+		"there is no ArtifactNode":       {assignedConfig(assignedUID)},
+		"the ArtifactNode is being deleted": {
+			assignedConfig(assignedUID), terminating(testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID)),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, _ := newTestReconciler(t, objs...)
+
+			result, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+			require.NoError(t, err)
+			assert.Equal(t, time.Duration(0), result.RequeueAfter)
+			assert.Empty(t, r.node.GetInstalled(configKey()))
+			_, held := r.node.StatusEntry(artifact.KindConfig, testConfigName)
+			assert.False(t, held)
+		})
+	}
+}
+
+func terminating(artifactNode *artifactv1alpha1.ArtifactNode) *artifactv1alpha1.ArtifactNode {
+	now := metav1.Now()
+	artifactNode.DeletionTimestamp = &now
+	artifactNode.Finalizers = []string{controllerhelper.ArtifactNodeSidecarFinalizer}
+	return artifactNode
+}
+
+func TestReconcile_WaitsWhenTheSpecListsAnotherIncarnation(t *testing.T) {
+	r, _ := newTestReconciler(t, assignedConfig("new-uid"), testutil.NewAssigningArtifactNode("Config", testConfigName, "old-uid"))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+	require.NoError(t, err)
+	assert.Equal(t, shared.AssignmentRetryDelay, result.RequeueAfter)
+	assert.Empty(t, r.node.GetInstalled(configKey()), "never install for an incarnation the operator did not assign")
+}
+
+func TestReconcile_IgnoresAMissingOrDeletingConfig(t *testing.T) {
+	r, _ := newTestReconciler(t, testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request("nonexistent"))
+	require.NoError(t, err)
+
+	now := metav1.Now()
+	deleting := assignedConfig(assignedUID)
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"test/finalizer"}
+	r, _ = newTestReconciler(t, deleting, testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+	_, err = r.Reconcile(t.Context(), testutil.Request(testConfigName))
+	require.NoError(t, err)
+	assert.Empty(t, r.node.GetInstalled(configKey()), "a deleting artifact is removed when the operator drops its assignment")
+}
+
+func TestReconcile_DoesNotInstallWhenTheStatusEntryCannotBePersisted(t *testing.T) {
 	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(configMap, config).
-		WithIndex(&artifactv1alpha1.Config{}, index.ConfigMapOnConfig, index.ConfigByConfigMapRef).
+		WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+		WithObjects(assignedConfig(assignedUID), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID)).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
-
-	r := &ConfigReconciler{
-		Client:    cl,
-		namespace: testutil.TestNamespace,
-		nodeName:  testutil.TestNodeName,
-	}
-
-	requests := r.findNodeObjectsForConfigMap(context.Background(), configMap)
-	require.Len(t, requests, 1)
-	assert.Equal(t, testConfigNodeName(), requests[0].Name)
-	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
-}
-
-func TestFindNodeObjectForConfig(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
-	cl := fake.NewClientBuilder().WithScheme(s).Build()
-
-	r := &ConfigReconciler{
-		Client:   cl,
-		nodeName: testutil.TestNodeName,
-	}
-
-	cfg := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testConfigName,
-			Namespace: testutil.TestNamespace,
+	failing := interceptor.NewClient(cl, interceptor.Funcs{
+		SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+			return fmt.Errorf("apiserver unavailable")
 		},
-	}
+	})
+	// The only node publishes through a client whose status patches fail, so no entry can be persisted. A second
+	// node over a working client would publish the entry its ArtifactNode reserves, and the install would then
+	// rightly proceed.
+	n := nodetest.NewTestNodeOn(t, failing, fsfake.NewMockFileSystem(), events.NewFakeRecorder(100),
+		nodetest.WithFetcher(testutil.NewFakeFetcher(failing)))
+	r := &testReconciler{ConfigReconciler: &ConfigReconciler{Client: cl, node: n}}
 
-	requests := r.findNodeObjectForConfig(context.Background(), cfg)
-	require.Len(t, requests, 1)
-	assert.Equal(t, testConfigNodeName(), requests[0].Name)
-	assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+	_, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+	require.Error(t, err)
+	assert.Empty(t, r.node.GetInstalled(configKey()),
+		"a file must never exist without a persisted status entry naming it")
 }
 
-func TestFindNodeObjects_UsesCanonicalNameWithoutLookup(t *testing.T) {
-	parent := &artifactv1alpha1.Config{
-		ObjectMeta: metav1.ObjectMeta{Name: "test--config", Namespace: testutil.TestNamespace, UID: "owner"},
-		Spec:       artifactv1alpha1.ConfigSpec{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "source"}},
-	}
-	want := client.ObjectKey{
-		Namespace: parent.Namespace,
-		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindConfig, parent.Name, testutil.TestNodeName),
-	}
-	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(parent).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				t.Fatal("event mapping must not fetch ArtifactNodes")
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.Config{}, index.ConfigMapOnConfig, index.ConfigByConfigMapRef).Build()
-	r := &ConfigReconciler{Client: cl, nodeName: testutil.TestNodeName}
-	requests := r.findNodeObjectForConfig(t.Context(), parent)
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
-	requests = r.findNodeObjectsForConfigMap(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
+func TestReconcile_ReplacesTheFilesOfAPreviousIncarnation(t *testing.T) {
+	r, cl := newTestReconciler(t, assignedConfig("uid-1"), testutil.NewAssigningArtifactNode("Config", testConfigName, "uid-1"))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+	require.NoError(t, err)
+	require.NotEmpty(t, r.node.GetInstalled(configKey()))
+
+	// The Config is deleted and recreated with the same name, and the operator re-lists it.
+	require.NoError(t, cl.Delete(t.Context(), assignedConfig("uid-1")))
+	require.NoError(t, cl.Create(t.Context(), func() *artifactv1alpha1.Config {
+		c := assignedConfig("uid-2")
+		c.ResourceVersion = ""
+		return c
+	}()))
+	artifactNodeKey := client.ObjectKeyFromObject(testutil.NewAssigningArtifactNode("Config", testConfigName, ""))
+	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		artifactNode := &artifactv1alpha1.ArtifactNode{}
+		if err := cl.Get(t.Context(), artifactNodeKey, artifactNode); err != nil {
+			return err
+		}
+		artifactNode.Spec.Artifacts[0].UID = "uid-2"
+		return cl.Update(t.Context(), artifactNode)
+	}))
+
+	_, err = r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+	require.NoError(t, err)
+	assert.Len(t, r.node.GetInstalled(configKey()), 1, "the old incarnation's file was replaced, not duplicated")
+	entry, ok := r.node.StatusEntry(artifact.KindConfig, testConfigName)
+	require.True(t, ok)
+	assert.Equal(t, "uid-2", entry.UID)
 }
 
-func TestHandleDeletion(t *testing.T) {
+func TestCleanup_RemovesFilesAndTheStatusEntry(t *testing.T) {
+	r, cl := newTestReconciler(t, assignedConfig(assignedUID), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+	require.NoError(t, err)
+	testutil.RequirePublished(t, cl, "Config", testConfigName)
+	testutil.DropAssignments(t, cl) // an artifact the ArtifactNode still lists keeps an entry to be filled in
+
+	require.NoError(t, r.Cleanup(t.Context(), testConfigName))
+
+	assert.Empty(t, r.node.GetInstalled(configKey()))
+	artifactNodeKey := client.ObjectKeyFromObject(testutil.NewAssigningArtifactNode("Config", testConfigName, ""))
+	require.Eventually(t, func() bool {
+		artifactNode := &artifactv1alpha1.ArtifactNode{}
+		return cl.Get(t.Context(), artifactNodeKey, artifactNode) == nil && len(artifactNode.Status.Artifacts) == 0
+	}, 2*time.Second, 5*time.Millisecond, "the entry is withdrawn once the last file is gone")
+}
+
+func TestCleanup_IsIdempotent(t *testing.T) {
+	r, _ := newTestReconciler(t)
+
+	require.NoError(t, r.Cleanup(t.Context(), "never-installed"))
+	require.NoError(t, r.Cleanup(t.Context(), "never-installed"))
+}
+
+// withFinalizer keeps the object around when it is deleted, terminating.
+func withFinalizer(t *testing.T, cl client.Client, obj client.Object) {
+	t.Helper()
+	// The ArtifactNode is patched concurrently by the node's status publisher: retry on a conflict.
+	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := cl.Get(t.Context(), client.ObjectKeyFromObject(obj), obj); err != nil {
+			return err
+		}
+		obj.SetFinalizers([]string{"test/finalizer"})
+		return cl.Update(t.Context(), obj)
+	}))
+}
+
+func installedConfig(t *testing.T) (*testReconciler, client.Client) {
+	t.Helper()
+	r, cl := newTestReconciler(t, assignedConfig(assignedUID), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+	require.NoError(t, err)
+	require.NotEmpty(t, r.node.GetInstalled(configKey()), "the config is on disk")
+	return r, cl
+}
+
+// The node controller asks for the removal of an artifact by having its reconciler reconcile it, which is then
+// the only one working on it. Each way the artifact can stop being assigned must remove what the node holds.
+func TestReconcile_RemovesWhatItHoldsWhenTheConfigIsNoLongerAssigned(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, client.Client){
+		"the ArtifactNode stops listing it": testutil.DropAssignments,
+		"the Config is gone and the ArtifactNode stopped listing it": func(t *testing.T, cl client.Client) {
+			testutil.DropAssignments(t, cl)
+			require.NoError(t, cl.Delete(t.Context(), assignedConfig(assignedUID)))
+		},
+		"the Config is being deleted and the ArtifactNode stopped listing it": func(t *testing.T, cl client.Client) {
+			testutil.DropAssignments(t, cl)
+			withFinalizer(t, cl, assignedConfig(assignedUID))
+			require.NoError(t, cl.Delete(t.Context(), assignedConfig(assignedUID)))
+		},
+		"the ArtifactNode is being deleted": func(t *testing.T, cl client.Client) {
+			withFinalizer(t, cl, testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID))
+			require.NoError(t, cl.Delete(t.Context(), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID)))
+		},
+		"there is no ArtifactNode": func(t *testing.T, cl client.Client) {
+			require.NoError(t, cl.Delete(t.Context(), testutil.NewAssigningArtifactNode("Config", testConfigName, assignedUID)))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, cl := installedConfig(t)
+			prepare(t, cl)
+
+			result, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+			require.NoError(t, err)
+			assert.Equal(t, time.Duration(0), result.RequeueAfter)
+			assert.Empty(t, r.node.GetInstalled(configKey()))
+			_, held := r.node.StatusEntry(artifact.KindConfig, testConfigName)
+			assert.False(t, held, "an entry left behind would keep the parent's finalizer")
+		})
+	}
+}
+
+// While the ArtifactNode still lists a Config that is gone or being deleted, the operator has yet to drop it: nothing is
+// removed until it does, which reconciles the Config again.
+func TestReconcile_KeepsWhatItHoldsWhileTheArtifactNodeStillListsAGoneConfig(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, client.Client){
+		"the Config is gone": func(t *testing.T, cl client.Client) {
+			require.NoError(t, cl.Delete(t.Context(), assignedConfig(assignedUID)))
+		},
+		"the Config is being deleted": func(t *testing.T, cl client.Client) {
+			withFinalizer(t, cl, assignedConfig(assignedUID))
+			require.NoError(t, cl.Delete(t.Context(), assignedConfig(assignedUID)))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, cl := installedConfig(t)
+			prepare(t, cl)
+
+			_, err := r.Reconcile(t.Context(), testutil.Request(testConfigName))
+
+			require.NoError(t, err)
+			assert.NotEmpty(t, r.node.GetInstalled(configKey()))
+		})
+	}
+}
+
+func TestCleanup_ReportsWhatCannotBeRemoved(t *testing.T) {
+	mockFS := fsfake.NewMockFileSystem()
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+		WithObjects(testutil.NewTestArtifactNode()).WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+	n := nodetest.NewTestNodeOn(t, cl, mockFS, events.NewFakeRecorder(100))
+	r := &ConfigReconciler{node: n}
+	require.NoError(t, n.ApplyArtifact(t.Context(), &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: testConfigName, UID: "uid"},
+		Spec:       artifactv1alpha1.ConfigSpec{Config: &apiextensionsv1.JSON{Raw: []byte(testConfigJSON)}, Priority: 50},
+	}, &artifactv1alpha1.NodeArtifactStatus{}))
+	mockFS.RemoveErr = errors.New("disk on fire")
+
+	err := r.Cleanup(t.Context(), testConfigName)
+
+	require.ErrorIs(t, err, mockFS.RemoveErr)
+	assert.NotEmpty(t, n.GetInstalled(configKey()), "what could not be removed is still recorded")
+}
+
+// A ConfigMap event reconciles the Configs that reference it, and only those.
+func TestFindConfigsForConfigMap(t *testing.T) {
+	config := func(name, configMap string) *artifactv1alpha1.Config {
+		c := &artifactv1alpha1.Config{}
+		c.Namespace, c.Name = testutil.TestNamespace, name
+		if configMap != "" {
+			c.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: configMap}
+		}
+		return c
+	}
 	tests := []struct {
 		name    string
-		objects []client.Object
-		trigger bool
-		wantOK  bool
+		listErr error
+		want    []reconcile.Request
 	}{
-		{
-			name: "not marked for deletion returns false",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			wantOK: false,
-		},
-		{
-			name: "marked for deletion with finalizer cleans up",
-			objects: []client.Object{
-				&artifactv1alpha1.Config{
-					ObjectMeta: metav1.ObjectMeta{Name: testConfigName, Namespace: testutil.TestNamespace},
-				},
-				newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef()),
-			},
-			trigger: true,
-			wantOK:  true,
-		},
-		{
-			name: "marked for deletion without our finalizer skips cleanup",
-			objects: []client.Object{
-				newTestConfigNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{"some-other-finalizer"}
-				}),
-			},
-			trigger: true,
-			wantOK:  true,
-		},
+		{name: "the Configs that reference it", want: []reconcile.Request{testutil.Request("a"), testutil.Request("b")}},
+		{name: "the Configs cannot be listed", listErr: errors.New("boom")},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t, tt.objects...)
-
-			nodeObj := &artifactv1alpha1.ArtifactNode{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
-
-			if tt.trigger {
-				require.NoError(t, cl.Delete(context.Background(), nodeObj))
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testConfigNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
+			builder := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+				WithObjects(config("a", "cm"), config("b", "cm"), config("c", "other"), config("d", ""))
+			for _, idx := range index.All {
+				builder = builder.WithIndex(idx.Object, idx.Field, idx.ExtractValueFn)
 			}
+			if tt.listErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+						return tt.listErr
+					},
+				})
+			}
+			r := &ConfigReconciler{Client: builder.Build()}
+			cm := &corev1.ConfigMap{}
+			cm.Namespace, cm.Name = testutil.TestNamespace, "cm"
 
-			ok, err := r.handleDeletion(context.Background(), nodeObj)
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantOK, ok)
+			got := r.findConfigsForConfigMap(t.Context(), cm)
+
+			assert.ElementsMatch(t, tt.want, got)
 		})
 	}
 }

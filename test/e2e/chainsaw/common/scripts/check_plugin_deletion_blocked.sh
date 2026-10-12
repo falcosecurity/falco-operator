@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Verify that deleting a Plugin referenced by a Rulesfile stays blocked by the
 # artifact.falcosecurity.dev/node-objects-in-use finalizer. That finalizer only
-# clears once every owned ArtifactNode is actually gone, and each ArtifactNode's
-# own per-node artifact operator refuses to remove itself while a Rulesfile on
-# that node still structurally depends on the plugin (node.Manager),
-# so this finalizer staying put is the real, authoritative signal that deletion
-# is blocked, not a name specific to "blocked by a rulesfile".
+# clears once no node's ArtifactNode lists the plugin or reports on it, and the
+# per-node artifact operator keeps its status entry for the plugin (and refuses to
+# remove the plugin) while a Rulesfile on that node still structurally depends on
+# it, so this finalizer staying put is the real,
+# authoritative signal that deletion is blocked, not a name specific to "blocked
+# by a rulesfile".
 #
 # Issues the delete request (no --wait), waits for the deletionTimestamp +
 # finalizer to appear, then polls for HOLD_SECONDS confirming the Plugin object

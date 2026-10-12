@@ -92,11 +92,9 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (length(installedArtifacts) == `2`): true
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (length(installedArtifacts) == `2`): true
 
     - name: "Step 05: Assert-both-files-on-filesystem"
       use:
@@ -148,13 +146,11 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (length(installedArtifacts) == `1`): true
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/config.d/50-03-config-remove-cm-test-inline.yaml
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (length(installedArtifacts) == `1`): true
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/config.d/50-03-config-remove-cm-test-inline.yaml
 
     - name: "Step 08: Assert-cm-file-deleted"
       use:

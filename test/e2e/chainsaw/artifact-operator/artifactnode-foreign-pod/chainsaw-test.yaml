@@ -1,0 +1,258 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-foreign-pod
+spec:
+  description: |
+    A Falco pod is recognized by the app.kubernetes.io/instance label carrying the name of its Falco. That label is
+    a common one: a pod of another workload, of a Helm release named like the Falco for instance, can carry the same
+    value in the same namespace. Such a pod is told apart by its app.kubernetes.io/name label, which the operator
+    sets to the Falco's name on its own pods and another workload sets to its own name. A pod whose name label says
+    something else is not a Falco pod: its node gets no ArtifactNode, and no artifact waits for a report from it.
+
+    It runs on two KWOK fake nodes with stub pods, so no artifact operator runs there: the report is simulated
+    (see common/scripts/simulate_sidecar_report.sh).
+
+    Scenarios:
+    1. One node runs a stub Falco pod, the other a pod of another app that carries the Falco's instance label.
+    2. A Config selects both nodes. Only the node with the Falco pod gets an ArtifactNode.
+    3. That node reports. The Config is Programmed, without waiting for the other node.
+
+  bindings:
+    - name: config_name
+      value: foreign-pod-config
+    - name: test_name
+      value: artifactnode-foreign-pod
+    - name: falco_name
+      value: foreign-pod-falco
+    - name: falco_node
+      value: (join('-', ['falco-node', $namespace]))
+    - name: other_node
+      value: (join('-', ['other-node', $namespace]))
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+    - name: other_pod_name
+      value: (join('-', ['other-pod', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-the-falco-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($falco_node)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Create-the-other-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($other_node)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 03: Create-falco-cr"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 04: Create-the-pod-of-another-app"
+      description: It carries the Falco's name as its instance, and its own app name. It is created before the Falco pod.
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($other_pod_name)
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/instance: ($falco_name)
+                  app.kubernetes.io/name: falcosidekick
+              spec:
+                nodeName: ($other_node)
+                tolerations:
+                  - key: kwok.x-k8s.io/node
+                    value: fake
+                    effect: NoSchedule
+                containers:
+                  - name: pause
+                    image: registry.k8s.io/pause:3.9
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($other_pod_name)
+                namespace: ($namespace)
+              status:
+                phase: Running
+
+    - name: "Step 05: Create-the-falco-pod"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($falco_node)
+
+    - name: "Step 06: Create-config"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                config:
+                  json_output: false
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($falco_node)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+
+    - name: "Step 07: Report-from-the-falco-node"
+      description: |
+        Scenario 3. With one report from the one node that runs Falco, the Config is Programmed: nothing is expected
+        of the node that runs the other app.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($falco_node)
+              - name: KINDS
+                value: Config
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 08: Assert-no-artifactnode-for-the-other-node"
+      description: Scenario 2. By now the operator has handled both nodes.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($other_node)
+                namespace: ($namespace)
+
+    - name: "Step 09: Cleanup"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($falco_node)
+              - name: KINDS
+                value: Config
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: ($config_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($falco_node)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($other_node)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort withdrawal of the simulated entries and finalizers, so the namespace can be deleted.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: KINDS
+            value: Rulesfile,Plugin,Config
+          - name: WITHDRAW
+            value: "true"
+          - name: STRIP_FINALIZERS
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
+    - description: Best-effort cleanup of the fake Nodes, cluster-scoped, so a mid-test failure must not leave them behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($falco_node)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($other_node)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

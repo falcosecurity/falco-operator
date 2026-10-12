@@ -89,19 +89,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ResolvedRefs']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(installedArtifacts) == `2`): true
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ResolvedRefs']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(installedArtifacts) == `2`): true
 
     - name: "Step 05: Assert-inline-file-on-filesystem"
       use:
@@ -143,13 +141,15 @@ spec:
               kind: Config
               name: ($config_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $config_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - kind: Config
 
     - name: "Step 08: Assert-inline-file-absent"
       use:

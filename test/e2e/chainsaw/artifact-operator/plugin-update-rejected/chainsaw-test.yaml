@@ -98,18 +98,16 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigProgrammed']):
+                      - status: 'True'
 
     - name: Assert-so-on-filesystem-initial
       description: Confirm the .so reached the node filesystem on the initial install.
@@ -178,19 +176,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfiedUpdateRejected
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfiedUpdateRejected
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigProgrammed']):
+                      - status: 'True'
 
     - name: Assert-so-still-on-filesystem
       description: |

@@ -15,7 +15,8 @@ spec:
     installed SpecHash. This proves current reconciliation rather than accepting
     the pre-restart Programmed=True status. The file checksum must remain unchanged.
 
-    The new process must emit no "Rulesfile OCI artifact written to disk" log.
+    The new process must emit neither an "Artifact installed" nor an "Artifact updated" log:
+    this Rulesfile is the only artifact on the node, so either one is a rewrite of its file.
     This is a no-rewrite assertion, not a no-fetch assertion. The historical test
     name is retained; recovering installed identity from status is no longer part
     of the contract.
@@ -210,19 +211,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (installedArtifacts[0].medium): oci
-                (installedArtifacts[0].specHash): ($current_spec_hash)
-                (installedArtifacts[0].contentHash): ($installed_rules_checksum)
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                    observedGeneration: 2
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                    observedGeneration: 2
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (installedArtifacts[0].medium): oci
+                    (installedArtifacts[0].specHash): ($current_spec_hash)
+                    (installedArtifacts[0].contentHash): ($installed_rules_checksum)
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                        observedGeneration: 2
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                        observedGeneration: 2
         - script:
             env:
               - name: NAMESPACE
@@ -252,7 +251,21 @@ spec:
               - name: CONTAINER
                 value: artifact-operator
               - name: PATTERN
-                value: Rulesfile OCI artifact written to disk
+                value: Artifact installed
+              - name: MAX_RETRIES
+                value: "20"
+            content: |
+              bash ../../common/scripts/check_log_absent_on_pod.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: CONTAINER
+                value: artifact-operator
+              - name: PATTERN
+                value: Artifact updated
               - name: MAX_RETRIES
                 value: "20"
             content: |

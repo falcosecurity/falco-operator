@@ -22,7 +22,7 @@ spec:
 
     Expected outcome:
     - Programmed=False, reason=OCIArtifactProgramFailed on the Plugin.
-    - No ArtifactNode created.
+    - The Plugin is assigned to the nodes, but no node reports any file installed for it.
     - No .so binary written to disk.
 
   bindings:
@@ -84,17 +84,30 @@ spec:
                   - status: 'False'
                     reason: OCIArtifactProgramFailed
 
-    - name: "Step 04: Assert-no-artifact-node"
-      description: ObservedGeneration not stamped → per-node sidecar deferred → no ArtifactNode created.
+    - name: "Step 04: Assert-assigned-but-not-installed"
+      description: |
+        ObservedGeneration not stamped → per-node sidecar deferred. The Plugin is still
+        listed by the ArtifactNodes, since assignment only follows the selector, but no
+        node reports anything installed for it.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Plugin
 
     - name: "Step 05: Assert-no-binary-on-filesystem"
       use:

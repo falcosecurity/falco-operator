@@ -127,6 +127,21 @@ type RulesRequirements struct {
 	PluginVersions []commonv1alpha1.ArtifactMetaDependency
 }
 
+// AppendTo adds these requirements to meta, in the form the rest of the operator compares against
+// Falco's reported capabilities: EngineVersions already carries the capability each directive is
+// checked against.
+//
+// Both operators use this: the instance operator to build a Rulesfile's Status.ArtifactMeta from
+// the content it fetched, and the node to recover the same facts from a rules file already on
+// disk. The mapping has to be identical in both, which is why it lives here.
+func (r *RulesRequirements) AppendTo(meta *commonv1alpha1.ArtifactMeta) {
+	if r == nil || meta == nil {
+		return
+	}
+	meta.Requirements = append(meta.Requirements, r.EngineVersions...)
+	meta.Dependencies = append(meta.Dependencies, r.PluginVersions...)
+}
+
 // ParseRulesRequirements scans every document in a Falco rules YAML stream for required_engine_version
 // and required_plugin_versions directives. It skips unknown top-level items (rules, macros,
 // lists, etc.) without error. Returns empty requirements when data is nil or empty.

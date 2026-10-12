@@ -4,13 +4,13 @@ metadata:
   name: rulesfile-warmsync-removes-orphaned-file
 spec:
   description: |
-    Regression test for the artifact-operator sidecar's WarmSync: at startup it scans disk
-    (ArtifactStore.ScanAll) for every artifact file, and any name with files on disk but no
-    ArtifactNode at all for this node is removed immediately, since nothing will ever ask
-    about it again. This is the disk-ground-truth cleanup path, distinct from a normal
-    finalizer-driven deletion (which the per-node sidecar itself performs while running).
+    Regression test for the artifact-operator sidecar's handling of orphans: at startup WarmSync
+    scans disk (ArtifactStore.ScanAll) for every artifact file, and the node controller removes
+    any name with files on disk but no ArtifactNode at all for this node, since nothing will ever
+    ask about it again. This is the disk-ground-truth cleanup path,
+    distinct from a normal finalizer-driven deletion (which the sidecar itself performs while running).
 
-    ScanAll doesn't care WHY a file has no matching live ArtifactNode, only that it doesn't, so
+    The scan doesn't care WHY a file has no matching live ArtifactNode, only that it doesn't, so
     this test never creates a real Rulesfile at all: it writes a correctly-named file (matching
     the "PP-SS-{name}-oci.yaml" convention scan.go parses) straight into rules.d via kubectl
     exec, simulating a file whose parent CR and ArtifactNode are long gone. Deleting a real
@@ -23,7 +23,7 @@ spec:
     The artifact-operator container is then restarted IN PLACE (never the Pod: see
     restart_artifact_operator_container.sh's doc comment for why the shared EmptyDir
     volumes make that the only way to test WarmSync's disk-recovery logic at all), and the
-    new process's WarmSync is expected to sweep the orphaned file from disk.
+    new process is expected to recover the file from disk and remove it.
 
   bindings:
     - name: falco_name
@@ -96,8 +96,8 @@ spec:
 
     - name: "Step 05: Assert-orphaned-file-removed"
       description: |
-        The core assertion: WarmSync scanned disk, found this file with no ArtifactNode
-        left to claim it, and removed it.
+        The core assertion: the sidecar found this file on disk with no ArtifactNode left to
+        claim it, and removed it.
       try:
         - script:
             env:

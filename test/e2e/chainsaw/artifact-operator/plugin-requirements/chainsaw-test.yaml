@@ -112,15 +112,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
 
     - name: Assert-so-absent-from-filesystem
       description: The container.so must never have reached the node filesystem.
@@ -208,18 +206,16 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigProgrammed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigProgrammed']):
+                      - status: 'True'
 
     - name: Assert-so-on-filesystem
       description: The container.so must now be present on the node filesystem.

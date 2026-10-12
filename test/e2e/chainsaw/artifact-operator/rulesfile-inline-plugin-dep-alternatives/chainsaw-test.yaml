@@ -203,6 +203,10 @@ spec:
                   - status: 'True'
 
     - name: "Step 09: Block-primary-deletion-with-incompatible-alternative"
+      description: |
+        The Plugin is dropped from the node's spec, but the node's artifact operator refuses to remove it while
+        the Rulesfile requires it, and reports DeletionBlocked on its entry. The ArtifactNode itself stays: it
+        still lists the Rulesfile, and is not deleted.
       try:
         - script:
             env:
@@ -217,14 +221,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: json
-                  artifact.falcosecurity.dev/kind: plugin
-                (deletionTimestamp != null): true
+              spec:
+                (length(artifacts[?kind == 'Plugin' && name == 'json'] || `[]`)): 0
               status:
-                (conditions[?type == 'DeletionBlocked']):
-                  - status: 'True'
-                    reason: PluginConfigStillRequired
+                (artifacts[?kind == 'Plugin' && name == 'json']):
+                  - (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+                        reason: PluginConfigStillRequired
         - script:
             env:
               - name: NAMESPACE
@@ -338,19 +341,33 @@ spec:
 
     - name: "Step 14: Remove-rules-before-reinstalling-primary"
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 15: Reinstall-primary"
       use:
@@ -476,19 +493,33 @@ spec:
 
     - name: "Step 23: Remove-rules-before-plugin-cleanup"
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
   catch:
     - script:
         env:

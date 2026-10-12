@@ -14,30 +14,25 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package config implements the Config node-object aggregator controller.
+// Package config implements the Config aggregator controller.
 // It runs in the instance operator (singleton Deployment) and is responsible for:
-//   - Creating one ArtifactNode per cluster node that matches the Config selector.
-//   - Deleting ArtifactNode objects when a node no longer matches.
-//   - Aggregating per-node conditions into the parent Config status (sole writer).
+//   - Aggregating the per-node conditions that each node's artifact operator publishes on its
+//     ArtifactNode into the parent Config status (sole writer).
 //   - Managing the NodeObjectsInUseFinalizer on the parent Config.
+//
+// Which nodes get the Config is decided by the ArtifactNode assignment controller.
 package config
 
 import (
 	"context"
 
-	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 )
 
 // ControllerName identifies this controller in logs and as the SSA field manager.
@@ -48,8 +43,8 @@ func NewConfigAggregatorReconciler(cl client.Client, scheme *runtime.Scheme) *Co
 	return &ConfigAggregatorReconciler{Client: cl, Scheme: scheme}
 }
 
-// ConfigAggregatorReconciler manages ArtifactNode objects and aggregates their
-// conditions into the parent Config status.
+// ConfigAggregatorReconciler aggregates the per-node conditions published on ArtifactNodes into the
+// parent Config status.
 type ConfigAggregatorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -58,158 +53,32 @@ type ConfigAggregatorReconciler struct {
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/status,verbs=patch;update
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=configs/finalizers,verbs=patch;update
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
 
-// Reconcile reconciles a Config: ensures ArtifactNode objects exist for matching nodes,
-// removes stale ones, and writes the aggregate conditions back to the Config.
+// Reconcile reconciles a Config: manages its in-use finalizer and writes the aggregate of the conditions
+// its nodes published back to the Config.
 func (r *ConfigAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling Config")
-
-	config := &artifactv1alpha1.Config{}
-	if err := r.Get(ctx, req.NamespacedName, config); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	if !config.DeletionTimestamp.IsZero() {
-		logger.V(1).Info("Config marked for deletion, running cleanup")
-		return ctrl.Result{}, r.handleDeletion(ctx, config)
-	}
-
-	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, config.Spec.Selector)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	runningFalcoNodes, err := controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, config.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	matchingNodes := controllerhelper.FilterNodesByName(allMatchingNodes, runningFalcoNodes)
-	logger.V(1).Info("Listed matching nodes", "total", len(allMatchingNodes), "withFalco", len(matchingNodes))
-
-	existingNodes, err := controllerhelper.ListOwnedNodes(ctx, r.Client, config.Namespace, config.Name, controllerhelper.KindConfig)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Listed existing ArtifactNode objects", "count", len(existingNodes.Items))
-
-	desired := make(map[string]struct{}, len(matchingNodes))
-	for i := range matchingNodes {
-		desired[matchingNodes[i].Name] = struct{}{}
-	}
-
-	if err := controllerhelper.DeleteStaleNodeObjects(
-		ctx, r.Client, existingNodes.Items, desired, runningFalcoNodes,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// No network-bound work happens between here and node creation, so the DeletionTimestamp
-	// check at the top of Reconcile is still valid.
-
-	// Ensure an ArtifactNode exists for each matching node.
-	configGVK := artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindConfig)
-	for i := range matchingNodes {
-		if err := controllerhelper.EnsureNodeObject(
-			ctx, r.Client, config, configGVK, controllerhelper.ArtifactKindConfig, matchingNodes[i].Name,
-		); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Re-fetch node objects (some may have just been created) to compute the aggregate.
-	existingNodes, err = controllerhelper.ListOwnedNodes(ctx, r.Client, config.Namespace, config.Name, controllerhelper.KindConfig)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Re-listed ArtifactNode objects after sync", "count", len(existingNodes.Items))
-
-	// Keep the parent alive when children are desired or until every existing child is
-	// physically gone. The desired-node check also covers a just-created child that the
-	// informer cache may not expose in the immediate re-list yet.
-	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
-		ctx, r.Client, config, nil,
-		len(matchingNodes) > 0 || len(existingNodes.Items) > 0,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// A stale or terminating child no longer represents the desired assignment and must not
-	// keep its last condition in the aggregate while deletion is pending.
-	nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-
-	oldStatus := config.Status.DeepCopy()
-	config.Status.ObservedGeneration = config.Generation
-	controllerhelper.ComputeAggregateConditions(ctx, config, &config.Status.Conditions, nodeSets)
-	if !apiequality.Semantic.DeepEqual(*oldStatus, config.Status) {
-		return ctrl.Result{}, controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, config, ControllerName)
-	}
-	return ctrl.Result{}, nil
+	return shared.Reconcile(ctx, req, r.aggregation())
 }
 
-// handleDeletion deletes all ArtifactNode objects so each per-node artifact operator can clean up and
-// remove its own finalizer (skipping this would deadlock: GC cascade only fires after the owner is
-// deleted, but the in-use finalizer keeps the owner alive).
-func (r *ConfigAggregatorReconciler) handleDeletion(ctx context.Context, config *artifactv1alpha1.Config) error {
-	existing, err := controllerhelper.ListOwnedNodes(ctx, r.Client, config.Namespace, config.Name, controllerhelper.KindConfig)
-	if err != nil {
-		return err
+// aggregation is what the aggregate reconcile needs of the Configs.
+func (r *ConfigAggregatorReconciler) aggregation() shared.Aggregation[*artifactv1alpha1.Config] {
+	return shared.Aggregation[*artifactv1alpha1.Config]{
+		Client:       r.Client,
+		Scheme:       r.Scheme,
+		FieldManager: ControllerName,
+		Kind:         artifact.KindConfig,
+		Cache:        nil,
+		New:          func() *artifactv1alpha1.Config { return &artifactv1alpha1.Config{} },
+		StatusValue:  func(config *artifactv1alpha1.Config) any { return *config.Status.DeepCopy() },
 	}
-
-	runningFalcoNodes := map[string]struct{}{}
-	if len(existing.Items) > 0 {
-		runningFalcoNodes, err = controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, config.Namespace)
-		if err != nil {
-			return err
-		}
-	}
-
-	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(
-		ctx, r.Client, existing.Items, runningFalcoNodes,
-	)
-	if err != nil {
-		return err
-	}
-	if nodesRemaining {
-		return nil
-	}
-
-	return controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, config,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		false,
-	)
 }
 
 // SetupWithManager registers this controller with the manager.
 func (r *ConfigAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		// Status events must reconcile too: a cached no-op can race with an earlier
-		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
-		For(&artifactv1alpha1.Config{}).
-		Watches(&corev1.Node{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.ConfigList{})
-			}),
-			builder.WithPredicates(predicate.Or(
-				predicate.GenerationChangedPredicate{},
-				predicate.LabelChangedPredicate{},
-			)),
-		).
-		Watches(&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, pod client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.ConfigList{}, client.InNamespace(pod.GetNamespace()))
-			}),
-			builder.WithPredicates(controllerhelper.FalcoPodChangePredicate()),
-		).
-		Watches(&artifactv1alpha1.ArtifactNode{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &artifactv1alpha1.Config{}),
-		).
-		Named(ControllerName).
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &artifactv1alpha1.Config{})).
+	return shared.NewControllerManagedBy(mgr, r.Client, ControllerName, artifact.KindConfig, &artifactv1alpha1.Config{},
+		func() client.ObjectList { return &artifactv1alpha1.ConfigList{} }, nil).
 		Complete(r)
 }

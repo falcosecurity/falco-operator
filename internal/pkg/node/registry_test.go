@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package node_test
+package node
 
 import (
 	"context"
@@ -26,44 +26,43 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
-func TestManager_PluginRemovalUsesOnlyKnownRulesfileDependencies(t *testing.T) {
+func TestNode_PluginRemovalUsesOnlyKnownRulesfileDependencies(t *testing.T) {
 	ctx := t.Context()
-	m := newTestManager()
+	m := newTestNode()
 	fetcher := &artifact.Fetcher{}
 	for _, name := range []string{"container", "unrelated"} {
-		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
+		_, _, err := m.AddPluginConfig(ctx, testPlugin(name))
 		require.NoError(t, err)
 	}
-	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: "rules"}
 	content, err := fetcher.FetchInline(ctx, []byte("rules"))
 	require.NoError(t, err)
-	_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content, nil, false)
+	_, _, err = m.StoreRulesfile(ctx, key.Name, 50, artifact.MediumOCI, content, nil, false)
 	require.NoError(t, err)
-	_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumInline, content,
+	_, _, err = m.StoreRulesfile(ctx, key.Name, 50, artifact.MediumInline, content,
 		&commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}}, false)
 	require.NoError(t, err)
 
-	require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("unrelated")),
+	require.NoError(t, m.RemovePluginConfig(ctx, testPlugin("unrelated")),
 		"an unknown source must not block an unrelated plugin")
-	var blocked *node.BlockedError
-	require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked,
+	var blocked *BlockedError
+	require.ErrorAs(t, m.RemovePluginConfig(ctx, testPlugin("container")), &blocked,
 		"the other source's known dependency must remain protected")
-	assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
-	_, removed, err := m.RemoveIfInstalled(ctx, key, artifact.MediumInline)
+	assert.Equal(t, []artifact.Ref{key}, blocked.BlockedBy)
+	_, removed, err := m.removeIfInstalled(ctx, key, artifact.MediumInline)
 	require.NoError(t, err)
 	require.True(t, removed)
 	require.NotNil(t, m.FindInstalled(key, artifact.MediumOCI))
-	require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")),
+	require.NoError(t, m.RemovePluginConfig(ctx, testPlugin("container")),
 		"only an unknown source remains; no dependency can be attributed to it")
 }
 
-func TestManager_CheckRequirement_NotFoundBeforeAnyObservation(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckRequirement_NotFoundBeforeAnyObservation(t *testing.T) {
+	m := newTestNode()
 
-	provided, found, satisfied, err := m.CheckRequirement("engine_version_semver", "0.57.0")
+	provided, found, satisfied, err := m.checkRequirement("engine_version_semver", "0.57.0")
 
 	require.NoError(t, err)
 	assert.False(t, found)
@@ -71,13 +70,13 @@ func TestManager_CheckRequirement_NotFoundBeforeAnyObservation(t *testing.T) {
 	assert.Empty(t, provided)
 }
 
-func TestManager_CheckRequirement_SatisfiedAfterObservation(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckRequirement_SatisfiedAfterObservation(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}).Result)
 
-	provided, found, satisfied, err := m.CheckRequirement("engine_version_semver", "0.57.0")
+	provided, found, satisfied, err := m.checkRequirement("engine_version_semver", "0.57.0")
 
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -85,13 +84,13 @@ func TestManager_CheckRequirement_SatisfiedAfterObservation(t *testing.T) {
 	assert.Equal(t, "0.62.0", provided)
 }
 
-func TestManager_CheckRequirement_NotSatisfiedWhenTooOld(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckRequirement_NotSatisfiedWhenTooOld(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container": "0.3.0",
 	}).Result)
 
-	provided, found, satisfied, err := m.CheckRequirement("container", "0.4.0")
+	provided, found, satisfied, err := m.checkRequirement("container", "0.4.0")
 
 	require.NoError(t, err)
 	assert.True(t, found)
@@ -99,30 +98,30 @@ func TestManager_CheckRequirement_NotSatisfiedWhenTooOld(t *testing.T) {
 	assert.Equal(t, "0.3.0", provided)
 }
 
-func TestManager_CheckRequirement_PluginAPIVersionUsesMajorCompatibility(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckRequirement_PluginAPIVersionUsesMajorCompatibility(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"plugin_api_version": "3.12.0",
 	}).Result)
 
-	_, found, satisfied, err := m.CheckRequirement("plugin_api_version", "3.0.0")
+	_, found, satisfied, err := m.checkRequirement("plugin_api_version", "3.0.0")
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, satisfied, "3.12.0 is major-compatible with a 3.0.0 requirement")
 
-	_, found, satisfied, err = m.CheckRequirement("plugin_api_version", "4.0.0")
+	_, found, satisfied, err = m.checkRequirement("plugin_api_version", "4.0.0")
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.False(t, satisfied, "major version 3 cannot satisfy a major version 4 requirement")
 }
 
-func TestManager_CheckDependency_PrimarySatisfied(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckDependency_PrimarySatisfied(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container": "0.7.1",
 	}).Result)
 
-	matched, provided, satisfied, err := m.CheckDependency(
+	matched, provided, satisfied, err := m.checkDependency(
 		commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0"},
 	)
 
@@ -132,13 +131,13 @@ func TestManager_CheckDependency_PrimarySatisfied(t *testing.T) {
 	assert.Equal(t, "0.7.1", provided)
 }
 
-func TestManager_CheckDependency_AlternativeSatisfied(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckDependency_AlternativeSatisfied(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"container-alt": "0.2.0",
 	}).Result)
 
-	matched, provided, satisfied, err := m.CheckDependency(
+	matched, provided, satisfied, err := m.checkDependency(
 		commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0",
 			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "0.1.0"}}},
 	)
@@ -149,10 +148,10 @@ func TestManager_CheckDependency_AlternativeSatisfied(t *testing.T) {
 	assert.Equal(t, "0.2.0", provided)
 }
 
-func TestManager_CheckDependency_NoneSatisfied(t *testing.T) {
-	m := newTestManager()
+func TestNode_CheckDependency_NoneSatisfied(t *testing.T) {
+	m := newTestNode()
 
-	matched, provided, satisfied, err := m.CheckDependency(
+	matched, provided, satisfied, err := m.checkDependency(
 		commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0",
 			Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "0.1.0"}}},
 	)
@@ -163,16 +162,15 @@ func TestManager_CheckDependency_NoneSatisfied(t *testing.T) {
 	assert.Empty(t, provided)
 }
 
-func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
+func TestNode_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	ctx := t.Context()
 	versions := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"})
-	m := newTestManagerWithFetcher(versions)
-	fetcher := &artifact.Fetcher{}
+	m := newTestNodeWithFetcher(versions)
 	dependency := commonv1alpha1.ArtifactMetaDependency{Name: "json", Version: "0.7.0",
 		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container", Version: "0.7.0"}}}
 	check := func(wantMatch string, wantSatisfied bool) {
 		t.Helper()
-		matched, _, satisfied, err := m.CheckDependency(dependency)
+		matched, _, satisfied, err := m.checkDependency(dependency)
 		require.NoError(t, err)
 		assert.Equal(t, wantMatch, matched)
 		assert.Equal(t, wantSatisfied, satisfied)
@@ -182,7 +180,7 @@ func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	// have loaded since the last poll, so its unknown version must not allow fallback.
 	m.OnFalcoVersionsObserved(versions.Result)
 	check("container", true)
-	_, _, err := m.AddPluginConfig(ctx, testPlugin("json"), fetcher)
+	_, _, err := m.AddPluginConfig(ctx, testPlugin("json"))
 	require.NoError(t, err)
 	check("json", false)
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
@@ -196,14 +194,14 @@ func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	// It does not make the alternative safe for rules that the primary will reject.
 	m.OnFalcoVersionsObserved(versions.Result)
 	check("json", false)
-	require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("json")))
+	require.NoError(t, m.RemovePluginConfig(ctx, testPlugin("json")))
 	check("container", true)
-	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"), fetcher)
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"))
 	require.NoError(t, err)
 	check("json", false)
 
 	// The same rule applies to an earlier alternative awaiting observation.
-	_, _, satisfied, err := m.CheckDependency(commonv1alpha1.ArtifactMetaDependency{
+	_, _, satisfied, err := m.checkDependency(commonv1alpha1.ArtifactMetaDependency{
 		Name: "absent", Version: "1.0.0",
 		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
 			{Name: dependency.Name, Version: dependency.Version}, dependency.Alternatives[0],
@@ -213,7 +211,7 @@ func TestManager_CheckDependency_WaitsForConfiguredCandidate(t *testing.T) {
 	assert.False(t, satisfied)
 }
 
-func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
+func TestNode_CheckDependency_FalcoCompatibility(t *testing.T) {
 	dependency := commonv1alpha1.ArtifactMetaDependency{
 		Name: "primary", Version: "1.2.0",
 		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
@@ -241,9 +239,9 @@ func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := newTestManager()
+			m := newTestNode()
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.versions).Result)
-			matched, _, satisfied, err := m.CheckDependency(dependency)
+			matched, _, satisfied, err := m.checkDependency(dependency)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -257,7 +255,7 @@ func TestManager_CheckDependency_FalcoCompatibility(t *testing.T) {
 	}
 }
 
-func TestManager_CheckDependency_PreservesMetadataOrder(t *testing.T) {
+func TestNode_CheckDependency_PreservesMetadataOrder(t *testing.T) {
 	meta := &commonv1alpha1.ArtifactMeta{
 		Dependencies: []commonv1alpha1.ArtifactMetaDependency{{
 			Name: "absent", Version: "1.0.0",
@@ -268,19 +266,19 @@ func TestManager_CheckDependency_PreservesMetadataOrder(t *testing.T) {
 		}},
 	}
 	artifact.DeduplicateArtifactMeta(meta)
-	m := newTestManager()
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"z-first": "1.0.0", "a-second": "1.0.0",
 	}).Result)
 	d := meta.Dependencies[0]
 	assert.Equal(t, "z-first", d.Alternatives[0].Name)
-	matched, _, satisfied, err := m.CheckDependency(d)
+	matched, _, satisfied, err := m.checkDependency(d)
 	require.NoError(t, err)
 	assert.True(t, satisfied)
 	assert.Equal(t, "z-first", matched)
 }
 
-func TestManager_CheckDependency_ValidatesAllCandidates(t *testing.T) {
+func TestNode_CheckDependency_ValidatesAllCandidates(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		dependency commonv1alpha1.ArtifactMetaDependency
@@ -295,9 +293,9 @@ func TestManager_CheckDependency_ValidatesAllCandidates(t *testing.T) {
 		{name: "numeric prefix matches Falco", dependency: commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.7.0junk"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager()
+			m := newTestNode()
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
-			_, _, satisfied, err := m.CheckDependency(tc.dependency)
+			_, _, satisfied, err := m.checkDependency(tc.dependency)
 			if tc.wantErr {
 				require.Error(t, err)
 				assert.False(t, satisfied)
@@ -309,10 +307,9 @@ func TestManager_CheckDependency_ValidatesAllCandidates(t *testing.T) {
 	}
 }
 
-func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *testing.T) {
-	m := newTestManager()
-	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
+func TestNode_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *testing.T) {
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
 	require.NoError(t, err)
 
 	// AddPluginConfig already triggered an opportunistic refresh via the mock fetcher, which
@@ -320,31 +317,31 @@ func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *t
 	// the removal-blocking entry.
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
 
-	provided, found, _, err := m.CheckRequirement("container", "0.4.0")
+	provided, found, _, err := m.checkRequirement("container", "0.4.0")
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.Equal(t, "0.7.1", provided)
 
-	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.4.0"}})
-	err = m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container"))
-	require.Error(t, err, "the PluginConfigKey-registered entry must still be tracked for removal-blocking after a version observation merged into it")
+	err = m.RemovePluginConfig(context.Background(), testPlugin("container"))
+	require.Error(t, err, "the configured entry must still be tracked for removal-blocking after a version observation merged into it")
 }
 
-func TestManager_OnFalcoVersionsObserved_CreatesFalcoOwnedEntryForUnknownName(t *testing.T) {
-	m := newTestManager()
+func TestNode_OnFalcoVersionsObserved_CreatesFalcoOwnedEntryForUnknownName(t *testing.T) {
+	m := newTestNode()
 
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}).Result)
 
-	_, found, _, err := m.CheckRequirement("engine_version_semver", "0.57.0")
+	_, found, _, err := m.checkRequirement("engine_version_semver", "0.57.0")
 	require.NoError(t, err)
 	assert.True(t, found, "a capability never explicitly registered via AddPluginConfig/SyncProvides must still be tracked once Falco reports it")
 }
 
-func TestManager_OnFalcoVersionsObserved_NotifiesOnNewCapability(t *testing.T) {
-	m := newTestManager()
+func TestNode_OnFalcoVersionsObserved_NotifiesOnNewCapability(t *testing.T) {
+	m := newTestNode()
 	ch := m.Events()
 
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
@@ -356,10 +353,10 @@ func TestManager_OnFalcoVersionsObserved_NotifiesOnNewCapability(t *testing.T) {
 	}
 }
 
-func TestManager_OnFalcoVersionsObserved_NotifiesWhenConfigEntryVersionIsFirstConfirmed(t *testing.T) {
+func TestNode_OnFalcoVersionsObserved_NotifiesWhenConfigEntryVersionIsFirstConfirmed(t *testing.T) {
 	// An empty-to-confirmed version transition on an existing provides entry counts as a change.
-	m := newTestManager()
-	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), &artifact.Fetcher{})
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
 	require.NoError(t, err)
 	ch := m.Events()
 
@@ -372,8 +369,8 @@ func TestManager_OnFalcoVersionsObserved_NotifiesWhenConfigEntryVersionIsFirstCo
 	}
 }
 
-func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
-	m := newTestManager()
+func TestNode_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
+	m := newTestNode()
 	ch := m.Events()
 
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
@@ -383,7 +380,7 @@ func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
 		t.Fatal("expected an event on the first observation")
 	}
 
-	// Observing the same value again must not fire an event, even though the Manager's own
+	// Observing the same value again must not fire an event, even though the node's own
 	// bookkeeping went through an unrelated remove/re-add cycle for a different name in between.
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.62.0"}).Result)
 	select {
@@ -393,8 +390,8 @@ func TestManager_OnFalcoVersionsObserved_NoNotifyWhenUnchanged(t *testing.T) {
 	}
 }
 
-func TestManager_OnFalcoVersionsObserved_NotifiesOnVersionBump(t *testing.T) {
-	m := newTestManager()
+func TestNode_OnFalcoVersionsObserved_NotifiesOnVersionBump(t *testing.T) {
+	m := newTestNode()
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}).Result)
 	ch := m.Events()
 
@@ -407,7 +404,7 @@ func TestManager_OnFalcoVersionsObserved_NotifiesOnVersionBump(t *testing.T) {
 	}
 }
 
-func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T) {
+func TestNode_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T) {
 	for _, tc := range []struct {
 		name, capability string
 		configured       bool
@@ -417,26 +414,26 @@ func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T
 		{"Falco capability", "engine_version_semver", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := newTestManager()
+			m := newTestNode()
 			if tc.configured {
-				_, _, err := m.AddPluginConfig(t.Context(), testPlugin(tc.capability), &artifact.Fetcher{})
+				_, _, err := m.AddPluginConfig(t.Context(), testPlugin(tc.capability))
 				require.NoError(t, err)
 			}
 			loaded := compatfake.NewMockVersionsFetcher(map[string]string{tc.capability: "1.0.0", "other": "1.0.0"}).Result
 			missing := compatfake.NewMockVersionsFetcher(map[string]string{"other": "1.0.0"}).Result
 			m.OnFalcoVersionsObserved(loaded)
 			chA, chB := m.Events(), m.Events()
-			_, found, satisfied, err := m.CheckRequirement(tc.capability, "1.0.0")
+			_, found, satisfied, err := m.checkRequirement(tc.capability, "1.0.0")
 			require.NoError(t, err)
 			require.True(t, found && satisfied)
 
 			m.OnFalcoVersionsObserved(missing)
-			version, found, satisfied, err := m.CheckRequirement(tc.capability, "1.0.0")
+			version, found, satisfied, err := m.checkRequirement(tc.capability, "1.0.0")
 			require.NoError(t, err)
 			assert.Empty(t, version)
 			assert.False(t, found, "a version absent from the latest successful observation is no longer confirmed")
 			assert.False(t, satisfied)
-			_, found, satisfied, err = m.CheckRequirement("other", "1.0.0")
+			_, found, satisfied, err = m.checkRequirement("other", "1.0.0")
 			require.NoError(t, err)
 			assert.True(t, found && satisfied, "unchanged capabilities must remain available")
 			require.Len(t, chA, 1, "disappearance must notify every subscriber")
@@ -448,7 +445,7 @@ func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T
 			assert.Empty(t, chA, "a repeated missing observation must not cause a reconcile loop")
 			assert.Empty(t, chB)
 			m.OnFalcoVersionsObserved(loaded)
-			_, found, satisfied, err = m.CheckRequirement(tc.capability, "1.0.0")
+			_, found, satisfied, err = m.checkRequirement(tc.capability, "1.0.0")
 			require.NoError(t, err)
 			assert.True(t, found && satisfied)
 			require.Len(t, chA, 1, "reappearance at the same version must notify subscribers")
@@ -458,7 +455,7 @@ func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T
 
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
 			for _, name := range []string{tc.capability, "other"} {
-				_, found, satisfied, err = m.CheckRequirement(name, "1.0.0")
+				_, found, satisfied, err = m.checkRequirement(name, "1.0.0")
 				require.NoError(t, err)
 				assert.False(t, found || satisfied, "a successful empty snapshot must invalidate every confirmed version")
 			}
@@ -468,8 +465,8 @@ func TestManager_OnFalcoVersionsObserved_InvalidatesMissingVersions(t *testing.T
 	}
 }
 
-func TestManager_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
-	m := newTestManager()
+func TestNode_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
+	m := newTestNode()
 	chA := m.Events()
 	chB := m.Events()
 
@@ -487,33 +484,33 @@ func TestManager_Events_MultipleSubscribersEachReceiveEveryEvent(t *testing.T) {
 	}
 }
 
-func TestManager_RefreshFalcoVersions_MergesFetchedSnapshot(t *testing.T) {
-	m := newTestManagerWithFetcher(compatfake.NewMockVersionsFetcher(map[string]string{
+func TestNode_RefreshFalcoVersions_MergesFetchedSnapshot(t *testing.T) {
+	m := newTestNodeWithFetcher(compatfake.NewMockVersionsFetcher(map[string]string{
 		"engine_version_semver": "0.62.0",
 	}))
 
-	versions, err := m.RefreshFalcoVersions(context.Background())
+	versions, err := m.refreshFalcoVersions(context.Background())
 	require.NoError(t, err)
 	require.NotNil(t, versions)
 
-	_, found, satisfied, err := m.CheckRequirement("engine_version_semver", "0.57.0")
+	_, found, satisfied, err := m.checkRequirement("engine_version_semver", "0.57.0")
 	require.NoError(t, err)
 	assert.True(t, found)
 	assert.True(t, satisfied)
 }
 
-func TestManager_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
+func TestNode_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
 	fetcher := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"})
-	m := newTestManagerWithFetcher(fetcher)
-	_, err := m.RefreshFalcoVersions(context.Background())
+	m := newTestNodeWithFetcher(fetcher)
+	_, err := m.refreshFalcoVersions(context.Background())
 	require.NoError(t, err)
 	ch := m.Events()
 	fetcher.FetchErr = assert.AnError
 
-	_, err = m.RefreshFalcoVersions(context.Background())
+	_, err = m.refreshFalcoVersions(context.Background())
 
 	require.Error(t, err)
-	version, found, satisfied, err := m.CheckRequirement("container", "0.7.1")
+	version, found, satisfied, err := m.checkRequirement("container", "0.7.1")
 	require.NoError(t, err)
 	assert.Equal(t, "0.7.1", version)
 	assert.True(t, found && satisfied, "a failed fetch must preserve the last successful observation")
@@ -521,9 +518,9 @@ func TestManager_RefreshFalcoVersions_PropagatesFetchError(t *testing.T) {
 
 	fetcher.FetchErr = nil
 	fetcher.Result = compatfake.NewMockVersionsFetcherWithPlugins(nil).Result
-	_, err = m.RefreshFalcoVersions(context.Background())
+	_, err = m.refreshFalcoVersions(context.Background())
 	require.NoError(t, err)
-	_, found, satisfied, err = m.CheckRequirement("container", "0.7.1")
+	_, found, satisfied, err = m.checkRequirement("container", "0.7.1")
 	require.NoError(t, err)
 	assert.False(t, found || satisfied, "a subsequent successful empty response must invalidate the old version")
 	assert.Len(t, ch, 1)

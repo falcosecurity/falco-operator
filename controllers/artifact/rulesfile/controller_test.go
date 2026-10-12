@@ -18,13 +18,9 @@ package rulesfile
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http/httptest"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -35,29 +31,41 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/shared"
 	instancerulesfile "github.com/falcosecurity/falco-operator/controllers/instance/artifact/rulesfile"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
+	"github.com/falcosecurity/falco-operator/internal/testutil/nodetest"
 )
+
+// testReconciler is the RulesfileReconciler a test drives, plus a handle on the stub the node
+// fetches through. The reconciler holds no fetcher: the node does the fetching, so a test
+// that wants to fail, replace or count a fetch reaches the stub here.
+type testReconciler struct {
+	*RulesfileReconciler
+	fetcher *testutil.FakeFetcher
+	// recorder receives the Events of the reconciler's node.
+	recorder events.EventRecorder
+}
 
 const testRulesfileName = "test-rulesfile"
 
@@ -80,106 +88,6 @@ func setCurrentRulesfileMetadata(t *testing.T, rf *artifactv1alpha1.Rulesfile, c
 	rf.Status.ObservedGeneration = rf.Generation
 }
 
-func TestVerifiedRulesfileMetadata(t *testing.T) {
-	const staleHash = "stale"
-	for _, tc := range []struct {
-		name   string
-		oci    bool
-		mutate func(*artifactv1alpha1.Rulesfile)
-		known  bool
-	}{
-		{name: "matching local sources", known: true},
-		{name: "matching OCI revision", oci: true, known: true},
-		{name: "missing metadata", mutate: func(rf *artifactv1alpha1.Rulesfile) { rf.Status.ArtifactMeta = nil }},
-		{name: "stale sources", mutate: func(rf *artifactv1alpha1.Rulesfile) { rf.Status.ArtifactMetaSourcesHash = staleHash }},
-		{name: "stale OCI spec", oci: true, mutate: func(rf *artifactv1alpha1.Rulesfile) { rf.Status.ArtifactMeta.SpecHash = staleHash }},
-		{name: "missing OCI digest", oci: true, mutate: func(rf *artifactv1alpha1.Rulesfile) { rf.Status.ArtifactMeta.Digest = "" }},
-		{name: "invalid OCI digest", oci: true, mutate: func(rf *artifactv1alpha1.Rulesfile) { rf.Status.ArtifactMeta.Digest = "sha256:invalid" }},
-		{name: "priority change preserves metadata identity", oci: true, known: true, mutate: func(rf *artifactv1alpha1.Rulesfile) {
-			rf.Generation++
-			rf.Spec.Priority++
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			rf := &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Generation: 1},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
-				},
-			}
-			if tc.oci {
-				rf.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{
-					Image: commonv1alpha1.ImageSpec{Repository: "example/rules", Tag: "latest"},
-				}
-			}
-			setCurrentRulesfileMetadata(t, rf, nil)
-			if tc.mutate != nil {
-				tc.mutate(rf)
-			}
-			sources, err := artifact.ResolveRulesfileSources(t.Context(), &artifact.Fetcher{}, rf)
-			require.NoError(t, err)
-
-			metadata, err := verifiedRulesfileMetadata(rf, sources)
-
-			require.NoError(t, err)
-			if tc.known {
-				require.Same(t, rf.Status.ArtifactMeta, metadata)
-			} else {
-				require.Nil(t, metadata, "unverified metadata must not certify the absence of dependencies")
-			}
-		})
-	}
-}
-
-// testFetcher implements artifact.ArtifactFetcher for controller unit tests.
-// ConfigMap and Inline use the real artifact.Fetcher backed by the fake k8s client.
-// FetchOCI returns in-memory bytes to avoid HTTP calls to a real artifact server.
-type testFetcher struct {
-	delegate           *artifact.Fetcher
-	ociErr             error
-	ociBytes           []byte
-	ociCallCount       int // incremented on every FetchOCI call
-	configMapCallCount int
-	onFetchOCI         func()
-	ociDigest          string
-}
-
-func newTestFetcher(cl client.Client) *testFetcher {
-	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
-}
-
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, expectedDigest string) (artifact.FetchResult, error) {
-	f.ociCallCount++
-	f.ociDigest = expectedDigest
-	if f.onFetchOCI != nil {
-		f.onFetchOCI()
-	}
-	if f.ociErr != nil {
-		return artifact.FetchResult{}, f.ociErr
-	}
-	content := f.ociBytes
-	if content == nil {
-		content = []byte("mock-oci-content")
-	}
-	h := sha256.Sum256(content)
-	return artifact.FetchResult{
-		Content:     content,
-		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        0o755,
-	}, nil
-}
-
-func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact.FetchResult, error) {
-	return f.delegate.FetchInline(ctx, content)
-}
-
-func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
-) (artifact.FetchResult, error) {
-	f.configMapCallCount++
-	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
-}
-
 // testInlineRulesJSON is sample Falco rules in JSON format (used for *apiextensionsv1.JSON fields).
 const testInlineRulesJSON = `[{"rule":"test_rule","desc":"test","condition":"always_true","output":"test","priority":"WARNING"}]`
 
@@ -189,177 +97,78 @@ const testInlineRulesYAML = "- condition: always_true\n  desc: test\n  output: t
 // testRulesData is used as a ConfigMap data value for rules.yaml.
 const testRulesData = "- rule: test_rule\n  desc: test\n  condition: always_true\n  output: test\n  priority: WARNING\n"
 
-// testNodeObjectName returns the expected RulesfileNode name for the test rulesfile and node.
-func testNodeObjectName() string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, testRulesfileName, testutil.TestNodeName)
-}
-
-// newTestNodeObj creates a fresh RulesfileNode for unit tests. It has no finalizer by default.
-func newTestNodeObj(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testNodeObjectName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, testRulesfileName, testutil.TestNodeName),
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
-}
-
-// withOwnerRef sets an owner reference to testRulesfileName on a RulesfileNode.
-func withOwnerRef() func(*artifactv1alpha1.ArtifactNode) {
-	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Rulesfile",
-				Name:       testRulesfileName,
-			},
-		}
-	}
-}
-
-// withPreviousOCIInstallStatus simulates an ArtifactNode where the OCI rulesfile was already
-// installed on a prior reconcile. Used to verify that the update-rejected code path keeps
-// OCIArtifactProgrammed=True even when requirements are no longer satisfied.
+// withPreviousOCIInstallStatus simulates a node where the OCI rulesfile was already installed on a prior
+// reconcile. Used to verify that the update-rejected code path keeps OCIArtifactProgrammed=True even when
+// requirements are no longer satisfied.
 func withPreviousOCIInstallStatus() func(*artifactv1alpha1.ArtifactNode) {
 	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+		n.Status.Artifacts[0].InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
 			{Path: "/etc/falco/rules.d/test-rulesfile-oci.yaml", Medium: string(artifact.MediumOCI)},
 		}
-		n.Status.Conditions = []metav1.Condition{
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
 			common.NewOCIArtifactProgrammedCondition(metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, 0),
 			common.NewDependenciesSatisfiedCondition(metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, 0),
 		}
 	}
 }
 
-func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileReconciler, client.Client) {
+func newTestReconciler(t *testing.T, objs ...client.Object) (*testReconciler, client.Client) {
+	t.Helper()
+	return newReconcilerEnforcing(t, false, objs...)
+}
+
+// newReconcilerEnforcing is newTestReconciler over a node whose requirements policy is enforce. The policy is the
+// node's, set when it is built, so a test that wants one gets it here rather than by changing the node.
+func newReconcilerEnforcing(t *testing.T, enforce bool, objs ...client.Object) (*testReconciler, client.Client) {
 	t.Helper()
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(objs...).
+		WithObjects(testutil.EnsureArtifactNode(objs)...).
 		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
-	store := node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-	seedInstalledCacheFromObjs(store, objs)
-
-	return &RulesfileReconciler{
-		Client:    cl,
-		Scheme:    s,
-		recorder:  events.NewFakeRecorder(100),
-		fetcher:   newTestFetcher(cl),
-		store:     store,
-		nodeName:  testutil.TestNodeName,
-		namespace: testutil.TestNamespace,
-	}, cl
+	fetcher := testutil.NewFakeFetcher(cl)
+	recorder := events.NewFakeRecorder(100)
+	store := nodetest.NewTestNodeOn(t, cl, mockFS, recorder, nodetest.WithFetcher(fetcher), nodetest.WithEnforceRequirements(enforce))
+	r := &RulesfileReconciler{
+		Client: cl,
+		node:   store,
+	}
+	useNode(t, r, store, objs)
+	return &testReconciler{RulesfileReconciler: r, fetcher: fetcher, recorder: recorder}, cl
 }
 
-func TestFindNodeObjects_UsesCanonicalNameWithoutLookup(t *testing.T) {
-	parent := &artifactv1alpha1.Rulesfile{
-		ObjectMeta: metav1.ObjectMeta{Name: "test--rules", Namespace: testutil.TestNamespace, UID: "owner"},
-		Spec: artifactv1alpha1.RulesfileSpec{
-			ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "source"},
-			OCIArtifact: &commonv1alpha1.OCIArtifact{Registry: &commonv1alpha1.RegistryConfig{
-				Auth: &commonv1alpha1.RegistryAuth{SecretRef: &commonv1alpha1.SecretRef{Name: "source"}}}},
-		},
-	}
-	want := client.ObjectKey{
-		Namespace: parent.Namespace,
-		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, parent.Name, testutil.TestNodeName),
-	}
-	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(parent).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				t.Fatal("event mapping must not fetch ArtifactNodes")
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.Rulesfile{}, index.ConfigMapOnRulesfile, index.RulesfileByConfigMapRef).
-		WithIndex(&artifactv1alpha1.Rulesfile{}, index.SecretOnRulesfile, index.RulesfileBySecretRef).Build()
-	r := &RulesfileReconciler{Client: cl, nodeName: testutil.TestNodeName}
-	requests := r.findNodeObjectForRulesfile(t.Context(), parent)
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
-	requests = r.findNodeObjectsForConfigMap(t.Context(), &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
-	requests = r.findNodeObjectsForSecret(t.Context(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
+// useNode makes r use n, as after a restart: what the ArtifactNodes among objs say is installed is
+// recovered into it, and it publishes through the client n was built over.
+func useNode(t *testing.T, r *RulesfileReconciler, n *node.Node, objs []client.Object) {
+	t.Helper()
+	r.node = n
+	nodetest.Prime(n, objs)
 }
 
-func TestFindAllNodeObjectsOnVersionChange_UsesFullNodeIdentity(t *testing.T) {
-	nodeName := strings.Repeat("n", 64)
-	parent := &artifactv1alpha1.Rulesfile{ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: testutil.TestNamespace}}
-	wanted := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{Name: controllerhelper.NodeObjectName("rulesfile", parent.Name, nodeName), Namespace: parent.Namespace,
-			Labels:          controllerhelper.NodeObjectLabels("rulesfile", parent.Name, nodeName),
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, artifactv1alpha1.GroupVersion.WithKind("Rulesfile"))}},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: nodeName},
-	}
-	otherNode := wanted.DeepCopy()
-	otherNode.Name = "other-node"
-	otherNode.Spec.NodeName = "another-node"
-	otherNamespace := wanted.DeepCopy()
-	otherNamespace.Namespace = "another-namespace"
-	r, _ := newTestReconciler(t, wanted, otherNode, otherNamespace)
-	r.nodeName = nodeName
-	requests := r.findAllNodeObjectsOnVersionChange(t.Context(), nil)
-	require.Len(t, requests, 1)
-	assert.Equal(t, client.ObjectKeyFromObject(wanted), requests[0].NamespacedName)
-}
-
-// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
-// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
-// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
-// from that cache, never from status, so a test simulating "this was already installed" must
-// seed the cache the same way a real restart would, not just set status on the object.
-func seedInstalledCacheFromObjs(store *node.Manager, objs []client.Object) {
-	for _, obj := range objs {
-		artifactNode, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || len(artifactNode.Status.InstalledArtifacts) == 0 {
-			continue
-		}
-		for _, ref := range artifactNode.OwnerReferences {
-			var kind node.Kind
-			switch ref.Kind {
-			case controllerhelper.KindRulesfile:
-				kind = node.KindRulesfile
-			case controllerhelper.KindPlugin:
-				kind = node.KindPlugin
-			case controllerhelper.KindConfig:
-				kind = node.KindConfig
-			default:
-				continue
-			}
-			store.SeedInstalled(node.Key{Kind: kind, Namespace: artifactNode.Namespace, Name: ref.Name}, artifactNode.Status.InstalledArtifacts)
-			break
-		}
-	}
+// entryOf is the status the reconciler holds for the test Rulesfile: what it has published, or found on the
+// node's ArtifactNode.
+func entryOf(t *testing.T, n *node.Node) artifactv1alpha1.NodeArtifactStatus {
+	t.Helper()
+	entry, ok := n.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+	require.True(t, ok, "the flow's status must reach the publisher")
+	return entry
 }
 
 func TestNewRulesfileReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	store := node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-		compatfake.NewMockVersionsFetcher(nil))
-	r := NewRulesfileReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", false, &artifact.Fetcher{}, store)
+	n := nodetest.NewTestNodeOn(t, cl, fsfake.NewMockFileSystem(), events.NewFakeRecorder(10),
+		nodetest.WithFetcher(testutil.NewFakeFetcher(cl)), nodetest.WithEnforceRequirements(true))
+	r := NewRulesfileReconciler(cl, n)
 
 	require.NotNil(t, r)
-	assert.Equal(t, "my-node", r.nodeName)
-	assert.Equal(t, "my-namespace", r.namespace)
-	assert.NotNil(t, r.fetcher)
-	assert.NotNil(t, r.store)
+	assert.True(t, n.EnforceRequirements(), "the policy is the node's, set when it is built, and no reconciler changes it")
+	assert.Same(t, n, r.node, "the reconciler works through the node it was given")
+	assert.Equal(t, testutil.TestNodeName, r.node.Name())
+	assert.Equal(t, testutil.TestNamespace, r.node.Namespace())
 }
 
 func TestReconcile_ConfigMapUpdateWaitsForMatchingMetadata(t *testing.T) {
@@ -375,6 +184,7 @@ func TestReconcile_ConfigMapUpdateWaitsForMatchingMetadata(t *testing.T) {
 }
 
 func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool) {
+	var status artifactv1alpha1.NodeArtifactStatus
 	t.Helper()
 	ctx := t.Context()
 	parent := &artifactv1alpha1.Rulesfile{
@@ -394,16 +204,22 @@ func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool
 		Spec:       corev1.PodSpec{NodeName: kubeNode.Name},
 		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, cm, kubeNode, falco, pod).
-		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}, &artifactv1alpha1.Rulesfile{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).Build()
+	artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, cm, kubeNode, falco, pod, artifactNode).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}, &artifactv1alpha1.Rulesfile{}).Build()
 	fs := fsfake.NewMockFileSystem()
 	versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
-	store := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, versions)
+	fetcher := testutil.NewFakeFetcher(cl)
+	recorder := events.NewFakeRecorder(100)
+	store := nodetest.NewTestNode(t, cl,
+		nodetest.WithStore(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}),
+		nodetest.WithFetcher(fetcher),
+		nodetest.WithRecorder(recorder),
+		nodetest.WithFalcoFetcher(versions),
+		nodetest.WithEnforceRequirements(true))
 	store.OnFalcoVersionsObserved(versions.Result)
-	fetcher := newTestFetcher(cl)
-	r := NewRulesfileReconciler(cl, scheme, events.NewFakeRecorder(100), testutil.TestNodeName,
-		testutil.TestNamespace, true, fetcher, store)
+	r := NewRulesfileReconciler(cl, store)
+	useNode(t, r, store, []client.Object{artifactNode})
 	aggregator := instancerulesfile.NewRulesfileAggregatorReconciler(cl, scheme, events.NewFakeRecorder(100), nil)
 	_, err := aggregator.Reconcile(ctx, testutil.Request(parent.Name))
 	require.NoError(t, err)
@@ -411,21 +227,17 @@ func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool
 	require.NotEmpty(t, parent.Status.ArtifactMetaSourcesHash)
 	require.Equal(t, parent.Generation, parent.Status.ObservedGeneration)
 
-	artifactNode := newTestNodeObj()
-	// The first sidecar reconcile only adds its finalizer to the assignment created above.
-	_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
-	require.NoError(t, err)
 	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority,
 		artifact.MediumConfigMap, artifact.KindRulesfile)
 	var previousContent []byte
 	if installed {
-		_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
+		_, err = r.Reconcile(ctx, testutil.Request(testRulesfileName))
 		require.NoError(t, err)
 		previousContent = []byte(oldContent)
 		require.Equal(t, previousContent, fs.Files[path])
 	}
-	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(artifactNode), artifactNode))
-	previousInstalled := artifactNode.Status.DeepCopy().InstalledArtifacts
+	status, _ = r.node.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+	previousInstalled := status.DeepCopy().InstalledArtifacts
 
 	// ConfigMap and Rulesfile informer events can arrive in either order. Change only the
 	// ConfigMap, leaving the parent generation and the instance operator's metadata untouched.
@@ -440,13 +252,13 @@ func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool
 		_, err = aggregator.Reconcile(ctx, testutil.Request(parent.Name))
 		require.NoError(t, err)
 		// Model the sidecar's independent informer cache still holding the old ConfigMap.
-		fetcher.delegate.K8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldConfigMap).Build()
+		fetcher.Delegate.K8sClient = fake.NewClientBuilder().WithScheme(scheme).WithObjects(oldConfigMap).Build()
 	}
-	_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
+	_, err = r.Reconcile(ctx, testutil.Request(testRulesfileName))
 	require.NoError(t, err)
 	require.Equal(t, previousContent, fs.Files[path], "mismatching metadata must not authorize any write")
-	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(artifactNode), artifactNode))
-	require.Equal(t, previousInstalled, artifactNode.Status.InstalledArtifacts)
+	status = entryOf(t, r.node)
+	require.Equal(t, previousInstalled, status.InstalledArtifacts)
 	wantConditions := []testutil.ConditionExpect{
 		{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 		{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionUnknown, Reason: artifact.ReasonArtifactMetaNotReady},
@@ -463,29 +275,30 @@ func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool
 			Status: metav1.ConditionFalse, Reason: artifact.ReasonArtifactMetaNotReady,
 		})
 	}
-	testutil.RequireConditions(t, artifactNode.Status.Conditions, wantConditions)
+	testutil.RequireConditions(t, status.Conditions, wantConditions)
 
 	// Once both controllers see matching inputs, resume without any spec/generation change.
-	fetcher.delegate.K8sClient = cl
+	fetcher.Delegate.K8sClient = cl
 	_, err = aggregator.Reconcile(ctx, testutil.Request(parent.Name))
 	require.NoError(t, err)
-	_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
+	_, err = r.Reconcile(ctx, testutil.Request(testRulesfileName))
 	require.NoError(t, err)
 	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(parent), parent))
 	require.EqualValues(t, 1, parent.Generation)
-	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(artifactNode), artifactNode))
+	status = entryOf(t, r.node)
 	if compatible {
 		require.Equal(t, []byte(newContent), fs.Files[path])
-		require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+		require.True(t, apimeta.IsStatusConditionTrue(status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 	} else {
 		require.Equal(t, previousContent, fs.Files[path], "incompatible update must leave the installed rules untouched")
-		require.Equal(t, previousInstalled, artifactNode.Status.InstalledArtifacts)
-		require.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String()))
-		require.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+		require.Equal(t, previousInstalled, status.InstalledArtifacts)
+		require.True(t, apimeta.IsStatusConditionFalse(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String()))
+		require.True(t, apimeta.IsStatusConditionFalse(status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 	}
 }
 
 func TestReconcile_ConfigMapSnapshot(t *testing.T) {
+	var status artifactv1alpha1.NodeArtifactStatus
 	for _, tt := range []struct {
 		name       string
 		enforce    bool
@@ -540,53 +353,56 @@ func TestReconcile_ConfigMapSnapshot(t *testing.T) {
 			if tt.missingKey {
 				delete(cm.Data, commonv1alpha1.ConfigMapRulesKey)
 			}
-			artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-				n.Finalizers = []string{rulesfileNodeFinalizer}
-			})
+			artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 			r, cl := newTestReconciler(t, parent, cm, artifactNode)
-			r.enforceRequirements = tt.enforce
 			fs := fsfake.NewMockFileSystem()
 			versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
-			r.store = node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()},
-				versions)
-			r.store.OnFalcoVersionsObserved(versions.Result)
-			fetcher := r.fetcher.(*testFetcher)
-			fetcher.onFetchOCI = func() {
+			useNode(t, r.RulesfileReconciler, nodetest.NewTestNode(t, cl,
+				nodetest.WithStore(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}),
+				nodetest.WithFetcher(r.fetcher),
+				nodetest.WithRecorder(r.recorder),
+				nodetest.WithFalcoFetcher(versions),
+				// Enforcement is the node's setting, so it goes on the node this test ends up with, not
+				// on the one newTestReconciler built and useNode just replaced.
+				nodetest.WithEnforceRequirements(tt.enforce)), []client.Object{artifactNode})
+			r.node.OnFalcoVersionsObserved(versions.Result)
+			fetcher := r.fetcher
+			fetcher.OnFetchOCI = func() {
 				// Fetching OCI can take time: a concurrent ConfigMap edit must not replace the
 				// content whose requirements were checked earlier in this reconcile.
 				cm.Data[commonv1alpha1.ConfigMapRulesKey] = "- required_engine_version: 999.0.0\n" + testRulesData
 				require.NoError(t, cl.Update(ctx, cm))
 			}
-			_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
+			_, err = r.Reconcile(ctx, testutil.Request(testRulesfileName))
 			if tt.missingKey {
 				require.ErrorContains(t, err, commonv1alpha1.ConfigMapRulesKey)
 			} else {
 				require.NoError(t, err)
 			}
-			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(artifactNode), artifactNode))
+			status = entryOf(t, r.node)
 			if tt.wantWrite {
-				require.Equal(t, 1, fetcher.configMapCallCount, "install must consume the checked content without refetching")
-				installed, err := r.store.ScanAll(ctx, artifact.KindRulesfile)
+				require.Equal(t, 1, fetcher.ConfigMapCalls, "install must consume the checked content without refetching")
+				installed, err := r.node.ScanAll(ctx, artifact.KindRulesfile)
 				require.NoError(t, err)
 				require.Len(t, installed[parent.Name], 3)
 				path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority,
 					artifact.MediumConfigMap, artifact.KindRulesfile)
 				require.Equal(t, []byte(content), fs.Files[path])
-				require.Equal(t, 1, fetcher.ociCallCount)
-				require.Equal(t, parent.Status.ArtifactMeta.Digest, fetcher.ociDigest, "floating tags must retain the resolved digest")
-				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				require.Equal(t, 1, fetcher.OCICalls)
+				require.Equal(t, parent.Status.ArtifactMeta.Digest, fetcher.OCIDigest, "floating tags must retain the resolved digest")
+				require.True(t, apimeta.IsStatusConditionTrue(status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 			} else {
 				require.Empty(t, fs.Files)
-				require.Empty(t, artifactNode.Status.InstalledArtifacts)
-				require.Zero(t, fetcher.ociCallCount)
-				require.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				require.Empty(t, status.InstalledArtifacts)
+				require.Zero(t, fetcher.OCICalls)
+				require.True(t, apimeta.IsStatusConditionFalse(status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 				if !tt.missingKey {
 					for _, conditionType := range []commonv1alpha1.ConditionType{
 						commonv1alpha1.ConditionOCIArtifactProgrammed,
 						commonv1alpha1.ConditionInlineArtifactProgrammed,
 						commonv1alpha1.ConditionConfigMapArtifactProgrammed,
 					} {
-						condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, conditionType.String())
+						condition := apimeta.FindStatusCondition(status.Conditions, conditionType.String())
 						require.NotNil(t, condition)
 						require.Equal(t, metav1.ConditionFalse, condition.Status)
 						require.Equal(t, artifact.ReasonArtifactMetaNotReady, condition.Reason)
@@ -598,41 +414,34 @@ func TestReconcile_ConfigMapSnapshot(t *testing.T) {
 }
 
 func TestReconcile_DeferredGenerationCannotReportProgrammed(t *testing.T) {
+	var status artifactv1alpha1.NodeArtifactStatus
 	for _, installed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("installed=%t", installed), func(t *testing.T) {
 			parent := &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 2},
 				Status:     artifactv1alpha1.RulesfileStatus{ObservedGeneration: 1},
 			}
-			artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-				n.Finalizers = []string{rulesfileNodeFinalizer}
+			artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName, func(n *artifactv1alpha1.ArtifactNode) {
 				if installed {
-					n.Status.Conditions = []metav1.Condition{
+					n.Status.Artifacts[0].Conditions = []metav1.Condition{
 						common.NewOCIArtifactProgrammedCondition(metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, "old rules installed", 1),
 					}
 				}
 			})
-			r, cl := newTestReconciler(t, parent, artifactNode)
-			r.enforceRequirements = true
-			_, err := r.Reconcile(t.Context(), testutil.Request(artifactNode.Name))
+			r, _ := newReconcilerEnforcing(t, true, parent, artifactNode)
+			_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
 			require.NoError(t, err)
-			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(artifactNode), artifactNode))
-			programmed := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+			status = entryOf(t, r.node)
+			programmed := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 			require.NotNil(t, programmed)
 			require.Equal(t, metav1.ConditionUnknown, programmed.Status)
 			require.Equal(t, "GenerationPending", programmed.Reason)
-			require.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
+			require.Zero(t, r.fetcher.OCICalls)
 		})
 	}
 }
 
 func TestReconcile(t *testing.T) {
-	parentRulesfile := &artifactv1alpha1.Rulesfile{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRulesfileName,
-			Namespace: testutil.TestNamespace,
-		},
-	}
 	parentWithInline := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      testRulesfileName,
@@ -656,56 +465,24 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 	}
-	nodeObjWithFinalizer := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{rulesfileNodeFinalizer}
-	})
 	tests := []struct {
 		name                string
 		objects             []client.Object
 		req                 ctrl.Request
-		triggerDeletion     bool
 		pullErr             error
 		enforceRequirements bool
 		wantErr             bool
 		wantResult          *ctrl.Result // nil means the zero-value ctrl.Result{} is expected
 		wantRequeueAfterGE  time.Duration
-		wantFinalizer       *bool
 		wantConditions      []testutil.ConditionExpect
 	}{
-		{
-			name: "RulesfileNode not found returns no error",
-			req:  testutil.Request("nonexistent"),
-		},
-		{
-			name:    "parent Rulesfile not found returns no error (waiting for GC)",
-			objects: []client.Object{newTestNodeObj(withOwnerRef())},
-			req:     testutil.Request(testNodeObjectName()),
-		},
-		{
-			name:            "deletion with finalizer removes artifacts and finalizer",
-			objects:         []client.Object{nodeObjWithFinalizer, parentRulesfile},
-			req:             testutil.Request(testNodeObjectName()),
-			triggerDeletion: true,
-			wantFinalizer:   func() *bool { b := false; return &b }(),
-		},
-		{
-			name: "sets finalizer on first reconcile",
-			objects: []client.Object{
-				parentRulesfile,
-				newTestNodeObj(withOwnerRef()),
-			},
-			req:           testutil.Request(testNodeObjectName()),
-			wantFinalizer: func() *bool { b := true; return &b }(),
-		},
 		{
 			name: "happy path with inline rules writes conditions to node object",
 			objects: []client.Object{
 				parentWithInline,
-				newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName),
 			},
-			req: testutil.Request(testNodeObjectName()),
+			req: testutil.Request(testRulesfileName),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
@@ -716,11 +493,9 @@ func TestReconcile(t *testing.T) {
 			name: "OCI artifact pull error sets failure conditions on node object",
 			objects: []client.Object{
 				parentWithOCI,
-				newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName),
 			},
-			req:     testutil.Request(testNodeObjectName()),
+			req:     testutil.Request(testRulesfileName),
 			pullErr: fmt.Errorf("mock pull error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
@@ -736,11 +511,9 @@ func TestReconcile(t *testing.T) {
 			name: "OCI artifact pull retryable error requeues without a reconcile error",
 			objects: []client.Object{
 				parentWithOCI,
-				newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName),
 			},
-			req:                testutil.Request(testNodeObjectName()),
+			req:                testutil.Request(testRulesfileName),
 			pullErr:            &artifact.RetryableError{Err: errors.New("mock pull error"), RetryAfter: 7 * time.Second},
 			wantRequeueAfterGE: 7 * time.Second,
 			wantConditions: []testutil.ConditionExpect{
@@ -767,11 +540,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName),
 			},
-			req:                 testutil.Request(testNodeObjectName()),
+			req:                 testutil.Request(testRulesfileName),
 			enforceRequirements: true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
@@ -797,11 +568,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestNodeObj(withOwnerRef(), withPreviousOCIInstallStatus(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName, withPreviousOCIInstallStatus()),
 			},
-			req:                 testutil.Request(testNodeObjectName()),
+			req:                 testutil.Request(testRulesfileName),
 			enforceRequirements: true,
 			wantConditions: []testutil.ConditionExpect{
 				{
@@ -828,11 +597,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				}),
+				testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName),
 			},
-			req:                 testutil.Request(testNodeObjectName()),
+			req:                 testutil.Request(testRulesfileName),
 			enforceRequirements: false,
 			wantConditions: []testutil.ConditionExpect{
 				{
@@ -852,20 +619,12 @@ func TestReconcile(t *testing.T) {
 					setCurrentRulesfileMetadata(t, rf, nil)
 				}
 			}
-			r, cl := newTestReconciler(t, tt.objects...)
-			r.enforceRequirements = tt.enforceRequirements
+			r, _ := newReconcilerEnforcing(t, tt.enforceRequirements, tt.objects...)
 
 			if tt.pullErr != nil {
-				r.fetcher = &testFetcher{
-					delegate: &artifact.Fetcher{K8sClient: cl},
-					ociErr:   tt.pullErr,
-				}
-			}
-
-			if tt.triggerDeletion {
-				obj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
-				require.NoError(t, cl.Delete(context.Background(), obj))
+				// The node does the fetching, and it shares this reconciler's fetcher; failing
+				// the shared one is what makes the node's pull fail.
+				r.fetcher.OCIErr = tt.pullErr
 			}
 
 			result, err := r.Reconcile(context.Background(), tt.req)
@@ -885,143 +644,10 @@ func TestReconcile(t *testing.T) {
 				}
 			}
 
-			if tt.wantFinalizer != nil {
-				obj := &artifactv1alpha1.ArtifactNode{}
-				if err := cl.Get(context.Background(), tt.req.NamespacedName, obj); err == nil {
-					assert.Equal(t, *tt.wantFinalizer, controllerutil.ContainsFinalizer(obj, rulesfileNodeFinalizer))
-				}
-			}
-
 			if len(tt.wantConditions) > 0 {
-				obj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, obj))
-				testutil.RequireConditions(t, obj.Status.Conditions, tt.wantConditions)
+				testutil.RequireConditions(t, entryOf(t, r.node).Conditions, tt.wantConditions)
 			}
 		})
-	}
-}
-
-func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
-	for _, tc := range []struct {
-		medium        artifact.Medium
-		conditionType commonv1alpha1.ConditionType
-	}{
-		{artifact.MediumOCI, commonv1alpha1.ConditionOCIArtifactProgrammed},
-		{artifact.MediumInline, commonv1alpha1.ConditionInlineArtifactProgrammed},
-		{artifact.MediumConfigMap, commonv1alpha1.ConditionConfigMapArtifactProgrammed},
-	} {
-		for _, missingCondition := range []bool{false, true} {
-			for _, enforce := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/missing-condition=%t/enforce=%t", tc.medium, missingCondition, enforce), func(t *testing.T) {
-					ctx := t.Context()
-					cm := &corev1.ConfigMap{
-						ObjectMeta: metav1.ObjectMeta{Name: "rules", Namespace: testutil.TestNamespace},
-						Data:       map[string]string{commonv1alpha1.ConfigMapRulesKey: testRulesData},
-					}
-					rf := &artifactv1alpha1.Rulesfile{
-						ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, Generation: 1},
-						Spec:       artifactv1alpha1.RulesfileSpec{Priority: 50},
-					}
-					switch tc.medium {
-					case artifact.MediumOCI:
-						rf.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}}
-					case artifact.MediumInline:
-						rf.Spec.InlineRules = &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}
-					case artifact.MediumConfigMap:
-						rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
-					}
-					artifactNode := newTestNodeObj(withOwnerRef())
-					artifactNode.Finalizers = []string{rulesfileNodeFinalizer}
-					r, cl := newTestReconciler(t, rf, cm, artifactNode)
-					r.enforceRequirements = enforce
-					fs := fsfake.NewMockFileSystem()
-					versions := compatfake.NewMockVersionsFetcher(map[string]string{"engine_version_semver": "0.57.0"})
-					r.store = node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, versions)
-					r.store.OnFalcoVersionsObserved(versions.Result)
-					setCurrentRulesfileMetadata(t, rf, cl)
-					rf.Status.ArtifactMeta.Requirements = []commonv1alpha1.ArtifactMetaRequirement{{Name: "engine_version_semver", Version: "0.57.0"}}
-					require.NoError(t, cl.Update(ctx, rf))
-					key := node.KeyFromObj(node.KindRulesfile, rf)
-					req := testutil.Request(artifactNode.Name)
-					_, err := r.Reconcile(ctx, req)
-					require.NoError(t, err)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-					require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
-					previousInstalled := artifactNode.Status.DeepCopy().InstalledArtifacts
-					require.Len(t, previousInstalled, 1)
-					previousPath := previousInstalled[0].Path
-					previousContent := append([]byte(nil), fs.Files[previousPath]...)
-					if missingCondition {
-						apimeta.RemoveStatusCondition(&artifactNode.Status.Conditions, tc.conditionType.String())
-						require.NoError(t, cl.Status().Update(ctx, artifactNode))
-					}
-
-					// A source switch refreshes refs/dependencies, but cleanup must still gate Programmed.
-					require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(rf), rf))
-					rf.Generation++
-					rf.Spec.OCIArtifact = nil
-					rf.Spec.InlineRules = &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}
-					rf.Spec.ConfigMapRef = nil
-					nextMedium, nextContent := artifact.MediumInline, testInlineRulesYAML
-					if tc.medium == artifact.MediumInline {
-						rf.Spec.InlineRules = nil
-						rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
-						nextMedium, nextContent = artifact.MediumConfigMap, testRulesData
-					}
-					setCurrentRulesfileMetadata(t, rf, cl)
-					require.NoError(t, cl.Update(ctx, rf))
-					nextPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), rf.Name, rf.Spec.Priority, nextMedium, artifact.KindRulesfile)
-					removeErr := fmt.Errorf("injected stale rulesfile removal failure")
-					fs.RemoveErr = removeErr
-					for range 2 {
-						_, err = r.Reconcile(ctx, req)
-						require.ErrorIs(t, err, removeErr)
-						require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-						assert.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()),
-							"%+v", artifactNode.Status.Conditions)
-						condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String())
-						require.NotNil(t, condition)
-						assert.Equal(t, metav1.ConditionFalse, condition.Status)
-						assert.Equal(t, artifact.ReasonArtifactRemoveFailed, condition.Reason)
-						assert.Equal(t, rf.Generation, condition.ObservedGeneration)
-						assert.Contains(t, condition.Message, removeErr.Error())
-						assert.Equal(t, previousContent, fs.Files[previousPath])
-						assert.NotContains(t, fs.Files, nextPath)
-						assert.Equal(t, previousInstalled, artifactNode.Status.InstalledArtifacts)
-						assert.Equal(t, previousInstalled, r.store.GetInstalled(key))
-					}
-
-					fs.RemoveErr = nil
-					_, err = r.Reconcile(ctx, req)
-					require.NoError(t, err)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-					assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String()))
-					require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
-					assert.NotContains(t, fs.Files, previousPath)
-					assert.Equal(t, []byte(nextContent), fs.Files[nextPath])
-					require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
-					assert.Equal(t, nextPath, artifactNode.Status.InstalledArtifacts[0].Path)
-					assert.Equal(t, artifactNode.Status.InstalledArtifacts, r.store.GetInstalled(key))
-
-					stableStatus := artifactNode.Status.DeepCopy()
-					writes, removes := len(fs.WriteCalls), len(fs.RemoveCalls)
-					for _, staleCondition := range []bool{false, true} {
-						if staleCondition {
-							// A stale status condition must also clear when nothing remains installed.
-							apimeta.SetStatusCondition(&artifactNode.Status.Conditions, common.NewCondition(tc.conditionType,
-								metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, removeErr.Error(), rf.Generation))
-							require.NoError(t, cl.Status().Update(ctx, artifactNode))
-						}
-						_, err = r.Reconcile(ctx, req)
-						require.NoError(t, err)
-						require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
-						assert.Equal(t, *stableStatus, artifactNode.Status)
-						assert.Len(t, fs.WriteCalls, writes)
-						assert.Len(t, fs.RemoveCalls, removes)
-					}
-				})
-			}
-		}
 	}
 }
 
@@ -1080,7 +706,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				{Type: commonv1alpha1.ConditionInlineArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonInlineArtifactProgrammed},
 			},
 			wantFiles:  []string{testInlineRulesYAML},
-			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
+			wantEvents: []string{"Normal ArtifactStored inline artifact stored successfully"},
 		},
 		{
 			name: "stores configmap ref successfully",
@@ -1109,8 +735,9 @@ func TestEnsureRulesfile(t *testing.T) {
 					Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigMapArtifactProgrammed,
 				},
 			},
-			wantFiles:  []string{testRulesData},
-			wantEvents: []string{"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully"},
+			wantFiles: []string{testRulesData},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully", "Normal ArtifactStored configmap artifact stored successfully"},
 		},
 		{
 			name: "both inline and configmap sources write two files",
@@ -1141,8 +768,9 @@ func TestEnsureRulesfile(t *testing.T) {
 			},
 			wantFiles: []string{testInlineRulesYAML, testRulesData},
 			wantEvents: []string{
-				"Normal InlineArtifactStored Inline artifact stored successfully",
-				"Normal ConfigMapArtifactStored ConfigMap artifact stored successfully",
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Normal ArtifactStored inline artifact stored successfully",
+				"Normal ArtifactStored configmap artifact stored successfully",
 			},
 		},
 		{
@@ -1208,7 +836,10 @@ func TestEnsureRulesfile(t *testing.T) {
 					Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigMapArtifactProgramFailed,
 				},
 			},
-			wantEvents: []string{"Warning ConfigMapRulesStoreFailed Failed to store ConfigMap rules: mock write error"},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Warning ConfigMapRulesStoreFailed Failed to store ConfigMap rules: mock write error",
+			},
 		},
 		{
 			name: "no sources sets programmed without touching resolved refs",
@@ -1247,7 +878,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			},
 			wantConditions: nil,
 			wantFiles:      []string{},
-			wantEvents:     []string{"Normal InlineArtifactRemoved Inline artifact removed from filesystem"},
+			wantEvents:     []string{"Normal ArtifactRemoved inline artifact removed successfully"},
 		},
 		{
 			name: "removing configmap ref deletes previously written file",
@@ -1274,7 +905,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			},
 			wantConditions: nil,
 			wantFiles:      []string{},
-			wantEvents:     []string{"Normal ConfigMapArtifactRemoved ConfigMap artifact removed from filesystem"},
+			wantEvents:     []string{"Normal ArtifactRemoved configmap artifact removed successfully"},
 		},
 		{
 			name: "removing OCI artifact deletes previously stored file",
@@ -1293,7 +924,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			useRealFS:      true,
 			wantConditions: nil,
 			wantDirEmpty:   true,
-			wantEvents:     []string{"Normal OCIArtifactRemoved OCI artifact removed from filesystem"},
+			wantEvents:     []string{"Normal ArtifactRemoved oci artifact removed successfully"},
 		},
 		// SpecHash tests
 		{
@@ -1311,7 +942,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			},
 			checkInstalledOCISpecHash: true,
 			wantOCIFetchCount:         new(1),
-			wantEvents:                []string{"Normal OCIArtifactStored OCI artifact stored successfully"},
+			wantEvents:                []string{"Normal ArtifactStored oci artifact stored successfully"},
 		},
 		{
 			name: "OCI: skips fetch when specHash and resolved digest match and disk is intact",
@@ -1402,49 +1033,49 @@ func TestEnsureRulesfile(t *testing.T) {
 
 			if tt.useRealFS {
 				tmpDir = t.TempDir()
-				r.fetcher = &testFetcher{
-					delegate: &artifact.Fetcher{K8sClient: cl},
-					ociBytes: []byte("fake-rules-content"),
+				r.fetcher = &testutil.FakeFetcher{
+					Delegate: &artifact.Fetcher{K8sClient: cl},
+					OCIBytes: []byte("fake-rules-content"),
 				}
-				r.store = node.NewManager(&artifact.LocalStore{
+				r.node = nodetest.NewTestNode(t, cl, nodetest.WithStore(&artifact.LocalStore{
 					FS:   filesystem.NewOSFileSystem(),
 					Dirs: artifact.ArtifactDirs{Rulesfile: tmpDir, Plugin: tmpDir, Config: tmpDir},
-				}, compatfake.NewMockVersionsFetcher(nil))
+				}), nodetest.WithFetcher(r.fetcher),
+					nodetest.WithRecorder(r.recorder),
+					nodetest.WithFalcoFetcher(compatfake.NewMockVersionsFetcher(nil)))
 			} else {
 				mockFS = fsfake.NewMockFileSystem()
 				if tt.writeErr != nil {
 					mockFS.WriteErrFor = make(map[string]error)
 					for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap} {
 						path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority, medium, artifact.KindRulesfile)
-						mockFS.WriteErrFor[filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp")] = tt.writeErr
+						mockFS.WriteErrFor[artifact.StagingPath(path)] = tt.writeErr
 					}
 				}
-				r.fetcher = &testFetcher{
-					delegate: &artifact.Fetcher{K8sClient: cl},
-					ociErr:   tt.pullErr,
+				r.fetcher = &testutil.FakeFetcher{
+					Delegate: &artifact.Fetcher{K8sClient: cl},
+					OCIErr:   tt.pullErr,
 				}
-				r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+				r.node = nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(r.fetcher))
 			}
 
-			nodeObj := newTestNodeObj()
+			nodeObj := &artifactv1alpha1.NodeArtifactStatus{}
 			if tt.preRf != nil {
 				setCurrentRulesfileMetadata(t, tt.preRf, cl)
-				preNode := newTestNodeObj()
-				sources, err := r.resolveRulesfileSources(t.Context(), tt.preRf, preNode)
-				require.NoError(t, err)
-				require.NoError(t, r.ensureRulesfile(t.Context(), tt.preRf, preNode, sources, tt.preRf.Status.ArtifactMeta), "preRf setup failed")
+				preNode := &artifactv1alpha1.NodeArtifactStatus{}
+				require.NoError(t, r.node.ApplyArtifact(t.Context(), tt.preRf, preNode), "preRf setup failed")
+				r.node.PublishStatus(artifact.KindRulesfile, tt.preRf, preNode)
 				testutil.DrainEvents(r.recorder.(*events.FakeRecorder).Events)
-				nodeObj.Status = preNode.Status
+				*nodeObj = *preNode
 			}
 
 			setCurrentRulesfileMetadata(t, tt.rf, cl)
-			tf := r.fetcher.(*testFetcher)
-			tf.ociCallCount = 0 // reset counter before the main reconcile
+			tf := r.fetcher
+			tf.OCICalls = 0 // reset counter before the main reconcile
 
-			sources, err := r.resolveRulesfileSources(t.Context(), tt.rf, nodeObj)
-			if err == nil {
-				err = r.ensureRulesfile(t.Context(), tt.rf, nodeObj, sources, tt.rf.Status.ArtifactMeta)
-			}
+			err := r.node.ApplyArtifact(t.Context(), tt.rf, nodeObj)
+			// The installed files are derived when the reconcile publishes on its way out.
+			r.node.PublishStatus(artifact.KindRulesfile, tt.rf, nodeObj)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1452,31 +1083,35 @@ func TestEnsureRulesfile(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+			// The apply reports its own compatibility assessment too, so this test asserts the conditions it
+			// speaks for rather than the whole list.
+			for _, exp := range tt.wantConditions {
+				testutil.RequireCondition(t, nodeObj.Conditions, exp.Type, exp.Status, exp.Reason)
+			}
 			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
 
 			if tt.wantOCIFetchCount != nil {
-				assert.Equal(t, *tt.wantOCIFetchCount, tf.ociCallCount, "unexpected FetchOCI call count")
+				assert.Equal(t, *tt.wantOCIFetchCount, tf.OCICalls, "unexpected FetchOCI call count")
 			}
 			if tt.checkInstalledOCISpecHash {
-				ociEntry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+				ociEntry := artifact.FindInstalled(nodeObj.InstalledArtifacts, artifact.MediumOCI)
 				require.NotNil(t, ociEntry, "expected OCI entry in InstalledArtifacts")
 				assert.Equal(t, tt.rf.Status.ArtifactMeta.SpecHash, ociEntry.SpecHash, "OCI InstalledArtifact.SpecHash mismatch")
 				assert.Equal(t, tt.rf.Spec.Priority, ociEntry.Priority)
 				assert.Equal(t, testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority,
 					artifact.MediumOCI, artifact.KindRulesfile), ociEntry.Path)
-				assert.Equal(t, tt.rf.Status.ArtifactMeta.Digest, tf.ociDigest, "fetch must use the resolved digest")
+				assert.Equal(t, tt.rf.Status.ArtifactMeta.Digest, tf.OCIDigest, "fetch must use the resolved digest")
 				if tt.preRf != nil && tt.preRf.Spec.Priority != tt.rf.Spec.Priority {
 					oldPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.preRf.Spec.Priority,
 						artifact.MediumOCI, artifact.KindRulesfile)
 					assert.NotContains(t, mockFS.Files, oldPath, "priority move must not leave a second active file")
 					assert.Equal(t, tt.preRf.Status.ArtifactMeta.Digest, tt.rf.Status.ArtifactMeta.Digest)
-					assert.Equal(t, sha256hexForTest(mockFS.Files[ociEntry.Path]), ociEntry.ContentHash)
+					assert.Equal(t, testutil.SHA256Hex(mockFS.Files[ociEntry.Path]), ociEntry.ContentHash)
 				}
 			}
 
 			if tt.wantFiles != nil {
-				installed, err := r.store.ScanAll(t.Context(), artifact.KindRulesfile)
+				installed, err := r.node.ScanAll(t.Context(), artifact.KindRulesfile)
 				require.NoError(t, err)
 				require.Len(t, installed[tt.rf.Name], len(tt.wantFiles), "unexpected number of installed rulesfiles")
 				gotContents := make([]string, 0, len(installed[tt.rf.Name]))
@@ -1487,7 +1122,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			}
 
 			if tt.wantDirEmpty {
-				installed, err := r.store.ScanAll(t.Context(), artifact.KindRulesfile)
+				installed, err := r.node.ScanAll(t.Context(), artifact.KindRulesfile)
 				require.NoError(t, err)
 				assert.Empty(t, installed, "expected no installed rulesfiles after cleanup")
 			}
@@ -1517,8 +1152,8 @@ func TestEnsureRulesfile_ProgrammedLastTransitionTime(t *testing.T) {
 					InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)},
 				},
 			}
-			nodeObj := newTestNodeObj()
-			nodeObj.Status.Conditions = []metav1.Condition{{
+			nodeObj := &artifactv1alpha1.NodeArtifactStatus{}
+			nodeObj.Conditions = []metav1.Condition{{
 				Type:               commonv1alpha1.ConditionInlineArtifactProgrammed.String(),
 				Status:             tt.initialStatus,
 				Reason:             artifact.ReasonInlineArtifactProgrammed,
@@ -1526,11 +1161,10 @@ func TestEnsureRulesfile_ProgrammedLastTransitionTime(t *testing.T) {
 				LastTransitionTime: pinned,
 			}}
 
-			sources, err := r.resolveRulesfileSources(t.Context(), rf, nodeObj)
-			require.NoError(t, err)
-			require.NoError(t, r.ensureRulesfile(t.Context(), rf, nodeObj, sources, &commonv1alpha1.ArtifactMeta{}))
+			require.NoError(t, r.node.ApplyArtifact(t.Context(), rf, nodeObj))
+			r.node.PublishStatus(artifact.KindRulesfile, rf, nodeObj)
 
-			cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
+			cond := apimeta.FindStatusCondition(nodeObj.Conditions, commonv1alpha1.ConditionInlineArtifactProgrammed.String())
 			require.NotNil(t, cond)
 			require.Equal(t, metav1.ConditionTrue, cond.Status)
 			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
@@ -1539,21 +1173,21 @@ func TestEnsureRulesfile_ProgrammedLastTransitionTime(t *testing.T) {
 }
 
 // TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty covers the case where
-// the manager's cache (restored by WarmSync, or surviving a status patch dropped by an
+// the node's record (recovered by the warm sync, or surviving a status patch dropped by an
 // SSA conflict) already considers the OCI artifact installed and verified, but this specific
-// ArtifactNode's own Status.InstalledArtifacts starts empty. The "already verified on disk, skip
+// status's InstalledArtifacts starts empty. The "already verified on disk, skip
 // fetch" shortcut must still populate status from the cache before returning, not just set the
 // condition True and leave installedArtifacts missing.
 func TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T) {
-	r, _ := newTestReconciler(t)
+	r, cl := newTestReconciler(t)
 	mockFS := fsfake.NewMockFileSystem()
-	r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	r.node = nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(r.fetcher))
 
 	content := []byte("- rule: test\n  condition: true\n")
-	hash := sha256hexForTest(content)
+	hash := testutil.SHA256Hex(content)
 	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), testRulesfileName, 50, artifact.MediumOCI, artifact.KindRulesfile)
 
-	key := node.Key{Kind: node.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: testRulesfileName}
 
 	rf := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
@@ -1565,26 +1199,22 @@ func TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *te
 		},
 	}
 	setCurrentRulesfileMetadata(t, rf, nil)
-	_, _, err := r.store.StoreRulesfile(t.Context(), rf.Namespace, rf.Name, rf.Spec.Priority, artifact.MediumOCI,
+	_, _, err := r.node.StoreRulesfile(t.Context(), rf.Name, rf.Spec.Priority, artifact.MediumOCI,
 		artifact.FetchResult{Content: content, ContentHash: hash, Perm: testutil.MustPermFor(t, artifact.KindRulesfile)}, rf.Status.ArtifactMeta, false)
 	require.NoError(t, err)
-	r.store.UpdateInstalledSpecHash(key, artifact.MediumOCI, rf.Status.ArtifactMeta.SpecHash)
-	nodeObj := newTestNodeObj() // Status.InstalledArtifacts starts nil, unlike the cache.
+	r.node.UpdateInstalledSpecHash(key, artifact.MediumOCI, rf.Status.ArtifactMeta.SpecHash)
+	nodeObj := &artifactv1alpha1.NodeArtifactStatus{} // InstalledArtifacts starts nil, unlike the cache.
 
-	tf := r.fetcher.(*testFetcher)
-	require.NoError(t, r.ensureOCIRulesfile(context.Background(), rf, nodeObj, rf.Status.ArtifactMeta))
+	tf := r.fetcher
+	require.NoError(t, r.node.ApplyArtifact(context.Background(), rf, nodeObj))
+	r.node.PublishStatus(artifact.KindRulesfile, rf, nodeObj)
 
-	assert.Zero(t, tf.ociCallCount, "the cache already verified this content; no fetch should happen")
-	entry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+	assert.Zero(t, tf.OCICalls, "the cache already verified this content; no fetch should happen")
+	entry := artifact.FindInstalled(nodeObj.InstalledArtifacts, artifact.MediumOCI)
 	require.NotNil(t, entry, "status must be synced from the cache even on the skip-fetch path")
 	assert.Equal(t, path, entry.Path)
 	assert.Equal(t, hash, entry.ContentHash)
 	assert.Equal(t, rf.Status.ArtifactMeta.SpecHash, entry.SpecHash)
-}
-
-func sha256hexForTest(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
 }
 
 func TestEnforceReferenceResolution(t *testing.T) {
@@ -1630,6 +1260,9 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			objects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+					// The apply reads the ConfigMap after resolving it, so the fixture needs the
+					// key as well as the object.
+					Data: map[string]string{commonv1alpha1.ConfigMapRulesKey: testRulesData},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
@@ -1656,34 +1289,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "OCI auth secret exists sets ResolvedRefs true",
-			objects: []client.Object{
-				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
-				},
-			},
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Image: commonv1alpha1.ImageSpec{
-							Repository: "falcosecurity/rules/falco-rules",
-							Tag:        "latest",
-						},
-						Registry: &commonv1alpha1.RegistryConfig{
-							Auth: &commonv1alpha1.RegistryAuth{
-								SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
-							},
-						},
-					},
-				},
-			},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-			},
-		},
-		{
-			name: "OCI auth secret not found sets ResolvedRefs false and Programmed false",
+			name: "a registry auth secret is the instance operator's to resolve: none reported, even when missing",
 			rf: &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.RulesfileSpec{
@@ -1700,16 +1306,16 @@ func TestEnforceReferenceResolution(t *testing.T) {
 					},
 				},
 			},
-			wantErr: true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
-			},
+			wantNoConditions: true,
 		},
 		{
 			name: "ConfigMap and auth secret both exist sets ResolvedRefs true",
 			objects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+					// The apply reads the ConfigMap after resolving it, so the fixture needs the
+					// key as well as the object.
+					Data: map[string]string{commonv1alpha1.ConfigMapRulesKey: testRulesData},
 				},
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
@@ -1737,10 +1343,13 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			},
 		},
 		{
-			name: "ConfigMap exists but auth secret missing fails on auth secret",
+			name: "the ConfigMap is resolved and the registry auth secret, even missing, is not the node's",
 			objects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{Name: "my-rules-cm", Namespace: testutil.TestNamespace},
+					// The apply reads the ConfigMap after resolving it, so the fixture needs the
+					// key as well as the object.
+					Data: map[string]string{commonv1alpha1.ConfigMapRulesKey: testRulesData},
 				},
 			},
 			rf: &artifactv1alpha1.Rulesfile{
@@ -1760,9 +1369,8 @@ func TestEnforceReferenceResolution(t *testing.T) {
 					},
 				},
 			},
-			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 			},
 		},
 	}
@@ -1771,12 +1379,12 @@ func TestEnforceReferenceResolution(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newTestReconciler(t, tt.objects...)
 
-			nodeObj := newTestNodeObj()
+			nodeObj := &artifactv1alpha1.NodeArtifactStatus{}
 			if len(tt.presetConditions) > 0 {
-				nodeObj.Status.Conditions = tt.presetConditions
+				nodeObj.Conditions = tt.presetConditions
 			}
 
-			err := r.enforceReferenceResolution(context.Background(), tt.rf, nodeObj)
+			err := r.node.ApplyArtifact(context.Background(), tt.rf, nodeObj)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1785,763 +1393,17 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			}
 
 			if tt.wantNoConditions {
-				assert.Empty(t, nodeObj.Status.Conditions)
+				assert.Nil(t, apimeta.FindStatusCondition(nodeObj.Conditions, commonv1alpha1.ConditionResolvedRefs.String()),
+					"nothing to resolve must leave no ResolvedRefs condition behind")
 			}
 
-			if len(tt.wantConditions) > 0 {
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
-			}
-		})
-	}
-}
-
-func TestFindNodeObjectsForSecret(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
-	rf := &artifactv1alpha1.Rulesfile{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRulesfileName,
-			Namespace: testutil.TestNamespace,
-		},
-		Spec: artifactv1alpha1.RulesfileSpec{
-			OCIArtifact: &commonv1alpha1.OCIArtifact{
-				Image: commonv1alpha1.ImageSpec{Repository: "ghcr.io/repo", Tag: "latest"},
-				Registry: &commonv1alpha1.RegistryConfig{
-					Auth: &commonv1alpha1.RegistryAuth{
-						SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
-					},
-				},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithIndex(&artifactv1alpha1.Rulesfile{}, index.SecretOnRulesfile, index.RulesfileBySecretRef).
-		Build()
-
-	r := &RulesfileReconciler{
-		Client:   cl,
-		Scheme:   s,
-		recorder: events.NewFakeRecorder(100),
-		fetcher:  &artifact.Fetcher{K8sClient: cl},
-		store: node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-			compatfake.NewMockVersionsFetcher(nil)),
-		nodeName:  testutil.TestNodeName,
-		namespace: testutil.TestNamespace,
-	}
-
-	tests := []struct {
-		name       string
-		secretName string
-		wantCount  int
-	}{
-		{
-			name:       "matching secret returns node object requests",
-			secretName: "my-pull-secret",
-			wantCount:  1,
-		},
-		{
-			name:       "non-matching secret returns empty",
-			secretName: "other-secret",
-			wantCount:  0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.secretName,
-					Namespace: testutil.TestNamespace,
-				},
-			}
-			requests := r.findNodeObjectsForSecret(context.Background(), secret)
-			require.Len(t, requests, tt.wantCount)
-			if tt.wantCount > 0 {
-				assert.Equal(t, testNodeObjectName(), requests[0].Name)
-				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+			for _, exp := range tt.wantConditions {
+				testutil.RequireCondition(t, nodeObj.Conditions, exp.Type, exp.Status, exp.Reason)
 			}
 		})
 	}
 }
 
-func TestFindNodeObjectsForConfigMap(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
-	rf := &artifactv1alpha1.Rulesfile{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRulesfileName,
-			Namespace: testutil.TestNamespace,
-		},
-		Spec: artifactv1alpha1.RulesfileSpec{
-			ConfigMapRef: &commonv1alpha1.ConfigMapRef{
-				Name: "my-rules-cm",
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithIndex(&artifactv1alpha1.Rulesfile{}, index.ConfigMapOnRulesfile, index.RulesfileByConfigMapRef).
-		Build()
-
-	r := &RulesfileReconciler{
-		Client:   cl,
-		Scheme:   s,
-		recorder: events.NewFakeRecorder(100),
-		fetcher:  &artifact.Fetcher{K8sClient: cl},
-		store: node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-			compatfake.NewMockVersionsFetcher(nil)),
-		nodeName:  testutil.TestNodeName,
-		namespace: testutil.TestNamespace,
-	}
-
-	tests := []struct {
-		name          string
-		configMapName string
-		wantCount     int
-	}{
-		{
-			name:          "matching configmap returns node object requests",
-			configMapName: "my-rules-cm",
-			wantCount:     1,
-		},
-		{
-			name:          "non-matching configmap returns empty",
-			configMapName: "other-cm",
-			wantCount:     0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cm := &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.configMapName,
-					Namespace: testutil.TestNamespace,
-				},
-			}
-			requests := r.findNodeObjectsForConfigMap(context.Background(), cm)
-			require.Len(t, requests, tt.wantCount)
-			if tt.wantCount > 0 {
-				assert.Equal(t, testNodeObjectName(), requests[0].Name)
-				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
-			}
-		})
-	}
-}
-
-func TestCheckEngineRequirement(t *testing.T) {
-	tests := []struct {
-		name                string
-		capability          string
-		falcoCaps           map[string]string
-		requiredVersion     string
-		enforceRequirements bool
-		preInstalled        bool
-		wantSkip            bool
-		wantSatisfied       bool
-		wantErr             bool
-	}{
-		{
-			name:            "capability found and version satisfied",
-			capability:      "engine_version_semver",
-			falcoCaps:       map[string]string{"engine_version_semver": "0.57.0"},
-			requiredVersion: "0.57.0",
-			wantSkip:        false,
-			wantSatisfied:   true,
-		},
-		{
-			name:                "capability found but version too low",
-			capability:          "engine_version_semver",
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			requiredVersion:     "0.57.0",
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantSatisfied:       false,
-		},
-		{
-			name:                "capability not found in Falco versions",
-			capability:          "engine_version_semver",
-			falcoCaps:           map[string]string{},
-			requiredVersion:     "0.57.0",
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantSatisfied:       false,
-		},
-		{
-			name:            "invalid provided version string returns error",
-			capability:      "engine_version_semver",
-			falcoCaps:       map[string]string{"engine_version_semver": "invalid"},
-			requiredVersion: "0.57.0",
-			wantSkip:        false,
-			wantSatisfied:   false,
-			wantErr:         true,
-		},
-		{
-			name:                "advise mode installs anyway when capability too low",
-			capability:          "engine_version_semver",
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			requiredVersion:     "0.57.0",
-			enforceRequirements: false,
-			wantSkip:            false,
-			wantSatisfied:       false,
-		},
-		{
-			name:                "enforce mode rejects update but keeps previous install",
-			capability:          "engine_version_semver",
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			requiredVersion:     "0.57.0",
-			enforceRequirements: true,
-			preInstalled:        true,
-			wantSkip:            true,
-			wantSatisfied:       false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t)
-			r.enforceRequirements = tt.enforceRequirements
-			rf := &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-			}
-			nodeObj := newTestNodeObj()
-			if tt.preInstalled {
-				nodeObj.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
-					{Path: "/etc/falco/rules.d/test.yaml", Medium: string(artifact.MediumOCI)},
-				}
-			}
-			if tt.falcoCaps != nil {
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcoCaps).Result)
-			}
-
-			skip, satisfied, err := r.checkEngineRequirement(context.Background(), rf, nodeObj, tt.capability, tt.requiredVersion, 0)
-
-			assert.Equal(t, tt.wantSkip, skip)
-			assert.Equal(t, tt.wantSatisfied, satisfied)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestCheckDependency(t *testing.T) {
-	tests := []struct {
-		name          string
-		falcaCaps     map[string]string
-		dep           commonv1alpha1.ArtifactMetaDependency
-		wantSatisfied bool
-		wantFailMsg   bool
-		wantErr       bool
-	}{
-		{
-			name:          "primary dependency found and satisfied",
-			falcaCaps:     map[string]string{"container": "0.4.0"},
-			dep:           commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0"},
-			wantSatisfied: true,
-		},
-		{
-			name:      "incompatible primary cannot be bypassed by an alternative",
-			falcaCaps: map[string]string{"container": "0.3.0", "k8smeta": "0.1.0"},
-			dep: commonv1alpha1.ArtifactMetaDependency{
-				Name: "container", Version: "0.4.0",
-				Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}},
-			},
-			wantFailMsg: true,
-		},
-		{
-			name:      "primary not found alternative satisfied",
-			falcaCaps: map[string]string{"k8smeta": "0.2.0"},
-			dep: commonv1alpha1.ArtifactMetaDependency{
-				Name: "container", Version: "0.4.0",
-				Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}},
-			},
-			wantSatisfied: true,
-		},
-		{
-			name:        "primary not found no alternatives",
-			falcaCaps:   map[string]string{},
-			dep:         commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0"},
-			wantFailMsg: true,
-		},
-		{
-			name:      "primary and all alternatives not found",
-			falcaCaps: map[string]string{},
-			dep: commonv1alpha1.ArtifactMetaDependency{
-				Name: "container", Version: "0.4.0",
-				Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "k8smeta", Version: "0.1.0"}},
-			},
-			wantFailMsg: true,
-		},
-		{
-			name:      "invalid provided version string returns error",
-			falcaCaps: map[string]string{"container": "invalid"},
-			dep:       commonv1alpha1.ArtifactMetaDependency{Name: "container", Version: "0.4.0"},
-			wantErr:   true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t)
-			if tt.falcaCaps != nil {
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcaCaps).Result)
-			}
-
-			satisfied, failMsg, err := r.checkDependency(context.Background(), tt.dep)
-
-			assert.Equal(t, tt.wantSatisfied, satisfied)
-			assert.Equal(t, tt.wantFailMsg, failMsg != "")
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestEnforceRulesfileCompatibility(t *testing.T) {
-	engineReq := func(name, version string) commonv1alpha1.ArtifactMetaRequirement {
-		return commonv1alpha1.ArtifactMetaRequirement{Name: name, Version: version}
-	}
-	pluginDep := func(name, version string, alts ...commonv1alpha1.ArtifactMetaDependencyVariant) commonv1alpha1.ArtifactMetaDependency {
-		return commonv1alpha1.ArtifactMetaDependency{Name: name, Version: version, Alternatives: alts}
-	}
-	altDep := func(name, version string) commonv1alpha1.ArtifactMetaDependencyVariant {
-		return commonv1alpha1.ArtifactMetaDependencyVariant{Name: name, Version: version}
-	}
-
-	tests := []struct {
-		name                string
-		rf                  *artifactv1alpha1.Rulesfile
-		artifactMeta        *commonv1alpha1.ArtifactMeta
-		falcoCaps           map[string]string
-		falcoErr            error
-		enforceRequirements bool
-		preInstalled        bool
-		presetConditions    []metav1.Condition
-		wantSkip            bool
-		wantErr             bool
-		wantConditions      []testutil.ConditionExpect
-		wantMessageContains []string
-	}{
-		{
-			name: "no source configured removes DependenciesSatisfied condition",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{},
-			},
-			presetConditions: []metav1.Condition{
-				common.NewDependenciesSatisfiedCondition(metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, 0),
-			},
-			wantConditions: nil,
-		},
-		{
-			name: "source configured with nil ArtifactMeta in non-strict mode proceeds",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionUnknown, Reason: artifact.ReasonArtifactMetaNotReady},
-			},
-		},
-		{
-			name: "source configured with nil ArtifactMeta in strict mode blocks",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionUnknown, Reason: artifact.ReasonArtifactMetaNotReady},
-			},
-		},
-		{
-			name: "ArtifactMeta with no requirements sets DependenciesSatisfied True",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
-			},
-		},
-		{
-			name: "engine requirement not found in Falco versions",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")},
-			},
-			falcoCaps:           map[string]string{},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "engine requirement version too low",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")},
-			},
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "engine requirement satisfied sets DependenciesSatisfied True",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")}},
-			falcoCaps:    map[string]string{"engine_version_semver": "0.57.0"},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
-			},
-		},
-		{
-			name: "integer engine version requirement satisfied via engine_version capability",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version", "15")}},
-			falcoCaps:    map[string]string{"engine_version": "62", "engine_version_semver": "0.62.0"},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
-			},
-		},
-		{
-			name: "integer engine version requirement not satisfied",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta:        &commonv1alpha1.ArtifactMeta{Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version", "100")}},
-			falcoCaps:           map[string]string{"engine_version": "62", "engine_version_semver": "0.62.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "plugin dependency not satisfied no alternatives",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta:        &commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{pluginDep("container", "0.4.0")}},
-			falcoCaps:           map[string]string{},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "plugin dependency satisfied sets DependenciesSatisfied True",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{pluginDep("container", "0.4.0")}},
-			falcoCaps:    map[string]string{"container": "0.4.0"},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
-			},
-		},
-		{
-			name: "plugin alternative satisfied sets DependenciesSatisfied True",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Dependencies: []commonv1alpha1.ArtifactMetaDependency{pluginDep("container", "0.4.0", altDep("k8smeta", "0.1.0"))},
-			},
-			falcoCaps: map[string]string{"k8smeta": "0.1.0"},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
-			},
-		},
-		{
-			name: "plugin alternatives all unsatisfied sets DependenciesSatisfied False",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Dependencies: []commonv1alpha1.ArtifactMetaDependency{pluginDep("container", "0.4.0", altDep("k8smeta", "0.1.0"))},
-			},
-			falcoCaps:           map[string]string{},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "Falco versions not yet observed non-strict installs anyway",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")}},
-			falcoErr:     fmt.Errorf("connection refused"),
-			wantConditions: []testutil.ConditionExpect{
-				{
-					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
-					Status: metav1.ConditionFalse,
-					Reason: artifact.ReasonDependenciesNotSatisfiedInstalledAnyway,
-				},
-			},
-		},
-		{
-			name: "Falco versions not yet observed strict blocks without returning an error",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")},
-			},
-			falcoErr:            fmt.Errorf("connection refused"),
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantErr:             false,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-		},
-		{
-			name: "multiple plugin deps all unsatisfied reports all in condition message",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
-					pluginDep("container", "0.4.0"),
-					pluginDep("k8saudit", "0.7.0"),
-				},
-			},
-			falcoCaps:           map[string]string{},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-			wantMessageContains: []string{"container >= 0.4.0", "k8saudit >= 0.7.0"},
-		},
-		{
-			name: "multiple plugin deps partially satisfied reports only unsatisfied",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec:       artifactv1alpha1.RulesfileSpec{InlineRules: &apiextensionsv1.JSON{Raw: []byte(testInlineRulesJSON)}},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Dependencies: []commonv1alpha1.ArtifactMetaDependency{
-					pluginDep("container", "0.4.0"),
-					pluginDep("k8saudit", "0.7.0"),
-				},
-			},
-			falcoCaps:           map[string]string{"container": "0.5.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
-			},
-			wantMessageContains: []string{"k8saudit >= 0.7.0"},
-		},
-		{
-			name: "advise mode installs despite unsatisfied engine requirement",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")},
-			},
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			enforceRequirements: false,
-			wantSkip:            false,
-			wantConditions: []testutil.ConditionExpect{
-				{
-					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
-					Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfiedInstalledAnyway,
-				},
-			},
-			wantMessageContains: []string{"installed anyway"},
-		},
-		{
-			name: "enforce mode rejects update but keeps previously installed rulesfile",
-			rf: &artifactv1alpha1.Rulesfile{
-				ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.RulesfileSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "repo/rules", Tag: "latest"}},
-				},
-			},
-			artifactMeta: &commonv1alpha1.ArtifactMeta{
-				Requirements: []commonv1alpha1.ArtifactMetaRequirement{engineReq("engine_version_semver", "0.57.0")},
-			},
-			falcoCaps:           map[string]string{"engine_version_semver": "0.50.0"},
-			enforceRequirements: true,
-			preInstalled:        true,
-			wantSkip:            true,
-			wantConditions: []testutil.ConditionExpect{
-				{
-					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
-					Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfiedUpdateRejected,
-				},
-			},
-			wantMessageContains: []string{"keeping the previously installed version"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t)
-			r.enforceRequirements = tt.enforceRequirements
-
-			if tt.falcoErr == nil && tt.falcoCaps != nil {
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcoCaps).Result)
-			}
-
-			tt.rf.Status.ArtifactMeta = tt.artifactMeta
-			nodeObj := newTestNodeObj()
-			if len(tt.presetConditions) > 0 {
-				nodeObj.Status.Conditions = tt.presetConditions
-			}
-			if tt.preInstalled {
-				installed := []artifactv1alpha1.InstalledArtifact{
-					{Path: "/etc/falco/rules.d/test.yaml", Medium: string(artifact.MediumOCI)},
-				}
-				nodeObj.Status.InstalledArtifacts = installed
-				// alreadyInstalled is read from the manager's cache, not status; seed it the way
-				// WarmSync would from a real restart.
-				r.store.SeedInstalled(node.Key{Kind: node.KindRulesfile, Namespace: tt.rf.Namespace, Name: tt.rf.Name}, installed)
-			}
-
-			skip, err := r.enforceRulesfileCompatibility(t.Context(), tt.rf, nodeObj, tt.artifactMeta)
-
-			assert.Equal(t, tt.wantSkip, skip)
-			if tt.wantErr {
-				require.Error(t, err)
-			} else {
-				require.NoError(t, err)
-			}
-			testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
-			if len(tt.wantMessageContains) > 0 {
-				for _, cond := range nodeObj.Status.Conditions {
-					if cond.Type == commonv1alpha1.ConditionDependenciesSatisfied.String() {
-						for _, substr := range tt.wantMessageContains {
-							assert.Contains(t, cond.Message, substr)
-						}
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestFindAllNodeObjectsOnVersionChange(t *testing.T) {
-	isController := true
-	node1 := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, "rf-one", testutil.TestNodeName),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, "rf-one", testutil.TestNodeName),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Rulesfile",
-				Name:       "rf-one",
-				Controller: &isController,
-			}},
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	node2 := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, "rf-two", testutil.TestNodeName),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, "rf-two", testutil.TestNodeName),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Rulesfile",
-				Name:       "rf-two",
-				Controller: &isController,
-			}},
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-
-	r, _ := newTestReconciler(t, node1, node2)
-
-	requests := r.findAllNodeObjectsOnVersionChange(context.Background(), nil)
-
-	require.Len(t, requests, 2)
-	names := make(map[string]struct{}, 2)
-	for _, req := range requests {
-		assert.Equal(t, testutil.TestNamespace, req.Namespace)
-		names[req.Name] = struct{}{}
-	}
-	assert.Contains(t, names, controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, "rf-one", testutil.TestNodeName))
-	assert.Contains(t, names, controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, "rf-two", testutil.TestNodeName))
-}
-
-func TestFindAllNodeObjectsOnVersionChange_Empty(t *testing.T) {
-	r, _ := newTestReconciler(t)
-	requests := r.findAllNodeObjectsOnVersionChange(context.Background(), nil)
-	assert.Empty(t, requests)
-}
-
-// TestReconcile_ResyncsAllMediaFromCacheBeforePatching covers an overlapping-reconcile race:
-// two reconciles for different spec generations of the same Rulesfile race to patch status via
-// SSA ForceOwnership. One reconcile (working off an older spec generation that still had an
-// inline source) can finish its patch after a newer reconcile has already removed that source,
-// resurrecting a stale InstalledArtifacts entry the newer reconcile had already cleared from the
-// cache.
-//
-// This test doesn't simulate the race directly; it simulates its end state: an ArtifactNode whose
-// persisted status still has a stale "inline" entry (as if an in-flight reconcile's Get read it
-// before it was removed), while the cache — the actual source of truth for what's installed —
-// already has none. A single Reconcile call must patch status back into agreement with the cache,
-// not merely leave a stale entry alone because this reconcile's own ensureX calls never touched it
-// (the current spec has no inline source at all, so cleanupStaleMedium's own cache-based check
-// finds nothing to remove and would otherwise return without touching status).
 func TestReconcile_ResyncsAllMediaFromCacheBeforePatching(t *testing.T) {
 	rf := &artifactv1alpha1.Rulesfile{
 		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
@@ -2553,26 +1415,24 @@ func TestReconcile_ResyncsAllMediaFromCacheBeforePatching(t *testing.T) {
 			// No InlineRules: this generation never configured it.
 		},
 	}
-	nodeObj := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{rulesfileNodeFinalizer}
+	nodeObj := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName, func(n *artifactv1alpha1.ArtifactNode) {
 		// Stale status: as if read before a concurrent reconcile's removal of inline landed.
-		n.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+		n.Status.Artifacts[0].InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
 			{Path: "/etc/falco/rules.d/50-03-test-rulesfile-inline.yaml", Medium: string(artifact.MediumInline)},
 		}
 	})
 
-	r, cl := newTestReconciler(t, rf, nodeObj)
+	r, _ := newTestReconciler(t, rf, nodeObj)
 	// The cache already reflects inline having been removed (by the "newer" reconcile this test
-	// doesn't simulate directly) — nothing seeded for it, unlike the stale status above.
-	key := node.Key{Kind: node.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
-	r.store.SeedInstalled(key, nil)
+	// doesn't simulate directly): nothing is seeded for it, unlike the stale status above.
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: testRulesfileName}
+	r.node.SeedInstalled(key, nil)
 
-	_, err := r.Reconcile(context.Background(), testutil.Request(testNodeObjectName()))
+	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.NoError(t, err)
 
-	got := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKey{Name: testNodeObjectName(), Namespace: testutil.TestNamespace}, got))
-	assert.Nil(t, artifact.FindInstalled(got.Status.InstalledArtifacts, artifact.MediumInline),
+	got := entryOf(t, r.node)
+	assert.Nil(t, artifact.FindInstalled(got.InstalledArtifacts, artifact.MediumInline),
 		"the persisted status must be resynced from the cache, not left with a stale entry the cache no longer has")
 }
 
@@ -2598,29 +1458,27 @@ func TestReconcile_RegistersDependenciesWithNodeArtifactManager(t *testing.T) {
 			},
 		},
 	}
-	nodeObj := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{rulesfileNodeFinalizer}
-	})
+	nodeObj := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 
 	setCurrentRulesfileMetadata(t, rf, nil)
 	r, _ := newTestReconciler(t, rf, nodeObj)
 
-	sharedManager := r.store
+	sharedManager := r.node
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testutil.TestNamespace}}
-	blockedBefore := sharedManager.RemovePluginConfig(context.Background(), &artifact.Fetcher{}, plugin)
+	blockedBefore := sharedManager.RemovePluginConfig(context.Background(), plugin)
 	require.NoError(t, blockedBefore, "nothing provides \"container\" yet, so removal (a no-op here) must not be blocked")
 
-	_, _, err := sharedManager.AddPluginConfig(context.Background(), plugin, &artifact.Fetcher{})
+	_, _, err := sharedManager.AddPluginConfig(context.Background(), plugin)
 	require.NoError(t, err)
 
-	_, err = r.Reconcile(context.Background(), testutil.Request(testNodeObjectName()))
+	_, err = r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.NoError(t, err)
 
-	err = sharedManager.RemovePluginConfig(context.Background(), &artifact.Fetcher{}, plugin)
+	err = sharedManager.RemovePluginConfig(context.Background(), plugin)
 	require.Error(t, err, "Reconcile must have registered this rulesfile's dependency on \"container\"")
 	blocked, ok := errors.AsType[*node.BlockedError](err)
 	require.True(t, ok)
-	wantKey := node.Key{Kind: node.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
+	wantKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: testRulesfileName}
 	assert.Equal(t, wantKey, blocked.BlockedBy[0])
 }
 
@@ -2648,29 +1506,26 @@ func TestReconcile_RulesUpdateKeepsInstalledDependenciesUntilReplacement(t *test
 					},
 				},
 			}
-			artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-				n.Finalizers = []string{rulesfileNodeFinalizer}
-			})
+			artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 			setCurrentRulesfileMetadata(t, rf, nil)
-			r, cl := newTestReconciler(t, rf, artifactNode)
-			r.enforceRequirements = true
+			r, cl := newReconcilerEnforcing(t, true, rf, artifactNode)
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: rf.Namespace}}
-			_, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
+			_, _, err := r.node.AddPluginConfig(ctx, plugin)
 			require.NoError(t, err)
-			r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
+			r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(map[string]string{
 				"engine_version_semver": "0.44.1", "container": "1.0.0",
 			}).Result)
-			fetcher := r.fetcher.(*testFetcher)
-			fetcher.ociBytes = []byte("- required_engine_version: 0.44.0\n" +
+			fetcher := r.fetcher
+			fetcher.OCIBytes = []byte("- required_engine_version: 0.44.0\n" +
 				"- required_plugin_versions:\n  - name: container\n    version: 1.0.0\n" + testRulesData)
-			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(artifactNode)}
+			request := testutil.Request(testRulesfileName)
 			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
-			key := node.KeyFromObj(node.KindRulesfile, rf)
-			oldFile := r.store.FindInstalled(key, artifact.MediumOCI)
+			key := artifact.RefOf(artifact.KindRulesfile, rf)
+			oldFile := r.node.FindInstalled(key, artifact.MediumOCI)
 			require.NotNil(t, oldFile, "setup must install the original rules through Reconcile")
 			var blocked *node.BlockedError
-			require.ErrorAs(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin), &blocked)
+			require.ErrorAs(t, r.node.RemovePluginConfig(ctx, plugin), &blocked)
 			require.Contains(t, blocked.BlockedBy, key)
 
 			// The new revision no longer needs container, but is not installed yet.
@@ -2682,23 +1537,23 @@ func TestReconcile_RulesUpdateKeepsInstalledDependenciesUntilReplacement(t *test
 			rf.Status.ArtifactMeta.Dependencies = nil
 			setCurrentRulesfileMetadata(t, rf, cl)
 			require.NoError(t, cl.Update(ctx, rf))
-			fetcher.ociBytes = []byte("- required_engine_version: 0.44.0\n" + testRulesData)
-			fetcher.ociErr = tc.fetchErr
+			fetcher.OCIBytes = []byte("- required_engine_version: 0.44.0\n" + testRulesData)
+			fetcher.OCIErr = tc.fetchErr
 			_, reconcileErr := r.Reconcile(ctx, request)
-			require.Equal(t, 2, fetcher.ociCallCount, "both revisions must reach the fetch path")
+			require.Equal(t, 2, fetcher.OCICalls, "both revisions must reach the fetch path")
 
-			intact, err := r.store.Verify(ctx, oldFile)
+			intact, err := r.node.Verify(ctx, oldFile)
 			require.NoError(t, err)
 			if tc.fetchErr != nil {
 				require.ErrorIs(t, reconcileErr, tc.fetchErr)
 				require.True(t, intact, "the failed update must leave the old rules on disk")
-				require.ErrorAs(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin), &blocked,
+				require.ErrorAs(t, r.node.RemovePluginConfig(ctx, plugin), &blocked,
 					"the plugin is still required by the rules left on disk")
 				assert.Contains(t, blocked.BlockedBy, key)
 			} else {
 				require.NoError(t, reconcileErr)
 				require.False(t, intact, "the successful update must replace the old rules")
-				require.NoError(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin),
+				require.NoError(t, r.node.RemovePluginConfig(ctx, plugin),
 					"the replaced rules must no longer block removal")
 			}
 		})
@@ -2706,6 +1561,7 @@ func TestReconcile_RulesUpdateKeepsInstalledDependenciesUntilReplacement(t *test
 }
 
 func TestReconcile_PluginRemovedDuringRulesFetch(t *testing.T) {
+	var status artifactv1alpha1.NodeArtifactStatus
 	for _, enforce := range []bool{false, true} {
 		t.Run(fmt.Sprintf("enforce=%t", enforce), func(t *testing.T) {
 			ctx := t.Context()
@@ -2721,30 +1577,27 @@ func TestReconcile_PluginRemovedDuringRulesFetch(t *testing.T) {
 					},
 				},
 			}
-			artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-				n.Finalizers = []string{rulesfileNodeFinalizer}
-			})
+			artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 			setCurrentRulesfileMetadata(t, rf, nil)
-			r, cl := newTestReconciler(t, rf, artifactNode)
-			r.enforceRequirements = enforce
+			r, _ := newReconcilerEnforcing(t, enforce, rf, artifactNode)
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: rf.Namespace}}
-			_, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
+			_, _, err := r.node.AddPluginConfig(ctx, plugin)
 			require.NoError(t, err)
-			r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
-			fetcher := r.fetcher.(*testFetcher)
-			fetcher.onFetchOCI = func() {
+			r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
+			fetcher := r.fetcher
+			fetcher.OnFetchOCI = func() {
 				// No rules have been installed yet, so deletion may legitimately win here.
-				require.NoError(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin))
+				require.NoError(t, r.node.RemovePluginConfig(ctx, plugin))
 			}
-			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(artifactNode)}
+			request := testutil.Request(testRulesfileName)
 			_, err = r.Reconcile(ctx, request)
 			require.NoError(t, err)
-			require.Equal(t, 1, fetcher.ociCallCount)
-			installed := r.store.FindInstalled(node.KeyFromObj(node.KindRulesfile, rf), artifact.MediumOCI)
+			require.Equal(t, 1, fetcher.OCICalls)
+			installed := r.node.FindInstalled(artifact.RefOf(artifact.KindRulesfile, rf), artifact.MediumOCI)
 			if enforce {
 				require.Nil(t, installed, "must recheck dependencies before writing fetched rules")
-				require.NoError(t, cl.Get(ctx, request.NamespacedName, artifactNode))
-				condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+				status = entryOf(t, r.node)
+				condition := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 				require.NotNil(t, condition)
 				assert.Equal(t, metav1.ConditionFalse, condition.Status)
 				assert.Contains(t, condition.Message, "container")
@@ -2759,6 +1612,7 @@ func TestReconcile_IncompatiblePluginVersion(t *testing.T) {
 	for _, enforce := range []bool{false, true} {
 		for _, preInstalled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("enforce=%t installed=%t", enforce, preInstalled), func(t *testing.T) {
+				var status artifactv1alpha1.NodeArtifactStatus
 				ctx := t.Context()
 				rf := &artifactv1alpha1.Rulesfile{
 					ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace},
@@ -2769,48 +1623,45 @@ func TestReconcile_IncompatiblePluginVersion(t *testing.T) {
 						Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}},
 					}},
 				}
-				artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				})
+				artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 				setCurrentRulesfileMetadata(t, rf, nil)
-				r, cl := newTestReconciler(t, rf, artifactNode)
-				r.enforceRequirements = enforce
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "2.0.0"}).Result)
+				r, _ := newReconcilerEnforcing(t, enforce, rf, artifactNode)
+				r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "2.0.0"}).Result)
 				var installedFile *artifact.File
 				if preInstalled {
 					result, err := r.fetcher.FetchInline(ctx, []byte(testRulesData))
 					require.NoError(t, err)
-					action, file, err := r.store.StoreRulesfile(ctx, rf.Namespace, rf.Name, 0, artifact.MediumOCI, result,
+					action, file, err := r.node.StoreRulesfile(ctx, rf.Name, 0, artifact.MediumOCI, result,
 						rf.Status.ArtifactMeta, false)
 					require.NoError(t, err)
 					installedFile = file
-					artifact.UpdateInstalledStatus(&artifactNode.Status.InstalledArtifacts, action, artifact.MediumOCI, file)
-					artifact.UpdateInstalledSpecHash(&artifactNode.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
-					specHashKey := node.Key{Kind: node.KindRulesfile, Namespace: rf.Namespace, Name: rf.Name}
-					r.store.UpdateInstalledSpecHash(specHashKey, artifact.MediumOCI, "old-spec")
-					require.NoError(t, cl.Status().Update(ctx, artifactNode))
+					artifact.UpdateInstalledStatus(&status.InstalledArtifacts, action, artifact.MediumOCI, file)
+					artifact.UpdateInstalledSpecHash(&status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
+					specHashKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: rf.Name}
+					r.node.UpdateInstalledSpecHash(specHashKey, artifact.MediumOCI, "old-spec")
+					r.node.PublishStatus(artifact.KindRulesfile, rf, &status)
 				}
-				oldInstalled := artifactNode.Status.InstalledArtifacts
-				request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(artifactNode)}
+				oldInstalled := status.InstalledArtifacts
+				request := testutil.Request(testRulesfileName)
 				_, err := r.Reconcile(ctx, request)
 				require.NoError(t, err)
-				require.NoError(t, cl.Get(ctx, request.NamespacedName, artifactNode))
-				condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+				status = entryOf(t, r.node)
+				condition := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 				require.NotNil(t, condition)
 				assert.Equal(t, metav1.ConditionFalse, condition.Status)
 				if enforce {
-					assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
-					assert.Equal(t, oldInstalled, artifactNode.Status.InstalledArtifacts)
+					assert.Zero(t, r.fetcher.OCICalls)
+					assert.Equal(t, oldInstalled, status.InstalledArtifacts)
 					if preInstalled {
 						assert.Equal(t, artifact.ReasonDependenciesNotSatisfiedUpdateRejected, condition.Reason)
-						intact, err := r.store.Verify(ctx, installedFile)
+						intact, err := r.node.Verify(ctx, installedFile)
 						require.NoError(t, err)
 						assert.True(t, intact, "a rejected update must preserve installed rules")
 					} else {
 						assert.Equal(t, artifact.ReasonDependenciesNotSatisfied, condition.Reason)
 					}
 				} else {
-					assert.Equal(t, 1, r.fetcher.(*testFetcher).ociCallCount, "advise mode still permits installation")
+					assert.Equal(t, 1, r.fetcher.OCICalls, "advise mode still permits installation")
 					assert.Equal(t, artifact.ReasonDependenciesNotSatisfiedInstalledAnyway, condition.Reason)
 				}
 			})
@@ -2831,19 +1682,20 @@ func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
 			goos, goarch, platform := "", "", ""
 			oldDigest := digest.FromString("old OCI manifest").String()
 			newDigest := digest.FromString("new OCI manifest").String()
-			oldPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", "artifact:old", oldDigest, goos, goarch)
-			newPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", "artifact:new", newDigest, goos, goarch)
+			oldPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindRulesfile), "artifact:old", oldDigest, goos, goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindRulesfile), "artifact:new", newDigest, goos, goarch)
 			require.NoError(t, cache.Store(oldPath, []byte("old artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("Rulesfile", "default", "artifact", platform, oldPath))
+			require.NoError(t, cache.Set(string(artifact.KindRulesfile), "default", "artifact", platform, oldPath))
 
 			srv := httptest.NewServer(artifactserver.New(cache).Handler())
 			defer srv.Close()
 			fs := fsfake.NewMockFileSystem()
-			reconciler := &RulesfileReconciler{
-				recorder: events.NewFakeRecorder(20),
-				fetcher:  &artifact.Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()},
-				store:    node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
-			}
+			cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+				WithObjects(testutil.NewTestArtifactNode()).WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+			fetcher := &artifact.Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
+			recorder := events.NewFakeRecorder(20)
+			// Only the node is exercised here.
+			testNode := nodetest.NewTestNodeOn(t, cl, fs, recorder, nodetest.WithFetcher(fetcher))
 			parent := &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Name: "artifact", Namespace: "default", Generation: 1},
 				Spec: artifactv1alpha1.RulesfileSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
@@ -2855,11 +1707,12 @@ func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
 				},
 			}
 			setCurrentRulesfileMetadata(t, parent, nil)
-			artifactNode := &artifactv1alpha1.ArtifactNode{}
+			artifactNode := &artifactv1alpha1.NodeArtifactStatus{}
 			if alreadyInstalled {
-				require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, artifactNode, parent.Status.ArtifactMeta))
+				require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
+				testNode.PublishStatus(artifact.KindRulesfile, parent, artifactNode)
 			}
-			previous := artifactNode.DeepCopy().Status.InstalledArtifacts
+			previous := artifactNode.DeepCopy().InstalledArtifacts
 
 			// The parent metadata is published before the aggregator replaces the cache entry.
 			parent.Generation = 2
@@ -2868,39 +1721,42 @@ func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
 			parent.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: newDigest}
 			setCurrentRulesfileMetadata(t, parent, nil)
 
-			err := reconciler.ensureOCIRulesfile(ctx, parent, artifactNode, parent.Status.ArtifactMeta)
+			err := testNode.ApplyArtifact(ctx, parent, artifactNode)
+			testNode.PublishStatus(artifact.KindRulesfile, parent, artifactNode)
 			var retryErr *artifact.RetryableError
 			require.ErrorAs(t, err, &retryErr, "an old cached revision must not be accepted as the new spec")
-			require.Equal(t, previous, artifactNode.Status.InstalledArtifacts)
+			require.Equal(t, previous, artifactNode.InstalledArtifacts)
 			if alreadyInstalled {
 				require.Equal(t, []byte("old artifact bytes"), fs.Files[previous[0].Path])
 			} else {
 				require.Empty(t, fs.Files)
 			}
-			condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			condition := apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
 			require.NotNil(t, condition)
 			require.Equal(t, metav1.ConditionFalse, condition.Status)
 
 			// Once the expected digest is available, the retry installs it and records its spec.
 			require.NoError(t, cache.Store(newPath, []byte("new artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("Rulesfile", "default", "artifact", platform, newPath))
-			require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, artifactNode, parent.Status.ArtifactMeta))
-			require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
-			installed := artifactNode.Status.InstalledArtifacts[0]
+			require.NoError(t, cache.Set(string(artifact.KindRulesfile), "default", "artifact", platform, newPath))
+			require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
+			testNode.PublishStatus(artifact.KindRulesfile, parent, artifactNode)
+			require.Len(t, artifactNode.InstalledArtifacts, 1)
+			installed := artifactNode.InstalledArtifacts[0]
 			require.Equal(t, parent.Status.ArtifactMeta.SpecHash, installed.SpecHash)
 			require.Equal(t, []byte("new artifact bytes"), fs.Files[installed.Path])
-			condition = apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			condition = apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
 			require.Equal(t, metav1.ConditionTrue, condition.Status)
 			require.Equal(t, int64(2), condition.ObservedGeneration)
 
 			// A verified, installed revision remains usable without another download.
 			srv.Close()
-			require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, artifactNode, parent.Status.ArtifactMeta))
+			require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
 		})
 	}
 }
 
 func TestReconcile_AdviseDoesNotInferUnverifiedDependencies(t *testing.T) {
+	var status artifactv1alpha1.NodeArtifactStatus
 	for _, medium := range []artifact.Medium{artifact.MediumInline, artifact.MediumConfigMap} {
 		for _, missing := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/missing=%t", medium, missing), func(t *testing.T) {
@@ -2925,22 +1781,20 @@ func TestReconcile_AdviseDoesNotInferUnverifiedDependencies(t *testing.T) {
 				}
 				sourceClient := fake.NewClientBuilder().WithScheme(testutil.Scheme(t)).WithObjects(cm).Build()
 				setCurrentRulesfileMetadata(t, rf, sourceClient)
-				artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{rulesfileNodeFinalizer}
-				})
+				artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 				r, cl := newTestReconciler(t, rf, cm, artifactNode)
 				plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: rf.Namespace}}
-				_, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
+				_, _, err := r.node.AddPluginConfig(ctx, plugin)
 				require.NoError(t, err)
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
-				request := testutil.Request(artifactNode.Name)
+				r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
+				request := testutil.Request(testRulesfileName)
 				_, err = r.Reconcile(ctx, request)
 				require.NoError(t, err)
-				key := node.KeyFromObj(node.KindRulesfile, rf)
-				oldFile := r.store.FindInstalled(key, medium)
+				key := artifact.RefOf(artifact.KindRulesfile, rf)
+				oldFile := r.node.FindInstalled(key, medium)
 				require.NotNil(t, oldFile)
 				var blocked *node.BlockedError
-				require.ErrorAs(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin), &blocked)
+				require.ErrorAs(t, r.node.RemovePluginConfig(ctx, plugin), &blocked)
 				require.Contains(t, blocked.BlockedBy, key, "the initial installation has known metadata")
 
 				// The source changes before the instance operator publishes matching metadata.
@@ -2960,20 +1814,20 @@ func TestReconcile_AdviseDoesNotInferUnverifiedDependencies(t *testing.T) {
 				require.NoError(t, cl.Update(ctx, rf))
 				_, err = r.Reconcile(ctx, request)
 				require.NoError(t, err, "advise mode still installs the changed local source")
-				installed := r.store.FindInstalled(key, medium)
+				installed := r.node.FindInstalled(key, medium)
 				require.NotNil(t, installed)
 				require.NotEqual(t, oldFile.ContentHash, installed.ContentHash)
-				intact, err := r.store.Verify(ctx, installed)
+				intact, err := r.node.Verify(ctx, installed)
 				require.NoError(t, err)
 				require.True(t, intact)
-				require.NoError(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin),
+				require.NoError(t, r.node.RemovePluginConfig(ctx, plugin),
 					"unknown metadata cannot identify a dependency to block removal")
-				require.NoError(t, cl.Get(ctx, request.NamespacedName, artifactNode))
-				condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+				status = entryOf(t, r.node)
+				condition := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 				require.NotNil(t, condition)
 				require.Equal(t, metav1.ConditionUnknown, condition.Status)
 				require.Equal(t, artifact.ReasonArtifactMetaNotReady, condition.Reason)
-				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				require.True(t, apimeta.IsStatusConditionTrue(status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 
 				// Removing the source still removes the installed file.
 				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(rf), rf))
@@ -2982,11 +1836,11 @@ func TestReconcile_AdviseDoesNotInferUnverifiedDependencies(t *testing.T) {
 				require.NoError(t, cl.Update(ctx, rf))
 				_, err = r.Reconcile(ctx, request)
 				require.NoError(t, err)
-				require.Nil(t, r.store.FindInstalled(key, medium))
-				intact, err = r.store.Verify(ctx, installed)
+				require.Nil(t, r.node.FindInstalled(key, medium))
+				intact, err = r.node.Verify(ctx, installed)
 				require.NoError(t, err)
 				require.False(t, intact)
-				require.NoError(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin))
+				require.NoError(t, r.node.RemovePluginConfig(ctx, plugin))
 			})
 		}
 	}
@@ -3005,21 +1859,19 @@ func TestReconcile_OCISpecReversionFetchesNewResolvedDigest(t *testing.T) {
 	}
 	setCurrentRulesfileMetadata(t, rf, nil)
 	originalSpecHash := rf.Status.ArtifactMeta.SpecHash
-	artifactNode := newTestNodeObj(withOwnerRef(), func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{rulesfileNodeFinalizer}
-	})
+	artifactNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 	r, cl := newTestReconciler(t, rf, artifactNode)
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: rf.Namespace}}
-	_, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
+	_, _, err := r.node.AddPluginConfig(ctx, plugin)
 	require.NoError(t, err)
-	r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
-	fetcher := r.fetcher.(*testFetcher)
-	fetcher.ociBytes = []byte("- required_plugin_versions:\n  - name: container\n    version: 1.0.0\n" + testRulesData)
-	request := testutil.Request(artifactNode.Name)
+	r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
+	fetcher := r.fetcher
+	fetcher.OCIBytes = []byte("- required_plugin_versions:\n  - name: container\n    version: 1.0.0\n" + testRulesData)
+	request := testutil.Request(testRulesfileName)
 	_, err = r.Reconcile(ctx, request)
 	require.NoError(t, err)
-	key := node.KeyFromObj(node.KindRulesfile, rf)
-	oldFile := r.store.FindInstalled(key, artifact.MediumOCI)
+	key := artifact.RefOf(artifact.KindRulesfile, rf)
+	oldFile := r.node.FindInstalled(key, artifact.MediumOCI)
 	require.NotNil(t, oldFile)
 
 	// The intermediate spec is observed, but its content never replaces the installed file.
@@ -3029,14 +1881,14 @@ func TestReconcile_OCISpecReversionFetchesNewResolvedDigest(t *testing.T) {
 	rf.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: digest.FromString("intermediate OCI manifest").String()}
 	setCurrentRulesfileMetadata(t, rf, cl)
 	require.NoError(t, cl.Update(ctx, rf))
-	fetcher.ociErr = errors.New("intermediate revision unavailable")
+	fetcher.OCIErr = errors.New("intermediate revision unavailable")
 	_, err = r.Reconcile(ctx, request)
-	require.ErrorIs(t, err, fetcher.ociErr)
-	intact, err := r.store.Verify(ctx, oldFile)
+	require.ErrorIs(t, err, fetcher.OCIErr)
+	intact, err := r.node.Verify(ctx, oldFile)
 	require.NoError(t, err)
 	require.True(t, intact)
 	var blocked *node.BlockedError
-	require.ErrorAs(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin), &blocked)
+	require.ErrorAs(t, r.node.RemovePluginConfig(ctx, plugin), &blocked)
 
 	// Returning to the same floating-tag spec resolves a different manifest.
 	require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(rf), rf))
@@ -3046,19 +1898,211 @@ func TestReconcile_OCISpecReversionFetchesNewResolvedDigest(t *testing.T) {
 	setCurrentRulesfileMetadata(t, rf, cl)
 	require.Equal(t, originalSpecHash, rf.Status.ArtifactMeta.SpecHash)
 	require.NoError(t, cl.Update(ctx, rf))
-	fetcher.ociErr = nil
-	fetcher.ociBytes = []byte(testRulesData)
+	fetcher.OCIErr = nil
+	fetcher.OCIBytes = []byte(testRulesData)
 	_, err = r.Reconcile(ctx, request)
 	require.NoError(t, err)
-	require.Equal(t, 3, fetcher.ociCallCount, "same spec hash cannot skip acquisition of a different resolved digest")
-	require.Equal(t, rf.Status.ArtifactMeta.Digest, fetcher.ociDigest)
-	installed := r.store.FindInstalled(key, artifact.MediumOCI)
+	require.Equal(t, 3, fetcher.OCICalls, "same spec hash cannot skip acquisition of a different resolved digest")
+	require.Equal(t, rf.Status.ArtifactMeta.Digest, fetcher.OCIDigest)
+	installed := r.node.FindInstalled(key, artifact.MediumOCI)
 	require.NotNil(t, installed)
 	require.Equal(t, originalSpecHash, installed.SpecHash)
-	require.Equal(t, sha256hexForTest(fetcher.ociBytes), installed.ContentHash)
-	intact, err = r.store.Verify(ctx, installed)
+	require.Equal(t, testutil.SHA256Hex(fetcher.OCIBytes), installed.ContentHash)
+	intact, err = r.node.Verify(ctx, installed)
 	require.NoError(t, err)
 	require.True(t, intact)
-	require.NoError(t, r.store.RemovePluginConfig(ctx, r.fetcher, plugin),
+	require.NoError(t, r.node.RemovePluginConfig(ctx, plugin),
 		"only the installed replacement releases the old dependency")
+}
+
+const assignedRulesfileUID = "rulesfile-uid"
+
+func assignedRulesfile(uid string) *artifactv1alpha1.Rulesfile {
+	return &artifactv1alpha1.Rulesfile{
+		ObjectMeta: metav1.ObjectMeta{Name: testRulesfileName, Namespace: testutil.TestNamespace, UID: types.UID(uid), Generation: 2},
+	}
+}
+
+func TestReconcile_RunsTheFlowAndPublishesWhenAssigned(t *testing.T) {
+	// Enforcing: the flow waits for the instance operator to observe generation 2.
+	r, cl := newReconcilerEnforcing(t, true, assignedRulesfile(assignedRulesfileUID),
+		testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, assignedRulesfileUID))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	got := testutil.RequirePublishedWhere(t, cl, "Rulesfile", testRulesfileName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.FindStatusCondition(e.Conditions, commonv1alpha1.ConditionProgrammed.String()) != nil
+	})
+	assert.Equal(t, assignedRulesfileUID, got.UID)
+}
+
+func TestReconcile_LeavesARulesfileAloneUnlessAssigned(t *testing.T) {
+	r, _ := newTestReconciler(t, assignedRulesfile(assignedRulesfileUID), testutil.NewTestArtifactNode())
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	_, held := r.node.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+	assert.False(t, held)
+}
+
+func TestReconcile_WaitsWhenTheSpecListsAnotherIncarnation(t *testing.T) {
+	r, _ := newTestReconciler(t, assignedRulesfile("new-uid"), testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, "old-uid"))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+
+	require.NoError(t, err)
+	assert.Equal(t, shared.AssignmentRetryDelay, result.RequeueAfter)
+	nodetest.AssertNothingDone(t, r.node, artifact.KindRulesfile, testRulesfileName, "never act for an incarnation the operator did not assign")
+}
+
+func TestReconcile_IgnoresAMissingOrDeletingRulesfile(t *testing.T) {
+	r, _ := newTestReconciler(t, testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, assignedRulesfileUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request("nonexistent"))
+	require.NoError(t, err)
+
+	now := metav1.Now()
+	deleting := assignedRulesfile(assignedRulesfileUID)
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"test/finalizer"}
+	r, _ = newTestReconciler(t, deleting, testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, assignedRulesfileUID))
+	_, err = r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+	nodetest.AssertNothingDone(t, r.node, artifact.KindRulesfile, testRulesfileName, "a deleting artifact is left alone")
+}
+
+func TestCleanup_IsIdempotentWhenNothingIsInstalled(t *testing.T) {
+	r, _ := newTestReconciler(t)
+
+	require.NoError(t, r.Cleanup(t.Context(), testRulesfileName))
+	require.NoError(t, r.Cleanup(t.Context(), testRulesfileName))
+}
+
+// heldRulesfile returns a reconciler that has reconciled an assigned Rulesfile, so that the node holds an entry
+// for it.
+func heldRulesfile(t *testing.T) (*testReconciler, client.Client) {
+	t.Helper()
+	// Enforcing: the flow waits for the instance operator to observe generation 2.
+	r, cl := newReconcilerEnforcing(t, true, assignedRulesfile(assignedRulesfileUID),
+		testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, assignedRulesfileUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+	require.NoError(t, err)
+	_, held := r.node.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+	require.True(t, held)
+	return r, cl
+}
+
+func TestReconcile_RemovesWhatItHoldsWhenTheRulesfileIsNoLongerAssigned(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, client.Client){
+		"the ArtifactNode stops listing it": testutil.DropAssignments,
+		"the Rulesfile is gone and the ArtifactNode stopped listing it": func(t *testing.T, cl client.Client) {
+			testutil.DropAssignments(t, cl)
+			require.NoError(t, cl.Delete(t.Context(), assignedRulesfile(assignedRulesfileUID)))
+		},
+		"there is no ArtifactNode": func(t *testing.T, cl client.Client) {
+			require.NoError(t, cl.Delete(t.Context(), testutil.NewAssigningArtifactNode("Rulesfile", testRulesfileName, "")))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, cl := heldRulesfile(t)
+			prepare(t, cl)
+
+			result, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+
+			require.NoError(t, err)
+			assert.Equal(t, time.Duration(0), result.RequeueAfter)
+			_, held := r.node.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+			assert.False(t, held, "an entry left behind would keep the parent's finalizer")
+		})
+	}
+}
+
+func TestReconcile_KeepsWhatItHoldsWhileTheArtifactNodeStillListsAGoneRulesfile(t *testing.T) {
+	r, cl := heldRulesfile(t)
+	require.NoError(t, cl.Delete(t.Context(), assignedRulesfile(assignedRulesfileUID)))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
+
+	require.NoError(t, err)
+	_, held := r.node.StatusEntry(artifact.KindRulesfile, testRulesfileName)
+	assert.True(t, held, "the operator has yet to drop it from the ArtifactNode, which reconciles the Rulesfile again")
+}
+
+var errBoom = errors.New("boom")
+
+func TestCleanup_ReportsWhatCannotBeRemoved(t *testing.T) {
+	mockFS := fsfake.NewMockFileSystem()
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+		WithObjects(testutil.NewTestArtifactNode()).WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+	n := nodetest.NewTestNodeOn(t, cl, mockFS, events.NewFakeRecorder(20), nodetest.WithFetcher(testutil.NewFakeFetcher(cl)))
+	r := &RulesfileReconciler{node: n}
+	_, _, err := n.StoreRulesfile(t.Context(), "rf", 50, artifact.MediumInline,
+		artifact.FetchResult{Content: []byte("- rule: r\n"), ContentHash: "hash", Perm: 0o644}, nil, false)
+	require.NoError(t, err)
+	mockFS.RemoveErr = errBoom
+
+	err = r.Cleanup(t.Context(), "rf")
+
+	require.ErrorIs(t, err, errBoom)
+}
+
+// A ConfigMap event reconciles the Rulesfiles that reference it, and only those.
+func TestFindRulesfilesForReferences(t *testing.T) {
+	rulesfile := func(name, configMap, secret string) *artifactv1alpha1.Rulesfile {
+		rf := &artifactv1alpha1.Rulesfile{ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: name}}
+		if configMap != "" {
+			rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: configMap}
+		}
+		if secret != "" {
+			rf.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{Registry: &commonv1alpha1.RegistryConfig{
+				Auth: &commonv1alpha1.RegistryAuth{SecretRef: &commonv1alpha1.SecretRef{Name: secret}},
+			}}
+		}
+		return rf
+	}
+	request := func(name string) reconcile.Request {
+		return reconcile.Request{NamespacedName: types.NamespacedName{Namespace: testutil.TestNamespace, Name: name}}
+	}
+	objects := []client.Object{rulesfile("a", "shared", ""), rulesfile("b", "", "shared"), rulesfile("c", "other", "other"), rulesfile("d", "", "")}
+	tests := []struct {
+		name    string
+		find    func(*RulesfileReconciler, context.Context, client.Object) []reconcile.Request
+		object  client.Object
+		listErr error
+		want    []reconcile.Request
+	}{
+		{
+			name: "a ConfigMap", find: (*RulesfileReconciler).findRulesfilesForConfigMap,
+			object: &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: "shared"}},
+			want:   []reconcile.Request{request("a")},
+		},
+		{
+			name: "the Rulesfiles cannot be listed", find: (*RulesfileReconciler).findRulesfilesForConfigMap,
+			object:  &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: "shared"}},
+			listErr: errBoom,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(objects...)
+			for _, idx := range index.All {
+				builder = builder.WithIndex(idx.Object, idx.Field, idx.ExtractValueFn)
+			}
+			if tt.listErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+						return tt.listErr
+					},
+				})
+			}
+			r := &RulesfileReconciler{Client: builder.Build()}
+
+			got := tt.find(r, t.Context(), tt.object)
+
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
 }

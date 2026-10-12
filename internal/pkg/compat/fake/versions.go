@@ -35,8 +35,7 @@ func NewMockVersionsFetcher(caps map[string]string) *MockVersionsFetcher {
 }
 
 // NewMockVersionsFetcherWithPlugins creates a MockVersionsFetcher whose result reports pluginVersions
-// as loaded plugins — flattened into capabilities too, matching HTTPVersionsFetcher's real behavior —
-// for tests that need PluginVersions() populated, not just Capability()/All().
+// as loaded plugins, flattened into the capabilities the way HTTPVersionsFetcher reports them.
 func NewMockVersionsFetcherWithPlugins(pluginVersions map[string]string) *MockVersionsFetcher {
 	return &MockVersionsFetcher{Result: compat.NewVersions(nil, pluginVersions)}
 }

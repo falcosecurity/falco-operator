@@ -28,13 +28,16 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/selection"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -46,6 +49,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	artifactnodectr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/artifactnode"
 	artifactconfigctr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/config"
 	artifactpluginctr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/plugin"
 	artifactrulesfilectr "github.com/falcosecurity/falco-operator/controllers/instance/artifact/rulesfile"
@@ -56,6 +60,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
+	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/image"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
@@ -359,7 +364,19 @@ func main() {
 	setupLog.V(4).Info("Label propagation filter", "excludedLabels", []string(excludedLabels))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
+		Scheme: scheme,
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				// Only Falco pods concern the operator, recognized by their instance label. The API server filters the
+				// watch, so the operator is not sent the updates of pods that do not carry it.
+				// The label is a common one, so many other pods carry it too: only what the operator reads of a pod
+				// is kept.
+				&corev1.Pod{}: {Label: falcoPodSelector(), Transform: stripPod},
+				// Every Node is needed, for the artifacts' selectors, but only its name and labels are read. The rest
+				// (the image list in particular) is dropped before it is cached.
+				&corev1.Node{}: {Transform: stripNode},
+			},
+		},
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
 		HealthProbeBindAddress: probeAddr,
@@ -384,7 +401,7 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	for _, idx := range index.All {
+	for _, idx := range index.InstanceOperator {
 		if err := mgr.GetFieldIndexer().IndexField(ctx, idx.Object, idx.Field, idx.ExtractValueFn); err != nil {
 			setupLog.Error(err, "unable to register field index", "field", idx.Field)
 			os.Exit(1)
@@ -456,6 +473,13 @@ func main() {
 		mgr.GetClient(), mgr.GetScheme(),
 	).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", artifactconfigctr.ControllerName)
+		os.Exit(1)
+	}
+
+	if err := artifactnodectr.NewArtifactNodeReconciler(
+		mgr.GetClient(), mgr.GetEventRecorder(artifactnodectr.ControllerName),
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", artifactnodectr.ControllerName)
 		os.Exit(1)
 	}
 
@@ -561,4 +585,40 @@ func artifactServiceURL(namespace, serviceName, clusterDomain, bindAddress strin
 	}
 	host := net.JoinHostPort(serviceName+"."+namespace+".svc."+clusterDomain, port)
 	return scheme + "://" + host, nil
+}
+
+// stripNode keeps of a Node what the operator reads, its metadata without managed fields, and drops the rest before
+// it is cached. With thousands of nodes, their status (image lists, conditions, addresses) is most of the cache.
+func stripNode(obj any) (any, error) {
+	node, ok := obj.(*corev1.Node)
+	if !ok {
+		return obj, nil
+	}
+	node.ManagedFields = nil
+	node.Status = corev1.NodeStatus{}
+	return node, nil
+}
+
+// stripPod keeps of a Pod what the operator reads: its metadata without managed fields, the node it runs on and
+// its phase. The instance label that selects the cached pods is a common one, so the cache holds far more pods
+// than the Falco ones, and their specs and statuses would be most of it.
+func stripPod(obj any) (any, error) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return obj, nil
+	}
+	pod.ManagedFields = nil
+	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
+	pod.Status = corev1.PodStatus{Phase: pod.Status.Phase}
+	return pod, nil
+}
+
+// falcoPodSelector selects the pods that carry the Falco instance label, whatever its value: the label Falco pods
+// are recognized by (see controllerhelper.FalcoInstanceLabel).
+func falcoPodSelector() labels.Selector {
+	requirement, err := labels.NewRequirement(controllerhelper.FalcoInstanceLabel, selection.Exists, nil)
+	if err != nil {
+		panic(err) // a constant key with no values cannot be invalid
+	}
+	return labels.NewSelector().Add(*requirement)
 }

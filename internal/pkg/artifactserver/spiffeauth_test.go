@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package artifactserver_test
+package artifactserver
 
 import (
 	"context"
@@ -46,7 +46,6 @@ import (
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 )
 
@@ -107,7 +106,7 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "known-falco", Namespace: "default"},
 		}).
 		Build()
-	authorizer := artifactserver.NewAuthorizer(fakeClient, logr.Discard())
+	authorizer := NewAuthorizer(fakeClient, logr.Discard())
 
 	cache := artifactcache.NewCache(t.TempDir())
 	require.NoError(t, cache.Load())
@@ -117,10 +116,10 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	srv := artifactserver.New(cache,
-		artifactserver.WithTLS(certWatcher),
-		artifactserver.WithClientCAs(caWatcher),
-		artifactserver.WithAuthorizer(authorizer))
+	srv := New(cache,
+		WithTLS(certWatcher),
+		WithClientCAs(caWatcher),
+		WithAuthorizer(authorizer))
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Start(ctx, addr) }()
 	waitForListening(t, addr)
@@ -175,20 +174,24 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 	t.Run("each request is restricted to the certificate namespace", func(t *testing.T) {
 		const otherNamespace = "tenant-b"
 		const artifactName = "scope-test"
-		const pluginKind = "Plugin"
+		// The routes are spelled out rather than taken from artifact.ServerPath: they are what a sidecar requests.
+		routes := []struct {
+			kind  artifact.Kind
+			route string
+		}{{artifact.KindPlugin, "plugins"}, {artifact.KindRulesfile, "rulesfiles"}}
 		const rootDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		require.NoError(t, fakeClient.Create(ctx, &instancev1alpha1.Falco{
 			ObjectMeta: metav1.ObjectMeta{Name: "other-falco", Namespace: otherNamespace},
 		}))
 		for _, namespace := range []string{"default", otherNamespace} {
-			for _, kind := range []string{pluginKind, "Rulesfile"} {
+			for _, r := range routes {
 				goos, goarch, platform := "", "", ""
-				if kind == pluginKind {
+				if r.kind == artifact.KindPlugin {
 					goos, goarch, platform = "linux", "amd64", "linux-amd64"
 				}
-				path := artifactcache.BlobPath(cache.Dir(), kind, namespace+"/"+artifactName, rootDigest, goos, goarch)
-				require.NoError(t, cache.Store(path, []byte(namespace+"/"+kind), 0o644))
-				require.NoError(t, cache.Set(kind, namespace, artifactName, platform, path))
+				path := artifactcache.BlobPath(cache.Dir(), string(r.kind), namespace+"/"+artifactName, rootDigest, goos, goarch)
+				require.NoError(t, cache.Store(path, []byte(namespace+"/"+r.route), 0o644))
+				require.NoError(t, cache.Set(string(r.kind), namespace, artifactName, platform, path))
 			}
 		}
 
@@ -201,8 +204,8 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 		t.Cleanup(transport.CloseIdleConnections)
 		client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 
-		for _, kind := range []string{pluginKind, "Rulesfile"} {
-			t.Run(kind, func(t *testing.T) {
+		for _, r := range routes {
+			t.Run(r.route, func(t *testing.T) {
 				for _, tc := range []struct {
 					name, namespace, artifactName, query string
 					headers                              map[string]string
@@ -223,7 +226,7 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 						if name == "" {
 							name = artifactName
 						}
-						requestURL := "https://" + addr + artifact.ServerPath(artifact.Kind(kind)) + tc.namespace + "/" + name + "?os=linux&arch=amd64" + tc.query
+						requestURL := "https://" + addr + "/v1/artifacts/" + r.route + "/" + tc.namespace + "/" + name + "?os=linux&arch=amd64" + tc.query
 						req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, requestURL, http.NoBody)
 						require.NoError(t, err)
 						for name, value := range tc.headers {
@@ -236,9 +239,9 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 						require.NoError(t, err)
 						assert.Equal(t, tc.wantStatus, resp.StatusCode)
 						if tc.wantStatus == http.StatusOK {
-							assert.Equal(t, "default/"+kind, string(body))
+							assert.Equal(t, "default/"+r.route, string(body))
 						} else {
-							assert.NotContains(t, string(body), otherNamespace+"/"+kind)
+							assert.NotContains(t, string(body), otherNamespace+"/"+r.route)
 							assert.Empty(t, resp.Header.Get(artifact.ArtifactDigestHeader))
 							assert.Empty(t, resp.Header.Get("Content-Range"))
 						}
@@ -261,7 +264,7 @@ func TestAuthorizer_AuthorizeRequest(t *testing.T) {
 	identity, err := url.Parse("spiffe://cluster.local/ns/default/sa/known-falco")
 	require.NoError(t, err)
 	leaf := &x509.Certificate{URIs: []*url.URL{identity}}
-	authorizer := artifactserver.NewAuthorizer(nil, logr.Discard())
+	authorizer := NewAuthorizer(nil, logr.Discard())
 
 	for _, tc := range []struct {
 		name      string

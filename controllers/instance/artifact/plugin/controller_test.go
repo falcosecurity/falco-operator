@@ -18,6 +18,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,6 +51,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
@@ -65,10 +67,6 @@ const (
 	testPluginName        = "test-plugin"
 	testPluginDigest      = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 )
-
-func testPluginNodeName() string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, testPluginName, testutil.TestNodeName)
-}
 
 func testOCIArtifact() *commonv1alpha1.OCIArtifact {
 	return &commonv1alpha1.OCIArtifact{
@@ -102,26 +100,9 @@ func withPluginSelector() func(*artifactv1alpha1.Plugin) {
 	}
 }
 
-func newTestPluginNode(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	isController := true
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testPluginNodeName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindPlugin, testPluginName, testutil.TestNodeName),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Plugin",
-				Name:       testPluginName,
-				Controller: &isController,
-			}},
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
+// withPluginConditions sets the conditions the node reports for the test Plugin.
+func withPluginConditions(conditions []metav1.Condition) func(*artifactv1alpha1.ArtifactNode) {
+	return func(n *artifactv1alpha1.ArtifactNode) { n.Status.Artifacts[0].Conditions = conditions }
 }
 
 func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginAggregatorReconciler, client.Client) {
@@ -130,8 +111,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginAggregatorRe
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+		WithStatusSubresource(&artifactv1alpha1.Plugin{}, &artifactv1alpha1.ArtifactNode{}).
 		Build()
 	return NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil), cl
 }
@@ -143,37 +123,6 @@ func newTestReconcilerWithPuller(t *testing.T, mockPuller puller.Puller, objs ..
 	return r, cl
 }
 
-func addInUseFinalizer(t *testing.T, cl client.Client, plugin *artifactv1alpha1.Plugin) {
-	t.Helper()
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), plugin))
-	require.NoError(t, controllerhelper.EnsureInUseFinalizer(
-		context.Background(), cl,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		plugin, true,
-	))
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), plugin))
-}
-
-const testFalcoName = "test-falco"
-
-func newTestFalco() *instancev1alpha1.Falco {
-	return &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{Name: testFalcoName, Namespace: testutil.TestNamespace},
-	}
-}
-
-func newRunningFalcoPod() *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "falco-pod",
-			Namespace: testutil.TestNamespace,
-			Labels:    map[string]string{"app.kubernetes.io/instance": testFalcoName},
-		},
-		Spec:   corev1.PodSpec{NodeName: testutil.TestNodeName},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-}
-
 func TestReconcile_NotFound(t *testing.T) {
 	r, _ := newTestReconciler(t)
 	result, err := r.Reconcile(context.Background(), testutil.Request("nonexistent"))
@@ -183,12 +132,12 @@ func TestReconcile_NotFound(t *testing.T) {
 
 func TestReconcile_MissingCacheOwner(t *testing.T) {
 	const (
-		shared       = "shared"
+		sharedBlob   = "shared"
 		grace        = "grace"
 		readError    = "read error"
 		persistError = "persist error"
 	)
-	for _, scenario := range []string{"unreferenced", shared, grace, readError, persistError} {
+	for _, scenario := range []string{"unreferenced", sharedBlob, grace, readError, persistError} {
 		t.Run(scenario, func(t *testing.T) {
 			cacheDir := t.TempDir()
 			r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir)
@@ -199,22 +148,19 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			platforms := []string{"linux-amd64", "linux-arm64"}
 			paths := make([]string, 0, len(platforms))
 			for _, platform := range platforms {
-				path := artifactcache.BlobPath(cacheDir, "Plugin", "repo:tag", testPluginDigest, "linux", strings.TrimPrefix(platform, "linux-"))
+				path := artifactcache.BlobPath(cacheDir, string(artifact.KindPlugin), "repo:tag", testPluginDigest,
+					"linux", strings.TrimPrefix(platform, "linux-"))
 				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
-				require.NoError(t, r.cache.Set("Plugin", testutil.TestNamespace, testPluginName, platform, path))
-				if scenario == shared {
-					require.NoError(t, r.cache.Set("Plugin", testutil.TestNamespace, "other", platform, path))
+				require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, platform, path))
+				if scenario == sharedBlob {
+					require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, "other", platform, path))
 				}
 				paths = append(paths, path)
 			}
 
 			originalClient := r.Client
 			if scenario == readError {
-				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(interceptor.Funcs{
-					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-						return fmt.Errorf("API unavailable")
-					},
-				}).Build()
+				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(testutil.FailGet(fmt.Errorf("API unavailable"))).Build()
 			}
 			snapshot := filepath.Join(cacheDir, "index.json")
 			if scenario == persistError {
@@ -224,7 +170,7 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
 			if scenario == readError || scenario == persistError {
 				require.Error(t, err)
-				require.NotEmpty(t, r.cache.Owners("Plugin"), "failed cleanup must retain the live index")
+				require.NotEmpty(t, r.cache.Owners(string(artifact.KindPlugin)), "failed cleanup must retain the live index")
 				for _, path := range paths {
 					require.FileExists(t, path)
 				}
@@ -235,25 +181,25 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 				}
 				reloaded := artifactcache.NewCache(cacheDir)
 				require.NoError(t, reloaded.Load())
-				require.Contains(t, reloaded.Owners("Plugin"), types.NamespacedName{
+				require.Contains(t, reloaded.Owners(string(artifact.KindPlugin)), types.NamespacedName{
 					Namespace: testutil.TestNamespace, Name: testPluginName,
 				}, "failed cleanup must retain the durable index")
 				_, err = r.Reconcile(t.Context(), testutil.Request(testPluginName))
 			}
 			require.NoError(t, err)
-			require.NotContains(t, r.cache.Owners("Plugin"), types.NamespacedName{
+			require.NotContains(t, r.cache.Owners(string(artifact.KindPlugin)), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testPluginName,
 			})
 			reloaded := artifactcache.NewCache(cacheDir)
 			require.NoError(t, reloaded.Load())
-			require.NotContains(t, reloaded.Owners("Plugin"), types.NamespacedName{
+			require.NotContains(t, reloaded.Owners(string(artifact.KindPlugin)), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testPluginName,
 			}, "successful cleanup must survive restart")
 			removed, err := r.cache.Sweep(t.Context())
 			require.NoError(t, err)
 			require.Zero(t, removed, "shared/grace blobs are protected; immediate mode already removed unreferenced blobs")
 			for _, path := range paths {
-				if scenario == shared || scenario == grace {
+				if scenario == sharedBlob || scenario == grace {
 					require.FileExists(t, path)
 					require.True(t, r.cache.BlobExists(path))
 				} else {
@@ -280,7 +226,7 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment := &envtest.Environment{
-				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 				ErrorIfCRDPathMissing: true,
 			}
 			cfg, err := environment.Start()
@@ -294,7 +240,7 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 			})
 			require.NoError(t, err)
-			for _, idx := range index.All {
+			for _, idx := range index.InstanceOperator {
 				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
 			}
 			direct, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -311,13 +257,13 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 
 			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, seed.Load())
-			missingPath := artifactcache.BlobPath(seed.Dir(), "Plugin", "deleted:tag", testPluginDigest, "linux", "amd64")
-			sharedPath := artifactcache.BlobPath(seed.Dir(), "Plugin", "shared:tag", testPluginDigest, "linux", "amd64")
+			missingPath := artifactcache.BlobPath(seed.Dir(), string(artifact.KindPlugin), "deleted:tag", testPluginDigest, "linux", "amd64")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), string(artifact.KindPlugin), "shared:tag", testPluginDigest, "linux", "amd64")
 			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
 			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
-			require.NoError(t, seed.Set("Plugin", tc.namespace, "missing", "linux-amd64", missingPath))
-			require.NoError(t, seed.Set("Plugin", tc.namespace, "missing-shared", "linux-amd64", sharedPath))
-			require.NoError(t, seed.Set("Plugin", tc.namespace, survivor.Name, "linux-amd64", sharedPath))
+			require.NoError(t, seed.Set(string(artifact.KindPlugin), tc.namespace, "missing", "linux-amd64", missingPath))
+			require.NoError(t, seed.Set(string(artifact.KindPlugin), tc.namespace, "missing-shared", "linux-amd64", sharedPath))
+			require.NoError(t, seed.Set(string(artifact.KindPlugin), tc.namespace, survivor.Name, "linux-amd64", sharedPath))
 			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, cache.Load())
 			r := NewPluginAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
@@ -341,9 +287,9 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 			// Neither missing name has ever existed in this API server. Only the controller's
 			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
 			require.Eventually(t, func() bool {
-				_, missing := cache.Lookup("Plugin", tc.namespace, "missing", "linux-amd64")
-				_, shared := cache.Lookup("Plugin", tc.namespace, "missing-shared", "linux-amd64")
-				return !missing && !shared
+				_, missing := cache.Lookup(string(artifact.KindPlugin), tc.namespace, "missing", "linux-amd64")
+				_, sharedFound := cache.Lookup(string(artifact.KindPlugin), tc.namespace, "missing-shared", "linux-amd64")
+				return !missing && !sharedFound
 			}, 10*time.Second, 20*time.Millisecond)
 			require.Eventually(t, func() bool {
 				current := &artifactv1alpha1.Plugin{}
@@ -353,12 +299,12 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 				return condition != nil && condition.Status == metav1.ConditionFalse
 			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
-			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("Plugin"))
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners(string(artifact.KindPlugin)))
 			require.NoFileExists(t, missingPath)
 			require.FileExists(t, sharedPath)
 			reloaded := artifactcache.NewCache(seed.Dir())
 			require.NoError(t, reloaded.Load())
-			require.Equal(t, cache.Owners("Plugin"), reloaded.Owners("Plugin"))
+			require.Equal(t, cache.Owners(string(artifact.KindPlugin)), reloaded.Owners(string(artifact.KindPlugin)))
 
 			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
 				response := httptest.NewRecorder()
@@ -391,7 +337,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment := &envtest.Environment{
-				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 				ErrorIfCRDPathMissing: true,
 			}
 			cfg, err := environment.Start()
@@ -404,7 +350,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 			})
 			require.NoError(t, err)
-			for _, idx := range index.All {
+			for _, idx := range index.InstanceOperator {
 				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
 			}
 			direct, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -431,16 +377,17 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 			parent := newTestPlugin()
 			require.NoError(t, direct.Create(t.Context(), parent))
 			require.NoError(t, direct.Create(t.Context(), newTestNode(testutil.TestNodeName, nil)))
-			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
-			pod := newRunningFalcoPod()
+			require.NoError(t, direct.Create(t.Context(), testutil.NewTestFalco()))
+			pod := testutil.NewRunningFalcoPod()
 			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
 			require.NoError(t, direct.Create(t.Context(), pod))
 			pod.Status.Phase = corev1.PodRunning
 			require.NoError(t, direct.Status().Update(t.Context(), pod))
-			child := newTestPluginNode()
-			child.OwnerReferences[0].UID = parent.UID
+			child := testutil.NewReportingArtifactNode(artifact.KindPlugin, parent.Name)
+			child.Spec.Artifacts[0].UID = string(parent.UID)
 			require.NoError(t, direct.Create(t.Context(), child))
-			child.Status.Conditions = []metav1.Condition{{
+			child.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{Kind: artifact.KindPlugin, Name: parent.Name, UID: string(parent.UID)}}
+			child.Status.Artifacts[0].Conditions = []metav1.Condition{{
 				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
 				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
 			}}
@@ -527,17 +474,16 @@ func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *test
 			fetchErr := fmt.Errorf("registry down")
 			parent := newTestPlugin(withPluginOCI())
 			parent.Generation = 1
-			child := newTestPluginNode()
-			child.Status.Conditions = []metav1.Condition{
+			child := testutil.NewReportingArtifactNode(artifact.KindPlugin, parent.Name)
+			child.Status.Artifacts[0].Conditions = []metav1.Condition{
 				{Type: "Programmed", Status: tc.programmed, Reason: tc.programmedReason, ObservedGeneration: 1},
 				{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ReferenceResolved", ObservedGeneration: 1},
 			}
 			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 			var statusApplies int
 			cl := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(parent, child, newTestNode(testutil.TestNodeName, nil), newTestFalco(), newRunningFalcoPod()).
+				WithObjects(parent, child, newTestNode(testutil.TestNodeName, nil), testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 				WithStatusSubresource(&artifactv1alpha1.Plugin{}, &artifactv1alpha1.ArtifactNode{}).
-				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 				WithInterceptorFuncs(interceptor.Funcs{
 					SubResourceApply: func(
 						ctx context.Context, c client.Client, subresource string,
@@ -577,7 +523,7 @@ func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *test
 
 			// A real child reference failure must still reach the parent while metadata fails.
 			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(child), child))
-			apimeta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+			apimeta.SetStatusCondition(&child.Status.Artifacts[0].Conditions, metav1.Condition{
 				Type: "ResolvedRefs", Status: metav1.ConditionFalse, Reason: "ReferenceNotFound",
 				Message: "Missing reference", ObservedGeneration: parent.Generation,
 			})
@@ -606,50 +552,10 @@ func TestReconcile_GetError(t *testing.T) {
 				return fmt.Errorf("api server error")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
 	require.Error(t, err)
-}
-
-func TestReconcile_DeletionNoNodeObjects(t *testing.T) {
-	// A finalizer makes cl.Delete set DeletionTimestamp on the object rather than removing it.
-	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
-		p.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	r, cl := newTestReconciler(t, plugin)
-
-	require.NoError(t, cl.Delete(context.Background(), plugin))
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// No PluginNodes should exist.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletionWithNodeObjects(t *testing.T) {
-	// A finalizer makes cl.Delete set DeletionTimestamp on the object rather than removing it.
-	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
-		p.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	pluginNode := newTestPluginNode()
-	r, cl := newTestReconciler(t, plugin, pluginNode)
-
-	require.NoError(t, cl.Delete(context.Background(), plugin))
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// PluginNode should be deleted.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
 }
 
 func TestReconcile_NoMatchingNodes(t *testing.T) {
@@ -660,179 +566,11 @@ func TestReconcile_NoMatchingNodes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
 
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-
 	got := &artifactv1alpha1.Plugin{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
 	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-}
-
-func TestReconcile_CreatesNodeObject(t *testing.T) {
-	plugin := newTestPlugin()
-	node := newTestNode(testutil.TestNodeName, nil)
-	r, cl := newTestReconciler(t, plugin, node, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	pluginNode := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testPluginNodeName(), Namespace: testutil.TestNamespace}, pluginNode))
-	assert.Equal(t, testutil.TestNodeName, pluginNode.Spec.NodeName)
-
-	got := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestReconcile_CreatesIndependentNodeObjectsForNamespaces(t *testing.T) {
-	const (
-		deploymentNamespace = "falco-deployment"
-		daemonSetNamespace  = "falco-daemonset"
-	)
-
-	node := newTestNode(testutil.TestNodeName, nil)
-	objects := make([]client.Object, 0, 7)
-	objects = append(objects, node)
-	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
-		plugin := newTestPlugin()
-		plugin.Namespace = namespace
-		falco := newTestFalco()
-		falco.Namespace = namespace
-		pod := newRunningFalcoPod()
-		pod.Namespace = namespace
-		objects = append(objects, plugin, falco, pod)
-	}
-	r, cl := newTestReconciler(t, objects...)
-
-	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
-		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
-			Name:      testPluginName,
-			Namespace: namespace,
-		}})
-		require.NoError(t, err)
-		assert.Equal(t, ctrl.Result{}, result)
-
-		pluginNode := &artifactv1alpha1.ArtifactNode{}
-		require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
-			Name:      testPluginNodeName(),
-			Namespace: namespace,
-		}, pluginNode))
-		assert.Equal(t, testutil.TestNodeName, pluginNode.Spec.NodeName)
-	}
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Len(t, nodeList.Items, 2)
-}
-
-func TestReconcile_NodeObjectAlreadyExists(t *testing.T) {
-	plugin := newTestPlugin()
-	node := newTestNode(testutil.TestNodeName, nil)
-	existing := newTestPluginNode()
-	r, cl := newTestReconciler(t, plugin, node, existing, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	list := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), list))
-	assert.Len(t, list.Items, 1)
-}
-
-func TestReconcile_NoFalcoPod_NoNodeObject(t *testing.T) {
-	// Node matches the artifact selector but no Falco pod is running on it.
-	plugin := newTestPlugin()
-	node := newTestNode(testutil.TestNodeName, nil)
-	r, cl := newTestReconciler(t, plugin, node) // no Falco CR or pod
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletesStaleNodeObject(t *testing.T) {
-	plugin := newTestPlugin(withPluginSelector())
-	staleNode := newTestPluginNode()
-	plainNode := newTestNode(testutil.TestNodeName, nil)
-	r, cl := newTestReconciler(t, plugin, staleNode, plainNode)
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) {
-	plugin := newTestPlugin(
-		withPluginSelector(),
-		func(p *artifactv1alpha1.Plugin) {
-			p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-		},
-	)
-	staleNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
-		n.Status.Conditions = []metav1.Condition{{
-			Type:    commonv1alpha1.ConditionProgrammed.String(),
-			Status:  metav1.ConditionTrue,
-			Reason:  "Programmed",
-			Message: "old result",
-		}}
-	})
-	r, cl := newTestReconciler(
-		t, plugin, staleNode, newTestNode(testutil.TestNodeName, nil), newTestFalco(), newRunningFalcoPod(),
-	)
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	terminating := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), terminating))
-	assert.False(t, terminating.DeletionTimestamp.IsZero(), "the node-side finalizer keeps the stale child terminating")
-
-	got := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
-		"the parent must stay alive until the terminating child is physically gone")
-	condition := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
-	assert.Equal(t, "NoNodesAssigned", condition.Reason,
-		"the stale child's last successful result must not remain in the aggregate")
-}
-
-func TestReconcile_RemovesNodeObjectWhenFalcoPodGone(t *testing.T) {
-	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
-		p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-	})
-	staleNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
-	})
-	// The Kubernetes Node still matches the Plugin selector, but no Falco pod remains there.
-	r, cl := newTestReconciler(t, plugin, staleNode, newTestNode(testutil.TestNodeName, nil))
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	got := &artifactv1alpha1.ArtifactNode{}
-	err = cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), got)
-	assert.True(t, k8serrors.IsNotFound(err),
-		"the instance operator must garbage-collect the ArtifactNode when its artifact operator is gone")
 }
 
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
@@ -850,75 +588,10 @@ func TestReconcile_ListMatchingNodesError(t *testing.T) {
 				return c.List(ctx, list, opts...)
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
 	require.Error(t, err)
-}
-
-func TestReconcile_ListNodeObjectsError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("plugin node list failed")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
-}
-
-func TestHandleDeletion_NoNodeObjects(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
-					return fmt.Errorf("Falco list should not be called without node objects")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	addInUseFinalizer(t, cl, plugin)
-
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), plugin)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
-	assert.NotContains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestHandleDeletion_NodeObjectsPresent(t *testing.T) {
-	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode()
-	r, cl := newTestReconciler(t, plugin, pluginNode)
-
-	err := r.handleDeletion(context.Background(), plugin)
-	require.NoError(t, err)
-
-	node := &artifactv1alpha1.ArtifactNode{}
-	err = cl.Get(context.Background(),
-		types.NamespacedName{Name: testPluginNodeName(), Namespace: testutil.TestNamespace}, node)
-	assert.Error(t, err)
 }
 
 func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
@@ -926,7 +599,7 @@ func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
 	cacheDir := t.TempDir()
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, plugin)
 
-	// An exclusively-referenced blob: gone once this CR's last node object disappears.
+	// An exclusively-referenced blob: gone once no node holds this Plugin any more.
 	ownBlob := filepath.Join(cacheDir, "blobs", "own")
 	require.NoError(t, r.cache.Store(ownBlob, []byte("x"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64", ownBlob))
@@ -937,8 +610,8 @@ func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
 	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-arm64", sharedBlob))
 	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, "other-plugin", "", sharedBlob))
 
-	// No ArtifactNode objects owned by this Plugin exist, so handleDeletion evicts the cache entries now.
-	err := r.handleDeletion(context.Background(), plugin)
+	// No node lists or reports on this Plugin, so the deletion evicts the cache entries.
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), plugin)
 	require.NoError(t, err)
 
 	_, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
@@ -955,7 +628,7 @@ func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
 
 func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode()
+	pluginNode := testutil.NewReportingArtifactNode("Plugin", testPluginName)
 	cacheDir := t.TempDir()
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, plugin, pluginNode)
 
@@ -963,29 +636,27 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o755))
 	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
 
-	err := r.handleDeletion(context.Background(), plugin)
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), plugin)
 	require.NoError(t, err)
 
 	got, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
-	require.True(t, ok, "cache entry must survive while a node object still exists")
+	require.True(t, ok, "cache entry must survive while a node still lists the plugin")
 	assert.Equal(t, blobPath, got)
 }
 
 func TestHandleDeletion_SurfacesDeletionBlockedCondition(t *testing.T) {
 	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Status.Conditions = []metav1.Condition{
-			{
-				Type:    commonv1alpha1.ConditionDeletionBlocked.String(),
-				Status:  metav1.ConditionTrue,
-				Reason:  artifact.ReasonPluginConfigStillRequired,
-				Message: `"container" is still required by [{Rulesfile some-rulesfile}]`,
-			},
-		}
-	})
+	pluginNode := testutil.NewReportingArtifactNode("Plugin", testPluginName, withPluginConditions([]metav1.Condition{
+		{
+			Type:    commonv1alpha1.ConditionDeletionBlocked.String(),
+			Status:  metav1.ConditionTrue,
+			Reason:  artifact.ReasonPluginConfigStillRequired,
+			Message: `"container" is still required by [{Rulesfile some-rulesfile}]`,
+		},
+	}))
 	r, cl := newTestReconciler(t, plugin, pluginNode)
 
-	err := r.handleDeletion(context.Background(), plugin)
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), plugin)
 	require.NoError(t, err)
 
 	got := &artifactv1alpha1.Plugin{}
@@ -994,218 +665,6 @@ func TestHandleDeletion_SurfacesDeletionBlockedCondition(t *testing.T) {
 	require.NotNil(t, cond, "aggregator must surface the per-node DeletionBlocked condition onto the parent Plugin")
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, artifact.ReasonPluginConfigStillRequired, cond.Reason)
-}
-
-func TestHandleDeletion_StatusNoOpAndRetry(t *testing.T) {
-	for _, tc := range []struct {
-		name          string
-		failedApplies int
-	}{
-		{name: "single failed apply", failedApplies: 1},
-		{name: "repeated failed apply", failedApplies: 2},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
-				p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-			})
-			node := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-				n.Finalizers = []string{"artifact.example.com/cleanup"}
-				n.Status.Conditions = []metav1.Condition{{
-					Type: commonv1alpha1.ConditionDeletionBlocked.String(), Status: metav1.ConditionTrue,
-					Reason: artifact.ReasonPluginConfigStillRequired, Message: "rules still installed",
-				}}
-			})
-			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-			cl := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(plugin, node, newTestNode(testutil.TestNodeName, nil), newTestFalco(), newRunningFalcoPod()).
-				WithStatusSubresource(plugin, node).
-				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-				Build()
-			r := NewPluginAggregatorReconciler(cl, scheme, events.NewFakeRecorder(100), nil)
-			require.NoError(t, cl.Delete(ctx, plugin))
-			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(plugin), plugin))
-			writes := 0
-			applyFailure := fmt.Errorf("injected deletion status failure")
-			r.Client = interceptor.NewClient(cl, interceptor.Funcs{
-				SubResourceApply: func(
-					ctx context.Context, cl client.Client, subresource string,
-					obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
-				) error {
-					writes++
-					if writes <= tc.failedApplies {
-						return applyFailure
-					}
-					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
-				},
-			})
-			for range tc.failedApplies {
-				require.ErrorIs(t, r.handleDeletion(ctx, plugin), applyFailure)
-				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(plugin), plugin))
-				require.Empty(t, plugin.Status.Conditions, "failed status Apply must remain retryable")
-			}
-			for range 3 {
-				require.NoError(t, r.handleDeletion(ctx, plugin))
-				require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(plugin), plugin))
-			}
-			assert.Equal(t, tc.failedApplies+1, writes, "publish once after the failure; repeated deletion must not rewrite unchanged status")
-			testutil.RequireCondition(t, plugin.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String(),
-				metav1.ConditionTrue, artifact.ReasonPluginConfigStillRequired)
-			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(node), node))
-			require.False(t, node.DeletionTimestamp.IsZero(), "status no-op must not prevent child deletion")
-			node.Status.Conditions[0].Message = "another rulesfile still installed"
-			require.NoError(t, cl.Status().Update(ctx, node))
-			require.NoError(t, r.handleDeletion(ctx, plugin))
-			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(plugin), plugin))
-			assert.Equal(t, tc.failedApplies+2, writes, "a changed deletion block must still be published")
-			condition := apimeta.FindStatusCondition(plugin.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
-			require.NotNil(t, condition)
-			assert.Contains(t, condition.Message, "another rulesfile still installed")
-			node.Finalizers = nil
-			require.NoError(t, cl.Update(ctx, node))
-			require.NoError(t, r.handleDeletion(ctx, plugin))
-			err := cl.Get(ctx, client.ObjectKeyFromObject(plugin), plugin)
-			require.True(t, k8serrors.IsNotFound(err), "cleanup must release the parent's finalizer")
-		})
-	}
-}
-
-func TestHandleDeletion_NodeObjectsBeingDeleted(t *testing.T) {
-	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		now := metav1.Now()
-		n.DeletionTimestamp = &now
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	r, _ := newTestReconciler(t, plugin, pluginNode)
-
-	err := r.handleDeletion(context.Background(), plugin)
-	require.NoError(t, err)
-}
-
-func TestHandleDeletion_ListError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, _ ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("list error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-
-	err := r.handleDeletion(context.Background(), plugin)
-	require.Error(t, err)
-}
-
-func TestEnsureNodeObject_AlreadyExists(t *testing.T) {
-	plugin := newTestPlugin()
-	existing := newTestPluginNode()
-	r, cl := newTestReconciler(t, plugin, existing)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, plugin,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindPlugin), controllerhelper.ArtifactKindPlugin, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	list := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), list))
-	assert.Len(t, list.Items, 1)
-}
-
-func TestEnsureNodeObject_Creates(t *testing.T) {
-	plugin := newTestPlugin()
-	r, cl := newTestReconciler(t, plugin)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, plugin,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindPlugin), controllerhelper.ArtifactKindPlugin, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	created := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testPluginNodeName(), Namespace: testutil.TestNamespace}, created))
-	assert.Equal(t, testutil.TestNodeName, created.Spec.NodeName)
-}
-
-func TestEnsureNodeObject_GetError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("get error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, plugin,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindPlugin), controllerhelper.ArtifactKindPlugin, testutil.TestNodeName)
-	require.Error(t, err)
-}
-
-func TestUpdateAggregateConditions_Empty(t *testing.T) {
-	plugin := newTestPlugin()
-	r, cl := newTestReconciler(t, plugin)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	err := controllerhelper.UpdateAggregateConditions(
-		context.Background(), r.Client, r.Scheme, plugin, &plugin.Status.Conditions, nodeList, ControllerName,
-	)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-	assert.Equal(t, "NoNodesAssigned", cond.Reason)
-}
-
-func TestUpdateAggregateConditions_WithNodeConditions(t *testing.T) {
-	plugin := newTestPlugin()
-	r, cl := newTestReconciler(t, plugin)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{
-		Items: []artifactv1alpha1.ArtifactNode{
-			{
-				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-				Status: artifactv1alpha1.ArtifactNodeStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:    commonv1alpha1.ConditionProgrammed.String(),
-							Status:  metav1.ConditionTrue,
-							Reason:  "Programmed",
-							Message: "ok",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err := controllerhelper.UpdateAggregateConditions(
-		context.Background(), r.Client, r.Scheme, plugin, &plugin.Status.Conditions, nodeList, ControllerName,
-	)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Plugin{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
 func TestFetchAndCacheArtifactMeta_NoOCI(t *testing.T) {
@@ -1376,7 +835,6 @@ func TestFindPluginsForNode_ListError(t *testing.T) {
 				return nil
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	reqs := controllerhelper.EnqueueAllOfType(context.Background(), cl, &artifactv1alpha1.PluginList{})
 	assert.Nil(t, reqs)
@@ -1390,97 +848,20 @@ func TestFindPluginsForNode_EmptyList(t *testing.T) {
 
 // ── Reconcile remaining error paths ─────────────────────────────────────────
 
-func TestReconcile_DeleteStaleNodeError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	// Selector requires env=prod; existing PluginNode is for a node without that label → stale.
-	plugin := newTestPlugin(withPluginSelector())
-	staleNode := newTestPluginNode()
-	plainNode := newTestNode(testutil.TestNodeName, nil)
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, staleNode, plainNode).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("delete failed")
-				}
-				return c.Delete(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
-}
-
-func TestReconcile_EnsureNodeObjectError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	node := newTestNode(testutil.TestNodeName, nil)
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, node, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("create failed")
-				}
-				return c.Create(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
-}
-
 func TestReconcile_EnsureInUseFinalizerError(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	plugin := newTestPlugin()
 	node := newTestNode(testutil.TestNodeName, nil)
-	pluginNode := newTestPluginNode() // makes ensureNodeObject a no-op
+	pluginNode := testutil.NewReportingArtifactNode("Plugin", testPluginName)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(plugin, node, pluginNode, newTestFalco(), newRunningFalcoPod()).
+		WithObjects(plugin, node, pluginNode, testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return fmt.Errorf("patch failed")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
-}
-
-func TestReconcile_SecondListNodeObjectsError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	node := newTestNode(testutil.TestNodeName, nil)
-	pluginNode := newTestPluginNode() // existing PluginNode makes ensureNodeObject a no-op
-	var listCount int
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, node, pluginNode).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					listCount++
-					if listCount == 2 {
-						return fmt.Errorf("second list error")
-					}
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
@@ -1493,37 +874,21 @@ func TestReconcile_FetchAndCacheError(t *testing.T) {
 	}
 	plugin := newTestPlugin(withPluginOCI())
 	node := newTestNode(testutil.TestNodeName, nil)
-	pluginNode := newTestPluginNode() // pre-existing
-	r, _ := newTestReconcilerWithPuller(t, mockPuller, plugin, node, pluginNode)
+	pluginNode := testutil.NewReportingArtifactNode("Plugin", testPluginName)
+	r, cl := newTestReconcilerWithPuller(t, mockPuller, plugin, node, pluginNode)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
+	require.ErrorContains(t, err, "registry down")
+
+	// The failure is on the Plugin, where its user looks, and not only in the operator's log.
+	got := &artifactv1alpha1.Plugin{}
+	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(plugin), got))
+	programmed := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	require.NotNil(t, programmed)
+	assert.Equal(t, metav1.ConditionFalse, programmed.Status)
+	assert.Contains(t, programmed.Message, "registry down")
 }
 
-// ── handleDeletion delete error ──────────────────────────────────────────────
-
-func TestHandleDeletion_DeleteError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, pluginNode).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("delete error")
-				}
-				return c.Delete(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), plugin)
-	require.Error(t, err)
-}
-
-// ── fetchAndCacheBlobs tests ──────────────────────────────────────────────
+// ── HandleDeletion delete error ──────────────────────────────────────────────
 
 // newTestReconcilerWithCacheAndPuller creates a PluginAggregatorReconciler with a real,
 // loaded artifact Cache rooted at cacheDir, and an injected mock OCI puller.
@@ -1536,7 +901,6 @@ func newTestReconcilerWithCacheAndPuller(
 		WithScheme(s).
 		WithObjects(objs...).
 		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	// Zero grace period: dereferenced blobs are removed from disk immediately.
 	cache := artifactcache.NewCache(cacheDir, artifactcache.WithEvictionGracePeriod(0))
@@ -1721,7 +1085,7 @@ func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
 		require.NoError(t, err)
 		mockPuller.layers[arch] = layer
 	}
-	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, t.TempDir(), plugin, node, newTestFalco(), newRunningFalcoPod())
+	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, t.TempDir(), plugin, node, testutil.NewTestFalco(), testutil.NewRunningFalcoPod())
 	_, err := r.Reconcile(ctx, testutil.Request(plugin.Name))
 	require.NoError(t, err)
 	require.Len(t, mockPuller.FetchConfigCalls, 1)
@@ -1734,7 +1098,7 @@ func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
 		t.Run("new node "+arch, func(t *testing.T) {
 			added := newTestNode("new-"+arch, map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: arch})
 			require.NoError(t, r.Create(ctx, added))
-			pod := newRunningFalcoPod()
+			pod := testutil.NewRunningFalcoPod()
 			pod.Name = "falco-" + arch
 			pod.Spec.NodeName = added.Name
 			require.NoError(t, r.Create(ctx, pod))
@@ -1742,18 +1106,12 @@ func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
 				mockPuller.PullErr = fmt.Errorf("platform unavailable")
 				_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
 				require.ErrorContains(t, reconcileErr, "platform unavailable")
-				_, ok := r.cache.Lookup("Plugin", plugin.Namespace, plugin.Name, "linux-"+arm64Arch)
+				_, ok := r.cache.Lookup(string(artifact.KindPlugin), plugin.Namespace, plugin.Name, "linux-"+arm64Arch)
 				require.False(t, ok, "a failed pull must not publish a cache entry")
 				mockPuller.PullErr = nil
 			}
 			_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
 			require.NoError(t, reconcileErr)
-			child := &artifactv1alpha1.ArtifactNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{
-				Namespace: plugin.Namespace,
-				Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, plugin.Name, added.Name),
-			}, child))
-			require.Equal(t, added.Name, child.Spec.NodeName)
 			if arch == amd64Arch {
 				require.Len(t, mockPuller.PullCalls, 1, "a new node of a cached architecture needs no new registry pull")
 			}
@@ -1801,65 +1159,6 @@ func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
 	}
 }
 
-func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
-	// staleNode is stale: the plugin's env=prod selector excludes plainNode. staleNode carries a
-	// finalizer and a Falco pod still runs there, so orphan detection calls Node.Get; the
-	// interceptor fails that lookup with a
-	// non-404 error that propagates back to Reconcile.
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin(withPluginSelector())
-	staleNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	plainNode := newTestNode(testutil.TestNodeName, nil)
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, staleNode, plainNode, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*corev1.Node); ok {
-					return fmt.Errorf("node lookup error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "node lookup error")
-}
-
-func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
-	// pluginNode carries a finalizer and a Falco pod still runs on its node, so orphan detection
-	// checks the Kubernetes Node via Get, which the interceptor fails with a non-404 error.
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	plugin := newTestPlugin()
-	pluginNode := newTestPluginNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(plugin, pluginNode, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Plugin{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*corev1.Node); ok {
-					return fmt.Errorf("node lookup error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewPluginAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), plugin)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "node lookup error")
-}
-
 func TestReconcile_FetchAndCacheBinariesError(t *testing.T) {
 	// fetchAndCacheArtifactMeta succeeds and sets Status.ArtifactMeta.Digest.
 	// fetchAndCacheBlobs uses that digest as knownDigest → skips ResolveDigest,
@@ -1873,7 +1172,7 @@ func TestReconcile_FetchAndCacheBinariesError(t *testing.T) {
 		ConfigDigest: testPluginDigest,
 		PullErr:      fmt.Errorf("registry down"),
 	}
-	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin, node, newTestFalco(), newRunningFalcoPod())
+	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, cacheDir, plugin, node, testutil.NewTestFalco(), testutil.NewRunningFalcoPod())
 	_, err := r.Reconcile(context.Background(), testutil.Request(testPluginName))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry down")
@@ -1911,4 +1210,154 @@ func TestReconcile_CacheOwnershipSurvivesLastNodeRemoval(t *testing.T) {
 	t.Logf("deleted parent; cache sweep removed=%d", removed)
 	_, cached := r.cache.Lookup(string(artifact.KindPlugin), plugin.Namespace, plugin.Name, "linux-amd64")
 	require.False(t, cached, "deleting the parent must release its cache reference even after its selector stopped matching nodes")
+}
+
+const newUID = "new-uid"
+
+func TestReconcile_AggregatesFromTheArtifactNode(t *testing.T) {
+	const uid = "plugin-uid"
+	programmed := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: "Programmed", Status: status, Reason: "Programmed", ObservedGeneration: 1}}
+	}
+
+	for name, tc := range map[string]struct {
+		conditions     []metav1.Condition
+		wantProgrammed bool
+	}{
+		"the node reports programmed":   {programmed(metav1.ConditionTrue), true},
+		"the node reports failure":      {programmed(metav1.ConditionFalse), false},
+		"the node has not reported yet": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) { p.Generation, p.UID = 1, uid })
+			node := testutil.NewReportingArtifactNode("Plugin", testPluginName, func(n *artifactv1alpha1.ArtifactNode) {
+				n.Status.Artifacts[0].UID = uid
+				n.Status.Artifacts[0].Conditions = tc.conditions
+			})
+			r, cl := newTestReconciler(t, plugin, newTestNode(testutil.TestNodeName, nil), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+			_, err := r.Reconcile(t.Context(), testutil.Request(plugin.Name))
+			require.NoError(t, err)
+
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(plugin), plugin))
+			assert.Equal(t, tc.wantProgrammed, apimeta.IsStatusConditionTrue(plugin.Status.Conditions, "Programmed"))
+		})
+	}
+}
+
+func TestReconcile_APreviousIncarnationsEntryIsNotCreditedToTheNewPlugin(t *testing.T) {
+	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) { p.Generation, p.UID = 1, newUID })
+	node := testutil.NewReportingArtifactNode("Plugin", testPluginName, func(n *artifactv1alpha1.ArtifactNode) {
+		n.Spec.Artifacts[0].UID = newUID
+		n.Status.Artifacts[0].UID = "old-uid"
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
+			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", ObservedGeneration: 1},
+		}
+	})
+	r, cl := newTestReconciler(t, plugin, newTestNode(testutil.TestNodeName, nil), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(plugin.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(plugin), plugin))
+	assert.False(t, apimeta.IsStatusConditionTrue(plugin.Status.Conditions, "Programmed"),
+		"the deleted plugin's success must not make its replacement look programmed")
+}
+
+func TestReconcile_DeletionWaitsForNodeCleanup(t *testing.T) {
+	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
+		p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	artifactNode := testutil.NewTestArtifactNode()
+	artifactNode.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{Kind: "Plugin", Name: plugin.Name}}
+	r, cl := newTestReconciler(t, plugin, artifactNode)
+	require.NoError(t, cl.Delete(t.Context(), plugin))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(plugin.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(plugin), plugin))
+	assert.Contains(t, plugin.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
+		"a node still reports on the plugin, so its files may remain: the parent must stay")
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(artifactNode), artifactNode))
+	artifactNode.Status.Artifacts = nil
+	require.NoError(t, cl.Status().Update(t.Context(), artifactNode))
+
+	_, err = r.Reconcile(t.Context(), testutil.Request(plugin.Name))
+	require.NoError(t, err)
+	err = cl.Get(t.Context(), client.ObjectKeyFromObject(plugin), plugin)
+	assert.True(t, k8serrors.IsNotFound(err), "with every node clean the parent is released")
+}
+
+func TestReconcile_DeletionShowsABlockPublishedThroughTheArtifactNode(t *testing.T) {
+	plugin := newTestPlugin(func(p *artifactv1alpha1.Plugin) {
+		p.Generation = 1
+		p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	artifactNode := testutil.NewTestArtifactNode()
+	artifactNode.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{
+		Kind: "Plugin", Name: plugin.Name,
+		Conditions: []metav1.Condition{{
+			Type: "DeletionBlocked", Status: metav1.ConditionTrue, Reason: "PluginConfigStillRequired",
+			Message: "required by rulesfile x", ObservedGeneration: 1,
+		}},
+	}}
+	// The node is running Falco, so the aggregate reports on it.
+	r, cl := newTestReconciler(t, plugin, artifactNode, newTestNode(testutil.TestNodeName, nil), testutil.NewTestFalco(), testutil.NewRunningFalcoPod())
+	require.NoError(t, cl.Delete(t.Context(), plugin))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(plugin.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(plugin), plugin))
+	blocked := apimeta.FindStatusCondition(plugin.Status.Conditions, "DeletionBlocked")
+	require.NotNil(t, blocked, "the block the sidecar published through the ArtifactNode must reach the parent")
+	assert.Equal(t, metav1.ConditionTrue, blocked.Status)
+}
+
+var errBoom = errors.New("boom")
+
+func TestHandleDeletion_Errors(t *testing.T) {
+	deleting := func() *artifactv1alpha1.Plugin {
+		return newTestPlugin(func(p *artifactv1alpha1.Plugin) {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+			p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+		})
+	}
+	tests := []struct {
+		name  string
+		funcs interceptor.Funcs
+	}{
+		{
+			name: "the ArtifactNodes cannot be listed",
+			funcs: interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return errBoom
+			}},
+		},
+		{
+			name: "the finalizer cannot be released",
+			funcs: interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return errBoom
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plugin := deleting()
+			r, cl := newTestReconciler(t, plugin)
+			r.Client = interceptor.NewClient(cl.(client.WithWatch), tt.funcs)
+
+			_, err := shared.HandleDeletion(t.Context(), r.aggregation(), plugin)
+
+			require.ErrorIs(t, err, errBoom)
+		})
+	}
+}
+
+func TestSetupWithManager(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	mgr := testutil.NewUnstartedManager(t, testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme))
+
+	require.NoError(t, r.SetupWithManager(mgr))
 }

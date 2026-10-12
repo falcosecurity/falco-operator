@@ -17,12 +17,16 @@
 package artifact
 
 import (
+	"cmp"
 	"io/fs"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 )
 
-// Kind is an artifact kind, spelled as the Kubernetes API Kind of its CRD.
+// Kind is an artifact kind, spelled as the Kubernetes API Kind of its CRD. It is the API's own type, so a kind
+// read from or written to an ArtifactNode needs no conversion.
 type Kind = artifactv1alpha1.ArtifactKind
 
 const (
@@ -33,6 +37,34 @@ const (
 	// KindConfig is the kind of a Config.
 	KindConfig = artifactv1alpha1.KindConfig
 )
+
+// Ref identifies an artifact within its namespace: an ArtifactNode, its spec and its status all live in the
+// artifact's namespace, so kind and name are all it takes to tell artifacts apart there.
+type Ref struct {
+	Kind Kind
+	Name string
+}
+
+// Compare orders refs by kind, then by name: the order of every list of artifacts the operators write.
+func (r Ref) Compare(other Ref) int {
+	return cmp.Or(cmp.Compare(r.Kind, other.Kind), cmp.Compare(r.Name, other.Name))
+}
+
+// RefOfAssignment is the Ref of the artifact an entry of an ArtifactNode's spec assigns, whichever incarnation of
+// it (uid) is meant.
+func RefOfAssignment(assigned artifactv1alpha1.NodeArtifactRef) Ref {
+	return Ref{Kind: assigned.Kind, Name: assigned.Name}
+}
+
+// RefOfStatus is the Ref of the artifact an entry of an ArtifactNode's status reports on.
+func RefOfStatus(reported *artifactv1alpha1.NodeArtifactStatus) Ref {
+	return Ref{Kind: reported.Kind, Name: reported.Name}
+}
+
+// RefOf is the Ref of obj, an artifact of kind.
+func RefOf(kind Kind, obj metav1.Object) Ref {
+	return Ref{Kind: kind, Name: obj.GetName()}
+}
 
 // Medium represents how the artifact is distributed.
 type Medium string

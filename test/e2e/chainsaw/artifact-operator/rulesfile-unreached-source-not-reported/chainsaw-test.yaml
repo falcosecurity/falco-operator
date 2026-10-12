@@ -1,0 +1,140 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-unreached-source-not-reported
+spec:
+  description: |
+    A Rulesfile's sources are applied in order (oci, inline, configmap) and the apply stops at the
+    first failure, so every later source is left untouched. The node must not report those sources
+    as programmed: the parent aggregates what each node says, so a programmed condition for a file
+    that was never written hides the failure instead of surfacing it.
+
+    Only the sidecar's cache endpoint is broken, pointed at a port nothing listens on. The instance
+    operator still resolves the OCI metadata from the real registry and advances ObservedGeneration,
+    which is what lets the node reach its apply at all; the node's own download then fails.
+
+    Before the fix the node published InlineArtifactProgrammed=True for an inline file it had never
+    written, because the condition was set for every source the spec declared rather than for the
+    ones the apply actually reached.
+
+  bindings:
+    - name: falco_name
+      value: falco-unreached-source
+    - name: rulesfile_name
+      value: unreached-source
+    - name: test_name
+      value: rulesfile-unreached-source-not-reported
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: inline_file
+      value: 50-03-unreached-source-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco-with-an-unreachable-cache"
+      description: |
+        The sidecar's artifact server points at a dead port, so its downloads fail fast with a
+        connection refused rather than waiting for a timeout.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+            - name: artifact_operator_env
+              value:
+                - name: ARTIFACT_SERVER_URL
+                  value: http://127.0.0.1:19099
+
+    - name: "Step 02: Create-rulesfile-with-two-sources"
+      description: |
+        An OCI source the node cannot download, and an inline source it would write second. The OCI
+        image is a real one, so the instance operator's metadata fetch succeeds.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                priority: 50
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-engine-req-met
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+                inlineRules:
+                  - rule: Unreached source rule
+                    condition: "evt.type = execve"
+                    output: "cmd=%proc.cmdline"
+                    priority: DEBUG
+
+    - name: "Step 03: Assert-the-OCI-source-is-reported-failed"
+      description: The source the node did reach reports what happened to it.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'False'
+                        reason: OCIArtifactProgramFailed
+                    (length((conditions || `[]`)[?type == 'InlineArtifactProgrammed' && status == 'True'])): 0
+
+    - name: "Step 04: Assert-the-inline-source-is-not-claimed-programmed"
+      description: |
+        The apply never got past the OCI source, so the inline source must not be reported
+        programmed. This is the assertion that fails on the pre-fix build.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'InlineArtifactProgrammed' && status == 'True']):
+                      - type: InlineArtifactProgrammed
+
+    - name: "Step 05: Assert-no-inline-file-was-written"
+      description: Nothing claimed programmed, and nothing on disk either.
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

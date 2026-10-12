@@ -36,7 +36,12 @@ type Entry struct {
 }
 
 // All aggregates all field indexes defined in this package.
-var All []Entry = append(append(append(ConfigIndexes, RulesfileIndexes...), PluginIndexes...), ArtifactNodeIndexes...)
+var All []Entry = append(append(ConfigIndexes, RulesfileIndexes...), PluginIndexes...)
+
+// InstanceOperator is every index the instance operator registers: All, plus the Pod index that only it
+// needs. The artifact operator's sidecar registers All alone: it does not read pods, and an index on them
+// would start an informer it has no use for, and no permission for.
+var InstanceOperator []Entry = append(append([]Entry{}, All...), PodIndexes...)
 
 // IndexByConfigMapRef returns a client.IndexerFunc that indexes objects by their ConfigMapRef name.
 // The getRef function extracts the ConfigMapRef from the typed object; return nil when not set.

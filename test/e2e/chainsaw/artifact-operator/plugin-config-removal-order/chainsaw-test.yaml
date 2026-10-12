@@ -207,13 +207,15 @@ spec:
               kind: Plugin
               name: ($json_plugin)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $json_plugin]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $json_plugin]):
+                  - kind: Plugin
 
     - name: "Step 09: Assert-json-binary-absent"
       description: |

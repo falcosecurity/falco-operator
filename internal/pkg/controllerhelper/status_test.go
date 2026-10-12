@@ -34,12 +34,13 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func TestPatchStatusSSA_UnresolvableGVKReturnsError(t *testing.T) {
 	// A scheme with nothing registered can't resolve a GVK for any object.
 	s := runtime.NewScheme()
-	cl := fake.NewClientBuilder().WithScheme(newArtifactScheme(t)).Build()
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
 
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	err := controllerhelper.PatchStatusSSA(context.Background(), cl, s, plugin, "test-manager")
@@ -77,7 +78,7 @@ func TestPatchStatusSSA_ToUnstructuredError(t *testing.T) {
 }
 
 func TestPatchStatusSSA_NoStatusFieldIsANoOp(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	require.NoError(t, corev1.AddToScheme(s))
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: "default"}}
 	cl := fake.NewClientBuilder().
@@ -96,7 +97,7 @@ func TestPatchStatusSSA_NoStatusFieldIsANoOp(t *testing.T) {
 }
 
 func TestPatchStatusSSA_Success(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(plugin).WithStatusSubresource(plugin).Build()
 
@@ -113,7 +114,7 @@ func TestPatchStatusSSA_Success(t *testing.T) {
 }
 
 func TestPatchStatusSSA_ConflictError(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
@@ -132,7 +133,7 @@ func TestPatchStatusSSA_ConflictError(t *testing.T) {
 }
 
 func TestPatchStatusSSA_NotFoundErrorIsSwallowed(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
@@ -150,7 +151,7 @@ func TestPatchStatusSSA_NotFoundErrorIsSwallowed(t *testing.T) {
 }
 
 func TestPatchStatusSSA_GenericApplyError(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	cl := fake.NewClientBuilder().
 		WithScheme(s).

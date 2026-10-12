@@ -30,9 +30,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
 
-//go:fix inline
-func ptrInt32(v int32) *int32 { return new(v) }
-
 // mustGetPodTemplateLabels extracts pod template labels from an unstructured workload.
 func mustGetPodTemplateLabels(t *testing.T, obj *unstructured.Unstructured) map[string]string {
 	t.Helper()
@@ -253,7 +250,7 @@ func TestGenerateUserOverlay(t *testing.T) {
 			name:         "Deployment with labels, replicas, and PodTemplateSpec",
 			resourceType: ResourceTypeDeployment,
 			crLabels:     map[string]string{"app": "falco", "env": "prod"},
-			replicas:     ptrInt32(3),
+			replicas:     new(int32(3)),
 			podTemplateSpec: &corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					NodeSelector: map[string]string{"node": "worker"},

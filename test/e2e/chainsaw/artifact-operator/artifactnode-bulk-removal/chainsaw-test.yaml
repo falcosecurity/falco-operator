@@ -1,0 +1,277 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-bulk-removal
+spec:
+  description: |
+    Exercises the guard against a wrongly short assignment, on a real Falco with a real artifact operator (sidecar)
+    on every node. When one reconcile of a node's ArtifactNode finds many artifacts (10 or more) no longer assigned,
+    the sidecar removes them as it always does, and also records a Warning Event on the ArtifactNode, so that a
+    mass removal cannot go unnoticed.
+
+    The artifacts select the nodes running this test's Falco by a label the test puts on them. Taking the label
+    away makes the assignment controller drop all of them from the ArtifactNode in one write.
+
+    Scenarios:
+    1. 10 Configs are assigned, installed and reported Programmed.
+    2. The label is removed from the nodes. Each sidecar removes what it installed and warns with BulkRemoval on
+       its node's ArtifactNode.
+
+  bindings:
+    - name: falco_name
+      value: falco-artifactnode-bulk-removal-test
+    - name: test_name
+      value: artifactnode-bulk-removal
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Label-the-nodes-running-falco"
+      description: The label carries the test's namespace, so tests running side by side cannot select each other's nodes.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: LABEL
+                value: (join('', ['chainsaw-bulk-removal=', $namespace]))
+            content: bash ../../common/scripts/label_falco_nodes.sh
+
+    - name: "Step 03: Create-the-configs"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-00
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-01
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-02
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-03
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-04
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-05
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-06
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-07
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-08
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: bulk-config-09
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-bulk-removal: ($namespace)
+                config:
+                  json_output: false
+
+    - name: "Step 04: Assert-assigned-installed-and-reported"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length(artifacts[?kind == 'Config'])): 10
+              status:
+                (length(artifacts[?kind == 'Config' && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`])): 10
+
+    - name: "Step 05: Assert-a-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-bulk-config-00-inline.yaml
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 06: Remove-the-label"
+      description: Nothing selects the nodes any more, so all 10 Configs are dropped from each ArtifactNode at once.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: LABEL
+                value: chainsaw-bulk-removal-
+            content: bash ../../common/scripts/label_falco_nodes.sh
+
+    - name: "Step 07: Assert-the-warning"
+      try:
+        - assert:
+            resource:
+              apiVersion: events.k8s.io/v1
+              kind: Event
+              metadata:
+                namespace: ($namespace)
+              type: Warning
+              reason: BulkRemoval
+              regarding:
+                kind: ArtifactNode
+
+    - name: "Step 08: Assert-the-files-are-removed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: 50-03-bulk-config-00-inline.yaml
+            - name: should_exist
+              value: "false"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort removal of the label the test put on real nodes, which outlive it.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: FALCO_NAME
+            value: ($falco_name)
+          - name: LABEL
+            value: chainsaw-bulk-removal-
+          - name: ALLOW_FAILURE
+            value: "true"
+        content: bash ../../common/scripts/label_falco_nodes.sh

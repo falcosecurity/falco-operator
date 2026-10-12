@@ -82,7 +82,7 @@ func pruneEmptyFields(m map[string]any) {
 			}
 			// Don't delete pointer fields that point to zero values (user explicitly set them)
 			// Only delete if the pointer itself is nil
-			if rv.Kind() == reflect.Ptr {
+			if rv.Kind() == reflect.Pointer {
 				if rv.IsNil() {
 					delete(m, k)
 				}

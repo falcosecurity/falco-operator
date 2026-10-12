@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/artifactnode"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/config"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/rulesfile"
@@ -77,6 +79,7 @@ func main() {
 	var falcoBaseURL string
 	var falcoReloadCooldown time.Duration
 	var enforceRequirements bool
+
 	var tlsOpts []func(*tls.Config)
 	var opts zap.Options
 
@@ -175,7 +178,7 @@ func main() {
 
 	// Waits for Falco to be available before starting the controllers; Falco starts in idle mode
 	// (no plugins, no rules) as a regular container alongside the artifact operator. The fetched
-	// snapshot seeds nodeManager's Falco-capability cache below, which compatibility checks read
+	// snapshot seeds the node's Falco-capability cache below, which compatibility checks read
 	// instead of querying Falco live on every reconcile.
 	setupLog.Info("Waiting for Falco to be available", "url", falcoBaseURL)
 	initialFalcoVersions, err := compat.WaitAndFetch(ctx, falcoBaseURL)
@@ -277,6 +280,11 @@ func main() {
 			DefaultNamespaces: map[string]cache.Config{
 				namespace: {},
 			},
+			// Only this node's ArtifactNode concerns the sidecar. Selecting it keeps the informer from
+			// caching, and watching, every other node's object.
+			ByObject: map[client.Object]cache.ByObject{
+				&artifactv1alpha1.ArtifactNode{}: controllerhelper.SidecarArtifactNodeCache(nodeName),
+			},
 		},
 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
 		// when the Manager ends. This requires the binary to immediately end when the
@@ -303,69 +311,10 @@ func main() {
 		}
 	}
 
-	// falcoFetcher is shared by nodeManager (post-install refresh) and versionsWatcher (periodic
-	// refresh); both call the same Falco /versions endpoint on different triggers. See
-	// node.Manager's doc comment.
-	falcoFetcher := compat.NewHTTPVersionsFetcher(falcoBaseURL)
-
-	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
-	// keeping a plugin's config entry until no rules file on this node still requires it. It also
-	// caches Falco's reported capabilities and plugin versions so compatibility checks never
-	// require a live HTTP call. WarmSync observes installed files and current assignments using
-	// the synced manager cache, before any reconcilers start. Dependency metadata is rebuilt during
-	// reconciliation, without restoring historical state from disk or ArtifactNode status.
-	nodeManager := node.NewManager(artifact.NewLocalStore(), falcoFetcher)
-	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
-	mgr, err = controllerhelper.WithStartup(mgr, func(ctx context.Context) error {
-		if err := node.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
-			return err
-		}
-		setupLog.Info("Node artifact manager observed installed files and current plugin assignments")
-		return nil
-	})
-	if err != nil {
-		setupLog.Error(err, "unable to configure node artifact startup")
-		os.Exit(1)
-	}
-
-	reloadCoordinator := node.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
-	if err := mgr.Add(reloadCoordinator); err != nil {
-		setupLog.Error(err, "unable to add reload coordinator to manager")
-		os.Exit(1)
-	}
-
-	dirWatcher, err := node.NewDirWatcher(artifact.DefaultArtifactDirs(), falcoBaseURL, reloadCoordinator.NotifyWrite)
-	if err != nil {
-		setupLog.Error(err, "unable to create Falco dir watcher")
-		os.Exit(1)
-	}
-	if err := mgr.Add(dirWatcher); err != nil {
-		setupLog.Error(err, "unable to add Falco dir watcher to manager")
-		os.Exit(1)
-	}
-
-	if err = config.NewConfigReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		mgr.GetEventRecorder("config-controller/"+nodeName),
-		nodeName,
-		namespace,
-		nodeManager,
-	).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "Config")
-		os.Exit(1)
-	}
-
-	versionsWatcher := compat.NewVersionsWatcher(falcoFetcher, compat.DefaultWatchInterval)
-	versionsWatcher.SetSink(nodeManager.OnFalcoVersionsObserved)
-	if err := mgr.Add(versionsWatcher); err != nil {
-		setupLog.Error(err, "unable to add Falco versions watcher to manager")
-		os.Exit(1)
-	}
-
-	// Builds the shared HTTP client and Fetcher used by both the Rulesfile and Plugin
-	// reconcilers' FetchOCI calls. TLS/mTLS identity and retry policy are configured once here
-	// for both reconcilers.
+	// Builds the shared HTTP client and Fetcher. TLS/mTLS identity and retry policy are
+	// configured once here for everything that reaches the artifact server. It is built before
+	// the node because the node resolves artifact content itself and takes the Fetcher at
+	// construction; the reconcilers below share the same one.
 	var artifactClientCertWatcher *certwatcher.CertWatcher
 	var artifactCAWatcher *tlsutil.CAWatcher
 
@@ -403,31 +352,65 @@ func main() {
 		NodeName:   nodeName,
 	}
 
-	if err := rulesfile.NewRulesfileReconciler(
-		mgr.GetClient(),
-		mgr.GetScheme(),
-		mgr.GetEventRecorder("rulesfile-controller/"+nodeName),
-		nodeName,
-		namespace,
-		enforceRequirements,
-		artifactFetcher,
-		nodeManager,
-	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
+	// falcoNode models this node: the artifacts installed on it, the dependency tree they form,
+	// the capabilities Falco reports and the status published back to the node's ArtifactNode. It
+	// coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below, keeping a
+	// plugin's config entry until no rules file on this node still requires it, and it caches
+	// Falco's reported capabilities so compatibility checks never require a live HTTP call. Its warm
+	// sync recovers the installed files, and what the installed rules require, from disk, and the
+	// status entries a previous process published from the ArtifactNode.
+	falcoNode, err := node.New(&node.Config{
+		Client:         mgr.GetClient(),
+		NodeName:       nodeName,
+		Namespace:      namespace,
+		FalcoBaseURL:   falcoBaseURL,
+		ReloadCooldown: falcoReloadCooldown,
+		Fetcher:        artifactFetcher,
+		Recorder:       mgr.GetEventRecorder("artifact-node/" + nodeName),
+		FalcoVersions:  initialFalcoVersions, // seeds the capability cache from the fetch above
+		// Whether unmet requirements block an install is the node's policy: every reconciler reads it there.
+		EnforceRequirements: enforceRequirements,
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to create the node")
+		os.Exit(1)
+	}
+
+	// Registers the node's runnables: the reload coordinator, the directory watcher, the status
+	// publisher, the warm sync that observes installed files and current assignments once the
+	// manager's cache has synced, and the Falco versions watcher.
+	if err := falcoNode.AddToManager(mgr); err != nil {
+		setupLog.Error(err, "unable to add the node's runnables to manager")
+		os.Exit(1)
+	}
+
+	if err = config.NewConfigReconciler(mgr.GetClient(), falcoNode).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "Config")
+		os.Exit(1)
+	}
+
+	if err := rulesfile.NewRulesfileReconciler(mgr.GetClient(), falcoNode).SetupWithManager(mgr, falcoNode.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Rulesfile")
 		os.Exit(1)
 	}
 
 	if err := plugin.NewPluginReconciler(
 		mgr.GetClient(),
-		mgr.GetScheme(),
 		mgr.GetEventRecorder("plugin-controller/"+nodeName),
-		nodeName,
-		namespace,
-		enforceRequirements,
-		artifactFetcher,
-		nodeManager,
-	).SetupWithManager(mgr, nodeManager.Events()); err != nil {
+		falcoNode,
+	).SetupWithManager(mgr, falcoNode.Events()); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Plugin")
+		os.Exit(1)
+	}
+
+	// The node controller asks the reconcilers above to remove what the ArtifactNode no longer assigns, and holds the
+	// finalizer on the ArtifactNode.
+	if err := artifactnode.NewReconciler(
+		mgr.GetClient(),
+		mgr.GetEventRecorder("artifactnode-controller/"+nodeName),
+		falcoNode,
+	).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", artifactnode.ControllerName)
 		os.Exit(1)
 	}
 

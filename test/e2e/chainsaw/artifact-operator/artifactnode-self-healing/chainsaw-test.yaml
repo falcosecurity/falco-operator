@@ -1,0 +1,350 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-self-healing
+spec:
+  description: |
+    Exercises the assignment controller's repair of an ArtifactNode that is changed out-of-band, by a
+    crash, a bug or a stray manual kubectl action. It runs on a KWOK fake node with a stub Falco pod, so
+    no artifact operator reports on it.
+
+    Scenarios:
+    1. The ArtifactNode is deleted directly. The controller watches the objects it maintains, so it
+       recreates it with the same assignment.
+    2. The ArtifactNode's spec is emptied by hand. The desired assignment is recomputed from the
+       artifacts themselves, so the list is restored, not merely accepted.
+    3. The ArtifactNode's node label, the one the artifact operator selects its own object by, is removed.
+       The controller puts it back, and leaves a label somebody else added alone.
+    4. The ArtifactNode's spec.nodeName is changed. It is immutable, so the API server refuses, and the object
+       keeps naming the node it is for.
+    5. An ArtifactNode is created by hand under a name that is not a node's. The controller names its objects
+       after their node, so this one corresponds to no node, and is removed.
+
+  bindings:
+    - name: rulesfile_name
+      value: self-healing-rulesfile
+    - name: test_name
+      value: artifactnode-self-healing
+    - name: node_name
+      value: (join('-', ['self-healing-node', $namespace]))
+    - name: falco_name
+      value: self-healing-falco
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Create-falco-cr-and-pod"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 02b: Create-falco-pod"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 03: Create-rulesfile-and-assert-the-assignment"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw self-healing rule
+                    desc: Rule used to verify the repair of an ArtifactNode.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=self-healing"
+                    priority: DEBUG
+                    tags: [test]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+
+    - name: "Step 04: Delete-the-artifactnode"
+      description: Scenario 1. The object is gone, the parent and the node are not.
+      try:
+        # Not chainsaw's delete: it waits to see the name gone, which it may never do once the
+        # controller has created the object again. A changed uid proves the delete and the recreation.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($node_name)
+            content: |
+              bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+            outputs:
+              - name: artifact_node_uid_before
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($node_name)
+            content: |
+              bash ../../common/scripts/delete_resource_no_wait.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($node_name)
+              - name: OLD_UID
+                value: ($artifact_node_uid_before)
+            content: |
+              bash ../../common/scripts/wait_for_resource_uid_changed.sh
+
+    - name: "Step 05: Assert-it-is-recreated"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+
+    - name: "Step 06: Empty-its-spec-by-hand"
+      description: Scenario 2.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                artifacts: []
+
+    - name: "Step 07: Assert-the-assignment-is-restored"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+
+    - name: "Step 08: Remove-its-node-label"
+      description: Scenario 3.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: null
+
+    - name: "Step 09: Assert-the-label-is-back"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: ($node_name)
+
+    - name: "Step 09a: Set-its-node-label-to-another-node"
+      description: Scenario 3. A wrong value is corrected like a missing one.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: some-other-node
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: ($node_name)
+
+    - name: "Step 09b: Add-a-label-of-someone-else-and-remove-the-node-label"
+      description: Scenario 3, second half. Only the node label is the controller's.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  example.com/owner: somebody-else
+                  artifact.falcosecurity.dev/node: null
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: ($node_name)
+                  example.com/owner: somebody-else
+
+    - name: "Step 09c: Change-spec-nodename"
+      description: Scenario 4. The API server refuses, since nodeName is immutable (a CEL rule on the CRD).
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: some-other-node
+            expect:
+              - check:
+                  ($error != null): true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+
+    - name: "Step 09d: Create-an-artifactnode-under-a-name-that-is-no-nodes"
+      description: |
+        Scenario 5. The controller keys objects by node name. This one names a node that does not exist, so no
+        artifact operator could ever act on it, and it is deleted, whatever its spec says.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: hand-made
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: hand-made
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+
+    - name: "Step 10: Delete-the-fake-node-and-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not leave it behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)
