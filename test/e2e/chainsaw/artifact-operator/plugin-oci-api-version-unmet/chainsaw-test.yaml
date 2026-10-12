@@ -74,16 +74,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfied
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfied
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
 
   catch:
     - description: Capture debug snapshot on failure

@@ -78,14 +78,6 @@ type LocalStore struct {
 	Dirs ArtifactDirs
 }
 
-// NewLocalStore returns a LocalStore backed by the OS filesystem with production directories.
-func NewLocalStore() *LocalStore {
-	return &LocalStore{
-		FS:   filesystem.NewOSFileSystem(),
-		Dirs: DefaultArtifactDirs(),
-	}
-}
-
 // Store idempotently writes artifact content to the final on-disk path.
 // It uses a write-then-rename pattern so the file is never partially visible.
 func (s *LocalStore) Store(ctx context.Context, current *File, name string, artifactPriority int32,
@@ -118,13 +110,10 @@ func (s *LocalStore) Store(ctx context.Context, current *File, name string, arti
 	// Priority rename: content is the same but the file needs to move.
 	priorityChanged := current != nil && current.ContentHash == result.ContentHash && current.Path != newPath
 
-	// Falco loads every regular file in config.d, regardless of its extension.
-	// Stage in a subdirectory on the same filesystem, outside its directory scan.
-	tmpDir := filepath.Join(filepath.Dir(newPath), ".tmp")
-	if err := s.FS.MkdirAll(tmpDir, 0o700); err != nil {
+	tmpPath := StagingPath(newPath)
+	if err := s.FS.MkdirAll(filepath.Dir(tmpPath), 0o700); err != nil {
 		return StoreActionNone, nil, fmt.Errorf("create artifact staging directory: %w", err)
 	}
-	tmpPath := filepath.Join(tmpDir, filepath.Base(newPath)+".tmp")
 	if err := s.FS.WriteFile(tmpPath, result.Content, result.Perm); err != nil {
 		logger.Error(err, "unable to write artifact temp file", "tmp", tmpPath)
 		_ = s.FS.Remove(tmpPath)
@@ -241,10 +230,7 @@ func FindInstalled(artifacts []artifactv1alpha1.InstalledArtifact, medium Medium
 	return nil
 }
 
-// SetInstalled upserts a File into the InstalledArtifacts slice (matched by Medium). File carries
-// no Config sub-entry (that's tracked separately via UpdateInstalledConfig, e.g. for a Plugin's
-// shared config-file linkage), so updating an existing entry's main fields preserves whatever
-// Config it already had rather than clearing it.
+// SetInstalled upserts a File into the InstalledArtifacts slice (matched by Medium).
 func SetInstalled(artifacts *[]artifactv1alpha1.InstalledArtifact, f File) {
 	for i, a := range *artifacts {
 		if a.Medium == string(f.Medium) {
@@ -254,7 +240,6 @@ func SetInstalled(artifacts *[]artifactv1alpha1.InstalledArtifact, f File) {
 				Priority:    f.Priority,
 				ContentHash: f.ContentHash,
 				SpecHash:    f.SpecHash,
-				Config:      a.Config,
 			}
 			return
 		}
@@ -305,18 +290,9 @@ func UpdateInstalledSpecHash(artifacts *[]artifactv1alpha1.InstalledArtifact, me
 	}
 }
 
-// UpdateInstalledConfig sets the Config sub-entry on the artifact matching medium.
-// No-op when f is nil or no entry matches medium.
-func UpdateInstalledConfig(artifacts *[]artifactv1alpha1.InstalledArtifact, medium Medium, f *File) {
-	if f == nil {
-		return
-	}
-	for i, a := range *artifacts {
-		if a.Medium == string(medium) {
-			(*artifacts)[i].Config = &artifactv1alpha1.InstalledArtifactConfig{
-				Path: f.Path,
-			}
-			return
-		}
-	}
+// StagingPath is where Store writes the content for path before renaming it into place. Falco loads every
+// regular file in config.d, regardless of its extension, so the content is staged in a subdirectory on the
+// same filesystem, outside its directory scan, rather than next to path.
+func StagingPath(path string) string {
+	return filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp")
 }

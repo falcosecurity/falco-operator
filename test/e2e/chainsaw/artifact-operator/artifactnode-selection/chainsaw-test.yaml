@@ -1,0 +1,508 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-selection
+spec:
+  description: |
+    Exercises which artifacts an ArtifactNode lists: every form of selector, an invalid one, a change of a node's
+    labels, and an artifact that is deleted and recreated under the same name. It runs on two KWOK fake nodes
+    with stub Falco pods, so no artifact operator runs. Node a carries chainsaw-node-group=<namespace>, node b
+    the same key with a different value.
+
+    Selectors under test (each on its own artifact, so a failure names the form):
+      - none:                     selects every node that runs Falco
+      - matchLabels on the group: only the node with that value
+      - matchLabels on hostname:  only the node with that name (unique per node)
+      - In:                       only nodes whose value is listed
+      - NotIn:                    every node whose value is not listed, which matchLabels cannot express
+      - Exists:                   every node that has the label
+      - DoesNotExist:             every node that lacks a label, here one no node has
+      - invalid operator:         selects nothing, is logged, and must not affect any other artifact
+    The list of a node is sorted by kind and then name, so the Config comes before the Rulesfiles.
+
+    Scenarios:
+    1. The lists of both nodes are exactly what each selector says.
+    2. Node b is relabeled to the value of node a: it now matches what selects by that value, and only that,
+       and is unselected again by relabelling it back.
+    3. An artifact is deleted and created again under the same name: the node lists it again, with the new
+       uid and not the old one, and only once.
+
+  bindings:
+    - name: test_name
+      value: artifactnode-selection
+    - name: falco_name
+      value: selection-falco
+    - name: node_a_name
+      value: (join('-', ['selection-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['selection-b', $namespace]))
+    - name: excluded_group
+      value: (join('-', [$namespace, 'excluded']))
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-the-nodes"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-node-b"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($excluded_group)
+
+    - name: "Step 01c: Create-falco-cr"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01d: Create-falco-pod-on-node-a"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 01e: Create-falco-pod-on-node-b"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 02: Create-the-artifacts"
+      description: One per selector form. The invalid one goes with the others, not before them.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: sel-config-none
+                namespace: ($namespace)
+              spec:
+                config:
+                  json_output: false
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-none
+                namespace: ($namespace)
+              spec:
+                inlineRules: &rules
+                  - rule: Chainsaw selection rule
+                    desc: Rule used to verify node selection.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=selection"
+                    priority: DEBUG
+                    tags: [test]
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-group
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-hostname
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    kubernetes.io/hostname: ($node_a_name)
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-in
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: In
+                      values:
+                        - ($namespace)
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-notin
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: NotIn
+                      values:
+                        - ($excluded_group)
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-exists
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: Exists
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-doesnotexist
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: no-node-has-this-label
+                      operator: DoesNotExist
+                inlineRules: *rules
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-invalid
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: NotAnOperator
+                      values:
+                        - anything
+                inlineRules: *rules
+
+    - name: "Step 03: Assert-the-lists"
+      description: |
+        Scenario 1. Node a has the group value the selectors ask for, node b has another one. sel-invalid is on
+        neither, and the rest are all where they belong.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - sel-config-none
+                  - sel-doesnotexist
+                  - sel-exists
+                  - sel-group
+                  - sel-hostname
+                  - sel-in
+                  - sel-none
+                  - sel-notin
+                (artifacts[0].kind): Config
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - sel-config-none
+                  - sel-doesnotexist
+                  - sel-exists
+                  - sel-none
+                (artifacts[0].kind): Config
+
+    - name: "Step 04: Hold-check-the-invalid-selector-stays-out"
+      description: The invalid one is reconciled over and over by its aggregator, and must never be assigned.
+      try:
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 8
+                (artifacts[?name == 'sel-invalid']): []
+
+    - name: "Step 05: Relabel-node-b-to-the-value-of-node-a"
+      description: Scenario 2.
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_b_name)
+                labels:
+                  chainsaw-node-group: ($namespace)
+
+    - name: "Step 06: Assert-node-b-now-matches-what-selects-by-that-value"
+      description: sel-group and sel-in select by the value, sel-notin because it is no longer the excluded one.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - sel-config-none
+                  - sel-doesnotexist
+                  - sel-exists
+                  - sel-group
+                  - sel-in
+                  - sel-none
+                  - sel-notin
+
+    - name: "Step 07: Relabel-node-b-back"
+      try:
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_b_name)
+                labels:
+                  chainsaw-node-group: ($excluded_group)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - sel-config-none
+                  - sel-doesnotexist
+                  - sel-exists
+                  - sel-none
+
+    - name: "Step 08: Delete-and-recreate-an-artifact"
+      description: |
+        Scenario 3. The uid of sel-in is recorded, the artifact is deleted (which waits until the node has let go of
+        it) and created again under the same name.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: rulesfiles.artifact.falcosecurity.dev
+              - name: NAME
+                value: sel-in
+              - name: JSONPATH
+                value: '{.metadata.uid}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            outputs:
+              - name: old_uid
+                value: ($stdout)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-in
+              namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[?name == 'sel-in']): []
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: sel-in
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: chainsaw-node-group
+                      operator: In
+                      values:
+                        - ($namespace)
+                inlineRules: *rules
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts[?name == 'sel-in'])): 1
+                (artifacts[?name == 'sel-in'] | [0].uid != $old_uid): true
+                (length(artifacts)): 8
+
+    - name: "Step 09: Delete-the-artifacts"
+      description: |
+        Each deletion waits until the artifact is gone, which needs its ArtifactNodes to let go of it. It is done
+        here, with the nodes still there, and not left to the cleanup at the end of the test, so that an artifact
+        that is not released fails a step and gets a debug snapshot.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              name: sel-config-none
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-none
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-group
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-hostname
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-in
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-notin
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-exists
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-doesnotexist
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: sel-invalid
+              namespace: ($namespace)
+
+    - name: "Step 10: Delete-the-nodes-and-the-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not leave them behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

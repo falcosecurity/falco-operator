@@ -17,8 +17,12 @@
 package controllerhelper
 
 import (
+	"time"
+
 	"github.com/go-logr/logr"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 )
@@ -31,4 +35,20 @@ func ResultForEnsureError(logger logr.Logger, err error) (ctrl.Result, error) {
 		return ctrl.Result{RequeueAfter: delay}, nil
 	}
 	return ctrl.Result{}, err
+}
+
+// StaleCacheRetryDelay is how long to wait before retrying a write rejected because the informer cache lagged
+// behind the API server. The cache catches up within milliseconds, and the rejection is expected rather than an
+// error.
+const StaleCacheRetryDelay = 250 * time.Millisecond
+
+// ResultForWriteError turns the outcome of a write based on an object read from an informer cache. A conflict,
+// or a create that finds the object already there, means the cache lagged behind the API server: it is retried
+// after StaleCacheRetryDelay and is not an error. An object that is gone leaves nothing to do. Any other error is
+// returned.
+func ResultForWriteError(err error) (ctrl.Result, error) {
+	if k8serrors.IsConflict(err) || k8serrors.IsAlreadyExists(err) {
+		return ctrl.Result{RequeueAfter: StaleCacheRetryDelay}, nil
+	}
+	return ctrl.Result{}, client.IgnoreNotFound(err)
 }

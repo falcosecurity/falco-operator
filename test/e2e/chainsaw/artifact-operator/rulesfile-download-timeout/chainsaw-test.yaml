@@ -363,21 +363,56 @@ spec:
             content: bash ../../common/scripts/check_no_pod_restarts.sh
 
     - name: "Step 07: Delete-artifacts"
-      description: Ordinary deletion must remove both ArtifactNodes and their installed files after recovery.
+      description: Ordinary deletion must drop both Rulesfiles from the node's ArtifactNode and remove their installed files after recovery.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $inline_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $inline_name]):
+                  - kind: Rulesfile
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
         - script:
             env:
               - name: NAMESPACE
@@ -397,13 +432,24 @@ spec:
               kind: Rulesfile
               name: ($inline_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $inline_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $inline_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $inline_name]):
+                  - kind: Rulesfile
         - script:
             env:
               - name: NAMESPACE

@@ -151,15 +151,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (conditions[?type == 'ResolvedRefs']):
-                  - status: 'False'
-                    reason: ReferenceResolutionFailed
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (conditions[?type == 'ResolvedRefs']):
+                      - status: 'False'
+                        reason: ReferenceResolutionFailed
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
 
     - name: "Step 09: Assert-old-file-still-on-filesystem"
       description: Broken update must not remove the working install.

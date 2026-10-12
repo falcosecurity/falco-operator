@@ -14,12 +14,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package rulesfile implements the Rulesfile node-object aggregator controller.
+// Package rulesfile implements the Rulesfile aggregator controller.
 // It runs in the instance operator (singleton Deployment) and is responsible for:
-//   - Creating one ArtifactNode per cluster node that matches the Rulesfile selector.
-//   - Deleting ArtifactNode objects when a node no longer matches.
-//   - Aggregating per-node conditions into the parent Rulesfile status (sole writer).
+//   - Aggregating the per-node conditions that each node's artifact operator publishes on its
+//     ArtifactNode into the parent Rulesfile status (sole writer).
 //   - Managing the NodeObjectsInUseFinalizer on the parent Rulesfile.
+//
+// Which nodes get the Rulesfile is decided by the ArtifactNode assignment controller.
 package rulesfile
 
 import (
@@ -27,24 +28,17 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
@@ -65,8 +59,8 @@ func NewRulesfileAggregatorReconciler(
 	return &RulesfileAggregatorReconciler{Client: cl, Scheme: scheme, recorder: recorder, cache: cache}
 }
 
-// RulesfileAggregatorReconciler manages ArtifactNode objects and aggregates their
-// conditions into the parent Rulesfile status.
+// RulesfileAggregatorReconciler aggregates the per-node conditions published on ArtifactNodes into the
+// parent Rulesfile status.
 type RulesfileAggregatorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -82,170 +76,36 @@ type RulesfileAggregatorReconciler struct {
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles/status,verbs=patch;update
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=rulesfiles/finalizers,verbs=patch;update
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
 
-// Reconcile reconciles a Rulesfile: ensures ArtifactNode objects exist for matching nodes,
-// removes stale ones, and writes the aggregate conditions back to the Rulesfile.
+// Reconcile reconciles a Rulesfile: prepares its metadata and blob cache, manages its in-use finalizer and
+// writes the aggregate of the conditions its nodes published back to the Rulesfile.
 func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling Rulesfile")
+	return shared.Reconcile(ctx, req, r.aggregation())
+}
 
-	rulesfile := &artifactv1alpha1.Rulesfile{}
-	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil {
-		if k8serrors.IsNotFound(err) && r.cache != nil {
-			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.KindRulesfile), req.Namespace, req.Name)
-		}
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+// aggregation is what the aggregate reconcile needs of the Rulesfiles.
+func (r *RulesfileAggregatorReconciler) aggregation() shared.Aggregation[*artifactv1alpha1.Rulesfile] {
+	return shared.Aggregation[*artifactv1alpha1.Rulesfile]{
+		Client:                                   r.Client,
+		Scheme:                                   r.Scheme,
+		FieldManager:                             ControllerName,
+		Kind:                                     artifact.KindRulesfile,
+		Cache:                                    r.cache,
+		New:                                      func() *artifactv1alpha1.Rulesfile { return &artifactv1alpha1.Rulesfile{} },
+		StatusValue:                              func(rulesfile *artifactv1alpha1.Rulesfile) any { return *rulesfile.Status.DeepCopy() },
+		HoldForSelectedNodes:                     true,
+		Metadata:                                 r.fetchAndCacheArtifactMeta,
+		MetadataFailedReason:                     artifact.ReasonProgramFailed,
+		MetadataFailedMessage:                    "Failed to compute artifact metadata: %s",
+		ResetObservedGenerationOnMetadataFailure: true,
+		Prefetch: func(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile, _ []corev1.Node) error {
+			return r.fetchAndCacheBlob(ctx, rulesfile)
+		},
 	}
-
-	// Handle deletion: release the finalizer after node objects and cache references are cleaned up.
-	if !rulesfile.DeletionTimestamp.IsZero() {
-		logger.V(1).Info("Rulesfile marked for deletion, running cleanup")
-		return ctrl.Result{}, r.handleDeletion(ctx, rulesfile)
-	}
-
-	// allMatchingNodes contains all selected nodes; the blob is platform-agnostic and is
-	// pre-fetched independently of this set. OCI cache ownership also survives an empty set.
-	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, rulesfile.Spec.Selector)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	// matchingNodes: subset that also has a Running Falco pod; only these nodes get ArtifactNode
-	// objects (avoids stale Pending objects on nodes where no sidecar will ever run).
-	runningFalcoNodes, err := controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, rulesfile.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	matchingNodes := controllerhelper.FilterNodesByName(allMatchingNodes, runningFalcoNodes)
-	logger.V(1).Info("Listed matching nodes", "total", len(allMatchingNodes), "withFalco", len(matchingNodes))
-
-	// List all existing ArtifactNode objects for this Rulesfile.
-	existingNodes, err := controllerhelper.ListOwnedNodes(ctx, r.Client, rulesfile.Namespace, rulesfile.Name, controllerhelper.KindRulesfile)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Listed existing ArtifactNode objects", "count", len(existingNodes.Items))
-
-	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
-		ctx, r.Client, rulesfile, r.cache,
-		len(allMatchingNodes) > 0 || len(existingNodes.Items) > 0,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// ArtifactNode existence is the desired per-node assignment. Use the same set for
-	// creation, stale deletion, and status aggregation. If a Falco pod moves away, its old
-	// ArtifactNode is removed; a later pod on that node causes it to be created again.
-	desired := make(map[string]struct{}, len(matchingNodes))
-	for i := range matchingNodes {
-		desired[matchingNodes[i].Name] = struct{}{}
-	}
-
-	if err := controllerhelper.DeleteStaleNodeObjects(
-		ctx, r.Client, existingNodes.Items, desired, runningFalcoNodes,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Snapshot before any status mutation so we can skip the first SSA when nothing changed.
-	oldStatus := rulesfile.Status.DeepCopy()
-
-	// Build and cache the complete metadata aggregate so per-node artifact operators can
-	// evaluate every configured source without hitting the registry or re-parsing content.
-	if err := r.fetchAndCacheArtifactMeta(ctx, rulesfile); err != nil {
-		// A referenced ConfigMap can change without changing Rulesfile.Generation, so merely
-		// retaining the previous ObservedGeneration could make stale metadata look current.
-		// Reset it on every source failure; the last complete ArtifactMeta remains available for
-		// diagnosis, but enforce-mode per-node operators stay deferred until a complete rebuild.
-		rulesfile.Status.ObservedGeneration = 0
-
-		// Still aggregate per-node conditions from existing ArtifactNodes: a broken reference
-		// (e.g. a missing ConfigMap) fails fetchAndCacheArtifactMeta too, and the usual
-		// aggregation pass below never runs in this branch, since node creation depends on
-		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
-		// would never reach the Rulesfile's own status.
-		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-		aggregated := controllerhelper.AggregateConditions(nodeSets, rulesfile.Generation)
-
-		// The instance-level metadata failure is the more specific, authoritative cause of
-		// Programmed=False; it must win over whatever the per-node aggregate computed above.
-		apimeta.SetStatusCondition(&aggregated, metav1.Condition{
-			Type:               commonv1alpha1.ConditionProgrammed.String(),
-			Status:             metav1.ConditionFalse,
-			Reason:             artifact.ReasonProgramFailed,
-			Message:            fmt.Sprintf("Failed to compute artifact metadata: %s", err.Error()),
-			ObservedGeneration: rulesfile.Generation,
-		})
-		// Apply only the final outcome so unchanged failures keep their transition time
-		// and do not create status events that bypass the error retry backoff.
-		controllerhelper.LogConditionTransitions(ctx, rulesfile.Status.Conditions, aggregated)
-		controllerhelper.ApplyAggregateConditions(&rulesfile.Status.Conditions, aggregated)
-		if !apiequality.Semantic.DeepEqual(*oldStatus, rulesfile.Status) {
-			if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); patchErr != nil {
-				return ctrl.Result{}, patchErr
-			}
-		}
-		return ctrl.Result{}, err
-	}
-
-	// Stamps ObservedGeneration so per-node operators know this spec generation has been processed.
-	// Written in the same SSA patch as ArtifactMeta so ObservedGeneration never advances ahead of it.
-	rulesfile.Status.ObservedGeneration = rulesfile.Generation
-	if !apiequality.Semantic.DeepEqual(*oldStatus, rulesfile.Status) {
-		if err := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Pulls the OCI binary before creating ArtifactNode objects, so the blob cache is warm
-	// when the per-node operator requests it over HTTP.
-	// If the pre-fetch fails, node creation still proceeds: the per-node operator fetches
-	// independently and surfaces any failure in its own conditions.
-	fetchBinErr := r.fetchAndCacheBlob(ctx, rulesfile)
-
-	// Re-checks deletion status right before creating node objects; see IsBeingDeleted's doc.
-	if deleting, err := controllerhelper.IsBeingDeleted(ctx, r.Client, rulesfile); err != nil {
-		return ctrl.Result{}, err
-	} else if deleting {
-		logger.Info("Rulesfile marked for deletion; skipping node object creation")
-		return ctrl.Result{}, nil
-	}
-
-	// Ensure an ArtifactNode exists for each matching node.
-	rulesfileGVK := artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindRulesfile)
-	for i := range matchingNodes {
-		if err := controllerhelper.EnsureNodeObject(
-			ctx, r.Client, rulesfile, rulesfileGVK, controllerhelper.ArtifactKindRulesfile, matchingNodes[i].Name,
-		); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Re-fetch node objects (some may have just been created) to compute the aggregate.
-	existingNodes, err = controllerhelper.ListOwnedNodes(ctx, r.Client, rulesfile.Namespace, rulesfile.Name, controllerhelper.KindRulesfile)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Re-listed ArtifactNode objects after sync", "count", len(existingNodes.Items))
-
-	// A stale or terminating child no longer represents the desired assignment and must not
-	// keep its last condition in the aggregate while deletion is pending.
-	nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-
-	condSnap := make([]metav1.Condition, len(rulesfile.Status.Conditions))
-	copy(condSnap, rulesfile.Status.Conditions)
-	controllerhelper.ComputeAggregateConditions(ctx, rulesfile, &rulesfile.Status.Conditions, nodeSets)
-	if !apiequality.Semantic.DeepEqual(condSnap, rulesfile.Status.Conditions) {
-		if err := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, rulesfile, ControllerName); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	return ctrl.Result{}, fetchBinErr
 }
 
 // fetchAndCacheArtifactMeta collects requirements for the Rulesfile from every configured
@@ -284,35 +144,17 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 	meta := &commonv1alpha1.ArtifactMeta{SpecHash: ociSpecHash}
 
 	if sources.OCIArtifact != nil {
-		var opts []artifact.ManagerOption
-		if r.ociPuller != nil {
-			opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
-		}
-		am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
-
 		// A ConfigMap/inline change rebuilds the aggregate, but must not update an unchanged
 		// OCI source by following its tag. Re-read that source at its previously resolved digest.
 		var knownDigest string
 		if cached := rulesfile.Status.ArtifactMeta; artifact.ArtifactMetaCacheHit(cached, ociSpecHash) {
 			knownDigest = cached.Digest
 		}
-		ref := artifact.ResolveReference(sources.OCIArtifact)
-		logger.Info("Fetching rulesfile ArtifactMeta from OCI config layer", "ref", ref)
-		fetched, digest, fetchErr := am.FetchConfig(ctx, sources.OCIArtifact, knownDigest)
-		if fetchErr != nil {
-			logger.Error(fetchErr, "Unable to fetch rulesfile OCI config; ArtifactMeta will remain stale", "ref", ref)
-			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactProgramFailed,
-				"Failed to fetch OCI config layer: %s", fetchErr.Error())
-			return fetchErr
+		am := shared.NewOCIManager(r.Client, rulesfile.Namespace, r.ociPuller)
+		if err := shared.FetchConfigLayer(ctx, am, r.recorder, rulesfile, sources.OCIArtifact, knownDigest, meta); err != nil {
+			return err
 		}
-
-		meta.Digest = digest
-		artifact.AppendConfigLayerRequirements(meta, fetched)
-		logger.Info("Rulesfile ArtifactMeta parsed from OCI config layer",
-			"ref", ref,
-			"requirements", len(meta.Requirements),
-			"dependencies", len(meta.Dependencies),
-		)
+		ref := artifact.ResolveReference(sources.OCIArtifact)
 
 		// Also parses the YAML content layer, since some artifacts declare
 		// required_engine_version/required_plugin_versions there but not in the config layer.
@@ -323,7 +165,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Co
 		// unadvanced, rather than persisting an incomplete ArtifactMeta that could let a per-node
 		// operator install the rulesfile without its real plugin dependencies enforced.
 		logger.Info("Fetching rulesfile ArtifactMeta from OCI content layer", "ref", ref)
-		content, contentErr := am.FetchContent(ctx, sources.OCIArtifact, digest)
+		content, contentErr := am.FetchContent(ctx, sources.OCIArtifact, meta.Digest)
 		if contentErr != nil {
 			logger.Error(contentErr, "Unable to fetch rulesfile OCI content; ArtifactMeta will remain stale", "ref", ref)
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactProgramFailed,
@@ -376,98 +218,20 @@ func appendYAMLRequirements(meta *commonv1alpha1.ArtifactMeta, content []byte) e
 	if err != nil {
 		return err
 	}
-	if rulesReqs == nil {
-		return nil
-	}
-	meta.Requirements = append(meta.Requirements, rulesReqs.EngineVersions...)
-	meta.Dependencies = append(meta.Dependencies, rulesReqs.PluginVersions...)
+	rulesReqs.AppendTo(meta)
 	return nil
-}
-
-// handleDeletion deletes all ArtifactNode objects so each per-node artifact operator can clean up
-// and remove its own finalizer (skipping this would deadlock: GC cascade only fires after the owner
-// is deleted, but the in-use finalizer keeps the owner alive).
-func (r *RulesfileAggregatorReconciler) handleDeletion(ctx context.Context, rulesfile *artifactv1alpha1.Rulesfile) error {
-	existing, err := controllerhelper.ListOwnedNodes(ctx, r.Client, rulesfile.Namespace, rulesfile.Name, controllerhelper.KindRulesfile)
-	if err != nil {
-		return err
-	}
-
-	runningFalcoNodes := map[string]struct{}{}
-	if len(existing.Items) > 0 {
-		runningFalcoNodes, err = controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, rulesfile.Namespace)
-		if err != nil {
-			return err
-		}
-	}
-
-	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(
-		ctx, r.Client, existing.Items, runningFalcoNodes,
-	)
-	if err != nil {
-		return err
-	}
-	if nodesRemaining {
-		return nil
-	}
-
-	// Evicts this CR's cache entry here, in the last reconcile before the finalizer is
-	// released and the object is removed from etcd.
-	if r.cache != nil {
-		if err := r.cache.RemoveAll(string(artifact.KindRulesfile), rulesfile.Namespace, rulesfile.Name); err != nil {
-			return fmt.Errorf("evict rulesfile cache entries: %w", err)
-		}
-	}
-
-	return controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, rulesfile,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		false,
-	)
 }
 
 // SetupWithManager registers this controller with the manager.
 func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		// Initial informer events omit CRs deleted while this replica was inactive.
-		// Queue their persisted owners too; workers wait for informer synchronization.
-		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-			if r.cache != nil {
-				for _, owner := range r.cache.Owners(string(artifact.KindRulesfile)) {
-					queue.Add(reconcile.Request{NamespacedName: owner})
-				}
-			}
-			return nil
-		})).
-		// Status events must reconcile too: a cached no-op can race with an earlier
-		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
-		For(&artifactv1alpha1.Rulesfile{}).
-		Watches(&corev1.Node{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.RulesfileList{})
-			}),
-			builder.WithPredicates(predicate.Or(
-				predicate.GenerationChangedPredicate{},
-				predicate.LabelChangedPredicate{},
-			)),
-		).
-		Watches(&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, pod client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.RulesfileList{}, client.InNamespace(pod.GetNamespace()))
-			}),
-			builder.WithPredicates(controllerhelper.FalcoPodChangePredicate()),
-		).
-		Watches(&artifactv1alpha1.ArtifactNode{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &artifactv1alpha1.Rulesfile{}),
-		).
+	return shared.NewControllerManagedBy(mgr, r.Client, ControllerName, artifact.KindRulesfile, &artifactv1alpha1.Rulesfile{},
+		func() client.ObjectList { return &artifactv1alpha1.RulesfileList{} }, r.cache).
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(r.findRulesfilesForConfigMap),
 		).
 		Watches(&artifactv1alpha1.Plugin{},
 			handler.EnqueueRequestsFromMapFunc(r.findRulesfilesForPlugin),
 		).
-		Named(ControllerName).
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &artifactv1alpha1.Rulesfile{})).
 		Complete(r)
 }
 
@@ -485,11 +249,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheBlob(ctx context.Context, r
 
 	logger := log.FromContext(ctx)
 
-	var opts []artifact.ManagerOption
-	if r.ociPuller != nil {
-		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
-	}
-	am := artifact.NewManagerWithOptions(r.Client, rulesfile.Namespace, opts...)
+	am := shared.NewOCIManager(r.Client, rulesfile.Namespace, r.ociPuller)
 
 	var knownDigest string
 	if meta := rulesfile.Status.ArtifactMeta; meta != nil {
@@ -506,18 +266,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheBlob(ctx context.Context, r
 // findRulesfilesForConfigMap maps a ConfigMap event to the parent Rulesfiles that reference it,
 // so their ArtifactMeta is refreshed when the ConfigMap content changes.
 func (r *RulesfileAggregatorReconciler) findRulesfilesForConfigMap(ctx context.Context, cm client.Object) []reconcile.Request {
-	logger := log.FromContext(ctx)
-	list := &artifactv1alpha1.RulesfileList{}
-	indexKey := cm.GetNamespace() + "/" + cm.GetName()
-	if err := r.List(ctx, list, client.MatchingFields{index.ConfigMapOnRulesfile: indexKey}); err != nil {
-		logger.Error(err, "unable to list Rulesfiles by ConfigMap index")
-		return nil
-	}
-	reqs := make([]reconcile.Request, len(list.Items))
-	for i := range list.Items {
-		reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])}
-	}
-	return reqs
+	return controllerhelper.RequestsReferencing(ctx, r.Client, &artifactv1alpha1.RulesfileList{}, index.ConfigMapOnRulesfile, cm)
 }
 
 // findRulesfilesForPlugin re-enqueues all Rulesfiles in the same namespace that list this

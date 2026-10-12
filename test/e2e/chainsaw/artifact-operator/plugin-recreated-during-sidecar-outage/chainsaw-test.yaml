@@ -1,0 +1,261 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-recreated-during-sidecar-outage
+spec:
+  description: |
+    A Plugin deleted and created again under the same name while the sidecar is down is installed anew once
+    the sidecar is back, with the previous incarnation's files removed first.
+
+    The sidecar restarts over a mixed picture: the ArtifactNode's spec lists the new incarnation (the
+    assignment controller kept up), its status still carries the old one's entry (only the sidecar
+    withdraws entries), and the shared plugins-config entry on disk gets attributed to the new incarnation
+    by warm sync, since that is the one assigned. The cleanup of the old incarnation must release that
+    entry all the same, or the binary can never be removed and the new incarnation is never installed.
+
+    The state is reached the way an outage reaches it: the artifact-operator container is taken down in
+    place (its emptyDir files survive) and, behind its back, the Plugin is deleted with its finalizer
+    stripped and applied again.
+
+    Scenarios:
+    1. The json plugin is installed, configured and loaded by Falco.
+    2. The sidecar is down; the Plugin has a new uid; the ArtifactNode lists the new uid in its spec and
+       still reports the old one in its status.
+    3. The sidecar is back: the ArtifactNode reports the new uid as Programmed, the Plugin is Programmed,
+       the binary and the config entry are there, and Falco loads the plugin.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-recreated-test
+    - name: plugin_name
+      value: json
+    - name: test_name
+      value: plugin-recreated-during-sidecar-outage
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+    - name: plugin_config_path
+      value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: One Deployment pod, so that the sidecar restarted in place is the only one.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-json
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 03: Assert-installed-and-loaded"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 04: Recreate-the-plugin-while-the-sidecar-is-down"
+      description: |
+        The sidecar is taken down and held back by kubelet. The Plugin is deleted with its finalizer
+        stripped, so nothing cleans up after it, and applied again: a new uid. The assignment controller
+        lists the new uid; the status entry of the old one stays, since the sidecar is not there to
+        withdraw it. The sidecar must still be down once that is done, or the test did not exercise a
+        restart over that picture.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/stop_artifact_operator_container.sh
+            check:
+              (json_parse($stdout).status): success
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status): success
+            outputs:
+              - name: old_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/force_delete_resource.sh
+            check:
+              (json_parse($stdout).status): success
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-json
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+              - name: OLD_UID
+                value: ($old_uid)
+            content: bash ../../common/scripts/wait_for_resource_uid_changed.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name] | length(@)): 1
+                (artifacts[?kind == 'Plugin' && name == $plugin_name].uid != [$old_uid]): true
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name].uid): [($old_uid)]
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RESOURCE
+                value: pods
+              - name: SELECTOR
+                value: (join('', ['app.kubernetes.io/name=', $falco_name]))
+              - name: JSONPATH
+                value: '{.items[0].status.containerStatuses[?(@.name=="artifact-operator")].state.waiting.reason}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            check:
+              ($stdout): CrashLoopBackOff
+
+    - name: "Step 05: Wait-for-the-sidecar"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/wait_artifact_operator_ready.sh
+            check:
+              (json_parse($stdout).status): success
+
+    - name: "Step 06: Assert-the-new-incarnation-is-installed"
+      description: |
+        The stale entry is what tells the sidecar to clean up before installing. The cleanup must release
+        the config entry warm sync attributed to the new incarnation, remove the binary, and let the
+        install of the new incarnation through. The status entry then names the uid the spec names.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              (status.artifacts[?kind == 'Plugin' && name == $plugin_name].uid == spec.artifacts[?kind == 'Plugin' && name == $plugin_name].uid): true
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (contains(installedArtifacts[0].path || '', $plugin_name)): true
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

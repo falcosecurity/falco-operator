@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package artifactcache_test
+package artifactcache
 
 import (
 	"context"
@@ -23,22 +23,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 )
 
 func TestCache_Sweep(t *testing.T) {
 	tests := []struct {
 		name        string
-		setup       func(t *testing.T, dir string, c *artifactcache.Cache) (blobPath string)
+		setup       func(t *testing.T, dir string, c *Cache) (blobPath string)
 		wantRemoved int
 		wantGone    bool
 	}{
 		{
 			name: "orphaned blob past the grace window is removed, .perm companion too",
-			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
+			setup: func(t *testing.T, dir string, c *Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "orphan-old")
 				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
@@ -51,7 +50,7 @@ func TestCache_Sweep(t *testing.T) {
 		},
 		{
 			name: "orphaned blob within the grace window is skipped",
-			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
+			setup: func(t *testing.T, dir string, c *Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "orphan-fresh")
 				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
@@ -62,13 +61,13 @@ func TestCache_Sweep(t *testing.T) {
 		},
 		{
 			name: "referenced blob is never touched regardless of age",
-			setup: func(t *testing.T, dir string, c *artifactcache.Cache) string {
+			setup: func(t *testing.T, dir string, c *Cache) string {
 				t.Helper()
 				blobPath := filepath.Join(dir, "blobs", "referenced")
 				require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 				old := time.Now().Add(-time.Hour)
 				require.NoError(t, os.Chtimes(blobPath, old, old))
-				require.NoError(t, c.Set("plugin", "ns", "json", "", blobPath))
+				require.NoError(t, c.Set("Plugin", "ns", "json", "", blobPath))
 				return blobPath
 			},
 			wantRemoved: 0,
@@ -79,7 +78,7 @@ func TestCache_Sweep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			c := artifactcache.NewCache(dir)
+			c := NewCache(dir)
 			require.NoError(t, c.Load())
 			blobPath := tt.setup(t, dir, c)
 
@@ -90,7 +89,7 @@ func TestCache_Sweep(t *testing.T) {
 			_, statErr := os.Stat(blobPath)
 			if tt.wantGone {
 				assert.True(t, os.IsNotExist(statErr))
-				_, permErr := os.Stat(blobPath + artifactcache.PermSuffix)
+				_, permErr := os.Stat(blobPath + PermSuffix)
 				assert.True(t, os.IsNotExist(permErr), ".perm companion should be removed alongside its blob")
 			} else {
 				assert.NoError(t, statErr)
@@ -104,10 +103,10 @@ func TestCache_Sweep_BlobsDirUnreadable(t *testing.T) {
 		t.Skip("permission checks are bypassed when running as root")
 	}
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	require.NoError(t, c.Load())
 
-	blobsDir := filepath.Join(dir, artifactcache.BlobsDir)
+	blobsDir := filepath.Join(dir, BlobsDir)
 	require.NoError(t, os.Chmod(blobsDir, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(blobsDir, 0o755) })
 
@@ -118,10 +117,10 @@ func TestCache_Sweep_BlobsDirUnreadable(t *testing.T) {
 
 func TestCache_Sweep_RemovesNowEmptyRefDirectory(t *testing.T) {
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	require.NoError(t, c.Load())
 
-	blobPath := artifactcache.BlobPath(dir, "plugin", "orphan-ref", "sha256:old", "linux", "amd64")
+	blobPath := BlobPath(dir, "Plugin", "orphan-ref", "sha256:old", "linux", "amd64")
 	require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(blobPath, old, old))
@@ -136,17 +135,17 @@ func TestCache_Sweep_RemovesNowEmptyRefDirectory(t *testing.T) {
 
 func TestCache_Sweep_RefDirectorySurvivesWithSiblingBlob(t *testing.T) {
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	require.NoError(t, c.Load())
 
 	// Same ref, two digests: one orphaned and old, one still referenced.
-	orphan := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:old", "linux", "amd64")
-	kept := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:new", "linux", "amd64")
+	orphan := BlobPath(dir, "Plugin", "shared-ref", "sha256:old", "linux", "amd64")
+	kept := BlobPath(dir, "Plugin", "shared-ref", "sha256:new", "linux", "amd64")
 	require.NoError(t, c.Store(orphan, []byte("x"), 0o755))
 	require.NoError(t, c.Store(kept, []byte("y"), 0o755))
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(orphan, old, old))
-	require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", kept))
+	require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", kept))
 
 	removed, err := c.Sweep(context.Background())
 	require.NoError(t, err)
@@ -160,7 +159,7 @@ func TestCache_Sweep_RefDirectorySurvivesWithSiblingBlob(t *testing.T) {
 
 func TestCache_Sweep_NoBlobsDirYet(t *testing.T) {
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	// Deliberately not calling Load, so blobs/ was never created.
 	removed, err := c.Sweep(context.Background())
 	require.NoError(t, err)
@@ -172,14 +171,14 @@ func TestSweeper_Start_SweepErrorIsLoggedAndRetried(t *testing.T) {
 		t.Skip("permission checks are bypassed when running as root")
 	}
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	require.NoError(t, c.Load())
 
-	blobsDir := filepath.Join(dir, artifactcache.BlobsDir)
+	blobsDir := filepath.Join(dir, BlobsDir)
 	require.NoError(t, os.Chmod(blobsDir, 0o000))
 	t.Cleanup(func() { _ = os.Chmod(blobsDir, 0o755) })
 
-	sweeper := artifactcache.NewSweeper(c, 10*time.Millisecond)
+	sweeper := NewSweeper(c, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- sweeper.Start(ctx) }()
@@ -197,7 +196,7 @@ func TestSweeper_Start_SweepErrorIsLoggedAndRetried(t *testing.T) {
 
 func TestSweeper_Start(t *testing.T) {
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir)
+	c := NewCache(dir)
 	require.NoError(t, c.Load())
 
 	blobPath := filepath.Join(dir, "blobs", "orphan")
@@ -205,7 +204,7 @@ func TestSweeper_Start(t *testing.T) {
 	old := time.Now().Add(-time.Hour)
 	require.NoError(t, os.Chtimes(blobPath, old, old))
 
-	sweeper := artifactcache.NewSweeper(c, 10*time.Millisecond)
+	sweeper := NewSweeper(c, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -230,20 +229,20 @@ func TestSweeper_Start(t *testing.T) {
 // grace period), then gets removed once both the grace period and a sweep tick have passed.
 func TestSweeper_Start_DeferredEviction(t *testing.T) {
 	dir := t.TempDir()
-	c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(50*time.Millisecond))
+	c := NewCache(dir, WithEvictionGracePeriod(50*time.Millisecond))
 	require.NoError(t, c.Load())
 
 	oldBlob := filepath.Join(dir, "blobs", "v1")
 	newBlob := filepath.Join(dir, "blobs", "v2")
 	require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
 	require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
-	require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
-	require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob)) // dereferences oldBlob
+	require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", oldBlob))
+	require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", newBlob)) // dereferences oldBlob
 
 	_, err := os.Stat(oldBlob)
 	require.NoError(t, err, "dereferenced blob must survive immediately, pending its grace period")
 
-	sweeper := artifactcache.NewSweeper(c, 10*time.Millisecond)
+	sweeper := NewSweeper(c, 10*time.Millisecond)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan error, 1)
@@ -261,4 +260,201 @@ func TestSweeper_Start_DeferredEviction(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not return after context cancellation")
 	}
+}
+
+// TestRemoveOrphansLocked_SkipsReReferenced exercises the TOCTOU re-check inside
+// removeOrphansLocked directly: a candidate that became referenced again after
+// findOrphanCandidates took its snapshot (but before the write lock was acquired) must
+// survive. This race window isn't reproducible deterministically through the public
+// Sweep API, so it's tested white-box instead.
+func TestRemoveOrphansLocked_SkipsReReferenced(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "reref")
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
+
+	c.mu.Lock()
+	c.refs[blobPath] = 1
+	c.mu.Unlock()
+
+	removed := c.removeOrphansLocked(logr.Discard(), []string{blobPath})
+
+	assert.Equal(t, 0, removed)
+	_, err := os.Stat(blobPath)
+	assert.NoError(t, err, "re-referenced blob must survive")
+}
+
+// TestRemoveOrphansLocked_SkipsFreshlyRewrittenCandidate covers the Store-to-Set window when
+// Sweep discovered an old orphan immediately before a reconciler rewrote the same digest path.
+func TestRemoveOrphansLocked_SkipsFreshlyRewrittenCandidate(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "rewritten")
+	require.NoError(t, store(blobPath, []byte("old orphan"), 0o755))
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(blobPath, old, old))
+
+	candidates, err := c.findOrphanCandidates(map[string]int{}, map[string]time.Time{})
+	require.NoError(t, err)
+	require.Contains(t, candidates, blobPath)
+
+	require.NoError(t, c.Store(blobPath, []byte("fresh content"), 0o755))
+	c.mu.Lock()
+	removed := c.removeOrphansLocked(logr.Discard(), candidates)
+	c.mu.Unlock()
+
+	assert.Equal(t, 0, removed)
+	content, err := os.ReadFile(blobPath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("fresh content"), content)
+}
+
+// TestRemoveOrphansLocked_RemovalFailureIsLoggedAndSkipped exercises the best-effort
+// os.Remove-failure branch: a candidate that can't actually be unlinked (here, a
+// non-empty directory masquerading as a blob path) is logged and left in place rather
+// than treated as an error.
+func TestRemoveOrphansLocked_RemovalFailureIsLoggedAndSkipped(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "undeletable")
+	require.NoError(t, os.MkdirAll(blobPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blobPath, "occupied"), []byte("x"), 0o600))
+
+	removed := c.removeOrphansLocked(logr.Discard(), []string{blobPath})
+
+	assert.Equal(t, 0, removed)
+	_, err := os.Stat(blobPath)
+	assert.NoError(t, err, "removal failure must not be fatal")
+}
+
+// TestRemoveExpiredDerefsLocked_RemovesExpiredEntry exercises the deferred-eviction deletion
+// path directly, since waiting out a real evictionGracePeriod isn't practical in a test: a
+// blob whose derefTimes entry is older than evictionGracePeriod is deleted, along with its
+// .perm companion and now-empty ref directory.
+func TestRemoveExpiredDerefsLocked_RemovesExpiredEntry(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir) // default evictionGracePeriod (DefaultEvictionGracePeriod)
+	require.NoError(t, c.Load())
+
+	blobPath := BlobPath(dir, "Plugin", "expired-ref", "sha256:old", "linux", "amd64")
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
+
+	c.mu.Lock()
+	c.derefTimes[blobPath] = time.Now().Add(-time.Hour) // well past DefaultEvictionGracePeriod
+	c.mu.Unlock()
+
+	removed := c.removeExpiredDerefsLocked(logr.Discard())
+
+	assert.Equal(t, 1, removed)
+	_, err := os.Stat(blobPath)
+	assert.True(t, os.IsNotExist(err), "expired blob should have been removed")
+	_, err = os.Stat(blobPath + PermSuffix)
+	assert.True(t, os.IsNotExist(err), ".perm companion should have been removed")
+	_, err = os.Stat(filepath.Dir(blobPath))
+	assert.True(t, os.IsNotExist(err), "now-empty ref directory should have been removed")
+
+	c.mu.Lock()
+	_, stillPending := c.derefTimes[blobPath]
+	c.mu.Unlock()
+	assert.False(t, stillPending)
+}
+
+// TestRemoveExpiredDerefsLocked_SkipsWithinGracePeriod ensures a blob that was only just
+// dereferenced survives, the whole point of deferred eviction.
+func TestRemoveExpiredDerefsLocked_SkipsWithinGracePeriod(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "fresh")
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
+
+	c.mu.Lock()
+	c.derefTimes[blobPath] = time.Now()
+	c.mu.Unlock()
+
+	removed := c.removeExpiredDerefsLocked(logr.Discard())
+
+	assert.Equal(t, 0, removed)
+	_, err := os.Stat(blobPath)
+	assert.NoError(t, err, "blob within its grace period must survive")
+}
+
+// TestRemoveExpiredDerefsLocked_RemovalFailureIsLoggedAndSkipped mirrors
+// TestRemoveOrphansLocked_RemovalFailureIsLoggedAndSkipped: an expired entry that can't
+// actually be unlinked (a non-empty directory masquerading as a blob path) is logged and
+// dropped from derefTimes rather than treated as fatal: it falls through to the ordinary
+// orphan-sweep path on the next cycle instead of being retried here forever.
+func TestRemoveExpiredDerefsLocked_RemovalFailureIsLoggedAndSkipped(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "undeletable")
+	require.NoError(t, os.MkdirAll(blobPath, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(blobPath, "occupied"), []byte("x"), 0o600))
+
+	c.mu.Lock()
+	c.derefTimes[blobPath] = time.Now().Add(-time.Hour)
+	c.mu.Unlock()
+
+	removed := c.removeExpiredDerefsLocked(logr.Discard())
+
+	assert.Equal(t, 0, removed)
+	_, err := os.Stat(blobPath)
+	assert.NoError(t, err, "removal failure must not be fatal")
+
+	c.mu.Lock()
+	_, stillPending := c.derefTimes[blobPath]
+	c.mu.Unlock()
+	assert.False(t, stillPending, "entry is dropped from derefTimes regardless, falling through to the orphan sweep")
+}
+
+// TestFindOrphanCandidates_SkipsPendingDeref and TestRemoveOrphansLocked_SkipsPendingDeref
+// together cover the interaction-safety guarantee described in Sweep's doc comment: a blob
+// currently within its own eviction grace period must never be caught by the disk-orphan
+// path, even though its file mtime is almost always already older than sweepGraceWindow by
+// the time it's dereferenced (a long-lived blob was written well before it was ever
+// dereferenced).
+func TestFindOrphanCandidates_SkipsPendingDeref(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "pending")
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
+	old := time.Now().Add(-time.Hour) // mtime well past sweepGraceWindow
+	require.NoError(t, os.Chtimes(blobPath, old, old))
+
+	candidates, err := c.findOrphanCandidates(map[string]int{}, map[string]time.Time{blobPath: time.Now()})
+	require.NoError(t, err)
+	assert.NotContains(t, candidates, blobPath)
+}
+
+func TestRemoveOrphansLocked_SkipsPendingDeref(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCache(dir)
+	require.NoError(t, c.Load())
+
+	blobPath := filepath.Join(dir, BlobsDir, "pending")
+	require.NoError(t, store(blobPath, []byte("x"), 0o755))
+
+	c.mu.Lock()
+	c.derefTimes[blobPath] = time.Now() // within its own grace period
+	c.mu.Unlock()
+
+	// Simulate a stale pre-walk snapshot that missed the pending entry and wrongly included
+	// this path as an orphan candidate anyway. removeOrphansLocked's live derefTimes check
+	// must still catch it.
+	removed := c.removeOrphansLocked(logr.Discard(), []string{blobPath})
+
+	assert.Equal(t, 0, removed)
+	_, err := os.Stat(blobPath)
+	assert.NoError(t, err, "a blob pending its own eviction grace period must survive the orphan sweep")
 }

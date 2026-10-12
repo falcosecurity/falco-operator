@@ -313,18 +313,16 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (installedArtifacts[0].medium): oci
-                (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/51-01-', $rulesfile_name, '-oci.yaml']))
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                    observedGeneration: 2
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                    observedGeneration: 2
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (installedArtifacts[0].medium): oci
+                    (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/51-01-', $rulesfile_name, '-oci.yaml']))
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                        observedGeneration: 2
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                        observedGeneration: 2
         - script:
             env:
               - name: NAMESPACE
@@ -352,18 +350,16 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (installedArtifacts[0].medium): oci
-                (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                    observedGeneration: 3
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                    observedGeneration: 3
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (installedArtifacts[0].medium): oci
+                    (installedArtifacts[0].path): (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                        observedGeneration: 3
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                        observedGeneration: 3
         - script:
             env:
               - name: NAMESPACE
@@ -622,7 +618,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -636,7 +632,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -727,13 +723,15 @@ spec:
               - name: NAME
                 value: ($unrelated_plugin_name)
             content: bash ../../common/scripts/delete_resource_no_wait.sh
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $unrelated_plugin_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $unrelated_plugin_name]):
+                  - kind: Plugin
         - wait:
             apiVersion: artifact.falcosecurity.dev/v1alpha1
             kind: Plugin
@@ -825,7 +823,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -834,8 +832,8 @@ spec:
     - name: "Step 14: Delete-rulesfile"
       description: |
         Delete the Rulesfile. Its removal drops the installed dependency, so the
-        per-node artifact operator can remove the plugin config and release its
-        ArtifactNode finalizer. Request deletion without waiting; the ArtifactNode
+        per-node artifact operator can remove the plugin config and withdraw its
+        ArtifactNode status entry. Request deletion without waiting; the ArtifactNode
         wait is the completion signal, avoiding an implicit parent-object wait
         while Rulesfile cleanup is still running.
       try:
@@ -848,27 +846,49 @@ spec:
               - name: NAME
                 value: ($rulesfile_name)
             content: bash ../../common/scripts/delete_resource_no_wait.sh
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 15: Wait-plugin-node-object-deleted"
       description: |
         Isolate per-node cleanup from final parent deletion. If this step stalls,
-        the artifact-operator sidecar is not removing its ArtifactNode finalizer;
+        the artifact-operator sidecar is not withdrawing its entry from the ArtifactNode's status;
         inspect that container's logs, not the instance-operator's.
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
 
     - name: "Step 16: Wait-plugin-deleted"
       description: |

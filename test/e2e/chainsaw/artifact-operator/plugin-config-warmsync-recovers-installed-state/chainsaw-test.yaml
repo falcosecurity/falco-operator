@@ -344,13 +344,15 @@ spec:
               kind: Plugin
               name: ($json_plugin)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $json_plugin]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $json_plugin]):
+                  - kind: Plugin
         - script:
             env:
               - name: NAMESPACE
@@ -697,8 +699,8 @@ spec:
     - name: "Step 19: Delete-rulesfile"
       description: |
         Delete the Rulesfile. Its removal drops the installed dependency, so the
-        per-node artifact operator can remove the plugin config and release its
-        ArtifactNode finalizer. Request deletion without waiting; the ArtifactNode
+        per-node artifact operator can remove the plugin config and withdraw its
+        ArtifactNode status entry. Request deletion without waiting; the ArtifactNode
         wait is the completion signal, avoiding an implicit parent-object wait
         while Rulesfile cleanup is still running.
       try:
@@ -711,27 +713,49 @@ spec:
               - name: NAME
                 value: ($rulesfile_name)
             content: bash ../../common/scripts/delete_resource_no_wait.sh
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 20: Wait-plugin-node-object-deleted"
       description: |
         Isolate per-node cleanup from final parent deletion. If this step stalls,
-        the artifact-operator sidecar is not removing its ArtifactNode finalizer;
+        the artifact-operator sidecar is not withdrawing its entry from the ArtifactNode's status;
         inspect that container's logs, not the instance-operator's.
       try:
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $container_plugin]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $container_plugin]):
+                  - kind: Plugin
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $container_plugin]):
+                  - kind: Plugin
 
     - name: "Step 21: Wait-plugin-deleted"
       description: |

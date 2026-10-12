@@ -24,27 +24,29 @@ import (
 	"sort"
 	"strings"
 
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 )
 
 // maxFailingNodesListed caps how many node names AggregateConditions lists in a False condition's
-// message; the remainder is summarized as "(+N more)".
+// message; the remainder is summarized as "and others".
+//
+// Aggregated messages carry no counts and no name of a node that is merely late: a message that changes
+// each time one more node reports would make every such report a write to the parent's status.
 const maxFailingNodesListed = 5
-
-const reasonPending = "Pending"
 
 // NodeConditionSet pairs a node name with its observed conditions.
 type NodeConditionSet struct {
 	NodeName   string
 	Conditions []metav1.Condition
+	// Leftover marks a node the artifact is no longer assigned to but that still holds it. No report is expected
+	// from it, so it does not count towards the other conditions: only its DeletionBlocked is aggregated.
+	Leftover bool
 }
 
 // AggregateConditions merges per-node condition sets into a single aggregate slice
@@ -54,23 +56,32 @@ type NodeConditionSet struct {
 //   - False wins over Unknown wins over True.
 //   - When the result is False, the message includes the names of up to 5 failing nodes.
 //   - Missing or stale reports are Unknown, not successful observations.
-//   - An empty input produces a single Programmed=Unknown condition.
-func AggregateConditions(nodeSets []NodeConditionSet, generation int64) []metav1.Condition {
+//   - With no node expected to report, Programmed is Unknown.
+//   - DeletionBlocked is the exception to all of the above: it says a node cannot let go of the artifact, which
+//     is true of the artifact as soon as it is true of one node, whatever generation that node last saw and
+//     whether or not the others have reported. A single True is True, and names the nodes.
+func AggregateConditions(nodeConditions []NodeConditionSet, generation int64) []metav1.Condition {
 	now := metav1.Now()
 
-	if len(nodeSets) == 0 {
-		return []metav1.Condition{{
+	all := slices.Clone(nodeConditions)
+	sort.Slice(all, func(i, j int) bool { return all[i].NodeName < all[j].NodeName })
+	blocked := deletionBlocked(all, generation, now)
+	nodeConditions = slices.DeleteFunc(slices.Clone(all), func(ns NodeConditionSet) bool { return ns.Leftover })
+
+	if len(nodeConditions) == 0 {
+		result := []metav1.Condition{{
 			Type:               string(commonv1alpha1.ConditionProgrammed),
 			Status:             metav1.ConditionUnknown,
-			Reason:             "NoNodesAssigned",
+			Reason:             common.ReasonNoNodesAssigned,
 			Message:            "No nodes are assigned to this artifact.",
 			ObservedGeneration: generation,
 			LastTransitionTime: now,
 		}}
+		if blocked != nil {
+			result = append([]metav1.Condition{*blocked}, result...)
+		}
+		return result
 	}
-
-	nodeSets = slices.Clone(nodeSets)
-	sort.Slice(nodeSets, func(i, j int) bool { return nodeSets[i].NodeName < nodeSets[j].NodeName })
 
 	type entry struct {
 		reported     int
@@ -78,17 +89,22 @@ func AggregateConditions(nodeSets []NodeConditionSet, generation int64) []metav1
 		reason       string
 		message      string
 		failingNodes []string
+		// causesDiffer is whether the failing nodes do not all fail for the reason and message kept above.
+		causesDiffer bool
 	}
 	byType := map[string]*entry{
 		commonv1alpha1.ConditionProgrammed.String(): {worstStatus: metav1.ConditionTrue},
 	}
 
-	for _, ns := range nodeSets {
+	for _, ns := range nodeConditions {
 		for _, c := range ns.Conditions {
+			if blocked != nil && c.Type == blocked.Type {
+				continue
+			}
 			if c.ObservedGeneration != generation {
 				c.Status = metav1.ConditionUnknown
-				c.Reason = reasonPending
-				c.Message = fmt.Sprintf("Waiting for node %q to report %s for generation %d", ns.NodeName, c.Type, generation)
+				c.Reason = common.ReasonPending
+				c.Message = fmt.Sprintf("Waiting for nodes to report %s for generation %d", c.Type, generation)
 			}
 			e, exists := byType[c.Type]
 			if !exists {
@@ -106,6 +122,8 @@ func AggregateConditions(nodeSets []NodeConditionSet, generation int64) []metav1
 					e.worstStatus = metav1.ConditionFalse
 					e.reason = c.Reason
 					e.message = c.Message
+				} else if c.Reason != e.reason || c.Message != e.message {
+					e.causesDiffer = true
 				}
 			case metav1.ConditionUnknown:
 				if e.worstStatus == metav1.ConditionTrue {
@@ -125,15 +143,18 @@ func AggregateConditions(nodeSets []NodeConditionSet, generation int64) []metav1
 
 	result := make([]metav1.Condition, 0, len(byType))
 	for condType, e := range byType {
-		if e.reported < len(nodeSets) && e.worstStatus != metav1.ConditionFalse {
+		if e.reported < len(nodeConditions) && e.worstStatus != metav1.ConditionFalse {
 			e.worstStatus = metav1.ConditionUnknown
-			e.reason = reasonPending
-			e.message = fmt.Sprintf("Waiting for %s status from %d of %d assigned nodes",
-				condType, len(nodeSets)-e.reported, len(nodeSets))
+			e.reason = common.ReasonPending
+			e.message = fmt.Sprintf("Waiting for %s status from all assigned nodes", condType)
 		}
 		message := e.message
 		if e.worstStatus == metav1.ConditionFalse {
-			message = appendFailingNodes(message, e.failingNodes)
+			message = appendNodes(message, "failing nodes", e.failingNodes)
+			if e.causesDiffer {
+				// One message cannot carry every node's cause, and must not pass one node's off as all of theirs.
+				message += "; this is the cause on the first of them, the others differ: see each node's ArtifactNode"
+			}
 		}
 		result = append(result, metav1.Condition{
 			Type:               condType,
@@ -145,25 +166,54 @@ func AggregateConditions(nodeSets []NodeConditionSet, generation int64) []metav1
 		})
 	}
 
+	if blocked != nil {
+		result = append(result, *blocked)
+	}
+
 	// Stable ordering for deterministic SSA patches.
 	sort.Slice(result, func(i, j int) bool { return result[i].Type < result[j].Type })
 	return result
 }
 
-// appendFailingNodes appends up to maxFailingNodesListed failing node names (sorted) to message,
-// summarizing any remainder as "(+N more)".
-func appendFailingNodes(message string, failingNodes []string) string {
-	names := make([]string, len(failingNodes))
-	copy(names, failingNodes)
+// deletionBlocked returns the aggregate DeletionBlocked condition of sorted, which is True as soon as one node
+// reports it True, with that node's reason and message and the names of the nodes reporting it. It returns nil
+// when none does.
+func deletionBlocked(sorted []NodeConditionSet, generation int64, now metav1.Time) *metav1.Condition {
+	var blocked *metav1.Condition
+	var nodes []string
+	for _, ns := range sorted {
+		c := apimeta.FindStatusCondition(ns.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
+		if c == nil || c.Status != metav1.ConditionTrue {
+			continue
+		}
+		nodes = append(nodes, ns.NodeName)
+		if blocked == nil {
+			blocked = &metav1.Condition{
+				Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message,
+				ObservedGeneration: generation, LastTransitionTime: now,
+			}
+		}
+	}
+	if blocked != nil {
+		blocked.Message = appendNodes(blocked.Message, "blocked on nodes", nodes)
+	}
+	return blocked
+}
+
+// appendNodes appends up to maxFailingNodesListed node names (sorted) to message under label,
+// summarizing any remainder as "and others".
+func appendNodes(message, label string, nodes []string) string {
+	names := make([]string, len(nodes))
+	copy(names, nodes)
 	sort.Strings(names)
 
 	shown := names
 	var suffix string
 	if len(shown) > maxFailingNodesListed {
 		shown = shown[:maxFailingNodesListed]
-		suffix = fmt.Sprintf(" (+%d more)", len(names)-maxFailingNodesListed)
+		suffix = ", and others"
 	}
-	nodesPart := fmt.Sprintf("failing nodes: %s%s", strings.Join(shown, ", "), suffix)
+	nodesPart := fmt.Sprintf("%s: %s%s", label, strings.Join(shown, ", "), suffix)
 
 	if message == "" {
 		return nodesPart
@@ -202,37 +252,19 @@ func ApplyAggregateConditions(current *[]metav1.Condition, newConds []metav1.Con
 	for i := range newConds {
 		apimeta.SetStatusCondition(current, newConds[i])
 	}
-	newSet := make(map[string]bool, len(newConds))
+	newTypes := make(map[string]bool, len(newConds))
 	for _, c := range newConds {
-		newSet[c.Type] = true
+		newTypes[c.Type] = true
 	}
 	var toRemove []string
 	for _, c := range *current {
-		if !newSet[c.Type] {
+		if !newTypes[c.Type] {
 			toRemove = append(toRemove, c.Type)
 		}
 	}
 	for _, t := range toRemove {
 		apimeta.RemoveStatusCondition(current, t)
 	}
-}
-
-// NodeConditionsForAssignments includes every desired node, even when its ArtifactNode has
-// not reached the informer cache or has not reported status. Terminating and stale assignments
-// do not contribute their old conditions to the desired state.
-func NodeConditionsForAssignments(nodeList *artifactv1alpha1.ArtifactNodeList, desired map[string]struct{}) []NodeConditionSet {
-	byNode := make(map[string][]metav1.Condition, len(nodeList.Items))
-	for i := range nodeList.Items {
-		node := &nodeList.Items[i]
-		if node.DeletionTimestamp.IsZero() {
-			byNode[node.Spec.NodeName] = node.Status.Conditions
-		}
-	}
-	sets := make([]NodeConditionSet, 0, len(desired))
-	for name := range desired {
-		sets = append(sets, NodeConditionSet{NodeName: name, Conditions: byNode[name]})
-	}
-	return sets
 }
 
 // ComputeAggregateConditions merges the supplied node reports, logs transitions, and applies
@@ -242,38 +274,9 @@ func ComputeAggregateConditions(
 	ctx context.Context,
 	obj client.Object,
 	conditions *[]metav1.Condition,
-	nodeSets []NodeConditionSet,
+	nodeConditions []NodeConditionSet,
 ) {
-	aggregated := AggregateConditions(nodeSets, obj.GetGeneration())
+	aggregated := AggregateConditions(nodeConditions, obj.GetGeneration())
 	LogConditionTransitions(ctx, *conditions, aggregated)
 	ApplyAggregateConditions(conditions, aggregated)
-}
-
-// UpdateAggregateConditions computes aggregate conditions from nodeList and patches status only when
-// conditions change. Callers must publish other status changes separately. conditions is passed as an
-// addressable pointer (e.g. &plugin.Status.Conditions) because each aggregator controller's Status struct
-// (Plugin, Rulesfile, Config) is differently typed.
-func UpdateAggregateConditions(
-	ctx context.Context,
-	cl client.Client,
-	scheme *runtime.Scheme,
-	obj client.Object,
-	conditions *[]metav1.Condition,
-	nodeList *artifactv1alpha1.ArtifactNodeList,
-	fieldManager string,
-) error {
-	// During deletion, report on the remaining children, including Terminating ones.
-	sets := make([]NodeConditionSet, len(nodeList.Items))
-	for i := range nodeList.Items {
-		sets[i] = NodeConditionSet{
-			NodeName:   nodeList.Items[i].Spec.NodeName,
-			Conditions: nodeList.Items[i].Status.Conditions,
-		}
-	}
-	condSnap := slices.Clone(*conditions)
-	ComputeAggregateConditions(ctx, obj, conditions, sets)
-	if apiequality.Semantic.DeepEqual(condSnap, *conditions) {
-		return nil
-	}
-	return PatchStatusSSA(ctx, cl, scheme, obj, fieldManager)
 }

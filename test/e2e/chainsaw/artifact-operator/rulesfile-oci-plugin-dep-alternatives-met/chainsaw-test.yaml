@@ -117,14 +117,12 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     - name: "Step 05: Assert-file-on-filesystem"
       use:
@@ -155,13 +153,15 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
   catch:
     - description: Capture debug snapshot on failure

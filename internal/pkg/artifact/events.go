@@ -17,6 +17,8 @@
 package artifact
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
@@ -36,33 +38,17 @@ func RecordNormal(r events.EventRecorder, obj runtime.Object, reason, message st
 // No event is recorded for StoreActionNone or StoreActionUnchanged.
 func RecordStoreEvent(r events.EventRecorder, obj runtime.Object, action StoreAction, medium Medium) {
 	var reason, message string
-	switch {
-	case action == StoreActionRemoved && medium == MediumOCI:
-		reason, message = ReasonOCIArtifactRemoved, MessageOCIArtifactRemoved
-	case action == StoreActionRemoved && medium == MediumInline:
-		reason, message = ReasonInlineArtifactRemoved, MessageInlineArtifactRemoved
-	case action == StoreActionRemoved && medium == MediumConfigMap:
-		reason, message = ReasonConfigMapArtifactRemoved, MessageConfigMapArtifactRemoved
-	case action == StoreActionPriorityChanged && medium == MediumOCI:
-		reason, message = ReasonOCIArtifactPriorityChanged, MessageOCIArtifactPriorityChanged
-	case action == StoreActionPriorityChanged && medium == MediumInline:
-		reason, message = ReasonInlineArtifactPriorityChanged, MessageInlineArtifactPriorityChanged
-	case action == StoreActionPriorityChanged && medium == MediumConfigMap:
-		reason, message = ReasonConfigMapArtifactPriorityChanged, MessageConfigMapArtifactPriorityChanged
-	case action == StoreActionAdded && medium == MediumOCI:
-		reason, message = ReasonOCIArtifactStored, MessageOCIArtifactStored
-	case action == StoreActionUpdated && medium == MediumOCI:
-		reason, message = ReasonOCIArtifactUpdated, MessageOCIArtifactUpdated
-	case action == StoreActionAdded && medium == MediumInline:
-		reason, message = ReasonInlineArtifactStored, MessageInlineArtifactStored
-	case action == StoreActionUpdated && medium == MediumInline:
-		reason, message = ReasonInlineArtifactUpdated, MessageInlineArtifactUpdated
-	case action == StoreActionAdded && medium == MediumConfigMap:
-		reason, message = ReasonConfigMapArtifactStored, MessageConfigMapArtifactStored
-	case action == StoreActionUpdated && medium == MediumConfigMap:
-		reason, message = ReasonConfigMapArtifactUpdated, MessageConfigMapArtifactUpdated
+	switch action {
+	case StoreActionRemoved:
+		reason, message = ReasonArtifactRemoved, MessageArtifactRemoved
+	case StoreActionPriorityChanged:
+		reason, message = ReasonArtifactPriorityChanged, MessageArtifactPriorityChanged
+	case StoreActionAdded:
+		reason, message = ReasonArtifactStored, MessageArtifactStored
+	case StoreActionUpdated:
+		reason, message = ReasonArtifactUpdated, MessageArtifactUpdated
 	default:
 		return
 	}
-	RecordNormal(r, obj, reason, message)
+	RecordNormal(r, obj, reason, fmt.Sprintf(message, medium))
 }

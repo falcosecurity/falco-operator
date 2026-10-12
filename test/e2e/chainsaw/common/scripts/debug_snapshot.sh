@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Capture a debug snapshot of the test and operator namespaces when a test fails.
+# Capture a debug snapshot of the test and operator namespaces when a test fails. Everything goes to files;
+# the only output is the path of the snapshot, so the test log is not flooded.
 #
 # Variables (from environment):
 #   TEST_NAME:         Name of the test (for labeling output sections).
@@ -36,7 +37,6 @@ mkdir -p "$SNAPSHOT_DIR"
 capture() {
   local file="$1"
   shift
-  echo "=== $file (saved to $SNAPSHOT_DIR/$file) ==="
   "$@" >"$SNAPSHOT_DIR/$file" 2>&1 || true
 }
 
@@ -62,7 +62,6 @@ capture_pod_logs() {
   # whitespace separates the first fields: a pod that is not scheduled yet has an empty node,
   # which whitespace splitting would collapse, shifting the containers into the node variable.
   local pod_containers='{range .items[*]}{.metadata.name}{"|"}{.spec.nodeName}{"|"}{.spec.initContainers[*].name}{" "}{.spec.containers[*].name}{"\n"}{end}'
-  echo "=== $app logs (saved to $dir) ==="
   mkdir -p "$dir"
 
   local pod node containers container file

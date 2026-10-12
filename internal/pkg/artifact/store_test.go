@@ -18,8 +18,6 @@ package artifact
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -31,23 +29,7 @@ import (
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
-	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 )
-
-func sha256hex(data []byte) string {
-	h := sha256.Sum256(data)
-	return hex.EncodeToString(h[:])
-}
-
-func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
-	mockFS := fsfake.NewMockFileSystem()
-	dirs := ArtifactDirs{
-		Plugin:    "/plugins",
-		Rulesfile: "/rulesfiles",
-		Config:    "/configs",
-	}
-	return &LocalStore{FS: mockFS, Dirs: dirs}, mockFS
-}
 
 // Stop after the real write, before Store can rename or clean up the candidate.
 type interruptedWriteFS struct {
@@ -94,7 +76,7 @@ func TestLocalStore_InterruptedWrite(t *testing.T) {
 					})
 
 					finalPath := mustArtifactPath(t, store.Dirs, "test", 50, medium, artifactType)
-					stagedPath := filepath.Join(dir, ".tmp", filepath.Base(finalPath)+".tmp")
+					stagedPath := StagingPath(finalPath)
 					staged, err := os.ReadFile(stagedPath)
 					require.NoError(t, err)
 					expected := updated.Content
@@ -174,7 +156,7 @@ func TestLocalStore_RemoveAfterInterruptedWrite(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, remaining, 1)
 			assert.True(t, remaining[0].IsDir(), "deleting the committed file must leave no active artifact")
-			require.FileExists(t, filepath.Join(dir, ".tmp", filepath.Base(current.Path)+".tmp"))
+			require.FileExists(t, StagingPath(current.Path))
 			snapshot, err = store.ScanAll(t.Context(), tc.artifactType)
 			require.NoError(t, err)
 			assert.Empty(t, snapshot)
@@ -227,22 +209,6 @@ func TestLocalStore_Read(t *testing.T) {
 	fs.ReadErrFor = map[string]error{path: assert.AnError}
 	_, err = store.Read(t.Context(), path)
 	require.ErrorIs(t, err, assert.AnError)
-}
-func TestSetInstalled_PreservesExistingConfigSubEntry(t *testing.T) {
-	artifacts := []artifactv1alpha1.InstalledArtifact{
-		{
-			Path: "/old", Medium: "oci", Priority: 50, ContentHash: "old-hash",
-			Config: &artifactv1alpha1.InstalledArtifactConfig{Path: "/etc/falco/config.d/99-03-plugins-config-inline.yaml"},
-		},
-	}
-
-	SetInstalled(&artifacts, File{Path: "/new", Medium: MediumOCI, Priority: 50, ContentHash: "new-hash"})
-
-	require.Len(t, artifacts, 1)
-	assert.Equal(t, "/new", artifacts[0].Path)
-	assert.Equal(t, "new-hash", artifacts[0].ContentHash)
-	require.NotNil(t, artifacts[0].Config, "updating the main fields must not drop the Config sub-entry")
-	assert.Equal(t, "/etc/falco/config.d/99-03-plugins-config-inline.yaml", artifacts[0].Config.Path)
 }
 
 func TestLocalStore_Store_PriorityChange(t *testing.T) {
@@ -315,16 +281,16 @@ func TestLocalStore_Store_ContentAndPriorityChangeTogether(t *testing.T) {
 }
 
 func TestLocalStore_Store_PriorityChangeDoesNotLeaveOldPath(t *testing.T) {
-	for _, artifactType := range []Kind{KindRulesfile, KindConfig} {
-		t.Run(string(artifactType), func(t *testing.T) {
+	for _, kind := range []Kind{KindRulesfile, KindConfig} {
+		t.Run(string(kind), func(t *testing.T) {
 			store, mockFS := newTestStore()
 			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: 0o644}
 			updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: 0o644}
-			_, current, err := store.Store(t.Context(), nil, "test", 50, artifactType, MediumInline, old)
+			_, current, err := store.Store(t.Context(), nil, "test", 50, kind, MediumInline, old)
 			require.NoError(t, err)
 			mockFS.RemoveErrFor = map[string]error{current.Path: errors.New("cannot unlink old file")}
 
-			_, file, err := store.Store(t.Context(), current, "test", 20, artifactType, MediumInline, updated)
+			_, file, err := store.Store(t.Context(), current, "test", 20, kind, MediumInline, updated)
 
 			require.NoError(t, err)
 			require.NotNil(t, file)
@@ -336,14 +302,14 @@ func TestLocalStore_Store_PriorityChangeDoesNotLeaveOldPath(t *testing.T) {
 
 func TestLocalStore_StoreRepairsTrackedContent(t *testing.T) {
 	for _, source := range []struct {
-		artifactType Kind
-		medium       Medium
+		kind   Kind
+		medium Medium
 	}{{KindPlugin, MediumOCI}, {KindConfig, MediumInline}, {KindRulesfile, MediumConfigMap}} {
 		for _, state := range []string{"intact", "corrupt", "missing", "unreadable"} {
-			t.Run(string(source.artifactType)+"/"+state, func(t *testing.T) {
+			t.Run(string(source.kind)+"/"+state, func(t *testing.T) {
 				store, mockFS := newTestStore()
-				result := FetchResult{Content: []byte("expected"), ContentHash: sha256hex([]byte("expected")), Perm: mustPermFor(t, source.artifactType)}
-				_, current, err := store.Store(t.Context(), nil, "artifact", 10, source.artifactType, source.medium, result)
+				result := FetchResult{Content: []byte("expected"), ContentHash: sha256hex([]byte("expected")), Perm: mustPermFor(t, source.kind)}
+				_, current, err := store.Store(t.Context(), nil, "artifact", 10, source.kind, source.medium, result)
 				require.NoError(t, err)
 				switch state {
 				case "corrupt":
@@ -353,7 +319,7 @@ func TestLocalStore_StoreRepairsTrackedContent(t *testing.T) {
 				case "unreadable":
 					mockFS.ReadErr = fmt.Errorf("read failed")
 				}
-				action, updated, err := store.Store(t.Context(), current, "artifact", 10, source.artifactType, source.medium, result)
+				action, updated, err := store.Store(t.Context(), current, "artifact", 10, source.kind, source.medium, result)
 				require.NoError(t, err)
 				if state == "intact" {
 					require.Equal(t, StoreActionUnchanged, action)

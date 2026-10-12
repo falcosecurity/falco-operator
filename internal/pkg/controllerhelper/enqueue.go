@@ -30,9 +30,10 @@ import (
 // handler.EnqueueRequestsFromMapFunc watches that re-evaluate every parent artifact (Plugin/Rulesfile/Config)
 // on an unrelated event (e.g. a Node's labels changing). list must be a pointer to an empty list (e.g.
 // &artifactv1alpha1.PluginList{}); it is populated in place by the List call. Optional opts (e.g.
-// client.InNamespace) narrow the listing.
+// client.InNamespace) narrow the listing. Only the names are read, so the objects are not copied out of the informer
+// cache: an artifact can carry its whole content, and every Node or Pod event lists them all.
 func EnqueueAllOfType(ctx context.Context, cl client.Client, list client.ObjectList, opts ...client.ListOption) []reconcile.Request {
-	if err := cl.List(ctx, list, opts...); err != nil {
+	if err := cl.List(ctx, list, append(opts, client.UnsafeDisableDeepCopy)...); err != nil {
 		log.FromContext(ctx).Error(err, "unable to list for re-enqueue", "type", fmt.Sprintf("%T", list))
 		return nil
 	}
@@ -50,4 +51,13 @@ func EnqueueAllOfType(ctx context.Context, cl client.Client, list client.ObjectL
 		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(obj)})
 	}
 	return reqs
+}
+
+// RequestsReferencing returns a request for every object of list's type whose field index holds referenced, as
+// "namespace/name": the artifacts that reference a ConfigMap or a Secret, for instance. Like EnqueueAllOfType, a
+// failed list is logged and yields no request.
+func RequestsReferencing(
+	ctx context.Context, cl client.Client, list client.ObjectList, field string, referenced client.Object,
+) []reconcile.Request {
+	return EnqueueAllOfType(ctx, cl, list, client.MatchingFields{field: referenced.GetNamespace() + "/" + referenced.GetName()})
 }

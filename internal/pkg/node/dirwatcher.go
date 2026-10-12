@@ -38,23 +38,23 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// DefaultVerifyInterval is how often DirWatcher checks rules loaded by Falco and local plugin
+// defaultVerifyInterval is how often artifactDirWatcher checks rules loaded by Falco and local plugin
 // file changes, as a backstop for events missed by fsnotify.
-const DefaultVerifyInterval = 60 * time.Second
+const defaultVerifyInterval = 60 * time.Second
 
-// DirWatcher watches Falco's config directories with fsnotify and calls notifyFn on any file
-// Create or Remove event, driving ReloadCoordinator without coupling Manager to reload concerns.
+// artifactDirWatcher watches Falco's config directories with fsnotify and calls notifyFn on any file
+// Create or Remove event, driving reloadCoordinator without coupling the node to reload concerns.
 //
 // Its periodic pass compares rules files against Falco's /metrics and detects changes to the
 // shared plugin configuration and managed .so files. Plugin aliases cannot be matched to the ABI
 // names in /versions, so this backstop detects missed file events, not plugin runtime drift.
 // A plugin file change can cause one extra reload after its fsnotify event was already handled.
 //
-// DirWatcher registers its filesystem watches at construction time (not in Start), avoiding the
+// artifactDirWatcher registers its filesystem watches at construction time (not in Start), avoiding the
 // TOCTOU window between New and Start where a write could otherwise go unobserved.
 //
-// DirWatcher implements manager.Runnable.
-type DirWatcher struct {
+// artifactDirWatcher implements manager.Runnable.
+type artifactDirWatcher struct {
 	dirs           artifact.ArtifactDirs
 	falcoBaseURL   string
 	notifyFn       func()
@@ -67,10 +67,10 @@ type DirWatcher struct {
 	pluginFiles  map[string]string
 }
 
-// NewDirWatcher creates a DirWatcher watching dirs. Watches are registered immediately so no
+// newArtifactDirWatcher creates an artifactDirWatcher watching dirs. Watches are registered immediately so no
 // event is missed during the gap between construction and Start. Returns an error if the
 // underlying fsnotify watcher cannot be created or any directory cannot be added.
-func NewDirWatcher(dirs artifact.ArtifactDirs, falcoBaseURL string, notifyFn func()) (*DirWatcher, error) {
+func newArtifactDirWatcher(dirs artifact.ArtifactDirs, falcoBaseURL string, notifyFn func()) (*artifactDirWatcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("create fsnotify watcher: %w", err)
@@ -81,12 +81,12 @@ func NewDirWatcher(dirs artifact.ArtifactDirs, falcoBaseURL string, notifyFn fun
 			return nil, fmt.Errorf("watch dir %s: %w", dir, err)
 		}
 	}
-	d := &DirWatcher{
+	d := &artifactDirWatcher{
 		dirs:           dirs,
 		falcoBaseURL:   falcoBaseURL,
 		notifyFn:       notifyFn,
 		watcher:        fw,
-		verifyInterval: DefaultVerifyInterval,
+		verifyInterval: defaultVerifyInterval,
 		metricsClient:  &http.Client{Timeout: 5 * time.Second},
 		trackedRules:   make(map[string]map[string]struct{}),
 	}
@@ -105,16 +105,9 @@ func NewDirWatcher(dirs artifact.ArtifactDirs, falcoBaseURL string, notifyFn fun
 	return d, nil
 }
 
-// WithVerifyInterval overrides the default verification interval. Follows the same pattern as
-// tlsutil.CAWatcher.WithWatchInterval; primarily for testing.
-func (d *DirWatcher) WithVerifyInterval(interval time.Duration) *DirWatcher {
-	d.verifyInterval = interval
-	return d
-}
-
 // Start watches for filesystem events and runs the periodic verification pass until ctx is
 // canceled. Implements manager.Runnable.
-func (d *DirWatcher) Start(ctx context.Context) error {
+func (d *artifactDirWatcher) Start(ctx context.Context) error {
 	logger := ctrllog.FromContext(ctx)
 
 	var wg sync.WaitGroup
@@ -141,7 +134,7 @@ func (d *DirWatcher) Start(ctx context.Context) error {
 }
 
 // watch reads fsnotify events and reacts to file Create and Remove events.
-func (d *DirWatcher) watch(ctx context.Context) {
+func (d *artifactDirWatcher) watch(ctx context.Context) {
 	logger := ctrllog.FromContext(ctx)
 	for {
 		select {
@@ -161,7 +154,7 @@ func (d *DirWatcher) watch(ctx context.Context) {
 
 // handleEvent reacts to a single fsnotify event. Ignored operations (Write, Chmod, Rename) and
 // .tmp intermediate files are silently skipped.
-func (d *DirWatcher) handleEvent(ctx context.Context, event fsnotify.Event) {
+func (d *artifactDirWatcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 	logger := ctrllog.FromContext(ctx)
 	if !event.Op.Has(fsnotify.Create) && !event.Op.Has(fsnotify.Remove) {
 		return
@@ -186,8 +179,8 @@ func (d *DirWatcher) handleEvent(ctx context.Context, event fsnotify.Event) {
 }
 
 // verify requests a reload for mismatched runtime rules or changed local plugin files.
-// Calls notifyFn once per pass; ReloadCoordinator coalesces requests and retries failed signals.
-func (d *DirWatcher) verify(ctx context.Context) {
+// Calls notifyFn once per pass; reloadCoordinator coalesces requests and retries failed signals.
+func (d *artifactDirWatcher) verify(ctx context.Context) {
 	logger := ctrllog.FromContext(ctx)
 	if d.checkRulesFilesMismatch(ctx) {
 		logger.V(1).Info("rules files mismatch detected; triggering reload")
@@ -202,7 +195,7 @@ func (d *DirWatcher) verify(ctx context.Context) {
 
 // checkRulesFilesMismatch compares managed filenames and hashes, including pending removals.
 // Falco exposes basenames only: identical name/hash pairs in different directories cannot be distinguished.
-func (d *DirWatcher) checkRulesFilesMismatch(ctx context.Context) bool {
+func (d *artifactDirWatcher) checkRulesFilesMismatch(ctx context.Context) bool {
 	logger := ctrllog.FromContext(ctx)
 	diskHashes, err := rulesFilesHashes(d.dirs.Rulesfile)
 	if err != nil {
@@ -236,7 +229,7 @@ func (d *DirWatcher) checkRulesFilesMismatch(ctx context.Context) bool {
 	return false
 }
 
-func (d *DirWatcher) rememberRules(files map[string]string) {
+func (d *artifactDirWatcher) rememberRules(files map[string]string) {
 	for name, hash := range files {
 		if d.trackedRules[name] == nil {
 			d.trackedRules[name] = make(map[string]struct{})
@@ -247,7 +240,7 @@ func (d *DirWatcher) rememberRules(files map[string]string) {
 
 // fetchRulesHashes retains filename/hash pairs; a failed observation is not an empty runtime.
 // Returns nil if the endpoint is unreachable, times out, or responds unsuccessfully.
-func (d *DirWatcher) fetchRulesHashes(ctx context.Context) map[string]map[string]struct{} {
+func (d *artifactDirWatcher) fetchRulesHashes(ctx context.Context) map[string]map[string]struct{} {
 	metrics, err := fetchFalcoMetrics(ctx, d.metricsClient, d.falcoBaseURL)
 	if err != nil {
 		ctrllog.FromContext(ctx).V(1).Info("rules verification unavailable", "err", err)
@@ -282,7 +275,7 @@ func (d *DirWatcher) fetchRulesHashes(ctx context.Context) map[string]map[string
 }
 
 // checkPluginFilesChanged advances the local baseline only after a complete successful read.
-func (d *DirWatcher) checkPluginFilesChanged(ctx context.Context) bool {
+func (d *artifactDirWatcher) checkPluginFilesChanged(ctx context.Context) bool {
 	files, err := pluginFilesHashes(d.dirs)
 	if err != nil {
 		ctrllog.FromContext(ctx).Error(err, "failed to read plugin files; skipping verify tick")
@@ -293,11 +286,11 @@ func (d *DirWatcher) checkPluginFilesChanged(ctx context.Context) bool {
 	return changed
 }
 
-// NeedLeaderElection reports that the DirWatcher runs on every pod replica, not just the leader.
-func (d *DirWatcher) NeedLeaderElection() bool { return false }
+// NeedLeaderElection reports that the artifactDirWatcher runs on every pod replica, not just the leader.
+func (d *artifactDirWatcher) NeedLeaderElection() bool { return false }
 
 // allDirs returns the three watched directory paths as a slice for membership checks.
-func (d *DirWatcher) allDirs() []string {
+func (d *artifactDirWatcher) allDirs() []string {
 	return []string{d.dirs.Config, d.dirs.Rulesfile, d.dirs.Plugin}
 }
 

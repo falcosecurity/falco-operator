@@ -1,0 +1,289 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-capacity
+spec:
+  description: |
+    Exercises the cap on the artifacts a single ArtifactNode lists (100, in its spec and in its status alike,
+    which bounds the object's size: every update rewrites and re-sends the whole object). It runs on a KWOK fake
+    node with a stub Falco pod, so no artifact operator runs.
+
+    Rules under test:
+      - The artifacts already listed keep their slot. A newcomer never evicts an installed artifact, whatever it is
+        named and however it sorts.
+      - An artifact that does not fit is left unassigned, and its parent says so: Programmed=False with the reason
+        NodeCapacityExceeded, not a Pending that would never end.
+      - The freed slot goes to an unassigned artifact.
+
+    Scenarios:
+    1. 100 Rulesfiles select the node: all 100 are listed, in order of name (the list is sorted by kind and name).
+    2. A 101st, named to sort before all the others, is not listed, the 100 are untouched, and its parent reports
+       NodeCapacityExceeded.
+    3. A 102nd is not listed either, and the first newcomer is still waiting: the slot order among the unassigned
+       is by creation time, oldest first.
+    4. One of the 100 is deleted: the oldest unassigned takes its slot, and only that one. The other waits.
+
+  bindings:
+    - name: test_name
+      value: artifactnode-capacity
+    - name: falco_name
+      value: capacity-falco
+    - name: node_name
+      value: (join('-', ['capacity', $namespace]))
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+    - name: first_newcomer
+      value: aaa-newcomer-first
+    - name: second_newcomer
+      value: aaa-newcomer-second
+
+  steps:
+    - name: "Step 01: Create-fake-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 02: Create-100-rulesfiles"
+      description: Scenario 1. One request, so that they arrive together.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: KIND
+                value: Rulesfile
+              - name: PREFIX
+                value: capacity-rf-
+              - name: FIRST
+                value: "1"
+              - name: LAST
+                value: "100"
+            content: bash ../../common/scripts/apply_numbered_artifacts.sh
+
+    - name: "Step 03: Assert-all-100-are-listed"
+      try:
+        - assert:
+            timeout: 3m
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 100
+                (artifacts[0].name): capacity-rf-001
+                (artifacts[99].name): capacity-rf-100
+
+    - name: "Step 04: Create-a-newcomer-that-sorts-first"
+      description: |
+        Scenario 2. Named to sort before every listed artifact: if slots went by order rather than to what is
+        installed, it would take one.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($first_newcomer)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw first newcomer
+                    desc: Rule used to verify that a newcomer does not evict.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=first-newcomer"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 05: Assert-it-is-left-out-and-says-so"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($first_newcomer)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: NodeCapacityExceeded
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 100
+                (artifacts[?name == $first_newcomer]): []
+                (artifacts[0].name): capacity-rf-001
+                (artifacts[99].name): capacity-rf-100
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 100
+                (artifacts[?name == $first_newcomer]): []
+
+    - name: "Step 06: Create-a-second-newcomer"
+      description: Scenario 3. Created after the first one, and sorting the same way.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($second_newcomer)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw second newcomer
+                    desc: Rule used to verify the order of the unassigned.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=second-newcomer"
+                    priority: DEBUG
+                    tags: [test]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($second_newcomer)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: NodeCapacityExceeded
+
+    - name: "Step 07: Free-a-slot"
+      description: |
+        Scenario 4. capacity-rf-050 is deleted. Deleting waits for the node to let go of it, so the object has
+        already dropped it when the step ends.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: capacity-rf-050
+              namespace: ($namespace)
+
+    - name: "Step 08: Assert-the-oldest-newcomer-took-the-slot"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts)): 100
+                (length(artifacts[?name == $first_newcomer])): 1
+                (length(artifacts[?name == $second_newcomer])): 0
+                (length(artifacts[?name == 'capacity-rf-050'])): 0
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($first_newcomer)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($second_newcomer)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: NodeCapacityExceeded
+
+    - name: "Step 09: Delete-the-node-and-the-falco-cr"
+      description: The Rulesfiles go with the test namespace.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not leave it behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

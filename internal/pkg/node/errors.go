@@ -16,21 +16,25 @@
 
 package node
 
-import "fmt"
+import (
+	"fmt"
 
-// DependencyError means a dependency stopped being available before a rulesfile write.
-type DependencyError struct {
+	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+)
+
+// dependencyError means a dependency stopped being available before a rulesfile write.
+type dependencyError struct {
 	Name string
 }
 
-func (e *DependencyError) Error() string {
+func (e *dependencyError) Error() string {
 	return fmt.Sprintf("plugin dependency %q is no longer available at a compatible version", e.Name)
 }
 
 // BlockedError reports a plugin removal blocked by installed rules.
 type BlockedError struct {
 	Name      string
-	BlockedBy []Key
+	BlockedBy []artifact.Ref
 }
 
 func (e *BlockedError) Error() string {

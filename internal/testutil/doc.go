@@ -14,5 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package testutil provides the helpers shared by the tests of the controllers and of the internal packages.
+// Package testutil provides the helpers shared by the tests of the controllers and of the internal packages. It does
+// not import internal/pkg/node, so that the node package's own tests can use it: the helpers built on a node.Node
+// are in the nodetest subpackage.
 package testutil

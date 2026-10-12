@@ -75,19 +75,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-content-test-inline.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-content-test-inline.yaml
+                        priority: 50
 
     - name: "Step 04: Assert-file-on-filesystem"
       use:
@@ -160,19 +158,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-content-test-inline.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-update-inline-content-test-inline.yaml
+                        priority: 50
 
     - name: "Step 08: Assert-file-still-on-filesystem"
       use:

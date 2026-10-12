@@ -22,7 +22,7 @@ spec:
 
     Expected outcome:
     - Programmed=False, reason=ProgramFailed on the Rulesfile.
-    - No ArtifactNode created.
+    - The Rulesfile is assigned to the nodes, but no node reports any file installed for it.
     - No rules file written to disk.
 
   bindings:
@@ -85,17 +85,34 @@ spec:
                   - status: 'False'
                     reason: ProgramFailed
 
-    - name: "Step 04: Assert-no-artifact-node"
-      description: ObservedGeneration not stamped → per-node sidecar deferred → no ArtifactNode update.
+    - name: "Step 04: Assert-assigned-but-not-installed"
+      description: |
+        ObservedGeneration not stamped → per-node sidecar deferred. The Rulesfile is still
+        listed by the ArtifactNodes, since assignment only follows the selector, but no
+        node reports anything installed for it.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'Programmed' && status == 'True'] || `[]`)): 0
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Rulesfile
 
     - name: "Step 05: Assert-no-file-on-filesystem"
       use:

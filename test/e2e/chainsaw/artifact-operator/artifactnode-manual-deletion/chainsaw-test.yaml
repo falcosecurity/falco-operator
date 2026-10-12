@@ -1,0 +1,147 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-manual-deletion
+spec:
+  description: |
+    Exercises an ArtifactNode that somebody deletes while artifacts are assigned to it, on a real Falco with a
+    real artifact operator (sidecar) on every node. The sidecar's finalizer holds each object while the sidecar
+    removes everything it installed. Once it is released the assignment controller creates the object again,
+    from the artifacts themselves, since nothing they say depends on the object that was deleted, and the
+    sidecar installs what is assigned once more.
+
+    Scenarios:
+    1. A Rulesfile is installed and reported on every node running Falco, and the sidecar has put its finalizer on
+       the node's ArtifactNode.
+    2. Every ArtifactNode of the namespace is deleted at once. Each comes back as a new object (a new uid).
+    3. The new objects list the Rulesfile, report it Programmed again, and its file is on the node.
+
+  bindings:
+    - name: falco_name
+      value: falco-artifactnode-manual-deletion-test
+    - name: rulesfile_name
+      value: artifactnode-manual-deletion-rulesfile
+    - name: test_name
+      value: artifactnode-manual-deletion
+    - name: sidecar_finalizer
+      value: artifactnode.artifact.falcosecurity.dev/sidecar
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                inlineRules:
+                  - required_engine_version: "0.30.0"
+                  - rule: Chainsaw manual deletion rule
+                    desc: Minimal rule for the chainsaw artifactnode-manual-deletion test.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline"
+                    priority: DEBUG
+                    tags: [test, chainsaw]
+
+    - name: "Step 03: Assert-installed-and-reported"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'Programmed']):
+                      - status: 'True'
+
+    - name: "Step 04: Delete-every-ArtifactNode"
+      description: The objects are terminating while their sidecars clean up, then created again by the assignment controller.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: bash ../../common/scripts/delete_artifactnodes_and_wait_recreated.sh
+
+    - name: "Step 05: Assert-assigned-and-reinstalled"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'Programmed']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 06: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: 50-03-artifactnode-manual-deletion-rulesfile-inline.yaml
+            - name: should_exist
+              value: "true"
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

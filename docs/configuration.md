@@ -351,6 +351,11 @@ by the user. Development Make targets default to `dev`; plain `go build` without
 linker overrides defaults to `latest`. Developers can select the paired tag at
 build time as described in [Contributing](contributing.md).
 
+The two must match. The sidecar acts on the `ArtifactNode` named after its node,
+which only an Instance Operator of the same release maintains. A sidecar paired
+with an older operator finds no such object: it installs nothing, and removes
+what it finds installed.
+
 ## Operator replicas and artifact downloads
 
 When running more than one operator replica, enable leader election in the Helm values:
@@ -379,6 +384,48 @@ cache entries from the already-resolved digests, without following floating tags
 a different revision. It needs access to the registry and the configured credentials;
 sidecars retry while the cache is being populated. Already-installed artifacts are
 not removed because the server is temporarily unavailable.
+
+## Unreachable nodes
+
+A node that is unreachable keeps its ArtifactNode, and its artifact operator
+cannot report. A deleted artifact waits for every node that holds it, except
+the ones that have been unreachable for more than 5 minutes: those remove it by
+themselves if they come back.
+
+## Artifact status
+
+The `status.conditions` of a Rulesfile, Plugin or Config aggregate what the
+sidecar of every assigned node reports in its [ArtifactNode](crds/artifactnode.md).
+For each condition type, `False` on one node wins over `Unknown`, which wins over
+`True`. The message of a `False` condition is that of the first failing node and
+names up to five failing nodes; when they fail for different reasons it says so,
+and each node's ArtifactNode has its own.
+
+| Type | Meaning |
+|------|---------|
+| `Programmed` | Summary: `True` only when every other condition is `True` on every assigned node |
+| `ResolvedRefs` | The ConfigMap and Secret references resolve |
+| `DependenciesSatisfied` | Falco on the node provides what the artifact requires. Rulesfile and Plugin only; absent when the artifact has no source |
+| `OCIArtifactProgrammed`, `InlineArtifactProgrammed`, `ConfigMapArtifactProgrammed` | The source of that kind is installed |
+| `ConfigProgrammed` | Plugin only: its entry in the plugin configuration is written |
+| `DeletionBlocked` | Plugin only, `True` or absent: a node cannot remove the plugin because a Rulesfile there still requires it. One node is enough, and the message names the nodes. A node the selector no longer matches reports it too |
+
+Reasons of `Programmed` that do not come from a node's own failure:
+
+| Reason | Status | Meaning |
+|--------|--------|---------|
+| `Pending` | `Unknown` | Not every assigned node has reported on the current generation yet. Also the initial value |
+| `GenerationPending` | `Unknown` | On a node: the instance operator, or the node, has not processed the artifact's generation yet |
+| `NoNodesAssigned` | `Unknown` | No node is expected to report. The message says whether the selector matches no node, or no Falco pod runs on the nodes it matches |
+| `InvalidSelector` | `False` | `spec.selector` is not a valid label selector, so the artifact is assigned to no node and removed from the nodes that held it |
+| `NodeCapacityExceeded` | `False` | A selected node already lists 100 artifacts |
+| `ProgramFailed` | `False` | Another condition is not `True`, named in the message; or the artifact declares no source, so there is nothing to install |
+
+While an artifact is being deleted, a Plugin keeps aggregating, so that a
+`DeletionBlocked` shows why it cannot go yet. A Rulesfile or a Config keeps the
+conditions it had: their removal cannot be blocked, and a deletion that does not
+finish is waiting for a node, whose ArtifactNode still lists or reports the
+artifact.
 
 ## Artifact server CA renewal
 

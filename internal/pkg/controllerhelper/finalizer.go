@@ -25,9 +25,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-
-	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 )
 
 // patchFinalizer adds (add=true) or removes (add=false) finalizer on obj, then applies the
@@ -68,6 +65,23 @@ func EnsureFinalizer(ctx context.Context, cl client.Client, finalizer string, ob
 
 	logger.V(3).Info("Finalizer set", "finalizer", finalizer)
 	return true, nil
+}
+
+// RemoveFinalizer removes the given finalizer from obj if present, with an optimistic lock so that a
+// stale copy of obj cannot drop a finalizer another party added since.
+func RemoveFinalizer(ctx context.Context, cl client.Client, finalizer string, obj client.Object) error {
+	if !controllerutil.ContainsFinalizer(obj, finalizer) {
+		return nil
+	}
+	if err := patchFinalizer(ctx, cl, obj, finalizer, false); err != nil {
+		if k8serrors.IsConflict(err) {
+			log.FromContext(ctx).V(3).Info("Conflict while removing finalizer, will retry")
+			return err
+		}
+		log.FromContext(ctx).Error(err, "unable to remove finalizer", "finalizer", finalizer)
+		return err
+	}
+	return nil
 }
 
 // EnsureInUseFinalizer adds or removes a single finalizer on obj based on whether the object is
@@ -213,32 +227,4 @@ func isLegacyParentFinalizer(f string) bool {
 		}
 	}
 	return false
-}
-
-// ReconcileArtifactInUseFinalizer keeps an artifact alive while its nodes or OCI cache
-// require cleanup. Cache ownership outlives node assignments. Removing the OCI source
-// releases its references before the finalizer may be dropped.
-func ReconcileArtifactInUseFinalizer(ctx context.Context, cl client.Client, obj client.Object,
-	cache *artifactcache.Cache, nodesInUse bool,
-) error {
-	var kind string
-	var hasOCI bool
-	switch parent := obj.(type) {
-	case *artifactv1alpha1.Plugin:
-		kind, hasOCI = ArtifactKindPlugin, parent.Spec.OCIArtifact != nil
-	case *artifactv1alpha1.Rulesfile:
-		kind, hasOCI = ArtifactKindRulesfile, parent.Spec.OCIArtifact != nil
-	case *artifactv1alpha1.Config:
-		return ReconcileInUseFinalizer(ctx, cl, obj, NodeObjectsInUseFinalizer, nodesInUse)
-	default:
-		return fmt.Errorf("unsupported artifact type %T", obj)
-	}
-	if cache != nil {
-		if hasOCI {
-			nodesInUse = true
-		} else if err := cache.RemoveAll(kind, obj.GetNamespace(), obj.GetName()); err != nil {
-			return fmt.Errorf("evict removed OCI source: %w", err)
-		}
-	}
-	return ReconcileInUseFinalizer(ctx, cl, obj, NodeObjectsInUseFinalizer, nodesInUse)
 }

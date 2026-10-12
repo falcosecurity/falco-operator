@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -30,11 +31,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func TestEnqueueAllOfType_ReturnsOneRequestPerItem(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	p1 := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: "default"}}
 	p2 := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: "other"}}
 	cl := fake.NewClientBuilder().WithScheme(s).WithObjects(p1, p2).Build()
@@ -48,7 +52,7 @@ func TestEnqueueAllOfType_ReturnsOneRequestPerItem(t *testing.T) {
 }
 
 func TestEnqueueAllOfType_EmptyList(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
 
 	reqs := controllerhelper.EnqueueAllOfType(context.Background(), cl, &artifactv1alpha1.PluginList{})
@@ -56,7 +60,7 @@ func TestEnqueueAllOfType_EmptyList(t *testing.T) {
 }
 
 func TestEnqueueAllOfType_ListError(t *testing.T) {
-	s := newArtifactScheme(t)
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithInterceptorFuncs(interceptor.Funcs{
@@ -132,4 +136,28 @@ type noItemsList struct {
 
 func (l *noItemsList) DeepCopyObject() runtime.Object {
 	return &noItemsList{TypeMeta: l.TypeMeta, ListMeta: l.ListMeta}
+}
+
+// Only the objects whose index holds the referenced object's "namespace/name" are requested.
+func TestRequestsReferencing(t *testing.T) {
+	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
+	withCM := func(name, cm string) *artifactv1alpha1.Config {
+		return &artifactv1alpha1.Config{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+			Spec:       artifactv1alpha1.ConfigSpec{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: cm}},
+		}
+	}
+	cl := fake.NewClientBuilder().WithScheme(s).
+		WithObjects(withCM("a", "data"), withCM("b", "other"), withCM("c", "data")).
+		WithIndex(&artifactv1alpha1.Config{}, index.ConfigMapOnConfig, index.ConfigByConfigMapRef).
+		Build()
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "data", Namespace: "default"}}
+
+	reqs := controllerhelper.RequestsReferencing(t.Context(), cl, &artifactv1alpha1.ConfigList{}, index.ConfigMapOnConfig, cm)
+
+	names := make([]string, 0, len(reqs))
+	for _, r := range reqs {
+		names = append(names, r.Name)
+	}
+	assert.ElementsMatch(t, []string{"a", "c"}, names)
 }

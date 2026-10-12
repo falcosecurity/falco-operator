@@ -21,156 +21,168 @@ import (
 	"fmt"
 	"path/filepath"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
-	"github.com/falcosecurity/falco-operator/internal/pkg/index"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// WarmSync observes installed files before controllers start. Current Plugin assignments
-// determine which observed aggregate entries remain owned; historical rule dependencies
-// are not recovered and must be registered by normal source reconciliation.
+// runWarmSync observes installed files before controllers start, and restores plugin ownership from the
+// artifacts the node's ArtifactNode assigns. The ArtifactNode is the assignment; the disk is the source of truth
+// for what is installed.
 //
-// Call after the manager cache has synced, but before controllers start. The reader must
-// provide the ArtifactNodeNodeName index; labels are not authoritative for node assignment.
-func WarmSync(ctx context.Context, cl client.Reader, mgr *Manager, namespace, nodeName string) error {
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	if err := cl.List(ctx, nodeList, client.InNamespace(namespace), client.MatchingFields{index.ArtifactNodeNodeName: nodeName}); err != nil {
-		return fmt.Errorf("listing ArtifactNodes for warm sync: %w", err)
+// It never removes an artifact's files at startup. Orphaned files are the ArtifactNode controller's concern, which
+// acts on the ArtifactNode it observes, or on the lack of one. The one thing it prunes is the shared plugin
+// configuration, of entries that no assigned Plugin owns and no installed Rulesfile requires. When there is no ArtifactNode, it only recovers the
+// installed files from disk and observes the shared plugin configuration exactly as found, since pruning it
+// against an empty assignment would destroy working configuration.
+//
+// The node's client is expected to be the manager's own cache-backed client (mgr.GetClient()): runWarmSync is
+// only ever called from WarmSyncRunnable.Warmup, which controller-runtime runs after the manager's cache has
+// synced. The reconcilers wait for it through Node.WaitWarmSync (see WarmSyncRunnable's doc comment).
+func (n *Node) runWarmSync(ctx context.Context) error {
+	artifactNode := &artifactv1alpha1.ArtifactNode{}
+	if err := n.cl.Get(ctx, client.ObjectKey{Namespace: n.namespace, Name: n.name}, artifactNode); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("getting the ArtifactNode for warm sync: %w", err)
+		}
+		return n.recoverInstalled(ctx, nil, false)
 	}
+
+	n.ObserveArtifactNode(artifactNode)
+	assigned := artifactNode.Spec.Artifacts
+	if !artifactNode.DeletionTimestamp.IsZero() {
+		// Everything is being removed, so nothing is assigned any longer.
+		assigned = nil
+	}
+	return n.recoverInstalled(ctx, assigned, true)
+}
+
+// recoverInstalled recovers the installed files from disk and, when the assignment is known, restores the
+// ownership of the shared plugin configuration from the assigned plugins.
+func (n *Node) recoverInstalled(ctx context.Context, assigned []artifactv1alpha1.NodeArtifactRef, assignmentKnown bool) error {
+	if err := n.seedInstalledFromDisk(ctx); err != nil {
+		return err
+	}
+	if err := n.seedRequirementsFromDisk(ctx); err != nil {
+		return err
+	}
+	if !assignmentKnown {
+		// With no ArtifactNode to say whose the entries are, the shared plugin configuration is observed as
+		// found and left alone; see observePluginsConfig for what happens to it from there.
+		return n.observePluginsConfig(ctx)
+	}
+
 	pluginList := &artifactv1alpha1.PluginList{}
-	if err := cl.List(ctx, pluginList, client.InNamespace(namespace)); err != nil {
+	if err := n.cl.List(ctx, pluginList, client.InNamespace(n.namespace)); err != nil {
 		return fmt.Errorf("listing current Plugins for warm sync: %w", err)
 	}
 	byName := make(map[string]*artifactv1alpha1.Plugin, len(pluginList.Items))
 	for i := range pluginList.Items {
-		plugin := &pluginList.Items[i]
-		byName[plugin.Name] = plugin
+		byName[pluginList.Items[i].Name] = &pluginList.Items[i]
 	}
 	var plugins []*artifactv1alpha1.Plugin
-	for i := range nodeList.Items {
-		node := &nodeList.Items[i]
-		ref := metav1.GetControllerOf(node)
-		if !node.DeletionTimestamp.IsZero() || ref == nil || ref.Kind != controllerhelper.KindPlugin {
+	for _, ref := range assigned {
+		if ref.Kind != artifact.KindPlugin {
 			continue
 		}
 		plugin := byName[ref.Name]
-		if plugin == nil || plugin.UID != ref.UID || !plugin.DeletionTimestamp.IsZero() || plugin.Spec.OCIArtifact == nil {
+		if plugin == nil || plugin.UID != types.UID(ref.UID) || !plugin.DeletionTimestamp.IsZero() || plugin.Spec.OCIArtifact == nil {
 			continue
 		}
 		plugins = append(plugins, plugin)
-		delete(byName, plugin.Name) // Multiple assignments for the same owner are not alias collisions.
 	}
-
-	orphans, err := seedInstalledCacheFromDisk(ctx, mgr, nodeList, namespace)
-	if err != nil {
-		return err
-	}
-	if err := mgr.restorePluginsConfig(ctx, plugins); err != nil {
-		return err
-	}
-	return mgr.removeOrphanedArtifacts(ctx, orphans)
+	return n.restorePluginsConfig(ctx, plugins)
 }
 
-// seedInstalledCacheFromDisk recovers files from disk and identifies orphaned names.
-// Cleanup waits until the observed shared config has been reconciled with current owners.
+// seedInstalledFromDisk recovers the installed files from disk into the node's record of them.
 //
-// The cache, not any ArtifactNode's status, is what every filesystem decision (skip vs. rewrite,
-// what to remove) is based on from here on; status is a write-through mirror for observability
-// only. Seeding it from disk rather than from status means a crash between writing a file and
-// patching status recording it (or any other way status drifted from reality while this process
-// wasn't running) can never leave a file invisible to cleanup: the cache reflects what's actually
-// there, not what a possibly-stale status object last said.
-func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *artifactv1alpha1.ArtifactNodeList, namespace string) ([]Key, error) {
-	var orphans []Key
-
-	kinds := []struct {
-		ownerKind    string
-		cacheKind    Kind
-		artifactType artifact.Kind
-	}{
-		{controllerhelper.KindRulesfile, KindRulesfile, artifact.KindRulesfile},
-		{controllerhelper.KindConfig, KindConfig, artifact.KindConfig},
-		{controllerhelper.KindPlugin, KindPlugin, artifact.KindPlugin},
-	}
-
-	liveNames := map[string]map[string]bool{}
-	for i := range nodeList.Items {
-		n := &nodeList.Items[i]
-		for _, ref := range n.OwnerReferences {
-			if ref.Controller == nil || !*ref.Controller {
-				continue
-			}
-			if liveNames[ref.Kind] == nil {
-				liveNames[ref.Kind] = map[string]bool{}
-			}
-			liveNames[ref.Kind][ref.Name] = true
-			break
-		}
-	}
-
-	for _, kt := range kinds {
-		disk, err := mgr.ScanAll(ctx, kt.artifactType)
+// The record, not any status entry, is what every filesystem decision (skip vs. rewrite, what to remove) is
+// based on from here on; status is a write-through mirror for observability only. Seeding it from disk
+// rather than from status means a crash between writing a file and publishing the status that records it
+// (or any other way status drifted from reality while this process wasn't running) can never leave a file
+// invisible to cleanup: the record reflects what's actually there, not what a possibly-stale status last said.
+func (n *Node) seedInstalledFromDisk(ctx context.Context) error {
+	// Every registered kind is recovered, whatever they happen to be.
+	infos := artifact.Kinds()
+	for i := range infos {
+		info := &infos[i]
+		found, err := n.ScanAll(ctx, info.Kind)
 		if err != nil {
-			return nil, fmt.Errorf("warm sync: scan installed %s artifacts from disk: %w", kt.ownerKind, err)
+			return fmt.Errorf("warm sync: scan installed %s artifacts from disk: %w", info.Kind, err)
 		}
 
 		// The shared plugins-config aggregate lives in the same directory as Config CRs' own
-		// files but isn't one: it belongs to the single node-level PluginConfigKey, not to any
-		// Config ArtifactNode, and must never be treated as orphaned.
-		if kt.ownerKind == controllerhelper.KindConfig {
-			if files, ok := disk[pluginConfigFileName]; ok {
-				sharedPath, err := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), pluginConfigFileName,
-					priority.MaxPriority, artifact.MediumInline, artifact.KindConfig)
-				if err != nil {
-					return nil, err
-				}
+		// files but isn't one: it is the node's own file, not any Config's, and must never be
+		// treated as one.
+		if info.Kind == artifact.KindConfig {
+			sharedPath, err := artifact.ArtifactPath(n.dirs, pluginConfigFileName,
+				priority.MaxPriority, artifact.MediumInline, artifact.KindConfig)
+			if err != nil {
+				return fmt.Errorf("warm sync: resolve shared plugin configuration path: %w", err)
+			}
+
+			if files, ok := found[pluginConfigFileName]; ok {
 				sharedName := filepath.Base(sharedPath)
 				var ordinary []artifactv1alpha1.InstalledArtifact
 				for _, file := range files {
 					if filepath.Base(file.Path) == sharedName {
-						mgr.SeedInstalled(PluginConfigKey, []artifactv1alpha1.InstalledArtifact{file})
+						n.seedPluginsConfigFile(file)
 					} else {
 						ordinary = append(ordinary, file)
 					}
 				}
 				if len(ordinary) == 0 {
-					delete(disk, pluginConfigFileName)
+					delete(found, pluginConfigFileName)
 				} else {
-					disk[pluginConfigFileName] = ordinary
+					found[pluginConfigFileName] = ordinary
 				}
 			}
 		}
 
-		live := liveNames[kt.ownerKind]
-		for name, files := range disk {
-			key := Key{Kind: kt.cacheKind, Namespace: namespace, Name: name}
-			if !live[name] {
-				orphans = append(orphans, key)
-			}
-			mgr.SeedInstalled(key, files)
+		for name, files := range found {
+			n.SeedInstalled(artifact.Ref{Kind: info.Kind, Name: name}, files)
 		}
 	}
-	return orphans, nil
+	return nil
 }
 
-// Cleanup follows recovery so a plugin library still referenced by the aggregate is retained.
-func (m *Manager) removeOrphanedArtifacts(ctx context.Context, orphans []Key) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, key := range orphans {
-		files := m.installed[key]
-		if key.Kind == KindPlugin && m.pluginFilesReferencedLocked(files) {
+// seedRequirementsFromDisk recovers what each installed rulesfile requires by reading the file and
+// parsing its own required_engine_version and required_plugin_versions directives.
+//
+// The rules file is the source of truth for this: it is what the instance operator parsed to fill
+// in Status.ArtifactMeta in the first place, so recovering it here needs no CR and no API call, and
+// cannot disagree with what is installed. A file that cannot be read or parsed is skipped: it will
+// be rewritten by its own reconcile, and a missing requirement only ever fails safe, by leaving a
+// removal unblocked that a later reconcile will block.
+func (n *Node) seedRequirementsFromDisk(ctx context.Context) error {
+	logger := log.FromContext(ctx)
+	for _, key := range n.installedKeys() {
+		if key.Kind != artifact.KindRulesfile {
 			continue
 		}
-		log.FromContext(ctx).Info("Removing orphaned artifact files with no ArtifactNode on this node", "kind", key.Kind, "name", key.Name)
-		if err := m.removeLocked(ctx, key, files); err != nil {
-			return fmt.Errorf("warm sync: remove orphaned %s %q: %w", key.Kind, key.Name, err)
+		for _, file := range n.GetInstalled(key) {
+			content, err := n.disk.Read(ctx, file.Path)
+			if err != nil {
+				logger.V(3).Info("warm sync: unable to read installed rulesfile; its requirements stay unknown until it reconciles",
+					"path", file.Path, "err", err)
+				continue
+			}
+			requirements, err := compat.ParseRulesRequirements(content)
+			if err != nil {
+				logger.V(3).Info("warm sync: unable to parse installed rulesfile; its requirements stay unknown until it reconciles",
+					"path", file.Path, "err", err)
+				continue
+			}
+			metadata := &commonv1alpha1.ArtifactMeta{}
+			requirements.AppendTo(metadata)
+			n.seedRulesfileRequirements(key, artifact.Medium(file.Medium), file.ContentHash, metadata)
 		}
 	}
 	return nil

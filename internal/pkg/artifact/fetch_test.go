@@ -39,7 +39,7 @@ const testFetchDigest = "sha256:111111111111111111111111111111111111111111111111
 func TestFetcher_FetchOCI(t *testing.T) {
 	tests := []struct {
 		name            string
-		artifactType    Kind
+		kind            Kind
 		nodeName        string
 		handler         http.HandlerFunc
 		wantErrContains string
@@ -48,9 +48,9 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		wantNodeHeader  string // "" means: assert the header is absent entirely
 	}{
 		{
-			name:         "plugin request includes os/arch query and node header",
-			artifactType: KindPlugin,
-			nodeName:     "node-1",
+			name:     "plugin request includes os/arch query and node header",
+			kind:     KindPlugin,
+			nodeName: "node-1",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, runtime.GOOS, r.URL.Query().Get("os"))
 				assert.Equal(t, runtime.GOARCH, r.URL.Query().Get("arch"))
@@ -61,9 +61,9 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			wantNodeHeader: "node-1",
 		},
 		{
-			name:         "rulesfile request has no os/arch query",
-			artifactType: KindRulesfile,
-			nodeName:     "node-2",
+			name:     "rulesfile request has no os/arch query",
+			kind:     KindRulesfile,
+			nodeName: "node-2",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Empty(t, r.URL.Query().Get("os"))
 				assert.Empty(t, r.URL.Query().Get("arch"))
@@ -74,9 +74,9 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			wantNodeHeader: "node-2",
 		},
 		{
-			name:         "empty NodeName omits the header entirely",
-			artifactType: KindRulesfile,
-			nodeName:     "",
+			name:     "empty NodeName omits the header entirely",
+			kind:     KindRulesfile,
+			nodeName: "",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
@@ -85,8 +85,8 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			wantNodeHeader: "",
 		},
 		{
-			name:         "rulesfile perm is 0o644 regardless of server response headers",
-			artifactType: KindRulesfile,
+			name: "rulesfile perm is 0o644 regardless of server response headers",
+			kind: KindRulesfile,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
@@ -94,8 +94,8 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			wantPerm:    0o644,
 		},
 		{
-			name:         "plugin perm is 0o755 regardless of server response headers",
-			artifactType: KindPlugin,
+			name: "plugin perm is 0o755 regardless of server response headers",
+			kind: KindPlugin,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
@@ -104,8 +104,8 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		},
 		{
 			// RetryableError.Error() forwards the wrapped error's message regardless of retryability.
-			name:         "non-200 status returns an error",
-			artifactType: KindRulesfile,
+			name: "non-200 status returns an error",
+			kind: KindRulesfile,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 			},
@@ -126,7 +126,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 			defer srv.Close()
 
 			f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client(), NodeName: tt.nodeName}
-			result, err := f.FetchOCI(context.Background(), "ns", "name", tt.artifactType, testFetchDigest)
+			result, err := f.FetchOCI(context.Background(), "ns", "name", tt.kind, testFetchDigest)
 
 			if tt.wantErrContains != "" {
 				require.Error(t, err)
@@ -152,7 +152,7 @@ func TestFetcher_FetchOCI_UnsupportedType(t *testing.T) {
 	f := &Fetcher{ServerURL: "http://example.invalid", HTTPClient: http.DefaultClient}
 	_, err := f.FetchOCI(context.Background(), "ns", "name", KindConfig, testFetchDigest)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not serve")
+	assert.Contains(t, err.Error(), "does not serve Config artifacts")
 }
 
 func TestFetcher_FetchOCI_RequestError(t *testing.T) {
@@ -167,10 +167,10 @@ func TestFetcher_FetchOCI_RequestError(t *testing.T) {
 }
 
 func TestFetcher_FetchOCI_MissingServerURL(t *testing.T) {
-	for _, artifactType := range []Kind{KindPlugin, KindRulesfile} {
-		t.Run(string(artifactType), func(t *testing.T) {
+	for _, kind := range []Kind{KindPlugin, KindRulesfile} {
+		t.Run(string(kind), func(t *testing.T) {
 			fetcher := &Fetcher{HTTPClient: http.DefaultClient}
-			result, err := fetcher.FetchOCI(t.Context(), "ns", "name", artifactType, testFetchDigest)
+			result, err := fetcher.FetchOCI(t.Context(), "ns", "name", kind, testFetchDigest)
 			require.EqualError(t, err, "OCI artifacts require an artifact server URL; configure --artifact-server-url or ARTIFACT_SERVER_URL")
 			require.Empty(t, result)
 			var retryErr *RetryableError
@@ -307,8 +307,8 @@ func TestRequeueDelay(t *testing.T) {
 }
 
 func TestFetcher_FetchOCI_RequiresConfirmedDigest(t *testing.T) {
-	for _, artifactType := range []Kind{KindPlugin, KindRulesfile} {
-		t.Run(string(artifactType), func(t *testing.T) {
+	for _, kind := range []Kind{KindPlugin, KindRulesfile} {
+		t.Run(string(kind), func(t *testing.T) {
 			for _, tc := range []struct{ name, servedDigest string }{
 				{name: "older server without digest"},
 				{name: "different revision", servedDigest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
@@ -326,7 +326,7 @@ func TestFetcher_FetchOCI_RequiresConfirmedDigest(t *testing.T) {
 					}))
 					defer srv.Close()
 					f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-					result, err := f.FetchOCI(context.Background(), "ns", "name", artifactType, testFetchDigest)
+					result, err := f.FetchOCI(context.Background(), "ns", "name", kind, testFetchDigest)
 					assert.EqualValues(t, 1, calls.Load())
 					if tc.servedDigest != testFetchDigest {
 						var retryErr *RetryableError

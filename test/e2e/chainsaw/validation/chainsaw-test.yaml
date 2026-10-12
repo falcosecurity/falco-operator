@@ -189,6 +189,181 @@ spec:
               - check:
                   ($error != null): true
 
+
+    - name: Accept-a-valid-artifactnode
+      description: The baseline of the rejections below, checked on the server without keeping the object (a controller would delete it at once, since no such node exists).
+      try:
+        - create:
+            dryRun: true
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: valid
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Rulesfile
+                    name: rules
+                    uid: 6d1f3a52-0000-4000-8000-000000000001
+                  - kind: Rulesfile
+                    name: other-rules
+                    uid: 6d1f3a52-0000-4000-8000-000000000002
+                  - kind: Plugin
+                    name: rules
+                    uid: 6d1f3a52-0000-4000-8000-000000000003
+
+    - name: Reject-artifactnode-without-nodename
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-without-nodename
+                namespace: ($namespace)
+              spec:
+                artifacts: []
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-with-empty-nodename
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-with-empty-nodename
+                namespace: ($namespace)
+              spec:
+                nodeName: ""
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-artifact-of-another-kind
+      description: Only Rulesfiles, Plugins and Configs can be assigned.
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-artifact-of-another-kind
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Secret
+                    name: not-an-artifact
+                    uid: 6d1f3a52-0000-4000-8000-000000000001
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-artifact-without-uid
+      description: The uid is what tells a recreated artifact from its predecessor, so an assignment without one is meaningless.
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-artifact-without-uid
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Rulesfile
+                    name: rules
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-artifact-with-empty-uid
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-artifact-with-empty-uid
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Rulesfile
+                    name: rules
+                    uid: ""
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-artifact-without-name
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-artifact-without-name
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Rulesfile
+                    name: ""
+                    uid: 6d1f3a52-0000-4000-8000-000000000001
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-duplicate-artifact
+      description: A node lists an artifact once. Entries are unique by kind and name, whatever their uids.
+      try:
+        - create:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: invalid-duplicate-artifact
+                namespace: ($namespace)
+              spec:
+                nodeName: some-node
+                artifacts:
+                  - kind: Rulesfile
+                    name: rules
+                    uid: 6d1f3a52-0000-4000-8000-000000000001
+                  - kind: Rulesfile
+                    name: rules
+                    uid: 6d1f3a52-0000-4000-8000-000000000002
+            expect:
+              - check:
+                  ($error != null): true
+
+    - name: Reject-artifactnode-with-more-than-100-artifacts
+      description: The cap bounds the object's size, since every update rewrites and re-sends the whole object. 100 pass, 101 do not.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_COUNT
+                value: "100"
+            content: bash ../common/scripts/create_artifactnode_dry_run.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: ARTIFACT_COUNT
+                value: "101"
+            content: bash ../common/scripts/create_artifactnode_dry_run.sh
+            check:
+              ($error != null): true
+
   catch:
     - description: Capture debug snapshot on failure
       script:

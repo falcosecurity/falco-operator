@@ -17,8 +17,11 @@
 package testutil
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"reflect"
+	goruntime "runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,7 +32,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 const (
@@ -128,15 +135,24 @@ func RequireEvents(t *testing.T, ch chan string, wantEvents []string) {
 	assert.ElementsMatch(t, wantEvents, got)
 }
 
-// CRDDirPath returns the CRD directory path relative to an instance controller package
-// (controllers/instance/X/).
+// repoRoot is the root of the repository, located from this file so that it does not depend on how deep the
+// package running a test is.
+func repoRoot() string {
+	_, file, _, ok := goruntime.Caller(0)
+	if !ok {
+		panic("testutil: cannot locate the repository root")
+	}
+	return filepath.Join(filepath.Dir(file), "..", "..")
+}
+
+// CRDDirPath returns the directory holding the CRDs of the project.
 func CRDDirPath() string {
-	return filepath.Join("..", "..", "..", "chart", "falco-operator", "crds")
+	return filepath.Join(repoRoot(), "chart", "falco-operator", "crds")
 }
 
 // GetFirstFoundEnvTestBinaryDir returns the first found envtest binary directory, or empty string if not found.
 func GetFirstFoundEnvTestBinaryDir() string {
-	basePath := filepath.Join("..", "..", "..", "bin", "k8s")
+	basePath := filepath.Join(repoRoot(), "bin", "k8s")
 	entries, err := os.ReadDir(basePath)
 	if err != nil {
 		return ""
@@ -147,4 +163,70 @@ func GetFirstFoundEnvTestBinaryDir() string {
 		}
 	}
 	return ""
+}
+
+// Finalizers of the finalizer tests: one the test sets, one another controller owns, and the legacy per-node
+// finalizers that operators before node objects left on parents.
+const (
+	TestFinalizer                = "test.example.com/finalizer"
+	TestForeignFinalizer         = "other.example.com/keep-me"
+	TestLegacyRulesfileFinalizer = "rulesfile.artifact.falcosecurity.dev/finalizer-node-1"
+	TestLegacyPluginFinalizer    = "plugin.artifact.falcosecurity.dev/finalizer-node-2"
+	TestLegacyConfigFinalizer    = "config.artifact.falcosecurity.dev/finalizer-node-3"
+)
+
+// FailPatch returns interceptor funcs that fail every Patch with err.
+func FailPatch(err error) interceptor.Funcs {
+	return interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+		return err
+	}}
+}
+
+// FailGet returns interceptor funcs that fail every Get with err.
+func FailGet(err error) interceptor.Funcs {
+	return interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+		return err
+	}}
+}
+
+// FailCreate returns interceptor funcs that fail every Create with err.
+func FailCreate(err error) interceptor.Funcs {
+	return interceptor.Funcs{Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
+		return err
+	}}
+}
+
+// FailDelete returns interceptor funcs that fail every Delete with err.
+func FailDelete(err error) interceptor.Funcs {
+	return interceptor.Funcs{Delete: func(context.Context, client.WithWatch, client.Object, ...client.DeleteOption) error {
+		return err
+	}}
+}
+
+// FailListOf returns interceptor funcs that fail every List of the type of list with err, and let every other List
+// through.
+func FailListOf(list client.ObjectList, err error) interceptor.Funcs {
+	return interceptor.Funcs{List: func(ctx context.Context, cl client.WithWatch, l client.ObjectList, opts ...client.ListOption) error {
+		if reflect.TypeOf(l) == reflect.TypeOf(list) {
+			return err
+		}
+		return cl.List(ctx, l, opts...)
+	}}
+}
+
+// NewQueue returns an empty queue of requests, for the event handlers under test to fill.
+func NewQueue() workqueue.TypedRateLimitingInterface[reconcile.Request] {
+	return workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[reconcile.Request]())
+}
+
+// DrainQueue empties q and returns the names of the requests it held, in order.
+func DrainQueue(t *testing.T, q workqueue.TypedRateLimitingInterface[reconcile.Request]) []string {
+	t.Helper()
+	var names []string
+	for q.Len() > 0 {
+		item, _ := q.Get()
+		names = append(names, item.Name)
+		q.Done(item)
+	}
+	return names
 }

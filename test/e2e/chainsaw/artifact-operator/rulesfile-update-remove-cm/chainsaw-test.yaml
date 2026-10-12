@@ -99,25 +99,23 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-update-remove-cm-test-inline.yaml
-                    priority: 50
-                (installedArtifacts[?medium == 'configmap']):
-                  - path: /etc/falco/rules.d/50-02-rulesfile-update-remove-cm-test-configmap.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-update-remove-cm-test-inline.yaml
+                        priority: 50
+                    (installedArtifacts[?medium == 'configmap']):
+                      - path: /etc/falco/rules.d/50-02-rulesfile-update-remove-cm-test-configmap.yaml
+                        priority: 50
 
     - name: "Step 05: Assert-cm-file-on-filesystem"
       use:
@@ -186,22 +184,20 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-update-remove-cm-test-inline.yaml
-                    priority: 50
-                (length(installedArtifacts[?medium == 'configmap'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-update-remove-cm-test-inline.yaml
+                        priority: 50
+                    (length(installedArtifacts[?medium == 'configmap'])): 0
 
     - name: "Step 09: Assert-cm-file-deleted-from-filesystem"
       use:

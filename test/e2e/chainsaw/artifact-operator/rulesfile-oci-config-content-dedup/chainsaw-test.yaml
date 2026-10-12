@@ -82,20 +82,18 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'oci']):
-                  - path: /etc/falco/rules.d/50-01-rulesfile-oci-config-content-dedup-test-oci.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'oci']):
+                      - path: /etc/falco/rules.d/50-01-rulesfile-oci-config-content-dedup-test-oci.yaml
+                        priority: 50
 
     - name: "Step 04: Assert-file-on-filesystem"
       use:

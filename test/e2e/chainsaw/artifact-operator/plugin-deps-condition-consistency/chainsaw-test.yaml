@@ -140,29 +140,33 @@ spec:
                   matchLabels:
                     chainsaw-node-group: ($namespace)
 
-    - name: "Step 07: Assert-both-artifact-nodes-exist"
+    - name: "Step 07: Assert-both-nodes-list-the-artifact"
       description: |
-        Both fake nodes match the selector, so the instance aggregator creates two ArtifactNodes.
-        Names follow the deterministic format: "plugin--<pluginName>--<nodeName>".
+        Both fake nodes match the selector, so the assignment controller creates an ArtifactNode for
+        each of them, named after the node, listing the Plugin.
       try:
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
+                name: ($node_a_name)
                 namespace: ($namespace)
               spec:
                 nodeName: ($node_a_name)
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
+                name: ($node_b_name)
                 namespace: ($namespace)
               spec:
                 nodeName: ($node_b_name)
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
 
     - name: "Step 08: Patch-node-a-artifactnode-to-blocked"
       description: |
@@ -171,43 +175,21 @@ spec:
         OCIArtifactProgrammed=False so those condition types are present (and False) for the
         aggregator to act on, rather than absent and silently ignored.
 
-        Status-subresource patch: ArtifactNode has +kubebuilder:subresource:status, so a plain
-        patch would be silently ignored for status fields.
+        The report is written to the node's ArtifactNode status, as the artifact operator on that
+        node would (see common/scripts/simulate_sidecar_report.sh).
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: DependenciesSatisfied
-                    status: "False"
-                    reason: SimulatedDepsNotSatisfied
-                    message: Simulated blocked node (requirements not met, never installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: ConfigProgrammed
-                    status: "False"
-                    reason: SimulatedDepsNotSatisfied
-                    message: Simulated blocked node (requirements not met, never installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: OCIArtifactProgrammed
-                    status: "False"
-                    reason: SimulatedDepsNotSatisfied
-                    message: Simulated blocked node (requirements not met, never installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: Programmed
-                    status: "False"
-                    reason: SimulatedDepsNotSatisfied
-                    message: Simulated blocked node (requirements not met, never installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: DependenciesSatisfied:False:SimulatedDepsNotSatisfied,ConfigProgrammed:False:SimulatedDepsNotSatisfied,OCIArtifactProgrammed:False:SimulatedDepsNotSatisfied,Programmed:False:SimulatedDepsNotSatisfied
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 09: Patch-node-b-artifactnode-to-healthy"
       description: |
@@ -216,40 +198,18 @@ spec:
         Both nodes are patched before the assertion so the aggregator sees both simultaneously when
         the ArtifactNode watch fires the Plugin reconcile.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: DependenciesSatisfied
-                    status: "True"
-                    reason: SimulatedDepsOk
-                    message: Simulated healthy node (requirements met, artifact installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: ConfigProgrammed
-                    status: "True"
-                    reason: SimulatedDepsOk
-                    message: Simulated healthy node (requirements met, artifact installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: OCIArtifactProgrammed
-                    status: "True"
-                    reason: SimulatedDepsOk
-                    message: Simulated healthy node (requirements met, artifact installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedDepsOk
-                    message: Simulated healthy node (requirements met, artifact installed).
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: DependenciesSatisfied:True:SimulatedDepsOk,ConfigProgrammed:True:SimulatedDepsOk,OCIArtifactProgrammed:True:SimulatedDepsOk,Programmed:True:SimulatedDepsOk
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 10: Assert-plugin-false-wins-for-all-install-conditions"
       description: |
@@ -286,74 +246,34 @@ spec:
         List-order-independence reason as artifact-multi-node-aggregation Step 10: AggregateConditions'
         "first True wins" depends on ListOwnedNodes' List order, which is not guaranteed stable.
       try:
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_a_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: DependenciesSatisfied
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: ConfigProgrammed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: OCIArtifactProgrammed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
-        - patch:
-            resource:
-              apiVersion: artifact.falcosecurity.dev/v1alpha1
-              kind: ArtifactNode
-              metadata:
-                name: (join('--', ['plugin', $plugin_name, $node_b_name]))
-                namespace: ($namespace)
-              status:
-                conditions:
-                  - type: DependenciesSatisfied
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: ConfigProgrammed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: OCIArtifactProgrammed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-                  - type: Programmed
-                    status: "True"
-                    reason: SimulatedAllHealthy
-                    message: All nodes healthy for deps-condition-consistency test.
-                    observedGeneration: 1
-                    lastTransitionTime: "2024-01-01T00:00:00Z"
-            subresource: status
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: DependenciesSatisfied:True:SimulatedAllHealthy,ConfigProgrammed:True:SimulatedAllHealthy,OCIArtifactProgrammed:True:SimulatedAllHealthy,Programmed:True:SimulatedAllHealthy
+              - name: MESSAGE
+                value: All nodes healthy for deps-condition-consistency test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin
+              - name: CONDITIONS
+                value: DependenciesSatisfied:True:SimulatedAllHealthy,ConfigProgrammed:True:SimulatedAllHealthy,OCIArtifactProgrammed:True:SimulatedAllHealthy,Programmed:True:SimulatedAllHealthy
+              - name: MESSAGE
+                value: All nodes healthy for deps-condition-consistency test.
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 12: Assert-plugin-all-true-after-unblock"
       description: |
@@ -386,6 +306,34 @@ spec:
                     reason: SimulatedAllHealthy
                     message: All nodes healthy for deps-condition-consistency test.
 
+    - name: "Step 13: Withdraw-the-simulated-reports"
+      description: No artifact operator runs on the fake nodes, so the entries are withdrawn here, which is what lets the parent be deleted at cleanup.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Plugin
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Plugin
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+
   catch:
     - description: Capture debug snapshot on failure
       script:
@@ -398,6 +346,16 @@ spec:
             value: falco-operator
         content: |
           bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort withdrawal of the simulated entries, so the parent can be deleted.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: KINDS
+            value: Plugin
+          - name: WITHDRAW
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
     - description: |
         Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not
         leave either behind for the next run.

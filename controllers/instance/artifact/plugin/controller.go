@@ -14,14 +14,15 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package plugin implements the Plugin node-object aggregator controller.
+// Package plugin implements the Plugin aggregator controller.
 // It runs in the instance operator (singleton Deployment) and is responsible for:
-//   - Creating one ArtifactNode per cluster node that matches the Plugin selector.
-//   - Deleting ArtifactNode objects when a node no longer matches.
 //   - Fetching and caching the OCI artifact's requirements/dependencies as
 //     Status.ArtifactMeta, and pre-fetching its binary blob into the shared cache.
-//   - Aggregating per-node conditions into the parent Plugin status (sole writer).
+//   - Aggregating the per-node conditions that each node's artifact operator publishes on its
+//     ArtifactNode into the parent Plugin status (sole writer).
 //   - Managing the NodeObjectsInUseFinalizer on the parent Plugin.
+//
+// Which nodes get the Plugin is decided by the ArtifactNode assignment controller.
 package plugin
 
 import (
@@ -29,27 +30,17 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	apimeta "k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/events"
-	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
-	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/oci/puller"
 )
 
@@ -65,8 +56,8 @@ func NewPluginAggregatorReconciler(
 	return &PluginAggregatorReconciler{Client: cl, Scheme: scheme, recorder: recorder, cache: cache}
 }
 
-// PluginAggregatorReconciler manages ArtifactNode objects and aggregates their
-// conditions into the parent Plugin status.
+// PluginAggregatorReconciler aggregates the per-node conditions published on ArtifactNodes into the
+// parent Plugin status.
 type PluginAggregatorReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -82,169 +73,33 @@ type PluginAggregatorReconciler struct {
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins,verbs=get;list;watch
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/status,verbs=patch;update
 // +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=plugins/finalizers,verbs=patch;update
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=artifact.falcosecurity.dev,resources=artifactnodes/status,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups=instance.falcosecurity.dev,resources=falcos,verbs=get;list;watch
 
-// Reconcile reconciles a Plugin: ensures ArtifactNode objects exist for matching nodes,
-// removes stale ones, and writes the aggregate conditions back to the Plugin.
+// Reconcile reconciles a Plugin: prepares its metadata and blob cache, manages its in-use finalizer and
+// writes the aggregate of the conditions its nodes published back to the Plugin.
 func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	logger.V(1).Info("Reconciling Plugin")
+	return shared.Reconcile(ctx, req, r.aggregation())
+}
 
-	plugin := &artifactv1alpha1.Plugin{}
-	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil {
-		if k8serrors.IsNotFound(err) && r.cache != nil {
-			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.KindPlugin), req.Namespace, req.Name)
-		}
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+// aggregation is what the aggregate reconcile needs of the Plugins.
+func (r *PluginAggregatorReconciler) aggregation() shared.Aggregation[*artifactv1alpha1.Plugin] {
+	return shared.Aggregation[*artifactv1alpha1.Plugin]{
+		Client:                r.Client,
+		Scheme:                r.Scheme,
+		FieldManager:          ControllerName,
+		Kind:                  artifact.KindPlugin,
+		Cache:                 r.cache,
+		New:                   func() *artifactv1alpha1.Plugin { return &artifactv1alpha1.Plugin{} },
+		StatusValue:           func(plugin *artifactv1alpha1.Plugin) any { return *plugin.Status.DeepCopy() },
+		HoldForSelectedNodes:  true,
+		Metadata:              r.fetchAndCacheArtifactMeta,
+		MetadataFailedReason:  artifact.ReasonOCIArtifactProgramFailed,
+		MetadataFailedMessage: "Failed to fetch OCI artifact metadata: %s",
+		Prefetch:              r.fetchAndCacheBlobs,
+		AggregateOnDeletion:   true,
 	}
-
-	// Deletion is gated by NodeObjectsInUseFinalizer while node objects or the OCI cache need
-	// cleanup. A per-node artifact operator keeps its ArtifactNode's finalizer in place as
-	// long as a Rulesfile on that node still depends on this plugin.
-	if !plugin.DeletionTimestamp.IsZero() {
-		logger.V(1).Info("Plugin marked for deletion, running cleanup")
-		return ctrl.Result{}, r.handleDeletion(ctx, plugin)
-	}
-
-	// allMatchingNodes includes every selected platform for blob pre-fetching, even when no
-	// Falco pod currently runs there. OCI cache ownership is retained independently of this set.
-	allMatchingNodes, err := controllerhelper.ListMatchingNodes(ctx, r.Client, plugin.Spec.Selector)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	// matchingNodes: subset of allMatchingNodes where a Running Falco pod exists; these are
-	// the nodes that currently have an artifact operator able to reconcile an ArtifactNode.
-	runningFalcoNodes, err := controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, plugin.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	matchingNodes := controllerhelper.FilterNodesByName(allMatchingNodes, runningFalcoNodes)
-	logger.V(1).Info("Listed matching nodes", "total", len(allMatchingNodes), "withFalco", len(matchingNodes))
-
-	existingNodes, err := controllerhelper.ListOwnedNodes(ctx, r.Client, plugin.Namespace, plugin.Name, controllerhelper.KindPlugin)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Listed existing ArtifactNode objects", "count", len(existingNodes.Items))
-
-	if err := controllerhelper.ReconcileArtifactInUseFinalizer(
-		ctx, r.Client, plugin, r.cache,
-		len(allMatchingNodes) > 0 || len(existingNodes.Items) > 0,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// ArtifactNode existence is the desired per-node assignment. Use the same set for
-	// creation, stale deletion, and status aggregation. If a Falco pod moves away, its old
-	// ArtifactNode is removed; a later pod on that node causes it to be created again.
-	desired := make(map[string]struct{}, len(matchingNodes))
-	for i := range matchingNodes {
-		desired[matchingNodes[i].Name] = struct{}{}
-	}
-
-	if err := controllerhelper.DeleteStaleNodeObjects(
-		ctx, r.Client, existingNodes.Items, desired, runningFalcoNodes,
-	); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Snapshot before any status mutation so we can skip the first SSA when nothing changed.
-	oldStatus := plugin.Status.DeepCopy()
-
-	// Fetch OCI config layer once and cache it in parent.Status.ArtifactMeta so that
-	// per-node artifact operators can read requirements without hitting the registry.
-	if err := r.fetchAndCacheArtifactMeta(ctx, plugin); err != nil {
-		// Surfaces the failure directly on the parent Plugin status. ObservedGeneration is not
-		// advanced, so enforce-mode per-node operators stay deferred, and no ArtifactNodes are
-		// created since they cannot be programmed without metadata.
-
-		// Still aggregate per-node conditions from existing ArtifactNodes: a broken reference
-		// (e.g. a missing auth Secret) fails fetchAndCacheArtifactMeta too, and the usual
-		// aggregation pass below never runs in this branch, since node creation depends on
-		// metadata having been fetched. Without this, a per-node operator's ResolvedRefs=False
-		// would never reach the Plugin's own status.
-		nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-		aggregated := controllerhelper.AggregateConditions(nodeSets, plugin.Generation)
-
-		// The instance-level metadata failure is the more specific, authoritative cause of
-		// Programmed=False; it must win over whatever the per-node aggregate computed above.
-		apimeta.SetStatusCondition(&aggregated, metav1.Condition{
-			Type:               commonv1alpha1.ConditionProgrammed.String(),
-			Status:             metav1.ConditionFalse,
-			Reason:             artifact.ReasonOCIArtifactProgramFailed,
-			Message:            fmt.Sprintf("Failed to fetch OCI artifact metadata: %s", err.Error()),
-			ObservedGeneration: plugin.Generation,
-		})
-		// Apply only the final outcome so unchanged failures keep their transition time
-		// and do not create status events that bypass the error retry backoff.
-		controllerhelper.LogConditionTransitions(ctx, plugin.Status.Conditions, aggregated)
-		controllerhelper.ApplyAggregateConditions(&plugin.Status.Conditions, aggregated)
-		if !apiequality.Semantic.DeepEqual(*oldStatus, plugin.Status) {
-			if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); patchErr != nil {
-				return ctrl.Result{}, patchErr
-			}
-		}
-		return ctrl.Result{}, err
-	}
-
-	// Stamps ObservedGeneration so per-node operators know this spec generation has been processed.
-	// Written in the same SSA patch as ArtifactMeta so ObservedGeneration never advances ahead of it.
-	plugin.Status.ObservedGeneration = plugin.Generation
-	if !apiequality.Semantic.DeepEqual(*oldStatus, plugin.Status) {
-		if err := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Pulls the OCI binary for every platform present in selector-matching nodes before creating
-	// ArtifactNode objects, so the blob cache is warm when the per-node operator requests it over HTTP.
-	// If the pre-fetch fails, node creation still proceeds: the per-node operator fetches
-	// independently and surfaces any failure in its own conditions.
-	fetchBinErr := r.fetchAndCacheBlobs(ctx, plugin, allMatchingNodes)
-
-	// Re-checks deletion status right before creating node objects; see IsBeingDeleted's doc.
-	if deleting, err := controllerhelper.IsBeingDeleted(ctx, r.Client, plugin); err != nil {
-		return ctrl.Result{}, err
-	} else if deleting {
-		logger.Info("Plugin marked for deletion; skipping node object creation")
-		return ctrl.Result{}, nil
-	}
-
-	// Ensure an ArtifactNode exists for each matching node.
-	pluginGVK := artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindPlugin)
-	for i := range matchingNodes {
-		if err := controllerhelper.EnsureNodeObject(
-			ctx, r.Client, plugin, pluginGVK, controllerhelper.ArtifactKindPlugin, matchingNodes[i].Name,
-		); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Re-list node objects: EnsureNodeObject may have just created new ones that are
-	// not in the earlier existingNodes snapshot.
-	existingNodes, err = controllerhelper.ListOwnedNodes(ctx, r.Client, plugin.Namespace, plugin.Name, controllerhelper.KindPlugin)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	logger.V(1).Info("Re-listed ArtifactNode objects", "count", len(existingNodes.Items))
-
-	// A stale or terminating child no longer represents the desired assignment and must not
-	// keep its last condition in the aggregate while deletion is pending.
-	nodeSets := controllerhelper.NodeConditionsForAssignments(existingNodes, desired)
-
-	condSnap := make([]metav1.Condition, len(plugin.Status.Conditions))
-	copy(condSnap, plugin.Status.Conditions)
-	controllerhelper.ComputeAggregateConditions(ctx, plugin, &plugin.Status.Conditions, nodeSets)
-	if !apiequality.Semantic.DeepEqual(condSnap, plugin.Status.Conditions) {
-		if err := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, plugin, ControllerName); err != nil {
-			return ctrl.Result{}, err
-		}
-	}
-	return ctrl.Result{}, fetchBinErr
 }
 
 // fetchAndCacheArtifactMeta fetches the OCI config layer for the Plugin's OCI artifact
@@ -265,126 +120,24 @@ func (r *PluginAggregatorReconciler) fetchAndCacheArtifactMeta(ctx context.Conte
 		return fmt.Errorf("compute OCI spec hash: %w", err)
 	}
 
-	var opts []artifact.ManagerOption
-	if r.ociPuller != nil {
-		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
-	}
-	am := artifact.NewManagerWithOptions(r.Client, plugin.Namespace, opts...)
-
 	if artifact.ArtifactMetaCacheHit(plugin.Status.ArtifactMeta, specHash) {
 		return nil
 	}
 
-	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
-	logger.Info("Fetching plugin ArtifactMeta from OCI config layer", "ref", ref)
-	fetched, digest, fetchErr := am.FetchConfig(ctx, plugin.Spec.OCIArtifact, "")
-	if fetchErr != nil {
-		logger.Error(fetchErr, "Unable to fetch plugin OCI config; ArtifactMeta will remain stale", "ref", ref)
-		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactProgramFailed,
-			"Failed to fetch OCI config layer: %s", fetchErr.Error())
-		return fetchErr
+	meta := &commonv1alpha1.ArtifactMeta{SpecHash: specHash}
+	am := shared.NewOCIManager(r.Client, plugin.Namespace, r.ociPuller)
+	if err := shared.FetchConfigLayer(ctx, am, r.recorder, plugin, plugin.Spec.OCIArtifact, "", meta); err != nil {
+		return err
 	}
-
-	meta := &commonv1alpha1.ArtifactMeta{
-		Digest:   digest,
-		SpecHash: specHash,
-	}
-	artifact.AppendConfigLayerRequirements(meta, fetched)
 	artifact.DeduplicateArtifactMeta(meta)
-	logger.Info("Plugin ArtifactMeta updated from OCI config layer",
-		"ref", ref,
-		"digest", digest,
-		"requirements", len(meta.Requirements),
-		"dependencies", len(meta.Dependencies),
-	)
 	plugin.Status.ArtifactMeta = meta
 	return nil
 }
 
-// handleDeletion deletes all ArtifactNode objects so each per-node artifact operator can clean up and
-// remove its own finalizer (skipping this would deadlock: GC cascade only fires after the owner is
-// deleted, but the in-use finalizer keeps the owner alive).
-func (r *PluginAggregatorReconciler) handleDeletion(ctx context.Context, plugin *artifactv1alpha1.Plugin) error {
-	existing, err := controllerhelper.ListOwnedNodes(ctx, r.Client, plugin.Namespace, plugin.Name, controllerhelper.KindPlugin)
-	if err != nil {
-		return err
-	}
-
-	// Surfaces each node's current conditions onto the parent before triggering deletion below,
-	// notably DeletionBlocked, set by a per-node operator refusing removal while a Rulesfile on
-	// that node still depends on this plugin.
-	if err := controllerhelper.UpdateAggregateConditions(
-		ctx, r.Client, r.Scheme, plugin, &plugin.Status.Conditions, existing, ControllerName,
-	); err != nil {
-		return err
-	}
-
-	runningFalcoNodes := map[string]struct{}{}
-	if len(existing.Items) > 0 {
-		runningFalcoNodes, err = controllerhelper.ListFalcoRunningNodeNames(ctx, r.Client, plugin.Namespace)
-		if err != nil {
-			return err
-		}
-	}
-
-	nodesRemaining, err := controllerhelper.DeleteNodeObjectsForParentDeletion(
-		ctx, r.Client, existing.Items, runningFalcoNodes,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Evicts this CR's cache entries here, in the last reconcile before the finalizer is
-	// released and the object is removed from etcd.
-	if !nodesRemaining && r.cache != nil {
-		if err := r.cache.RemoveAll(string(artifact.KindPlugin), plugin.Namespace, plugin.Name); err != nil {
-			return fmt.Errorf("evict plugin cache entries: %w", err)
-		}
-	}
-
-	return controllerhelper.ReconcileInUseFinalizer(
-		ctx, r.Client, plugin,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		nodesRemaining,
-	)
-}
-
 // SetupWithManager registers this controller with the manager.
 func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		// Initial informer events omit CRs deleted while this replica was inactive.
-		// Queue their persisted owners too; workers wait for informer synchronization.
-		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
-			if r.cache != nil {
-				for _, owner := range r.cache.Owners(string(artifact.KindPlugin)) {
-					queue.Add(reconcile.Request{NamespacedName: owner})
-				}
-			}
-			return nil
-		})).
-		// Status events must reconcile too: a cached no-op can race with an earlier
-		// aggregate write. Unchanged status is already excluded from SSA in Reconcile.
-		For(&artifactv1alpha1.Plugin{}).
-		Watches(&corev1.Node{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, _ client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.PluginList{})
-			}),
-			builder.WithPredicates(predicate.Or(
-				predicate.GenerationChangedPredicate{},
-				predicate.LabelChangedPredicate{},
-			)),
-		).
-		Watches(&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(func(ctx context.Context, pod client.Object) []reconcile.Request {
-				return controllerhelper.EnqueueAllOfType(ctx, r.Client, &artifactv1alpha1.PluginList{}, client.InNamespace(pod.GetNamespace()))
-			}),
-			builder.WithPredicates(controllerhelper.FalcoPodChangePredicate()),
-		).
-		Watches(&artifactv1alpha1.ArtifactNode{},
-			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(), &artifactv1alpha1.Plugin{}),
-		).
-		Named(ControllerName).
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &artifactv1alpha1.Plugin{})).
+	return shared.NewControllerManagedBy(mgr, r.Client, ControllerName, artifact.KindPlugin, &artifactv1alpha1.Plugin{},
+		func() client.ObjectList { return &artifactv1alpha1.PluginList{} }, r.cache).
 		Complete(r)
 }
 
@@ -417,11 +170,7 @@ func (r *PluginAggregatorReconciler) fetchAndCacheBlobs(ctx context.Context, plu
 		return nil
 	}
 
-	var opts []artifact.ManagerOption
-	if r.ociPuller != nil {
-		opts = append(opts, artifact.WithOCIPuller(r.ociPuller))
-	}
-	am := artifact.NewManagerWithOptions(r.Client, plugin.Namespace, opts...)
+	am := shared.NewOCIManager(r.Client, plugin.Namespace, r.ociPuller)
 
 	for p := range seen {
 		// Pass the digest already resolved by fetchAndCacheArtifactMeta to avoid a

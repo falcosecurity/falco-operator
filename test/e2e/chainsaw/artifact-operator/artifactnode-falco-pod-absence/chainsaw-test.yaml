@@ -1,0 +1,322 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-falco-pod-absence
+spec:
+  description: |
+    Exercises what happens to an ArtifactNode when the node stops running a Falco pod. Replacing a Falco pod
+    (an update, a restart, a reschedule) leaves a moment with none on the node. Deleting the ArtifactNode then
+    would throw away what its artifact operator reported and the assignment, only to recreate both seconds
+    later, and every parent reading it would flap. So the object is kept for a grace period (2 minutes, kept
+    in the operator's memory), and only a pod that stays away longer is treated as gone. It runs on a KWOK fake
+    node with stub Falco pods, so no artifact operator runs: the report and the finalizer are simulated
+    (see common/scripts/simulate_sidecar_report.sh).
+
+    Scenarios:
+    1. The pod is deleted and comes back within the grace period: the object is the same one (same uid), still
+       lists the Rulesfile and still holds the reported status, and the parent stays Programmed throughout,
+       without a moment of Pending or NoNodesAssigned.
+    2. The pod is deleted again and stays away: once the grace has run out the controller clears the
+       artifact operator's finalizer, which nobody can release any more, and deletes the object. The parent
+       has no node any more.
+    3. The grace starts over each time the pod goes: scenario 1's short absence must not have counted
+       towards scenario 2's, or the object would have been deleted right away.
+    4. Falco comes back on the node: the object is created again for the parent.
+
+    The wait in scenario 2 is longer than the grace, so this test takes several minutes.
+
+  bindings:
+    - name: rulesfile_name
+      value: pod-absence-rulesfile
+    - name: test_name
+      value: artifactnode-falco-pod-absence
+    - name: falco_name
+      value: pod-absence-falco
+    - name: node_name
+      value: (join('-', ['pod-absence', $namespace]))
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+    - name: sidecar_finalizer
+      value: artifactnode.artifact.falcosecurity.dev/sidecar
+
+  steps:
+    - name: "Step 01: Create-fake-node-falco-cr-and-pod"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 02: Create-rulesfile-and-let-the-operator-report"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw pod absence rule
+                    desc: Rule used to verify the grace period of an ArtifactNode.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=pod-absence"
+                    priority: DEBUG
+                    tags: [test]
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: KINDS
+                value: Rulesfile
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 03: Delete-the-pod-and-bring-it-back-within-the-grace"
+      description: |
+        Scenario 1. The uid of the object is recorded before the pod goes, and checked after it is back. The
+        parent's Programmed condition is polled all along: a single moment of anything else fails the step.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: POD_NAME
+                value: ($falco_pod_name)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: ABSENCE_SECONDS
+                value: "60"
+              - name: SETTLE_SECONDS
+                value: "10"
+            content: bash ../../common/scripts/recreate_pod_within_grace.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+              status:
+                (length(artifacts)): 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Delete-the-pod-and-leave-it-away"
+      description: |
+        Scenario 2 and 3. The wait is longer than the grace period (2 minutes) plus the time to notice. If the
+        earlier absence had counted, the object would already be gone, which the hold check below refuses.
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Pod
+              name: ($falco_pod_name)
+              namespace: ($namespace)
+        # Within the grace on its own, beyond it when added to the absence of Step 03.
+        - sleep:
+            duration: 75s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+
+    - name: "Step 05: Wait-for-the-object-to-be-deleted-despite-its-finalizer"
+      description: |
+        Scenario 2. Nobody can release the artifact operator's finalizer once its pod is gone, so the controller
+        clears it after the grace.
+      try:
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_name)
+            namespace: ($namespace)
+            timeout: 5m
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 06: Falco-comes-back"
+      description: Scenario 4. The object is created again, for the Rulesfile that is still selected, with nothing reported.
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 07: Assert-the-object-is-created-again"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 08: Delete-the-node-and-the-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort withdrawal of the simulated entries and finalizer, so the namespace can be deleted.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: KINDS
+            value: Rulesfile,Plugin,Config
+          - name: WITHDRAW
+            value: "true"
+          - name: STRIP_FINALIZERS
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
+    - description: Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not leave it behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

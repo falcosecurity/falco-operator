@@ -172,17 +172,18 @@ func TestHTTPVersionsFetcher_Fetch(t *testing.T) {
 			}
 			require.NoError(t, err)
 
+			all := versions.All()
 			for k, wantV := range tt.wantCaps {
-				got, found := versions.Capability(k)
+				got, found := all[k]
 				assert.True(t, found, "expected capability %q to be present", k)
 				assert.Equal(t, wantV, got, "capability %q value mismatch", k)
 			}
 			for _, k := range tt.notWantKeys {
-				_, found := versions.Capability(k)
+				_, found := all[k]
 				assert.False(t, found, "capability key %q should not be present (it is a container key, not a capability)", k)
 			}
-			if tt.wantPluginVersions != nil {
-				assert.Equal(t, tt.wantPluginVersions, versions.pluginVersions)
+			for k, wantV := range tt.wantPluginVersions {
+				assert.Equal(t, wantV, all[k], "plugin version %q must be flattened into the capabilities", k)
 			}
 		})
 	}
@@ -231,12 +232,6 @@ func TestNewVersions(t *testing.T) {
 			v := NewVersions(tc.capabilities, tc.plugins)
 
 			assert.Equal(t, tc.want, v.All())
-			assert.True(t, maps.Equal(tc.plugins, v.PluginVersions()))
-			for name, version := range tc.want {
-				got, found := v.Capability(name)
-				assert.True(t, found)
-				assert.Equal(t, version, got)
-			}
 			assert.Equal(t, capabilities, tc.capabilities)
 			assert.Equal(t, plugins, tc.plugins)
 		})
@@ -251,53 +246,8 @@ func TestNewVersions_OwnsMaps(t *testing.T) {
 	delete(capabilities, "engine_version")
 	plugins["container"] = "1.0.0"
 	clear(v.All())
-	clear(v.PluginVersions())
 
 	assert.Equal(t, map[string]string{"engine_version": "62", "container": "0.7.1"}, v.All())
-	assert.Equal(t, map[string]string{"container": "0.7.1"}, v.PluginVersions())
-}
-
-func TestVersions_Capability(t *testing.T) {
-	v := &Versions{capabilities: map[string]string{
-		"engine_version_semver": "0.62.0",
-		"container":             "0.7.1",
-	}}
-
-	val, ok := v.Capability("engine_version_semver")
-	assert.True(t, ok)
-	assert.Equal(t, "0.62.0", val)
-
-	val, ok = v.Capability("container")
-	assert.True(t, ok)
-	assert.Equal(t, "0.7.1", val)
-
-	_, ok = v.Capability("nonexistent")
-	assert.False(t, ok)
-}
-
-func TestVersions_PluginVersions(t *testing.T) {
-	v := &Versions{
-		capabilities: map[string]string{
-			"engine_version_semver": "0.62.0",
-			"container":             "0.7.1",
-		},
-		pluginVersions: map[string]string{
-			"container": "0.7.1",
-		},
-	}
-
-	got := v.PluginVersions()
-	assert.Equal(t, map[string]string{"container": "0.7.1"}, got)
-
-	// Returned map must be a copy: mutating it must not affect the Versions' own state.
-	got["container"] = "mutated"
-	got2 := v.PluginVersions()
-	assert.Equal(t, "0.7.1", got2["container"])
-}
-
-func TestVersions_PluginVersions_Empty(t *testing.T) {
-	v := &Versions{capabilities: map[string]string{"engine_version_semver": "0.62.0"}}
-	assert.Empty(t, v.PluginVersions())
 }
 
 func TestWaitAndFetch(t *testing.T) {
@@ -314,9 +264,7 @@ func TestWaitAndFetch(t *testing.T) {
 
 		v, err := WaitAndFetch(context.Background(), srv.URL)
 		require.NoError(t, err)
-		val, found := v.Capability("falco_version")
-		assert.True(t, found)
-		assert.Equal(t, "0.44.1", val)
+		assert.Equal(t, "0.44.1", v.All()["falco_version"])
 	})
 
 	t.Run("canceled context returns context error", func(t *testing.T) {
@@ -341,8 +289,6 @@ func TestWaitAndFetch(t *testing.T) {
 
 		v, err := WaitAndFetch(context.Background(), srv.URL)
 		require.NoError(t, err)
-		val, found := v.Capability("falco_version")
-		assert.True(t, found)
-		assert.Equal(t, "0.44.1", val)
+		assert.Equal(t, "0.44.1", v.All()["falco_version"])
 	})
 }

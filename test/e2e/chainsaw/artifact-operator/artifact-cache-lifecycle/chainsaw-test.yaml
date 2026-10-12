@@ -236,20 +236,6 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_a_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_a_name]))
-            for:
-              deletion: {}
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_a_name]))
-            for:
-              deletion: {}
 
     - name: Assert-a-evicted-b-still-cached
       description: |
@@ -352,20 +338,6 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_b_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $plugin_b_name]))
-            for:
-              deletion: {}
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_b_name]))
-            for:
-              deletion: {}
 
     - name: Assert-b-evicted
       description: Now unreferenced by anything, the shared blobs' last index entries must be gone too.

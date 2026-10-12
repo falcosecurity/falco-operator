@@ -17,10 +17,16 @@
 package artifact
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 )
 
 // mustArtifactPath is ArtifactPath for a test that has no business handling an error: every
@@ -39,4 +45,33 @@ func mustPermFor(t *testing.T, kind Kind) fs.FileMode {
 	perm, err := PermFor(kind)
 	require.NoError(t, err)
 	return perm
+}
+
+const (
+	testDigest         = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	testResolvedDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	testOtherDigest    = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+)
+
+// createTestScheme creates a runtime scheme with corev1 types registered.
+func createTestScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
+	return scheme
+}
+
+func sha256hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+func newTestStore() (*LocalStore, *fsfake.MockFileSystem) {
+	mockFS := fsfake.NewMockFileSystem()
+	dirs := ArtifactDirs{
+		Plugin:    "/plugins",
+		Rulesfile: "/rulesfiles",
+		Config:    "/configs",
+	}
+	return &LocalStore{FS: mockFS, Dirs: dirs}, mockFS
 }

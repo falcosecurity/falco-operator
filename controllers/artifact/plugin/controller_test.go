@@ -18,14 +18,10 @@ package plugin
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http/httptest"
-	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -34,130 +30,78 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
+	"github.com/falcosecurity/falco-operator/internal/testutil/nodetest"
 )
 
 const testPluginName = "test-plugin"
 
-func pluginNodeName(pluginName string) string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, pluginName, testutil.TestNodeName)
+// pluginsConfigFile is the shared plugins-config file on the node's disk, or nil when there is none.
+func pluginsConfigFile(t *testing.T, n *node.Node) *artifact.File {
+	t.Helper()
+	path, err := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), "plugins-config", priority.MaxPriority,
+		artifact.MediumInline, artifact.KindConfig)
+	require.NoError(t, err)
+	found, err := n.ScanAll(t.Context(), artifact.KindConfig)
+	require.NoError(t, err)
+	for _, file := range found["plugins-config"] {
+		if file.Path == path {
+			return artifact.FindInstalled([]artifactv1alpha1.InstalledArtifact{file}, artifact.MediumInline)
+		}
+	}
+	return nil
 }
 
-func testPluginNodeName() string {
-	return pluginNodeName(testPluginName)
+// testReconciler is the PluginReconciler a test drives, plus a handle on the stub the node fetches
+// through. The reconciler holds no fetcher: the node does the fetching, so a test that
+// wants to fail, replace or count a fetch reaches the stub here.
+type testReconciler struct {
+	*PluginReconciler
+	fetcher *testutil.FakeFetcher
+	// recorder receives the Events of the reconciler's node.
+	recorder events.EventRecorder
 }
 
-func installRequiringRulesfile(t *testing.T, r *PluginReconciler, key node.Key) {
+func installRequiringRulesfile(t *testing.T, r *testReconciler, key artifact.Ref) {
 	t.Helper()
 	content, err := r.fetcher.FetchInline(t.Context(), []byte("test rules"))
 	require.NoError(t, err)
-	_, _, err = r.store.StoreRulesfile(t.Context(), key.Namespace, key.Name, 50, artifact.MediumOCI, content,
+	_, _, err = r.node.StoreRulesfile(t.Context(), key.Name, 50, artifact.MediumOCI, content,
 		&commonv1alpha1.ArtifactMeta{
 			Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: testPluginName, Version: "1.0.0"}},
 		}, false)
 	require.NoError(t, err)
 }
 
-// testFetcher implements artifact.ArtifactFetcher for controller unit tests.
-// ConfigMap and Inline delegate to a real artifact.Fetcher backed by the fake k8s client.
-// FetchOCI returns in-memory bytes to avoid HTTP calls to a real artifact server.
-type testFetcher struct {
-	delegate     *artifact.Fetcher
-	ociErr       error
-	ociBytes     []byte
-	ociCallCount int // incremented on every FetchOCI call
-}
-
-func newTestFetcher(cl client.Client) *testFetcher {
-	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
-}
-
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, _ string) (artifact.FetchResult, error) {
-	f.ociCallCount++
-	if f.ociErr != nil {
-		return artifact.FetchResult{}, f.ociErr
-	}
-	content := f.ociBytes
-	if content == nil {
-		content = []byte("mock-oci-content")
-	}
-	h := sha256.Sum256(content)
-	return artifact.FetchResult{
-		Content:     content,
-		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        0o755,
-	}, nil
-}
-
-func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact.FetchResult, error) {
-	return f.delegate.FetchInline(ctx, content)
-}
-
-func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
-) (artifact.FetchResult, error) {
-	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
-}
-
-func newTestPluginNodeObj(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testPluginNodeName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindPlugin, testPluginName, testutil.TestNodeName),
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
-}
-
-func withPluginOwnerRef() func(*artifactv1alpha1.ArtifactNode) {
-	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: artifactv1alpha1.GroupVersion.String(),
-			Kind:       "Plugin",
-			Name:       testPluginName,
-			Controller: new(true),
-		}}
-	}
-}
-
-// withPreviousInstallStatus seeds the ArtifactNode with the status that would result from a
-// prior successful reconcile: an OCI binary in InstalledArtifacts plus all installation
-// conditions set to True. Used to test the update-rejected flow.
+// withPreviousInstallStatus seeds the status entry with the status that would result from a prior successful
+// reconcile: an OCI binary in InstalledArtifacts plus all installation conditions set to True. Used to test
+// the update-rejected flow.
 func withPreviousInstallStatus() func(*artifactv1alpha1.ArtifactNode) {
 	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
+		n.Status.Artifacts[0].InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
 			{Path: "/usr/share/falco/plugins/test-plugin.so", Medium: string(artifact.MediumOCI)},
 		}
-		n.Status.Conditions = []metav1.Condition{
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
 			common.NewOCIArtifactProgrammedCondition(metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, 0),
 			common.NewConfigProgrammedCondition(metav1.ConditionTrue, artifact.ReasonConfigProgrammed, artifact.MessageConfigProgrammed, 0),
 			common.NewDependenciesSatisfiedCondition(metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, 0),
@@ -165,136 +109,61 @@ func withPreviousInstallStatus() func(*artifactv1alpha1.ArtifactNode) {
 	}
 }
 
-func withPluginFinalizer() func(*artifactv1alpha1.ArtifactNode) {
-	return func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{pluginNodeFinalizer}
-	}
+func newTestReconciler(t *testing.T, objs ...client.Object) (*testReconciler, client.Client) {
+	t.Helper()
+	return newReconcilerEnforcing(t, false, objs...)
 }
 
-func newTestReconciler(t *testing.T, objs ...client.Object) (*PluginReconciler, client.Client) {
+// newReconcilerEnforcing is newTestReconciler over a node whose requirements policy is enforce. The policy is the
+// node's, set when it is built, so a test that wants one gets it here rather than by changing the node.
+func newReconcilerEnforcing(t *testing.T, enforce bool, objs ...client.Object) (*testReconciler, client.Client) {
 	t.Helper()
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(objs...).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).
+		WithObjects(testutil.EnsureArtifactNode(objs)...).
 		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
-	store := node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-	seedInstalledCacheFromObjs(store, objs)
-
-	return &PluginReconciler{
+	fetcher := testutil.NewFakeFetcher(cl)
+	recorder := events.NewFakeRecorder(100)
+	store := nodetest.NewTestNodeOn(t, cl, mockFS, recorder, nodetest.WithFetcher(fetcher), nodetest.WithEnforceRequirements(enforce))
+	r := &PluginReconciler{
 		Client:   cl,
-		Scheme:   s,
-		recorder: events.NewFakeRecorder(100),
-		fetcher:  newTestFetcher(cl),
-		store:    store,
-		nodeName: testutil.TestNodeName,
-	}, cl
+		recorder: recorder,
+		node:     store,
+	}
+	useNode(t, r, store, objs)
+	return &testReconciler{PluginReconciler: r, fetcher: fetcher, recorder: recorder}, cl
 }
 
-func TestFindNodeObjects_UsesCanonicalNameWithoutLookup(t *testing.T) {
-	parent := &artifactv1alpha1.Plugin{
-		ObjectMeta: metav1.ObjectMeta{Name: "test--plugin", Namespace: testutil.TestNamespace, UID: "owner"},
-		Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
-			Registry: &commonv1alpha1.RegistryConfig{Auth: &commonv1alpha1.RegistryAuth{SecretRef: &commonv1alpha1.SecretRef{Name: "source"}}}}},
-	}
-	want := client.ObjectKey{
-		Namespace: parent.Namespace,
-		Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, parent.Name, testutil.TestNodeName),
-	}
-	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).WithObjects(parent).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-				t.Fatal("event mapping must not fetch ArtifactNodes")
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.Plugin{}, index.SecretOnPlugin, index.PluginBySecretRef).Build()
-	r := &PluginReconciler{Client: cl, nodeName: testutil.TestNodeName}
-	requests := r.findNodeObjectForPlugin(t.Context(), parent)
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
-	requests = r.findNodeObjectsForSecret(t.Context(), &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: parent.Namespace}})
-	require.Len(t, requests, 1)
-	assert.Equal(t, want, requests[0].NamespacedName)
-}
-
-func TestFindAllNodeObjectsOnVersionChange_UsesFullNodeIdentity(t *testing.T) {
-	nodeName := strings.Repeat("n", 64)
-	parent := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container", Namespace: testutil.TestNamespace}}
-	wanted := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{Name: controllerhelper.NodeObjectName("plugin", parent.Name, nodeName), Namespace: parent.Namespace,
-			Labels:          controllerhelper.NodeObjectLabels("plugin", parent.Name, nodeName),
-			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: nodeName},
-	}
-	otherNode := wanted.DeepCopy()
-	otherNode.Name = "other-node"
-	otherNode.Spec.NodeName = "another-node"
-	otherNamespace := wanted.DeepCopy()
-	otherNamespace.Namespace = "another-namespace"
-	r, _ := newTestReconciler(t, wanted, otherNode, otherNamespace)
-	r.nodeName = nodeName
-	r.namespace = parent.Namespace
-	requests := r.findAllNodeObjectsOnVersionChange(t.Context(), nil)
-	require.Len(t, requests, 1)
-	assert.Equal(t, client.ObjectKeyFromObject(wanted), requests[0].NamespacedName)
-}
-
-// seedInstalledCacheFromObjs mirrors what WarmSync does at startup: any pre-set
-// ArtifactNode.Status.InstalledArtifacts among objs is seeded into store's installed-artifact
-// cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
-// from that cache, never from status, so a test simulating "this was already installed" must
-// seed the cache the same way a real restart would, not just set status on the object.
-func seedInstalledCacheFromObjs(store *node.Manager, objs []client.Object) {
-	for _, obj := range objs {
-		artifactNode, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || len(artifactNode.Status.InstalledArtifacts) == 0 {
-			continue
-		}
-		for _, ref := range artifactNode.OwnerReferences {
-			var kind node.Kind
-			switch ref.Kind {
-			case controllerhelper.KindRulesfile:
-				kind = node.KindRulesfile
-			case controllerhelper.KindPlugin:
-				kind = node.KindPlugin
-			case controllerhelper.KindConfig:
-				kind = node.KindConfig
-			default:
-				continue
-			}
-			store.SeedInstalled(node.Key{Kind: kind, Namespace: artifactNode.Namespace, Name: ref.Name}, artifactNode.Status.InstalledArtifacts)
-			break
-		}
-	}
+// useNode makes r use n, as after a restart: what the ArtifactNodes among objs say is installed is
+// recovered into it, and it publishes through the client n was built over.
+func useNode(t *testing.T, r *PluginReconciler, n *node.Node, objs []client.Object) {
+	t.Helper()
+	r.node = n
+	nodetest.Prime(n, objs)
 }
 
 func TestNewPluginReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	store := node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
-		compatfake.NewMockVersionsFetcher(nil))
-	r := NewPluginReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", false, &artifact.Fetcher{}, store)
+	n := nodetest.NewTestNodeOn(t, cl, fsfake.NewMockFileSystem(), events.NewFakeRecorder(10),
+		nodetest.WithFetcher(&artifact.Fetcher{K8sClient: cl}), nodetest.WithEnforceRequirements(true))
+	r := NewPluginReconciler(cl, events.NewFakeRecorder(10), n)
 
 	require.NotNil(t, r)
-	assert.Equal(t, "my-node", r.nodeName)
-	assert.NotNil(t, r.fetcher)
-	assert.NotNil(t, r.store)
+	assert.True(t, n.EnforceRequirements(), "the policy is the node's, set when it is built, and no reconciler changes it")
+	assert.Same(t, n, r.node, "the reconciler works through the node it was given")
+	assert.Equal(t, testutil.TestNodeName, r.node.Name())
 }
 
 func TestReconcile(t *testing.T) {
-	containerNodeName := pluginNodeName("container")
-
 	tests := []struct {
 		name                string
 		objects             []client.Object
 		req                 ctrl.Request
-		triggerDeletion     bool
 		pullErr             error
 		preInstallPlugin    *artifactv1alpha1.Plugin // if set, seeds the shared node artifact manager via AddPluginConfig before Reconcile
 		enforceRequirements bool
@@ -303,24 +172,8 @@ func TestReconcile(t *testing.T) {
 		// wantRequeueAfterGE, when non-zero, replaces exact equality on wantResult.RequeueAfter
 		// with a >= assertion. Use for cases where RequeueDelay applies jitter.
 		wantRequeueAfterGE time.Duration
-		wantFinalizer      *bool
 		wantConditions     []testutil.ConditionExpect
 	}{
-		{
-			name: "node object not found returns no error",
-			req:  testutil.Request("nonexistent"),
-		},
-		{
-			name: "first reconcile sets finalizer and returns early",
-			objects: []client.Object{
-				&artifactv1alpha1.Plugin{
-					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				},
-				newTestPluginNodeObj(withPluginOwnerRef()),
-			},
-			req:           testutil.Request(testPluginNodeName()),
-			wantFinalizer: new(true),
-		},
 		{
 			name: "happy path with finalizer already set writes config",
 			objects: []client.Object{
@@ -332,9 +185,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req: testutil.Request(testPluginNodeName()),
+			req: testutil.Request(testPluginName),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionOCIArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactProgrammed},
@@ -358,52 +211,15 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				&artifactv1alpha1.ArtifactNode{
-					ObjectMeta: metav1.ObjectMeta{
-						Name:       containerNodeName,
-						Namespace:  testutil.TestNamespace,
-						Labels:     controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindPlugin, "container", testutil.TestNodeName),
-						Finalizers: []string{pluginNodeFinalizer},
-						OwnerReferences: []metav1.OwnerReference{{
-							APIVersion: artifactv1alpha1.GroupVersion.String(),
-							Kind:       "Plugin",
-							Name:       "container",
-						}},
-					},
-					Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-				},
+				testutil.NewReportingArtifactNode("Plugin", "container"),
 			},
-			req: testutil.Request(containerNodeName),
+			req: testutil.Request("container"),
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionOCIArtifactProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonOCIArtifactProgrammed},
 				{Type: commonv1alpha1.ConditionConfigProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigProgrammed},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonProgrammed},
 			},
-		},
-		{
-			name: "deletion with finalizer cleans up",
-			objects: []client.Object{
-				&artifactv1alpha1.Plugin{
-					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
-			},
-			triggerDeletion: true,
-			preInstallPlugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-			},
-			req: testutil.Request(testPluginNodeName()),
-		},
-		{
-			name: "deletion without our finalizer is no-op",
-			objects: []client.Object{
-				newTestPluginNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{"some-other-finalizer"}
-				}),
-			},
-			req:             testutil.Request(testPluginNodeName()),
-			triggerDeletion: true,
 		},
 		{
 			name: "OCI store failure sets error conditions on status",
@@ -419,9 +235,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req:     testutil.Request(testPluginNodeName()),
+			req:     testutil.Request(testPluginName),
 			pullErr: fmt.Errorf("network error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
@@ -447,9 +263,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req:                testutil.Request(testPluginNodeName()),
+			req:                testutil.Request(testPluginName),
 			pullErr:            &artifact.RetryableError{Err: errors.New("mock pull error"), RetryAfter: 7 * time.Second},
 			wantRequeueAfterGE: 7 * time.Second,
 			wantConditions: []testutil.ConditionExpect{
@@ -459,7 +275,7 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "references resolved but OCI pull fails sets ResolvedRefs true and Programmed false",
+			name: "an OCI pull failure sets Programmed false, and the auth secret is not the node's to resolve",
 			objects: []client.Object{
 				&corev1.Secret{
 					ObjectMeta: metav1.ObjectMeta{
@@ -487,13 +303,12 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req:     testutil.Request(testPluginNodeName()),
+			req:     testutil.Request(testPluginName),
 			pullErr: fmt.Errorf("network error"),
 			wantErr: true,
 			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonDependenciesSatisfied},
 				{Type: commonv1alpha1.ConditionOCIArtifactProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonOCIArtifactProgramFailed},
 				{Type: commonv1alpha1.ConditionProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonProgramFailed},
@@ -503,9 +318,10 @@ func TestReconcile(t *testing.T) {
 			// When enforce-requirements=true, requirements are not met, and the plugin was never
 			// installed on this node, the controller must explicitly set ConfigProgrammed=False and
 			// OCIArtifactProgrammed=False. Without this, those condition types are absent from the
-			// ArtifactNode, which lets another node's True status win unopposed in AggregateConditions
+			// node's status entry, which lets another node's True status win unopposed in AggregateConditions
 			// and makes the Plugin-level status show ConfigProgrammed=True while DependenciesSatisfied=False.
-			name: "enforce mode: requirements not satisfied and never installed sets ConfigProgrammed and OCIArtifactProgrammed to False",
+			name:                "enforce mode: requirements not satisfied and never installed sets ConfigProgrammed and OCIArtifactProgrammed to False",
+			enforceRequirements: true,
 			objects: []client.Object{
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
@@ -522,10 +338,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req:                 testutil.Request(testPluginNodeName()),
-			enforceRequirements: true,
+			req: testutil.Request(testPluginName),
 			// store has no Falco capabilities (default from newTestReconciler) → DependenciesNotSatisfied.
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
@@ -539,7 +354,8 @@ func TestReconcile(t *testing.T) {
 			// installed (alreadyInstalled=true), the controller must NOT clear ConfigProgrammed or
 			// OCIArtifactProgrammed: the old version is still on disk and its aggregate conditions
 			// correctly reflect that (DependenciesNotSatisfiedUpdateRejected reason).
-			name: "enforce mode: requirements fail on previously installed plugin keeps ConfigProgrammed and OCIArtifactProgrammed True",
+			name:                "enforce mode: requirements fail on previously installed plugin keeps ConfigProgrammed and OCIArtifactProgrammed True",
+			enforceRequirements: true,
 			objects: []client.Object{
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
@@ -556,10 +372,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef(), withPreviousInstallStatus()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName, withPreviousInstallStatus()),
 			},
-			req:                 testutil.Request(testPluginNodeName()),
-			enforceRequirements: true,
+			req: testutil.Request(testPluginName),
 			wantConditions: []testutil.ConditionExpect{
 				{
 					Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse,
@@ -571,7 +386,8 @@ func TestReconcile(t *testing.T) {
 			},
 		},
 		{
-			name: "advise mode installs despite unsatisfied requirement and stays Programmed",
+			name:                "advise mode installs despite unsatisfied requirement and stays Programmed",
+			enforceRequirements: false,
 			objects: []client.Object{
 				&artifactv1alpha1.Plugin{
 					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
@@ -588,10 +404,9 @@ func TestReconcile(t *testing.T) {
 						},
 					},
 				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
+				testutil.NewReportingArtifactNode("Plugin", testPluginName),
 			},
-			req:                 testutil.Request(testPluginNodeName()),
-			enforceRequirements: false,
+			req: testutil.Request(testPluginName),
 			wantConditions: []testutil.ConditionExpect{
 				{
 					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
@@ -606,25 +421,17 @@ func TestReconcile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t, tt.objects...)
-			r.enforceRequirements = tt.enforceRequirements
+			r, _ := newReconcilerEnforcing(t, tt.enforceRequirements, tt.objects...)
 
 			if tt.pullErr != nil {
-				r.fetcher = &testFetcher{
-					delegate: &artifact.Fetcher{K8sClient: cl},
-					ociErr:   tt.pullErr,
-				}
+				// The node does the fetching, and it shares this reconciler's fetcher; failing
+				// the shared one is what makes the node's pull fail.
+				r.fetcher.OCIErr = tt.pullErr
 			}
 
 			if tt.preInstallPlugin != nil {
-				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, r.fetcher)
+				_, _, err := r.node.AddPluginConfig(context.Background(), tt.preInstallPlugin)
 				require.NoError(t, err)
-			}
-
-			if tt.triggerDeletion {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
-				require.NoError(t, cl.Delete(context.Background(), nodeObj))
 			}
 
 			result, err := r.Reconcile(context.Background(), tt.req)
@@ -644,27 +451,20 @@ func TestReconcile(t *testing.T) {
 				}
 			}
 
-			if tt.wantFinalizer != nil {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				if err := cl.Get(context.Background(), tt.req.NamespacedName, nodeObj); err == nil {
-					assert.Equal(t, *tt.wantFinalizer, controllerutil.ContainsFinalizer(nodeObj, pluginNodeFinalizer))
-				}
-			}
-
 			if len(tt.wantConditions) > 0 {
-				nodeObj := &artifactv1alpha1.ArtifactNode{}
-				require.NoError(t, cl.Get(context.Background(), tt.req.NamespacedName, nodeObj))
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+				entry, ok := r.node.StatusEntry(artifact.KindPlugin, tt.req.Name)
+				require.True(t, ok, "the flow's status must reach the publisher")
+				testutil.RequireConditions(t, entry.Conditions, tt.wantConditions)
 			}
 		})
 	}
 }
 
-// TestReconcile_SecondReconcileDoesNotDropConfigSubEntry covers repeated back-to-back reconciles
-// for the same PluginNode with nothing in the spec changed (e.g. a watch event bounce): the
-// second Reconcile call must not lose the Config sub-entry a prior reconcile already established
-// in installedArtifacts[0].config.
-func TestReconcile_SecondReconcileDoesNotDropConfigSubEntry(t *testing.T) {
+// TestReconcile_SecondReconcileKeepsTheInstalledArtifacts covers repeated back-to-back reconciles
+// for the same Plugin with nothing in the spec changed (e.g. a watch event bounce): the second
+// Reconcile must publish the installed binary again rather than dropping it, since what it
+// publishes is derived from the node's record and not from what the previous status held.
+func TestReconcile_SecondReconcileKeepsTheInstalledArtifacts(t *testing.T) {
 	plugin := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 		Spec: artifactv1alpha1.PluginSpec{
@@ -673,108 +473,24 @@ func TestReconcile_SecondReconcileDoesNotDropConfigSubEntry(t *testing.T) {
 			},
 		},
 	}
-	nodeObj := newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef())
-	r, cl := newTestReconciler(t, plugin, nodeObj)
-	req := testutil.Request(testPluginNodeName())
+	r, _ := newTestReconciler(t, plugin, testutil.NewReportingArtifactNode("Plugin", testPluginName))
+	req := testutil.Request(testPluginName)
 
 	_, err := r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
-	got := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
-	require.Len(t, got.Status.InstalledArtifacts, 1, "after the first reconcile")
-	require.NotNil(t, got.Status.InstalledArtifacts[0].Config, "Config must be set after the first reconcile")
+	got, ok := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	require.True(t, ok)
+	require.Len(t, got.InstalledArtifacts, 1, "after the first reconcile")
 
 	// Second reconcile: nothing changed in the spec, simulating a watch event bounce (e.g. a
 	// Secret or unrelated ArtifactNode update re-enqueuing this object).
 	_, err = r.Reconcile(context.Background(), req)
 	require.NoError(t, err)
 
-	require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
-	require.Len(t, got.Status.InstalledArtifacts, 1, "after the second reconcile")
-	assert.NotNil(t, got.Status.InstalledArtifacts[0].Config, "second reconcile must not drop the Config sub-entry")
-}
-
-func TestHandleDeletion(t *testing.T) {
-	tests := []struct {
-		name             string
-		objects          []client.Object
-		triggerDeletion  bool
-		preInstallPlugin *artifactv1alpha1.Plugin // if set, seeds the shared node artifact manager via AddPluginConfig before handleDeletion
-		wantOK           bool
-	}{
-		{
-			name: "not marked for deletion returns false",
-			objects: []client.Object{
-				&artifactv1alpha1.Plugin{
-					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
-			},
-			wantOK: false,
-		},
-		{
-			name: "marked for deletion with finalizer cleans up",
-			objects: []client.Object{
-				&artifactv1alpha1.Plugin{
-					ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				},
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
-			},
-			triggerDeletion: true,
-			preInstallPlugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-			},
-			wantOK: true,
-		},
-		{
-			name: "marked for deletion without our finalizer skips cleanup",
-			objects: []client.Object{
-				newTestPluginNodeObj(func(n *artifactv1alpha1.ArtifactNode) {
-					n.Finalizers = []string{"some-other-finalizer"}
-				}),
-			},
-			triggerDeletion: true,
-			wantOK:          true,
-		},
-		{
-			// Parent Plugin already deleted; config removal falls back to the ownerRef name instead of being skipped.
-			name: "marked for deletion with finalizer but parent Plugin already deleted cleans up config",
-			objects: []client.Object{
-				// No Plugin object: it has already been garbage-collected.
-				newTestPluginNodeObj(withPluginFinalizer(), withPluginOwnerRef()),
-			},
-			triggerDeletion: true,
-			preInstallPlugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-			},
-			wantOK: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t, tt.objects...)
-
-			if tt.preInstallPlugin != nil {
-				_, _, err := r.store.AddPluginConfig(context.Background(), tt.preInstallPlugin, r.fetcher)
-				require.NoError(t, err)
-			}
-
-			nodeObj := &artifactv1alpha1.ArtifactNode{}
-			require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
-
-			if tt.triggerDeletion {
-				require.NoError(t, cl.Delete(context.Background(), nodeObj))
-				require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: testPluginNodeName(), Namespace: testutil.TestNamespace}, nodeObj))
-			}
-
-			ok, err := r.handleDeletion(context.Background(), nodeObj)
-
-			require.NoError(t, err)
-			assert.Equal(t, tt.wantOK, ok)
-		})
-	}
+	got, ok = r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	require.True(t, ok)
+	require.Len(t, got.InstalledArtifacts, 1, "after the second reconcile")
 }
 
 func TestEnsurePlugin(t *testing.T) {
@@ -904,24 +620,26 @@ func TestEnsurePlugin(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newTestReconciler(t)
-			nodeObj := newTestPluginNodeObj()
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 
 			if tt.prePlugin != nil {
 				if tt.preSpecHash != "" {
 					tt.prePlugin.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{SpecHash: tt.preSpecHash}
 				}
-				preNode := newTestPluginNodeObj()
-				require.NoError(t, r.ensurePlugin(context.Background(), tt.prePlugin, preNode), "prePlugin setup failed")
-				nodeObj.Status = preNode.Status
+				preNode := &artifactv1alpha1.NodeArtifactStatus{}
+				require.NoError(t, r.node.ApplyArtifact(context.Background(), tt.prePlugin, preNode), "prePlugin setup failed")
+				*status = *preNode
 			}
 
 			if tt.parentSpecHash != "" {
 				tt.plugin.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{SpecHash: tt.parentSpecHash}
 			}
-			tf := r.fetcher.(*testFetcher)
-			tf.ociCallCount = 0
+			tf := r.fetcher
+			tf.OCICalls = 0
 
-			err := r.ensurePlugin(context.Background(), tt.plugin, nodeObj)
+			err := r.node.ApplyArtifact(context.Background(), tt.plugin, status)
+			// The installed files are derived when the reconcile publishes on its way out.
+			r.node.PublishStatus(artifact.KindPlugin, tt.plugin, status)
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
@@ -929,17 +647,17 @@ func TestEnsurePlugin(t *testing.T) {
 			}
 
 			if tt.wantOCIFetchCount != nil {
-				assert.Equal(t, *tt.wantOCIFetchCount, tf.ociCallCount, "unexpected FetchOCI call count")
+				assert.Equal(t, *tt.wantOCIFetchCount, tf.OCICalls, "unexpected FetchOCI call count")
 			}
 			if tt.wantInstalledOCISpecHash != "" {
-				ociEntry := artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
+				ociEntry := artifact.FindInstalled(status.InstalledArtifacts, artifact.MediumOCI)
 				require.NotNil(t, ociEntry, "expected OCI entry in InstalledArtifacts")
 				assert.Equal(t, tt.wantInstalledOCISpecHash, ociEntry.SpecHash, "OCI InstalledArtifact.SpecHash mismatch")
 			}
 			if tt.wantOCIConditionRemoved {
-				assert.Nil(t, artifact.FindInstalled(nodeObj.Status.InstalledArtifacts, artifact.MediumOCI),
+				assert.Nil(t, artifact.FindInstalled(status.InstalledArtifacts, artifact.MediumOCI),
 					"expected OCI entry removed from InstalledArtifacts")
-				assert.Nil(t, apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String()),
+				assert.Nil(t, apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String()),
 					"expected OCIArtifactProgrammed condition to be removed, not set True, after stale cleanup")
 			}
 		})
@@ -948,11 +666,9 @@ func TestEnsurePlugin(t *testing.T) {
 
 func TestEnsurePlugin_RemovedOCIWithoutBinaryCleansRecoveredConfig(t *testing.T) {
 	ctx := t.Context()
-	r, _ := newTestReconciler(t)
+	r, cl := newTestReconciler(t)
 	fs := fsfake.NewMockFileSystem()
-	store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-	versions := compatfake.NewMockVersionsFetcher(nil)
-	r.store = node.NewManager(store, versions)
+	r.node = nodetest.NewTestNodeOn(t, cl, fs, r.recorder, nodetest.WithFetcher(r.fetcher))
 	plugin := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: "installed-uid"},
 		Spec: artifactv1alpha1.PluginSpec{
@@ -960,38 +676,40 @@ func TestEnsurePlugin_RemovedOCIWithoutBinaryCleansRecoveredConfig(t *testing.T)
 			Config:      &artifactv1alpha1.PluginConfig{Name: "installed-name"},
 		},
 	}
-	artifactNode := newTestPluginNodeObj()
-	artifactNode.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(plugin, artifactv1alpha1.GroupVersion.WithKind("Plugin"))}
-	require.NoError(t, r.ensurePlugin(ctx, plugin, artifactNode))
-	require.NoError(t, r.ensurePluginConfig(ctx, plugin, artifactNode))
-	key := node.KeyFromObj(node.KindPlugin, plugin)
-	binary := r.store.FindInstalled(key, artifact.MediumOCI)
-	sharedFile := r.store.FindInstalled(node.PluginConfigKey, artifact.MediumInline)
+	artifactNode := &artifactv1alpha1.NodeArtifactStatus{}
+	require.NoError(t, r.node.ApplyArtifact(ctx, plugin, artifactNode))
+	r.node.PublishStatus(artifact.KindPlugin, plugin, artifactNode)
+	key := artifact.RefOf(artifact.KindPlugin, plugin)
+	binary := r.node.FindInstalled(key, artifact.MediumOCI)
+	sharedFile := pluginsConfigFile(t, r.node)
 	require.NotNil(t, binary)
 	require.NotNil(t, sharedFile)
 	require.NoError(t, fs.Remove(binary.Path))
-	cl := fake.NewClientBuilder().WithScheme(r.Scheme).WithObjects(plugin, artifactNode).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
-	r.store = node.NewManager(store, versions)
-	require.NoError(t, node.WarmSync(ctx, cl, r.store, plugin.Namespace, artifactNode.Spec.NodeName))
-	require.Nil(t, r.store.FindInstalled(key, artifact.MediumOCI))
+	assignment := testutil.NewReportingArtifactNode("Plugin", plugin.Name)
+	assignment.Spec.Artifacts[0].UID = string(plugin.UID)
+	cl = fake.NewClientBuilder().WithScheme(r.Client.Scheme()).
+		WithObjects(testutil.EnsureArtifactNode([]client.Object{plugin, assignment})...).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+	r.node = nodetest.NewTestNodeOn(t, cl, fs, r.recorder, nodetest.WithFetcher(r.fetcher))
+	require.NoError(t, node.NewWarmSyncRunnable(r.node).Warmup(ctx))
+	require.Nil(t, r.node.FindInstalled(key, artifact.MediumOCI))
 	assert.Contains(t, string(fs.Files[sharedFile.Path]), "installed-name")
-	ociFetches := r.fetcher.(*testFetcher).ociCallCount
+	ociFetches := r.fetcher.OCICalls
 	plugin.Spec.OCIArtifact = nil
 	plugin.Spec.Config.Name = "never-installed"
 
-	require.NoError(t, r.ensurePlugin(ctx, plugin, artifactNode))
-	require.NoError(t, r.ensurePluginConfig(ctx, plugin, artifactNode))
+	require.NoError(t, r.node.ApplyArtifact(ctx, plugin, artifactNode))
+	r.node.PublishStatus(artifact.KindPlugin, plugin, artifactNode)
 
 	assert.Contains(t, string(fs.Files[sharedFile.Path]), "plugins: []")
 	assert.NotContains(t, string(fs.Files[sharedFile.Path]), "installed-name")
 	assert.NotContains(t, string(fs.Files[sharedFile.Path]), "never-installed")
 	assert.NotContains(t, fs.Files, binary.Path)
-	assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String()))
-	assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String()))
-	assert.Equal(t, ociFetches, r.fetcher.(*testFetcher).ociCallCount)
+	assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String()))
+	assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionConfigProgrammed.String()))
+	assert.Equal(t, ociFetches, r.fetcher.OCICalls)
 	writes := len(fs.WriteCalls)
-	require.NoError(t, r.ensurePlugin(ctx, plugin, artifactNode))
+	require.NoError(t, r.node.ApplyArtifact(ctx, plugin, artifactNode))
 	assert.Len(t, fs.WriteCalls, writes, "repeated cleanup must not rewrite the empty aggregate")
 }
 
@@ -1006,15 +724,15 @@ func TestEnsurePlugin_RecreatedOwnerCannotReplaceInstalledBinary(t *testing.T) {
 		},
 		Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "old-spec"}},
 	}
-	artifactNode := newTestPluginNodeObj()
-	require.NoError(t, r.ensurePlugin(ctx, plugin, artifactNode))
-	require.NoError(t, r.ensurePluginConfig(ctx, plugin, artifactNode))
-	key := node.KeyFromObj(node.KindPlugin, plugin)
-	binary := r.store.FindInstalled(key, artifact.MediumOCI)
-	config := r.store.FindInstalled(node.PluginConfigKey, artifact.MediumInline)
+	artifactNode := &artifactv1alpha1.NodeArtifactStatus{}
+	require.NoError(t, r.node.ApplyArtifact(ctx, plugin, artifactNode))
+	r.node.PublishStatus(artifact.KindPlugin, plugin, artifactNode)
+	key := artifact.RefOf(artifact.KindPlugin, plugin)
+	binary := r.node.FindInstalled(key, artifact.MediumOCI)
+	config := pluginsConfigFile(t, r.node)
 	require.NotNil(t, binary)
 	require.NotNil(t, config)
-	previous := artifactNode.DeepCopy().Status.InstalledArtifacts
+	previous := artifactNode.DeepCopy().InstalledArtifacts
 
 	// The CR name is reused while the previous incarnation's config is still installed.
 	candidate := plugin.DeepCopy()
@@ -1022,14 +740,14 @@ func TestEnsurePlugin_RecreatedOwnerCannotReplaceInstalledBinary(t *testing.T) {
 	candidate.Spec.Config.Name = "replacement-name"
 	candidate.Spec.OCIArtifact.Image.Tag = "replacement-tag"
 	candidate.Status.ArtifactMeta.SpecHash = "new-spec"
-	r.fetcher.(*testFetcher).ociBytes = []byte("replacement binary")
+	r.fetcher.OCIBytes = []byte("replacement binary")
 
-	err := r.ensurePlugin(ctx, candidate, artifactNode)
+	err := r.node.ApplyArtifact(ctx, candidate, artifactNode)
 
 	require.Error(t, err, "ownership must be checked before writing the downloaded binary")
-	assert.Equal(t, previous, artifactNode.Status.InstalledArtifacts)
+	assert.Equal(t, previous, artifactNode.InstalledArtifacts)
 	for _, file := range []*artifact.File{binary, config} {
-		intact, verifyErr := r.store.Verify(ctx, file)
+		intact, verifyErr := r.node.Verify(ctx, file)
 		require.NoError(t, verifyErr)
 		assert.True(t, intact)
 	}
@@ -1060,8 +778,8 @@ func TestEnsurePlugin_ProgrammedLastTransitionTime(t *testing.T) {
 					},
 				},
 			}
-			nodeObj := newTestPluginNodeObj()
-			nodeObj.Status.Conditions = []metav1.Condition{{
+			status := &artifactv1alpha1.NodeArtifactStatus{}
+			status.Conditions = []metav1.Condition{{
 				Type:               commonv1alpha1.ConditionOCIArtifactProgrammed.String(),
 				Status:             tt.initialStatus,
 				Reason:             artifact.ReasonOCIArtifactProgrammed,
@@ -1069,9 +787,9 @@ func TestEnsurePlugin_ProgrammedLastTransitionTime(t *testing.T) {
 				LastTransitionTime: pinned,
 			}}
 
-			require.NoError(t, r.ensurePlugin(context.Background(), plugin, nodeObj))
+			require.NoError(t, r.node.ApplyArtifact(context.Background(), plugin, status))
 
-			cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			cond := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
 			require.NotNil(t, cond)
 			require.Equal(t, metav1.ConditionTrue, cond.Status)
 			require.Equal(t, tt.wantPreserved, cond.LastTransitionTime.Equal(&pinned))
@@ -1079,10 +797,9 @@ func TestEnsurePlugin_ProgrammedLastTransitionTime(t *testing.T) {
 	}
 }
 
-// TestEnsurePluginConfig covers this reconciler's own responsibilities around
-// node.Manager.AddPluginConfig: translating its result into conditions/events, and
-// propagating a blocked rename as an error. The aggregate-file behavior itself (rename handling,
-// content, store failures) is covered directly against the Manager in the node package.
+// TestEnsurePluginConfig covers the conditions and events a Plugin gets for its entry in the shared
+// plugin configuration. The file itself (rename handling, content, store failures) is covered in the
+// node package.
 func TestEnsurePluginConfig(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1091,7 +808,7 @@ func TestEnsurePluginConfig(t *testing.T) {
 		writeErr error
 		wantErr  bool
 
-		// preConditions, if set, seed nodeObj.Status.Conditions before the call.
+		// preConditions, if set, seed status.Conditions before the call.
 		preConditions []metav1.Condition
 		// wantConfigConditionRemoved, when true, asserts ConfigProgrammed is absent afterward.
 		wantConfigConditionRemoved bool
@@ -1125,7 +842,10 @@ func TestEnsurePluginConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionConfigProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigProgrammed},
 			},
-			wantEvents: []string{"Normal InlineArtifactStored Inline artifact stored successfully"},
+			wantEvents: []string{
+				"Normal ArtifactStored oci artifact stored successfully",
+				"Normal ArtifactStored inline artifact stored successfully",
+			},
 		},
 		{
 			name: "store inline yaml fails sets error conditions",
@@ -1142,38 +862,43 @@ func TestEnsurePluginConfig(t *testing.T) {
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionConfigProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigProgramFailed},
 			},
-			wantEvents: []string{"Warning InlinePluginConfigStoreFailed Failed to store inline plugin config: disk full"},
+			wantEvents: []string{
+				"Normal ArtifactStored oci artifact stored successfully",
+				"Warning InlinePluginConfigStoreFailed Failed to store inline plugin config: disk full",
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t)
-			nodeObj := newTestPluginNodeObj()
+			r, cl := newTestReconciler(t)
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 			if tt.preConditions != nil {
-				nodeObj.Status.Conditions = tt.preConditions
+				status.Conditions = tt.preConditions
 			}
 
 			if tt.writeErr != nil {
 				mockFS := fsfake.NewMockFileSystem()
 				path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), "plugins-config",
 					priority.MaxPriority, artifact.MediumInline, artifact.KindConfig)
-				mockFS.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp"): tt.writeErr}
-				r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+				mockFS.WriteErrFor = map[string]error{artifact.StagingPath(path): tt.writeErr}
+				r.node = nodetest.NewTestNodeOn(t, cl, mockFS, r.recorder, nodetest.WithFetcher(r.fetcher))
 			}
 
-			err := r.ensurePluginConfig(context.Background(), tt.plugin, nodeObj)
+			err := r.node.ApplyArtifact(context.Background(), tt.plugin, status)
 
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 			}
-			if len(tt.wantConditions) > 0 {
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+			// The shared file is written inside the apply, so the whole pipeline runs and
+			// sets the conditions that go with it. This test speaks only for ConfigProgrammed.
+			for _, exp := range tt.wantConditions {
+				testutil.RequireCondition(t, status.Conditions, exp.Type, exp.Status, exp.Reason)
 			}
 			if tt.wantConfigConditionRemoved {
-				assert.Nil(t, apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String()),
+				assert.Nil(t, apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String()),
 					"expected ConfigProgrammed condition to be removed, not left True, when OCIArtifact is nil")
 			}
 			testutil.RequireEvents(t, r.recorder.(*events.FakeRecorder).Events, tt.wantEvents)
@@ -1182,43 +907,10 @@ func TestEnsurePluginConfig(t *testing.T) {
 }
 
 // TestEnsurePluginConfig_PopulatesConfigSubEntryEvenWhenUnchanged covers the shared
-// plugins-config aggregate, tracked in the manager's own cache (keyed by PluginConfigKey) rather
-// than per-Plugin-CR status: a re-add that the cache already knows is unchanged must still
+// plugins-config aggregate, tracked in the node's own record of it rather than per-Plugin-CR
+// status: a re-add that the cache already knows is unchanged must still
 // mirror the file's path into this Plugin's own status entry, not only on the reconcile that
 // first wrote it.
-func TestEnsurePluginConfig_PopulatesConfigSubEntryEvenWhenUnchanged(t *testing.T) {
-	r, _ := newTestReconciler(t)
-	plugin := &artifactv1alpha1.Plugin{
-		ObjectMeta: metav1.ObjectMeta{Name: "json", Namespace: testutil.TestNamespace},
-		Spec: artifactv1alpha1.PluginSpec{
-			OCIArtifact: &commonv1alpha1.OCIArtifact{
-				Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/json", Tag: "latest"},
-			},
-		},
-	}
-	// Establishes the shared config file in the manager's cache (StoreActionAdded).
-	require.NoError(t, r.ensurePluginConfig(context.Background(), plugin, newTestPluginNodeObj()))
-
-	// A separate nodeObj whose status never recorded the Config sub-entry (e.g. an earlier status
-	// patch dropped by an SSA conflict), even though the OCI binary entry already exists and the
-	// shared file, per the cache, is unchanged (configAction will be StoreActionUnchanged).
-	nodeObj := newTestPluginNodeObj()
-	nodeObj.Status.InstalledArtifacts = []artifactv1alpha1.InstalledArtifact{
-		{Path: "/usr/share/falco/plugins/json.so", Medium: string(artifact.MediumOCI)},
-	}
-
-	require.NoError(t, r.ensurePluginConfig(context.Background(), plugin, nodeObj))
-
-	var configEntry *artifactv1alpha1.InstalledArtifactConfig
-	for _, a := range nodeObj.Status.InstalledArtifacts {
-		if a.Medium == string(artifact.MediumOCI) {
-			configEntry = a.Config
-			break
-		}
-	}
-	require.NotNil(t, configEntry, "Config sub-entry must be populated from the cache even when configAction is Unchanged")
-	assert.NotEmpty(t, configEntry.Path)
-}
 
 func TestEnforceReferenceResolution(t *testing.T) {
 	tests := []struct {
@@ -1256,34 +948,7 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			wantNoConditions: true,
 		},
 		{
-			name: "auth secret exists sets ResolvedRefs true",
-			objects: []client.Object{
-				&corev1.Secret{
-					ObjectMeta: metav1.ObjectMeta{Name: "my-pull-secret", Namespace: testutil.TestNamespace},
-				},
-			},
-			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.PluginSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{
-						Image: commonv1alpha1.ImageSpec{
-							Repository: "falcosecurity/plugins/test",
-							Tag:        "latest",
-						},
-						Registry: &commonv1alpha1.RegistryConfig{
-							Auth: &commonv1alpha1.RegistryAuth{
-								SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
-							},
-						},
-					},
-				},
-			},
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
-			},
-		},
-		{
-			name: "auth secret not found sets ResolvedRefs false and Programmed false",
+			name: "a registry auth secret is the instance operator's to resolve: none reported, even when missing",
 			plugin: &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 				Spec: artifactv1alpha1.PluginSpec{
@@ -1300,23 +965,23 @@ func TestEnforceReferenceResolution(t *testing.T) {
 					},
 				},
 			},
-			wantErr: true,
-			wantConditions: []testutil.ConditionExpect{
-				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
-			},
+			wantNoConditions: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r, _ := newTestReconciler(t, tt.objects...)
-			nodeObj := newTestPluginNodeObj()
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 
 			if len(tt.presetConditions) > 0 {
-				nodeObj.Status.Conditions = tt.presetConditions
+				status.Conditions = tt.presetConditions
 			}
 
-			err := r.enforceReferenceResolution(context.Background(), tt.plugin, nodeObj)
+			// Reference resolution is a step inside the apply, so the whole pipeline runs and
+			// sets the conditions that go with it. This test speaks only for ResolvedRefs, so it
+			// asserts on that condition rather than on the whole list.
+			err := r.node.ApplyArtifact(context.Background(), tt.plugin, status)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -1325,88 +990,18 @@ func TestEnforceReferenceResolution(t *testing.T) {
 			}
 
 			if tt.wantNoConditions {
-				assert.Empty(t, nodeObj.Status.Conditions)
+				assert.Nil(t, apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionResolvedRefs.String()),
+					"nothing to resolve must leave no ResolvedRefs condition behind")
 			}
 
-			if len(tt.wantConditions) > 0 {
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
-			}
-		})
-	}
-}
-
-func TestFindNodeObjectsForSecret(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
-	pl := &artifactv1alpha1.Plugin{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testPluginName,
-			Namespace: testutil.TestNamespace,
-		},
-		Spec: artifactv1alpha1.PluginSpec{
-			OCIArtifact: &commonv1alpha1.OCIArtifact{
-				Image: commonv1alpha1.ImageSpec{Repository: "ghcr.io/repo", Tag: "latest"},
-				Registry: &commonv1alpha1.RegistryConfig{
-					Auth: &commonv1alpha1.RegistryAuth{
-						SecretRef: &commonv1alpha1.SecretRef{Name: "my-pull-secret"},
-					},
-				},
-			},
-		},
-	}
-
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(pl).
-		WithIndex(&artifactv1alpha1.Plugin{}, index.SecretOnPlugin, index.PluginBySecretRef).
-		Build()
-
-	mockFS := fsfake.NewMockFileSystem()
-
-	r := &PluginReconciler{
-		Client:   cl,
-		Scheme:   s,
-		recorder: events.NewFakeRecorder(100),
-		fetcher:  newTestFetcher(cl),
-		store:    node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
-		nodeName: testutil.TestNodeName,
-	}
-
-	tests := []struct {
-		name       string
-		secretName string
-		wantCount  int
-	}{
-		{
-			name:       "matching secret returns node object requests",
-			secretName: "my-pull-secret",
-			wantCount:  1,
-		},
-		{
-			name:       "non-matching secret returns empty",
-			secretName: "other-secret",
-			wantCount:  0,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      tt.secretName,
-					Namespace: testutil.TestNamespace,
-				},
-			}
-			requests := r.findNodeObjectsForSecret(context.Background(), secret)
-			require.Len(t, requests, tt.wantCount)
-			if tt.wantCount > 0 {
-				assert.Equal(t, testPluginNodeName(), requests[0].Name)
-				assert.Equal(t, testutil.TestNamespace, requests[0].Namespace)
+			for _, exp := range tt.wantConditions {
+				testutil.RequireCondition(t, status.Conditions, exp.Type, exp.Status, exp.Reason)
 			}
 		})
 	}
 }
 
-func TestEnforcePluginCompatibility(t *testing.T) {
+func TestApply_PluginCompatibility(t *testing.T) {
 	ociPlugin := func(meta *commonv1alpha1.ArtifactMeta) *artifactv1alpha1.Plugin {
 		return &artifactv1alpha1.Plugin{
 			ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
@@ -1448,8 +1043,8 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 		},
 		{
 			name:                "nil ArtifactMeta strict blocks with Unknown",
-			plugin:              ociPlugin(nil),
 			enforceRequirements: true,
+			plugin:              ociPlugin(nil),
 			wantSkip:            true,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionUnknown, Reason: artifact.ReasonDependenciesUnknown},
@@ -1479,76 +1074,76 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 			},
 		},
 		{
-			name: "plugin_api_version major mismatch blocks with False",
+			name:                "plugin_api_version major mismatch blocks with False",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "2.0.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{"plugin_api_version": "3.12.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantMsgContain:      "major versions are incompatible",
+			falcoCaps:      map[string]string{"plugin_api_version": "3.12.0"},
+			wantSkip:       true,
+			wantMsgContain: "major versions are incompatible",
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
 			},
 		},
 		{
-			name: "plugin_api_version downgrade blocks with False",
+			name:                "plugin_api_version downgrade blocks with False",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "3.0.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{"plugin_api_version": "2.12.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantMsgContain:      "major versions are incompatible",
+			falcoCaps:      map[string]string{"plugin_api_version": "2.12.0"},
+			wantSkip:       true,
+			wantMsgContain: "major versions are incompatible",
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
 			},
 		},
 		{
-			name: "generic requirement too low blocks with False",
+			name:                "generic requirement too low blocks with False",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "engine_version_semver", Version: "0.62.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{"engine_version_semver": "0.57.0"},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantMsgContain:      "engine_version_semver",
+			falcoCaps:      map[string]string{"engine_version_semver": "0.57.0"},
+			wantSkip:       true,
+			wantMsgContain: "engine_version_semver",
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
 			},
 		},
 		{
-			name: "capability not advertised by Falco blocks with False",
+			name:                "capability not advertised by Falco blocks with False",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "3.0.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{},
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantMsgContain:      "does not advertise",
+			falcoCaps:      map[string]string{},
+			wantSkip:       true,
+			wantMsgContain: "does not advertise",
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
 			},
 		},
 		{
-			name: "advise mode installs anyway on unsatisfied requirement",
+			name:                "advise mode installs anyway on unsatisfied requirement",
+			enforceRequirements: false,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "2.0.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{"plugin_api_version": "3.12.0"},
-			enforceRequirements: false,
-			wantSkip:            false,
-			wantMsgContain:      "installed anyway",
+			falcoCaps:      map[string]string{"plugin_api_version": "3.12.0"},
+			wantSkip:       false,
+			wantMsgContain: "installed anyway",
 			wantConditions: []testutil.ConditionExpect{
 				{
 					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
@@ -1557,17 +1152,17 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 			},
 		},
 		{
-			name: "enforce mode rejects an update but keeps the previous install",
+			name:                "enforce mode rejects an update but keeps the previous install",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "2.0.0"},
 				},
 			}),
-			falcoCaps:           map[string]string{"plugin_api_version": "3.12.0"},
-			enforceRequirements: true,
-			preInstalled:        true,
-			wantSkip:            true,
-			wantMsgContain:      "keeping the previously installed version",
+			falcoCaps:      map[string]string{"plugin_api_version": "3.12.0"},
+			preInstalled:   true,
+			wantSkip:       true,
+			wantMsgContain: "keeping the previously installed version",
 			wantConditions: []testutil.ConditionExpect{
 				{
 					Type:   commonv1alpha1.ConditionDependenciesSatisfied.String(),
@@ -1593,16 +1188,16 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 			},
 		},
 		{
-			name: "Falco versions not yet observed strict blocks without returning an error",
+			name:                "Falco versions not yet observed strict blocks without returning an error",
+			enforceRequirements: true,
 			plugin: ociPlugin(&commonv1alpha1.ArtifactMeta{
 				Requirements: []commonv1alpha1.ArtifactMetaRequirement{
 					{Name: "plugin_api_version", Version: "3.0.0"},
 				},
 			}),
-			falcoErr:            fmt.Errorf("connection refused"),
-			enforceRequirements: true,
-			wantSkip:            true,
-			wantErr:             false,
+			falcoErr: fmt.Errorf("connection refused"),
+			wantSkip: true,
+			wantErr:  false,
 			wantConditions: []testutil.ConditionExpect{
 				{Type: commonv1alpha1.ConditionDependenciesSatisfied.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonDependenciesNotSatisfied},
 			},
@@ -1611,40 +1206,47 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := newTestReconciler(t)
-			r.enforceRequirements = tt.enforceRequirements
+			r, _ := newReconcilerEnforcing(t, tt.enforceRequirements)
 			if tt.falcoErr == nil && tt.falcoCaps != nil {
-				r.store.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcoCaps).Result)
+				r.node.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(tt.falcoCaps).Result)
 			}
-			nodeObj := newTestPluginNodeObj()
+			status := &artifactv1alpha1.NodeArtifactStatus{}
 			if tt.preInstalled {
 				installed := []artifactv1alpha1.InstalledArtifact{
 					{Path: "/var/lib/falco/plugins/test.so", Medium: string(artifact.MediumOCI)},
 				}
-				nodeObj.Status.InstalledArtifacts = installed
-				// alreadyInstalled is read from the manager's cache, not status; seed it the way
-				// WarmSync would from a real restart.
-				r.store.SeedInstalled(node.Key{Kind: node.KindPlugin, Namespace: testutil.TestNamespace, Name: testPluginName}, installed)
+				status.InstalledArtifacts = installed
+				// Whether the plugin is already installed is read from the node's record, not from status: seed
+				// it the way the warm sync does after a restart.
+				r.node.SeedInstalled(artifact.Ref{Kind: artifact.KindPlugin, Name: testPluginName}, installed)
 			}
 
-			skip, err := r.enforcePluginCompatibility(context.Background(), tt.plugin, nodeObj)
+			r.fetcher.OCICalls = 0
+			err := r.node.ApplyArtifact(context.Background(), tt.plugin, status)
 
-			assert.Equal(t, tt.wantSkip, skip)
+			// The compatibility check is a step inside the apply, and it runs before the
+			// download: what "skipped" means from the outside is that nothing was fetched. A
+			// plugin with no OCI artifact has nothing to fetch either way, so it says nothing here.
+			if tt.plugin.Spec.OCIArtifact != nil {
+				assert.Equal(t, tt.wantSkip, r.fetcher.OCICalls == 0,
+					"a plugin blocked by its requirements must never be downloaded")
+			}
 			if tt.wantErr {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
 			}
 			if tt.wantNoConditions {
-				assert.Empty(t, nodeObj.Status.Conditions)
+				assert.Nil(t, apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String()),
+					"nothing to check must leave no DependenciesSatisfied condition behind")
 			}
 			if tt.wantMsgContain != "" {
-				cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
+				cond := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
 				require.NotNil(t, cond)
 				assert.Contains(t, cond.Message, tt.wantMsgContain)
 			}
-			if len(tt.wantConditions) > 0 {
-				testutil.RequireConditions(t, nodeObj.Status.Conditions, tt.wantConditions)
+			for _, exp := range tt.wantConditions {
+				testutil.RequireCondition(t, status.Conditions, exp.Type, exp.Status, exp.Reason)
 			}
 		})
 	}
@@ -1652,7 +1254,7 @@ func TestEnforcePluginCompatibility(t *testing.T) {
 
 func TestEnsurePluginConfig_RegistersProvidesWithNodeArtifactManager(t *testing.T) {
 	r, _ := newTestReconciler(t)
-	nodeObj := newTestPluginNodeObj()
+	status := &artifactv1alpha1.NodeArtifactStatus{}
 	pl := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 		Spec: artifactv1alpha1.PluginSpec{
@@ -1660,161 +1262,160 @@ func TestEnsurePluginConfig_RegistersProvidesWithNodeArtifactManager(t *testing.
 		},
 	}
 
-	require.NoError(t, r.ensurePluginConfig(context.Background(), pl, nodeObj))
+	require.NoError(t, r.node.ApplyArtifact(context.Background(), pl, status))
 
-	err := r.store.RemovePluginConfig(context.Background(), r.fetcher, pl)
+	err := r.node.RemovePluginConfig(context.Background(), pl)
 	require.NoError(t, err, "nothing requires it yet, so this proves the name was registered as provided")
 
-	require.NoError(t, r.ensurePluginConfig(context.Background(), pl, nodeObj))
+	require.NoError(t, r.node.ApplyArtifact(context.Background(), pl, status))
 
-	rfKey := node.Key{Kind: node.KindRulesfile, Name: "some-rulesfile"}
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
 	installRequiringRulesfile(t, r, rfKey)
 
-	err = r.store.RemovePluginConfig(context.Background(), r.fetcher, pl)
+	err = r.node.RemovePluginConfig(context.Background(), pl)
 	require.Error(t, err)
 	blocked, ok := errors.AsType[*node.BlockedError](err)
 	require.True(t, ok)
 	assert.Contains(t, blocked.BlockedBy, rfKey)
 }
 
-func TestHandleDeletion_BlockedByRequiringRulesfileDoesNotRemoveFinalizer(t *testing.T) {
+// A plugin whose config name a Rulesfile on the node still requires cannot be renamed yet. That is not a failed
+// store: the Plugin says why in its ConfigProgrammed condition, and the reconcile is tried again shortly, as a
+// blocked removal is, instead of failing into the controller's growing backoff.
+func TestApplyAndPublish_ABlockedRenameIsReportedAndRetriedShortly(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	status := &artifactv1alpha1.NodeArtifactStatus{}
 	pl := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "r", Tag: "t"}},
+		},
 	}
-	nodeObj := newTestPluginNodeObj(withPluginOwnerRef(), withPluginFinalizer())
+	require.NoError(t, r.node.ApplyArtifact(t.Context(), pl, status))
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
+	installRequiringRulesfile(t, r, rfKey)
+	renamed := pl.DeepCopy()
+	renamed.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
 
-	r, cl := newTestReconciler(t, pl, nodeObj)
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))
+	result, err := shared.ApplyAndPublish(t.Context(), r.node, renamed, status)
+
+	require.NoError(t, err, "a blocked rename is waited out, not failed")
+	assert.Equal(t, shared.BlockedRetryDelay, result.RequeueAfter)
+	testutil.RequireCondition(t, status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String(),
+		metav1.ConditionFalse, artifact.ReasonPluginConfigStillRequired)
+	cond := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String())
+	assert.Contains(t, cond.Message, rfKey.Name)
+	testutil.RequireCondition(t, status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String(),
+		metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed)
+
+	// Once the Rulesfile is gone the rename goes through.
+	require.NoError(t, r.node.Remove(t.Context(), rfKey))
+	result, err = shared.ApplyAndPublish(t.Context(), r.node, renamed, status)
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter)
+	testutil.RequireCondition(t, status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String(),
+		metav1.ConditionTrue, artifact.ReasonConfigProgrammed)
+}
+
+func TestCleanup_BlockedByARequiringRulesfileKeepsTheFilesAndPublishesWhy(t *testing.T) {
+	pl := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: "plugin-uid"},
+	}
+	reporting := testutil.NewReportingArtifactNode("Plugin", testPluginName)
+	reporting.Spec.Artifacts[0].UID, reporting.Status.Artifacts[0].UID = string(pl.UID), string(pl.UID)
+	r, _ := newTestReconciler(t, pl, reporting)
 
 	// Simulate config already installed for this plugin (as if a prior reconcile ran).
-	_, _, err := r.store.AddPluginConfig(context.Background(), pl, r.fetcher)
+	_, _, err := r.node.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
-	rfKey := node.Key{Kind: node.KindRulesfile, Name: "some-rulesfile"}
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
 	installRequiringRulesfile(t, r, rfKey)
 
-	require.NoError(t, cl.Delete(context.Background(), nodeObj))
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, nodeObj))
+	err = r.Cleanup(context.Background(), testPluginName)
 
-	handled, err := r.handleDeletion(context.Background(), nodeObj)
-
-	require.NoError(t, err, "a blocked removal must not surface as a reconcile error")
-	assert.True(t, handled, "blocked cleanup must stop normal reconciliation")
-	assert.True(t, controllerutil.ContainsFinalizer(nodeObj, pluginNodeFinalizer), "finalizer must remain while blocked")
-
-	cond := apimeta.FindStatusCondition(nodeObj.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
-	require.NotNil(t, cond, "DeletionBlocked condition must be set while blocked")
+	blocked, ok := errors.AsType[*node.BlockedError](err)
+	require.True(t, ok, "a blocked removal must be reported so that the node controller retries it: %v", err)
+	assert.Contains(t, blocked.BlockedBy, rfKey)
+	entry, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	require.True(t, held)
+	cond := apimeta.FindStatusCondition(entry.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
+	require.NotNil(t, cond, "DeletionBlocked condition must be published while blocked")
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, artifact.ReasonPluginConfigStillRequired, cond.Reason)
 	assert.Contains(t, cond.Message, rfKey.Name)
 
-	persisted := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), types.NamespacedName{Name: nodeObj.Name, Namespace: nodeObj.Namespace}, persisted))
-	persistedCond := apimeta.FindStatusCondition(persisted.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
-	require.NotNil(t, persistedCond, "DeletionBlocked condition must be patched to the ArtifactNode status")
-	assert.Equal(t, metav1.ConditionTrue, persistedCond.Status)
-
 	// Remove the dependent file and confirm cleanup proceeds.
-	require.NoError(t, r.store.Remove(t.Context(), rfKey))
-	handled, err = r.handleDeletion(context.Background(), nodeObj)
-	require.NoError(t, err)
-	assert.True(t, handled)
+	rmErr := r.node.Remove(t.Context(), rfKey)
+	require.NoError(t, rmErr)
+	require.NoError(t, r.Cleanup(context.Background(), testPluginName))
 }
 
-func TestReconcile_BlockedDeletionDoesNotInstall(t *testing.T) {
-	patchFailure := errors.New("status unavailable")
-	for _, failPatch := range []bool{false, true} {
-		t.Run(fmt.Sprintf("status patch fails=%t", failPatch), func(t *testing.T) {
-			ctx := t.Context()
-			parent := &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
-				Spec: artifactv1alpha1.PluginSpec{
-					OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "new"}},
-				},
-				Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "new-spec"}},
-			}
-			artifactNode := newTestPluginNodeObj(withPluginOwnerRef(), withPluginFinalizer())
-			r, cl := newTestReconciler(t, parent, artifactNode)
-			_, configFile, err := r.store.AddPluginConfig(ctx, parent, r.fetcher)
-			require.NoError(t, err)
-			result, err := r.fetcher.FetchInline(ctx, []byte("installed binary"))
-			require.NoError(t, err)
-			action, binaryFile, err := r.store.StorePlugin(ctx, parent, result)
-			require.NoError(t, err)
-			artifact.UpdateInstalledStatus(&artifactNode.Status.InstalledArtifacts, action, artifact.MediumOCI, binaryFile)
-			artifact.UpdateInstalledSpecHash(&artifactNode.Status.InstalledArtifacts, artifact.MediumOCI, "old-spec")
-			require.NoError(t, cl.Status().Update(ctx, artifactNode))
-			installed := artifactNode.Status.InstalledArtifacts
-			key := node.Key{Kind: node.KindRulesfile, Name: "installed-rules"}
-			installRequiringRulesfile(t, r, key)
-			require.NoError(t, cl.Delete(ctx, artifactNode))
-			watchClient, ok := cl.(client.WithWatch)
-			require.True(t, ok)
-			statusWrites := 0
-			r.Client = interceptor.NewClient(watchClient, interceptor.Funcs{
-				SubResourceApply: func(
-					ctx context.Context, cl client.Client, subresource string,
-					obj k8sruntime.ApplyConfiguration, opts ...client.SubResourceApplyOption,
-				) error {
-					statusWrites++
-					if failPatch {
-						return patchFailure
-					}
-					return cl.SubResource(subresource).Apply(ctx, obj, opts...)
-				},
-			})
-			request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(artifactNode)}
-			_, err = r.Reconcile(ctx, request)
-			if failPatch {
-				require.ErrorIs(t, err, patchFailure)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount, "deletion must not fall through to an OCI update")
-			for _, file := range []*artifact.File{binaryFile, configFile} {
-				intact, verifyErr := r.store.Verify(ctx, file)
-				require.NoError(t, verifyErr)
-				assert.True(t, intact, "blocked deletion must preserve installed files")
-			}
-			require.NoError(t, cl.Get(ctx, request.NamespacedName, artifactNode))
-			assert.Contains(t, artifactNode.Finalizers, pluginNodeFinalizer)
-			assert.Equal(t, installed, artifactNode.Status.InstalledArtifacts)
-			if !failPatch {
-				condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
-				require.NotNil(t, condition)
-				assert.Equal(t, metav1.ConditionTrue, condition.Status)
-				for range 2 {
-					_, err = r.Reconcile(ctx, request)
-					require.NoError(t, err)
-				}
-				assert.Equal(t, 1, statusWrites, "an unchanged deletion block must not be republished")
-			} else {
-				failPatch = false
-				for range 2 {
-					_, err = r.Reconcile(ctx, request)
-					require.NoError(t, err)
-				}
-				assert.Equal(t, 2, statusWrites, "retry must publish the block once, then stop writing")
-				require.NoError(t, cl.Get(ctx, request.NamespacedName, artifactNode))
-				condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
-				require.NotNil(t, condition)
-				assert.Equal(t, metav1.ConditionTrue, condition.Status)
-				assert.Contains(t, artifactNode.Finalizers, pluginNodeFinalizer)
-				assert.Equal(t, installed, artifactNode.Status.InstalledArtifacts)
-			}
-
-			// Once the dependent rules are removed, normal cleanup can finish without installing.
-			r.Client = cl
-			require.NoError(t, r.store.Remove(ctx, key))
-			_, err = r.Reconcile(ctx, request)
-			require.NoError(t, err)
-			err = cl.Get(ctx, request.NamespacedName, artifactNode)
-			require.True(t, k8serrors.IsNotFound(err), "cleanup should release the finalizer and delete the ArtifactNode: %v", err)
-			present, err := r.store.Verify(ctx, binaryFile)
-			require.NoError(t, err)
-			assert.False(t, present)
-			assert.Zero(t, r.fetcher.(*testFetcher).ociCallCount)
-		})
+// A plugin that is gone, and that the node knows of from its files alone, has no uid to report a blocked
+// removal under. Nothing is published: an entry without a uid would get every later write of the node's
+// status rejected. The removal is still reported as blocked, so that it is retried.
+func TestCleanup_BlockedRemovalOfAGonePluginWithoutAnEntryPublishesNothing(t *testing.T) {
+	gone := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
 	}
+	r, _ := newTestReconciler(t, testutil.NewTestArtifactNode())
+	_, _, err := r.node.AddPluginConfig(t.Context(), gone)
+	require.NoError(t, err)
+	r.node.WithdrawStatus(artifact.RefOf(artifact.KindPlugin, gone))
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
+	installRequiringRulesfile(t, r, rfKey)
+
+	err = r.Cleanup(t.Context(), testPluginName)
+
+	_, blocked := errors.AsType[*node.BlockedError](err)
+	require.True(t, blocked, "the removal must stay blocked so it is retried: %v", err)
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	assert.False(t, held, "no entry without a uid may be published")
+}
+
+func TestReconcile_ARemovedPluginIsNeverInstalledAgain(t *testing.T) {
+	ctx := t.Context()
+	parent := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "new"}},
+		},
+		Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "new-spec"}},
+	}
+	// The node's spec no longer lists the plugin, while the plugin still has files installed and reported.
+	artifactNode := testutil.NewReportingArtifactNode("Plugin", testPluginName)
+	artifactNode.Spec.Artifacts = nil
+	r, _ := newTestReconciler(t, parent, artifactNode)
+	require.NoError(t, r.node.ApplyArtifact(ctx, parent, &artifactv1alpha1.NodeArtifactStatus{}))
+	configFile := pluginsConfigFile(t, r.node)
+	binaryFile := r.node.FindInstalled(artifact.RefOf(artifact.KindPlugin, parent), artifact.MediumOCI)
+	require.NotNil(t, configFile)
+	require.NotNil(t, binaryFile)
+	r.fetcher.OCICalls = 0
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: "installed-rules"}
+	installRequiringRulesfile(t, r, key)
+
+	_, err := r.Reconcile(ctx, testutil.Request(testPluginName))
+	require.NoError(t, err)
+	assert.Zero(t, r.fetcher.OCICalls, "an unassigned plugin must not fall through to an OCI update")
+
+	// Removing it is the node controller's job, and is refused while a rulesfile still needs the plugin.
+	blockedErr := r.Cleanup(ctx, testPluginName)
+	_, isBlocked := errors.AsType[*node.BlockedError](blockedErr)
+	require.True(t, isBlocked)
+	for _, file := range []*artifact.File{binaryFile, configFile} {
+		intact, verifyErr := r.node.Verify(ctx, file)
+		require.NoError(t, verifyErr)
+		assert.True(t, intact, "a blocked removal must preserve installed files")
+	}
+
+	// Once the dependent rules are removed, cleanup finishes without installing anything.
+	rmErr := r.node.Remove(ctx, key)
+	require.NoError(t, rmErr)
+	require.NoError(t, r.Cleanup(ctx, testPluginName))
+	present, err := r.node.Verify(ctx, binaryFile)
+	require.NoError(t, err)
+	assert.False(t, present)
+	assert.Zero(t, r.fetcher.OCICalls)
 }
 
 func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
@@ -1830,19 +1431,20 @@ func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
 			goos, goarch, platform := runtime.GOOS, runtime.GOARCH, runtime.GOOS+"-"+runtime.GOARCH
 			oldDigest := digest.FromString("old OCI manifest").String()
 			newDigest := digest.FromString("new OCI manifest").String()
-			oldPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "artifact:old", oldDigest, goos, goarch)
-			newPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "artifact:new", newDigest, goos, goarch)
+			oldPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindPlugin), "artifact:old", oldDigest, goos, goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), string(artifact.KindPlugin), "artifact:new", newDigest, goos, goarch)
 			require.NoError(t, cache.Store(oldPath, []byte("old artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("Plugin", "default", "artifact", platform, oldPath))
+			require.NoError(t, cache.Set(string(artifact.KindPlugin), "default", "artifact", platform, oldPath))
 
 			srv := httptest.NewServer(artifactserver.New(cache).Handler())
 			defer srv.Close()
 			fs := fsfake.NewMockFileSystem()
-			reconciler := &PluginReconciler{
-				recorder: events.NewFakeRecorder(20),
-				fetcher:  &artifact.Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()},
-				store:    node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
-			}
+			cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+				WithObjects(testutil.NewTestArtifactNode()).WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+			fetcher := &artifact.Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
+			recorder := events.NewFakeRecorder(20)
+			// Only the node is exercised here.
+			testNode := nodetest.NewTestNodeOn(t, cl, fs, recorder, nodetest.WithFetcher(fetcher))
 			parent := &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Name: "artifact", Namespace: "default", Generation: 1},
 				Spec: artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{
@@ -1853,11 +1455,12 @@ func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
 					ArtifactMeta:       &commonv1alpha1.ArtifactMeta{SpecHash: "spec-old", Digest: oldDigest},
 				},
 			}
-			artifactNode := &artifactv1alpha1.ArtifactNode{}
+			artifactNode := &artifactv1alpha1.NodeArtifactStatus{}
 			if alreadyInstalled {
-				require.NoError(t, reconciler.ensurePlugin(ctx, parent, artifactNode))
+				require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
+				testNode.PublishStatus(artifact.KindPlugin, parent, artifactNode)
 			}
-			previous := artifactNode.DeepCopy().Status.InstalledArtifacts
+			previous := artifactNode.DeepCopy().InstalledArtifacts
 
 			// The parent metadata is published before the aggregator replaces the cache entry.
 			parent.Generation = 2
@@ -1865,34 +1468,353 @@ func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
 			parent.Status.ObservedGeneration = 2
 			parent.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{SpecHash: "spec-new", Digest: newDigest}
 
-			err := reconciler.ensurePlugin(ctx, parent, artifactNode)
+			err := testNode.ApplyArtifact(ctx, parent, artifactNode)
+			testNode.PublishStatus(artifact.KindPlugin, parent, artifactNode)
 			var retryErr *artifact.RetryableError
 			require.ErrorAs(t, err, &retryErr, "an old cached revision must not be accepted as the new spec")
-			require.Equal(t, previous, artifactNode.Status.InstalledArtifacts)
+			require.Equal(t, previous, artifactNode.InstalledArtifacts)
 			if alreadyInstalled {
 				require.Equal(t, []byte("old artifact bytes"), fs.Files[previous[0].Path])
 			} else {
 				require.Empty(t, fs.Files)
 			}
-			condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			condition := apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
 			require.NotNil(t, condition)
 			require.Equal(t, metav1.ConditionFalse, condition.Status)
 
 			// Once the expected digest is available, the retry installs it and records its spec.
 			require.NoError(t, cache.Store(newPath, []byte("new artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("Plugin", "default", "artifact", platform, newPath))
-			require.NoError(t, reconciler.ensurePlugin(ctx, parent, artifactNode))
-			require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
-			installed := artifactNode.Status.InstalledArtifacts[0]
+			require.NoError(t, cache.Set(string(artifact.KindPlugin), "default", "artifact", platform, newPath))
+			require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
+			testNode.PublishStatus(artifact.KindPlugin, parent, artifactNode)
+			require.Len(t, artifactNode.InstalledArtifacts, 1)
+			installed := artifactNode.InstalledArtifacts[0]
 			require.Equal(t, "spec-new", installed.SpecHash)
 			require.Equal(t, []byte("new artifact bytes"), fs.Files[installed.Path])
-			condition = apimeta.FindStatusCondition(artifactNode.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
+			condition = apimeta.FindStatusCondition(artifactNode.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
 			require.Equal(t, metav1.ConditionTrue, condition.Status)
 			require.Equal(t, int64(2), condition.ObservedGeneration)
 
 			// A verified, installed revision remains usable without another download.
 			srv.Close()
-			require.NoError(t, reconciler.ensurePlugin(ctx, parent, artifactNode))
+			require.NoError(t, testNode.ApplyArtifact(ctx, parent, artifactNode))
 		})
 	}
+}
+
+const assignedPluginUID = "plugin-uid"
+
+// newAssignedReconciler is newTestReconciler for the spec-driven path, which looks the node's
+// ArtifactNode up in the node's own namespace.
+func newAssignedReconciler(t *testing.T, objs ...client.Object) (*testReconciler, client.Client) {
+	t.Helper()
+	r, cl := newTestReconciler(t, objs...)
+	return r, cl
+}
+
+func assignedPlugin(uid string) *artifactv1alpha1.Plugin {
+	return &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: types.UID(uid), Generation: 2},
+	}
+}
+
+func TestReconcile_RunsTheFlowAndPublishesWhenAssigned(t *testing.T) {
+	// Enforcing: the flow waits for the instance operator to observe generation 2.
+	r, cl := newReconcilerEnforcing(t, true, assignedPlugin(assignedPluginUID),
+		testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	got := testutil.RequirePublishedWhere(t, cl, "Plugin", testPluginName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.FindStatusCondition(e.Conditions, commonv1alpha1.ConditionProgrammed.String()) != nil
+	})
+	assert.Equal(t, assignedPluginUID, got.UID)
+}
+
+func TestReconcile_LeavesAPluginAloneUnlessAssigned(t *testing.T) {
+	r, _ := newAssignedReconciler(t, assignedPlugin(assignedPluginUID), testutil.NewTestArtifactNode())
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	assert.False(t, held)
+}
+
+func TestReconcile_WaitsWhenTheSpecListsAnotherIncarnation(t *testing.T) {
+	r, _ := newAssignedReconciler(t, assignedPlugin("new-uid"), testutil.NewAssigningArtifactNode("Plugin", testPluginName, "old-uid"))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	assert.Equal(t, shared.AssignmentRetryDelay, result.RequeueAfter)
+	nodetest.AssertNothingDone(t, r.node, artifact.KindPlugin, testPluginName, "never act for an incarnation the operator did not assign")
+}
+
+func TestReconcile_IgnoresAMissingOrDeletingPlugin(t *testing.T) {
+	r, _ := newAssignedReconciler(t, testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request("nonexistent"))
+	require.NoError(t, err)
+
+	now := metav1.Now()
+	deleting := assignedPlugin(assignedPluginUID)
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{"test/finalizer"}
+	r, _ = newAssignedReconciler(t, deleting, testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+	_, err = r.Reconcile(t.Context(), testutil.Request(testPluginName))
+	require.NoError(t, err)
+	nodetest.AssertNothingDone(t, r.node, artifact.KindPlugin, testPluginName, "a deleting artifact is left alone")
+}
+
+func TestCleanup_IsIdempotentWhenNothingIsInstalled(t *testing.T) {
+	r, _ := newAssignedReconciler(t, assignedPlugin(assignedPluginUID))
+
+	require.NoError(t, r.Cleanup(t.Context(), testPluginName))
+	require.NoError(t, r.Cleanup(t.Context(), testPluginName))
+}
+
+func TestCleanup_WorksWithoutTheParent(t *testing.T) {
+	r, _ := newAssignedReconciler(t)
+
+	require.NoError(t, r.Cleanup(t.Context(), "already-deleted"), "removal needs only what installation recorded")
+}
+
+func TestCleanup_RemovesThePluginConfig(t *testing.T) {
+	pl := assignedPlugin(assignedPluginUID)
+	r, _ := newAssignedReconciler(t, pl)
+	_, _, err := r.node.AddPluginConfig(t.Context(), pl)
+	require.NoError(t, err)
+
+	// While the entry is there it is the plugin's, and no other Plugin can take its name.
+	other := assignedPlugin("other-uid")
+	other.Name = "other-plugin"
+	other.Spec.Config = &artifactv1alpha1.PluginConfig{Name: testPluginName}
+	_, _, err = r.node.AddPluginConfig(t.Context(), other)
+	require.Error(t, err)
+
+	require.NoError(t, r.Cleanup(t.Context(), testPluginName))
+
+	_, _, err = r.node.AddPluginConfig(t.Context(), other)
+	require.NoError(t, err, "the entry is gone, so its name is free")
+}
+
+func TestCleanup_BlockedByARequiringRulesfilePublishesWhy(t *testing.T) {
+	pl := assignedPlugin(assignedPluginUID)
+	r, cl := newAssignedReconciler(t, pl, testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+	_, _, err := r.node.AddPluginConfig(t.Context(), pl)
+	require.NoError(t, err)
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
+	installRequiringRulesfile(t, r, rfKey)
+
+	err = r.Cleanup(t.Context(), testPluginName)
+
+	blocked, ok := errors.AsType[*node.BlockedError](err)
+	require.True(t, ok, "the node controller must be able to tell a blocked removal from a failure")
+	assert.Contains(t, blocked.BlockedBy, rfKey)
+	got := testutil.RequirePublishedWhere(t, cl, "Plugin", testPluginName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.FindStatusCondition(e.Conditions, commonv1alpha1.ConditionDeletionBlocked.String()) != nil
+	})
+	cond := apimeta.FindStatusCondition(got.Conditions, commonv1alpha1.ConditionDeletionBlocked.String())
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, artifact.ReasonPluginConfigStillRequired, cond.Reason)
+	assert.Equal(t, assignedPluginUID, got.UID)
+
+	rmErr := r.node.Remove(t.Context(), rfKey)
+	require.NoError(t, rmErr)
+	require.NoError(t, r.Cleanup(t.Context(), testPluginName), "once nothing requires the plugin it can be removed")
+}
+
+// heldPlugin returns a reconciler that has reconciled an assigned Plugin, so that the node holds an entry for it.
+func heldPlugin(t *testing.T) (*testReconciler, client.Client) {
+	t.Helper()
+	// Enforcing: the flow waits for the instance operator to observe generation 2.
+	r, cl := newReconcilerEnforcing(t, true, assignedPlugin(assignedPluginUID),
+		testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+	require.NoError(t, err)
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	require.True(t, held)
+	return r, cl
+}
+
+func TestReconcile_RemovesWhatItHoldsWhenThePluginIsNoLongerAssigned(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, client.Client){
+		"the ArtifactNode stops listing it": testutil.DropAssignments,
+		"the Plugin is gone and the ArtifactNode stopped listing it": func(t *testing.T, cl client.Client) {
+			testutil.DropAssignments(t, cl)
+			require.NoError(t, cl.Delete(t.Context(), assignedPlugin(assignedPluginUID)))
+		},
+		"there is no ArtifactNode": func(t *testing.T, cl client.Client) {
+			require.NoError(t, cl.Delete(t.Context(), testutil.NewAssigningArtifactNode("Plugin", testPluginName, "")))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, cl := heldPlugin(t)
+			prepare(t, cl)
+
+			result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+			require.NoError(t, err)
+			assert.Equal(t, time.Duration(0), result.RequeueAfter)
+			_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+			assert.False(t, held, "an entry left behind would keep the parent's finalizer")
+		})
+	}
+}
+
+func TestReconcile_KeepsWhatItHoldsWhileTheArtifactNodeStillListsAGonePlugin(t *testing.T) {
+	r, cl := heldPlugin(t)
+	require.NoError(t, cl.Delete(t.Context(), assignedPlugin(assignedPluginUID)))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	assert.True(t, held, "the operator has yet to drop it from the ArtifactNode, which reconciles the Plugin again")
+}
+
+// A plugin a Rulesfile on the node still requires cannot be removed yet: the reconcile says why, and tries again.
+func TestReconcile_ARemovalABlockedByARequiringRulesfileIsRetried(t *testing.T) {
+	r, cl := heldPlugin(t)
+	pl := assignedPlugin(assignedPluginUID)
+	_, _, err := r.node.AddPluginConfig(t.Context(), pl)
+	require.NoError(t, err)
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"}
+	installRequiringRulesfile(t, r, rfKey)
+	testutil.DropAssignments(t, cl)
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err, "a removal that has to wait is not a failure")
+	assert.Equal(t, shared.BlockedRetryDelay, result.RequeueAfter)
+	testutil.RequirePublishedWhere(t, cl, "Plugin", testPluginName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.FindStatusCondition(e.Conditions, commonv1alpha1.ConditionDeletionBlocked.String()) != nil
+	})
+
+	rmErr := r.node.Remove(t.Context(), rfKey)
+	require.NoError(t, rmErr)
+	result, err = r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter)
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	assert.False(t, held)
+}
+
+// A Plugin recreated under the same name while a Rulesfile still requires what its previous incarnation
+// installed takes that over: waiting for a removal that cannot happen would keep it from ever being installed.
+func TestReconcile_ARecreatedPluginTakesOverWhatARulesfileStillRequires(t *testing.T) {
+	const recreatedUID = "recreated-uid"
+	previous := assignedPlugin(assignedPluginUID)
+	previous.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{}
+	r, cl := newTestReconciler(t, previous, testutil.NewAssigningArtifactNode("Plugin", testPluginName, assignedPluginUID))
+	_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+	require.NoError(t, err)
+	key := artifact.Ref{Kind: kind, Name: testPluginName}
+	binary := r.node.FindInstalled(key, artifact.MediumOCI)
+	require.NotNil(t, binary)
+	installRequiringRulesfile(t, r, artifact.Ref{Kind: artifact.KindRulesfile, Name: "some-rulesfile"})
+
+	require.NoError(t, cl.Delete(t.Context(), previous))
+	recreated := assignedPlugin(recreatedUID)
+	recreated.Spec.OCIArtifact = &commonv1alpha1.OCIArtifact{}
+	require.NoError(t, cl.Create(t.Context(), recreated))
+	artifactNode := testutil.NewAssigningArtifactNode("Plugin", testPluginName, recreatedUID)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(artifactNode), artifactNode))
+	artifactNode.Spec.Artifacts[0].UID = recreatedUID
+	require.NoError(t, cl.Update(t.Context(), artifactNode))
+
+	result, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
+
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), result.RequeueAfter, "nothing is left to wait for")
+	got := testutil.RequirePublishedWhere(t, cl, "Plugin", testPluginName, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return e.UID == recreatedUID && apimeta.IsStatusConditionTrue(e.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	})
+	assert.Nil(t, apimeta.FindStatusCondition(got.Conditions, commonv1alpha1.ConditionDeletionBlocked.String()))
+	present, err := r.node.Verify(t.Context(), binary)
+	require.NoError(t, err)
+	assert.True(t, present, "the rules still need the plugin")
+}
+
+var errBoom = errors.New("boom")
+
+func TestCleanup_ReportsWhatCannotBeDone(t *testing.T) {
+	tests := []struct {
+		name     string
+		getErr   error
+		removeFS error
+		// blocked keeps a Rulesfile requiring the plugin on the node, so that the removal is refused and
+		// Cleanup reads the Plugin to publish why. Removal itself never reads the Plugin.
+		blocked bool
+	}{
+		{name: "the Plugin cannot be read while the removal is blocked", getErr: errBoom, blocked: true},
+		{name: "the binary cannot be removed", removeFS: errBoom},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockFS := fsfake.NewMockFileSystem()
+			// Reads fail only once the plugin is installed: installing it reads the node's ArtifactNode.
+			failGets := false
+			cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+				WithObjects(testutil.NewTestArtifactNode()).WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if failGets && tt.getErr != nil {
+							return tt.getErr
+						}
+						return cl.Get(ctx, key, obj, opts...)
+					},
+				}).Build()
+			fetcher := testutil.NewFakeFetcher(cl)
+			store := nodetest.NewTestNodeOn(t, cl, mockFS, events.NewFakeRecorder(20), nodetest.WithFetcher(fetcher))
+			r := &PluginReconciler{Client: cl, node: store}
+			require.NoError(t, store.ApplyArtifact(t.Context(), &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: testPluginName, UID: "uid"},
+				Spec:       artifactv1alpha1.PluginSpec{OCIArtifact: &commonv1alpha1.OCIArtifact{}},
+			}, &artifactv1alpha1.NodeArtifactStatus{}))
+			if tt.blocked {
+				installRequiringRulesfile(t, &testReconciler{PluginReconciler: r, fetcher: fetcher},
+					artifact.Ref{Kind: artifact.KindRulesfile, Name: "requiring-rules"})
+			}
+			failGets = true
+			mockFS.RemoveErr = tt.removeFS
+
+			err := r.Cleanup(t.Context(), testPluginName)
+
+			require.ErrorIs(t, err, errBoom)
+		})
+	}
+}
+
+func TestCleanup_ReleasesTheEntryOfARecreatedPluginAfterARestart(t *testing.T) {
+	ctx := t.Context()
+	// The plugin was deleted and recreated while the sidecar was down. The new incarnation is the one the
+	// ArtifactNode assigns, so the restarted sidecar's warm sync restored the shared-config entry under its
+	// UID, while the status entry the previous process published still names the old one.
+	parent := &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace, UID: "new-uid"},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "example/plugin", Tag: "v1"}},
+		},
+		Status: artifactv1alpha1.PluginStatus{ArtifactMeta: &commonv1alpha1.ArtifactMeta{SpecHash: "spec"}},
+	}
+	r, _ := newTestReconciler(t, parent, testutil.NewAssigningArtifactNode("Plugin", testPluginName, "new-uid"))
+	require.NoError(t, r.node.ApplyArtifact(ctx, parent, &artifactv1alpha1.NodeArtifactStatus{}))
+	binary := r.node.FindInstalled(artifact.RefOf(artifact.KindPlugin, parent), artifact.MediumOCI)
+	require.NotNil(t, binary)
+	previous := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: testPluginName, UID: "old-uid"}}
+	r.node.PublishStatus(artifact.KindPlugin, previous, &artifactv1alpha1.NodeArtifactStatus{})
+
+	// StatusFor reports the entry stale, and the reconcile cleans up before installing the new incarnation.
+	require.NoError(t, r.Cleanup(ctx, testPluginName))
+
+	present, err := r.node.Verify(ctx, binary)
+	require.NoError(t, err)
+	assert.False(t, present, "the old incarnation's binary must go, whichever UID the entry was filed under")
+	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
+	assert.False(t, held, "the stale entry goes with the last file")
 }

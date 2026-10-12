@@ -187,22 +187,26 @@ spec:
               kind: Plugin
               name: ($k8saudit_plugin_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $container_plugin_name]))
-            for:
-              deletion: {}
+        - error:
             timeout: 120s
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $k8saudit_plugin_name]))
-            for:
-              deletion: {}
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $container_plugin_name]):
+                  - kind: Plugin
+        - error:
             timeout: 120s
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $k8saudit_plugin_name]):
+                  - kind: Plugin
 
     - name: Assert-container-so-absent-from-filesystem
       description: Verify the container.so binary has been removed from the node.

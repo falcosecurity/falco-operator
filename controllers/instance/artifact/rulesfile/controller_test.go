@@ -18,6 +18,7 @@ package rulesfile
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -49,6 +50,7 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/instance/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactcache"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifactserver"
@@ -67,10 +69,6 @@ const (
 	testRulesfileRepository = "test/rulesfile"
 	testEngine22Rules       = "- required_engine_version: 22"
 )
-
-func testRulesfileNodeName() string {
-	return controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, testRulesfileName, testutil.TestNodeName)
-}
 
 func testOCIArtifact() *commonv1alpha1.OCIArtifact {
 	return &commonv1alpha1.OCIArtifact{
@@ -98,12 +96,6 @@ func withRulesfileOCI() func(*artifactv1alpha1.Rulesfile) {
 	}
 }
 
-func withRulesfileSelector() func(*artifactv1alpha1.Rulesfile) {
-	return func(rf *artifactv1alpha1.Rulesfile) {
-		rf.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"env": "prod"}}
-	}
-}
-
 func withRulesfileConfigMapRef(name string) func(*artifactv1alpha1.Rulesfile) {
 	return func(rf *artifactv1alpha1.Rulesfile) {
 		rf.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: name}
@@ -116,36 +108,13 @@ func withInlineRules(yamlContent string) func(*artifactv1alpha1.Rulesfile) {
 	}
 }
 
-func newTestRulesfileNode(opts ...func(*artifactv1alpha1.ArtifactNode)) *artifactv1alpha1.ArtifactNode {
-	isController := true
-	n := &artifactv1alpha1.ArtifactNode{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      testRulesfileNodeName(),
-			Namespace: testutil.TestNamespace,
-			Labels:    controllerhelper.NodeObjectLabels(controllerhelper.ArtifactKindRulesfile, testRulesfileName, testutil.TestNodeName),
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: artifactv1alpha1.GroupVersion.String(),
-				Kind:       "Rulesfile",
-				Name:       testRulesfileName,
-				Controller: &isController,
-			}},
-		},
-		Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-	}
-	for _, o := range opts {
-		o(n)
-	}
-	return n
-}
-
 func newTestReconciler(t *testing.T, objs ...client.Object) (*RulesfileAggregatorReconciler, client.Client) {
 	t.Helper()
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(objs...).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
+		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}, &artifactv1alpha1.ArtifactNode{}).
 		Build()
 	return NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil), cl
 }
@@ -157,7 +126,6 @@ func newTestReconcilerWithIndex(t *testing.T, objs ...client.Object) (*Rulesfile
 		WithScheme(s).
 		WithObjects(objs...).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		WithIndex(&artifactv1alpha1.Rulesfile{}, index.ConfigMapOnRulesfile, index.RulesfileByConfigMapRef).
 		Build()
 	return NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil), cl
@@ -170,7 +138,6 @@ func newTestReconcilerWithPluginIndex(t *testing.T, objs ...client.Object) *Rule
 		WithScheme(s).
 		WithObjects(objs...).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		WithIndex(&artifactv1alpha1.Rulesfile{}, index.PluginOnRulesfile, index.RulesfileByPluginDependency).
 		Build()
 	return NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
@@ -183,37 +150,6 @@ func newTestReconcilerWithPuller(t *testing.T, mockPuller puller.Puller, objs ..
 	return r, cl
 }
 
-func addInUseFinalizer(t *testing.T, cl client.Client, rf *artifactv1alpha1.Rulesfile) {
-	t.Helper()
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), rf))
-	require.NoError(t, controllerhelper.EnsureInUseFinalizer(
-		context.Background(), cl,
-		controllerhelper.NodeObjectsInUseFinalizer,
-		rf, true,
-	))
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), rf))
-}
-
-const testFalcoName = "test-falco"
-
-func newTestFalco() *instancev1alpha1.Falco {
-	return &instancev1alpha1.Falco{
-		ObjectMeta: metav1.ObjectMeta{Name: testFalcoName, Namespace: testutil.TestNamespace},
-	}
-}
-
-func newRunningFalcoPod() *corev1.Pod {
-	return &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "falco-pod",
-			Namespace: testutil.TestNamespace,
-			Labels:    map[string]string{"app.kubernetes.io/instance": testFalcoName},
-		},
-		Spec:   corev1.PodSpec{NodeName: testutil.TestNodeName},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
-	}
-}
-
 func TestReconcile_NotFound(t *testing.T) {
 	r, _ := newTestReconciler(t)
 	result, err := r.Reconcile(context.Background(), testutil.Request("nonexistent"))
@@ -223,12 +159,12 @@ func TestReconcile_NotFound(t *testing.T) {
 
 func TestReconcile_MissingCacheOwner(t *testing.T) {
 	const (
-		shared       = "shared"
+		sharedBlob   = "shared"
 		grace        = "grace"
 		readError    = "read error"
 		persistError = "persist error"
 	)
-	for _, scenario := range []string{"unreferenced", shared, grace, readError, persistError} {
+	for _, scenario := range []string{"unreferenced", sharedBlob, grace, readError, persistError} {
 		t.Run(scenario, func(t *testing.T) {
 			cacheDir := t.TempDir()
 			r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir)
@@ -239,22 +175,18 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			platforms := []string{""}
 			paths := make([]string, 0, len(platforms))
 			for _, platform := range platforms {
-				path := artifactcache.BlobPath(cacheDir, "Rulesfile", "repo:tag", testRulesfileDigest, "", "")
+				path := artifactcache.BlobPath(cacheDir, string(artifact.KindRulesfile), "repo:tag", testRulesfileDigest, "", "")
 				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
-				require.NoError(t, r.cache.Set("Rulesfile", testutil.TestNamespace, testRulesfileName, platform, path))
-				if scenario == shared {
-					require.NoError(t, r.cache.Set("Rulesfile", testutil.TestNamespace, "other", platform, path))
+				require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, platform, path))
+				if scenario == sharedBlob {
+					require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, "other", platform, path))
 				}
 				paths = append(paths, path)
 			}
 
 			originalClient := r.Client
 			if scenario == readError {
-				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(interceptor.Funcs{
-					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
-						return fmt.Errorf("API unavailable")
-					},
-				}).Build()
+				r.Client = fake.NewClientBuilder().WithScheme(r.Scheme).WithInterceptorFuncs(testutil.FailGet(fmt.Errorf("API unavailable"))).Build()
 			}
 			snapshot := filepath.Join(cacheDir, "index.json")
 			if scenario == persistError {
@@ -264,7 +196,7 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
 			if scenario == readError || scenario == persistError {
 				require.Error(t, err)
-				require.NotEmpty(t, r.cache.Owners("Rulesfile"), "failed cleanup must retain the live index")
+				require.NotEmpty(t, r.cache.Owners(string(artifact.KindRulesfile)), "failed cleanup must retain the live index")
 				for _, path := range paths {
 					require.FileExists(t, path)
 				}
@@ -275,25 +207,25 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 				}
 				reloaded := artifactcache.NewCache(cacheDir)
 				require.NoError(t, reloaded.Load())
-				require.Contains(t, reloaded.Owners("Rulesfile"), types.NamespacedName{
+				require.Contains(t, reloaded.Owners(string(artifact.KindRulesfile)), types.NamespacedName{
 					Namespace: testutil.TestNamespace, Name: testRulesfileName,
 				}, "failed cleanup must retain the durable index")
 				_, err = r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
 			}
 			require.NoError(t, err)
-			require.NotContains(t, r.cache.Owners("Rulesfile"), types.NamespacedName{
+			require.NotContains(t, r.cache.Owners(string(artifact.KindRulesfile)), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testRulesfileName,
 			})
 			reloaded := artifactcache.NewCache(cacheDir)
 			require.NoError(t, reloaded.Load())
-			require.NotContains(t, reloaded.Owners("Rulesfile"), types.NamespacedName{
+			require.NotContains(t, reloaded.Owners(string(artifact.KindRulesfile)), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testRulesfileName,
 			}, "successful cleanup must survive restart")
 			removed, err := r.cache.Sweep(t.Context())
 			require.NoError(t, err)
 			require.Zero(t, removed, "shared/grace blobs are protected; immediate mode already removed unreferenced blobs")
 			for _, path := range paths {
-				if scenario == shared || scenario == grace {
+				if scenario == sharedBlob || scenario == grace {
 					require.FileExists(t, path)
 					require.True(t, r.cache.BlobExists(path))
 				} else {
@@ -320,7 +252,7 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment := &envtest.Environment{
-				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 				ErrorIfCRDPathMissing: true,
 			}
 			cfg, err := environment.Start()
@@ -334,7 +266,7 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 			})
 			require.NoError(t, err)
-			for _, idx := range index.All {
+			for _, idx := range index.InstanceOperator {
 				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
 			}
 			direct, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -351,13 +283,13 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 
 			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, seed.Load())
-			missingPath := artifactcache.BlobPath(seed.Dir(), "Rulesfile", "deleted:tag", testRulesfileDigest, "", "")
-			sharedPath := artifactcache.BlobPath(seed.Dir(), "Rulesfile", "shared:tag", testRulesfileDigest, "", "")
+			missingPath := artifactcache.BlobPath(seed.Dir(), string(artifact.KindRulesfile), "deleted:tag", testRulesfileDigest, "", "")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), string(artifact.KindRulesfile), "shared:tag", testRulesfileDigest, "", "")
 			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
 			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
-			require.NoError(t, seed.Set("Rulesfile", tc.namespace, "missing", "", missingPath))
-			require.NoError(t, seed.Set("Rulesfile", tc.namespace, "missing-shared", "", sharedPath))
-			require.NoError(t, seed.Set("Rulesfile", tc.namespace, survivor.Name, "", sharedPath))
+			require.NoError(t, seed.Set(string(artifact.KindRulesfile), tc.namespace, "missing", "", missingPath))
+			require.NoError(t, seed.Set(string(artifact.KindRulesfile), tc.namespace, "missing-shared", "", sharedPath))
+			require.NoError(t, seed.Set(string(artifact.KindRulesfile), tc.namespace, survivor.Name, "", sharedPath))
 			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, cache.Load())
 			r := NewRulesfileAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
@@ -381,9 +313,9 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 			// Neither missing name has ever existed in this API server. Only the controller's
 			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
 			require.Eventually(t, func() bool {
-				_, missing := cache.Lookup("Rulesfile", tc.namespace, "missing", "")
-				_, shared := cache.Lookup("Rulesfile", tc.namespace, "missing-shared", "")
-				return !missing && !shared
+				_, missing := cache.Lookup(string(artifact.KindRulesfile), tc.namespace, "missing", "")
+				_, sharedFound := cache.Lookup(string(artifact.KindRulesfile), tc.namespace, "missing-shared", "")
+				return !missing && !sharedFound
 			}, 10*time.Second, 20*time.Millisecond)
 			require.Eventually(t, func() bool {
 				current := &artifactv1alpha1.Rulesfile{}
@@ -393,12 +325,12 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 				return condition != nil && condition.Status == metav1.ConditionFalse
 			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
-			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("Rulesfile"))
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners(string(artifact.KindRulesfile)))
 			require.NoFileExists(t, missingPath)
 			require.FileExists(t, sharedPath)
 			reloaded := artifactcache.NewCache(seed.Dir())
 			require.NoError(t, reloaded.Load())
-			require.Equal(t, cache.Owners("Rulesfile"), reloaded.Owners("Rulesfile"))
+			require.Equal(t, cache.Owners(string(artifact.KindRulesfile)), reloaded.Owners(string(artifact.KindRulesfile)))
 
 			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
 				response := httptest.NewRecorder()
@@ -431,7 +363,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			environment := &envtest.Environment{
-				CRDDirectoryPaths:     []string{filepath.Join("..", testutil.CRDDirPath())},
+				CRDDirectoryPaths:     []string{testutil.CRDDirPath()},
 				ErrorIfCRDPathMissing: true,
 			}
 			cfg, err := environment.Start()
@@ -444,7 +376,7 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 				Controller: controllerconfig.Controller{SkipNameValidation: &skipNameValidation},
 			})
 			require.NoError(t, err)
-			for _, idx := range index.All {
+			for _, idx := range index.InstanceOperator {
 				require.NoError(t, mgr.GetFieldIndexer().IndexField(t.Context(), idx.Object, idx.Field, idx.ExtractValueFn))
 			}
 			direct, err := client.New(cfg, client.Options{Scheme: scheme})
@@ -471,16 +403,17 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 			parent := newTestRulesfile()
 			require.NoError(t, direct.Create(t.Context(), parent))
 			require.NoError(t, direct.Create(t.Context(), newTestNode()))
-			require.NoError(t, direct.Create(t.Context(), newTestFalco()))
-			pod := newRunningFalcoPod()
+			require.NoError(t, direct.Create(t.Context(), testutil.NewTestFalco()))
+			pod := testutil.NewRunningFalcoPod()
 			pod.Spec.Containers = []corev1.Container{{Name: "falco", Image: "unused"}}
 			require.NoError(t, direct.Create(t.Context(), pod))
 			pod.Status.Phase = corev1.PodRunning
 			require.NoError(t, direct.Status().Update(t.Context(), pod))
-			child := newTestRulesfileNode()
-			child.OwnerReferences[0].UID = parent.UID
+			child := testutil.NewReportingArtifactNode(artifact.KindRulesfile, parent.Name)
+			child.Spec.Artifacts[0].UID = string(parent.UID)
 			require.NoError(t, direct.Create(t.Context(), child))
-			child.Status.Conditions = []metav1.Condition{{
+			child.Status.Artifacts = []artifactv1alpha1.NodeArtifactStatus{{Kind: artifact.KindRulesfile, Name: parent.Name, UID: string(parent.UID)}}
+			child.Status.Artifacts[0].Conditions = []metav1.Condition{{
 				Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed",
 				Message: "Installed", ObservedGeneration: parent.Generation, LastTransitionTime: metav1.Now(),
 			}}
@@ -567,17 +500,16 @@ func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *test
 			fetchErr := fmt.Errorf("registry down")
 			parent := newTestRulesfile(withRulesfileOCI())
 			parent.Generation = 1
-			child := newTestRulesfileNode()
-			child.Status.Conditions = []metav1.Condition{
+			child := testutil.NewReportingArtifactNode(artifact.KindRulesfile, parent.Name)
+			child.Status.Artifacts[0].Conditions = []metav1.Condition{
 				{Type: "Programmed", Status: tc.programmed, Reason: tc.programmedReason, ObservedGeneration: 1},
 				{Type: "ResolvedRefs", Status: metav1.ConditionTrue, Reason: "ReferenceResolved", ObservedGeneration: 1},
 			}
 			scheme := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 			var statusApplies int
 			cl := fake.NewClientBuilder().WithScheme(scheme).
-				WithObjects(parent, child, newTestNode(), newTestFalco(), newRunningFalcoPod()).
+				WithObjects(parent, child, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 				WithStatusSubresource(&artifactv1alpha1.Rulesfile{}, &artifactv1alpha1.ArtifactNode{}).
-				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 				WithInterceptorFuncs(interceptor.Funcs{
 					SubResourceApply: func(
 						ctx context.Context, c client.Client, subresource string,
@@ -617,7 +549,7 @@ func TestReconcile_MetadataFailurePreservesFinalConditionAndAvoidsWrites(t *test
 
 			// A real child reference failure must still reach the parent while metadata fails.
 			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(child), child))
-			apimeta.SetStatusCondition(&child.Status.Conditions, metav1.Condition{
+			apimeta.SetStatusCondition(&child.Status.Artifacts[0].Conditions, metav1.Condition{
 				Type: "ResolvedRefs", Status: metav1.ConditionFalse, Reason: "ReferenceNotFound",
 				Message: "Missing reference", ObservedGeneration: parent.Generation,
 			})
@@ -646,50 +578,10 @@ func TestReconcile_GetError(t *testing.T) {
 				return fmt.Errorf("api server error")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.Error(t, err)
-}
-
-func TestReconcile_DeletionNoNodeObjects(t *testing.T) {
-	// A keep-alive finalizer makes cl.Delete set DeletionTimestamp without removing the object.
-	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) {
-		r.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	rec, cl := newTestReconciler(t, rf)
-
-	require.NoError(t, cl.Delete(context.Background(), rf))
-
-	result, err := rec.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// No RulesfileNodes should exist.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletionWithNodeObjects(t *testing.T) {
-	// A keep-alive finalizer makes cl.Delete set DeletionTimestamp without removing the object.
-	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) {
-		r.Finalizers = []string{"test.example.com/keep-alive"}
-	})
-	rfNode := newTestRulesfileNode()
-	rec, cl := newTestReconciler(t, rf, rfNode)
-
-	require.NoError(t, cl.Delete(context.Background(), rf))
-
-	result, err := rec.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// RulesfileNode should be deleted.
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
 }
 
 func TestReconcile_NoMatchingNodes(t *testing.T) {
@@ -699,10 +591,6 @@ func TestReconcile_NoMatchingNodes(t *testing.T) {
 	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.NoError(t, err)
 	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
 
 	got := &artifactv1alpha1.Rulesfile{}
 	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
@@ -737,167 +625,6 @@ func TestReconcile_NoSourcesClearsCachedMetadata(t *testing.T) {
 	assert.Equal(t, withSource.Generation, withoutSources.Status.ObservedGeneration)
 }
 
-func TestReconcile_CreatesNodeObject(t *testing.T) {
-	rf := newTestRulesfile()
-	node := newTestNode()
-	r, cl := newTestReconciler(t, rf, node, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	rfNode := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testRulesfileNodeName(), Namespace: testutil.TestNamespace}, rfNode))
-	assert.Equal(t, testutil.TestNodeName, rfNode.Spec.NodeName)
-
-	got := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestReconcile_CreatesIndependentNodeObjectsForNamespaces(t *testing.T) {
-	const (
-		deploymentNamespace = "falco-deployment"
-		daemonSetNamespace  = "falco-daemonset"
-	)
-
-	objects := make([]client.Object, 0, 7)
-	objects = append(objects, newTestNode())
-	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
-		rf := newTestRulesfile()
-		rf.Namespace = namespace
-		falco := newTestFalco()
-		falco.Namespace = namespace
-		pod := newRunningFalcoPod()
-		pod.Namespace = namespace
-		objects = append(objects, rf, falco, pod)
-	}
-	r, cl := newTestReconciler(t, objects...)
-
-	for _, namespace := range []string{deploymentNamespace, daemonSetNamespace} {
-		result, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{
-			Name:      testRulesfileName,
-			Namespace: namespace,
-		}})
-		require.NoError(t, err)
-		assert.Equal(t, ctrl.Result{}, result)
-
-		rfNode := &artifactv1alpha1.ArtifactNode{}
-		require.NoError(t, cl.Get(context.Background(), types.NamespacedName{
-			Name:      testRulesfileNodeName(),
-			Namespace: namespace,
-		}, rfNode))
-		assert.Equal(t, testutil.TestNodeName, rfNode.Spec.NodeName)
-	}
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Len(t, nodeList.Items, 2)
-}
-
-func TestReconcile_NodeObjectAlreadyExists(t *testing.T) {
-	rf := newTestRulesfile()
-	node := newTestNode()
-	existing := newTestRulesfileNode()
-	r, cl := newTestReconciler(t, rf, node, existing, newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	list := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), list))
-	assert.Len(t, list.Items, 1)
-}
-
-func TestReconcile_NoFalcoPod_NoNodeObject(t *testing.T) {
-	// Node matches the artifact selector but no Falco pod is running on it.
-	rf := newTestRulesfile()
-	node := newTestNode()
-	r, cl := newTestReconciler(t, rf, node) // no Falco CR or pod
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_DeletesStaleNodeObject(t *testing.T) {
-	rf := newTestRulesfile(withRulesfileSelector())
-	staleNode := newTestRulesfileNode()
-	plainNode := newTestNode()
-	r, cl := newTestReconciler(t, rf, staleNode, plainNode)
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), nodeList))
-	assert.Empty(t, nodeList.Items)
-}
-
-func TestReconcile_TerminatingStaleNodeIsRetainedButNotAggregated(t *testing.T) {
-	rf := newTestRulesfile(
-		withRulesfileSelector(),
-		func(r *artifactv1alpha1.Rulesfile) {
-			r.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-		},
-	)
-	staleNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
-		n.Status.Conditions = []metav1.Condition{{
-			Type:    commonv1alpha1.ConditionProgrammed.String(),
-			Status:  metav1.ConditionTrue,
-			Reason:  "Programmed",
-			Message: "old result",
-		}}
-	})
-	r, cl := newTestReconciler(t, rf, staleNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	terminating := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), terminating))
-	assert.False(t, terminating.DeletionTimestamp.IsZero(), "the node-side finalizer keeps the stale child terminating")
-
-	got := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
-	assert.Contains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
-		"the parent must stay alive until the terminating child is physically gone")
-	condition := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, condition)
-	assert.Equal(t, metav1.ConditionUnknown, condition.Status)
-	assert.Equal(t, "NoNodesAssigned", condition.Reason,
-		"the stale child's last successful result must not remain in the aggregate")
-}
-
-func TestReconcile_RemovesNodeObjectWhenFalcoPodGone(t *testing.T) {
-	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) {
-		r.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
-	})
-	staleNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"artifact.example.com/node-cleanup"}
-	})
-	// The Kubernetes Node still matches the Rulesfile selector, but no Falco pod remains there.
-	r, cl := newTestReconciler(t, rf, staleNode, newTestNode())
-
-	result, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	got := &artifactv1alpha1.ArtifactNode{}
-	err = cl.Get(context.Background(), client.ObjectKeyFromObject(staleNode), got)
-	assert.True(t, k8serrors.IsNotFound(err),
-		"the instance operator must garbage-collect the ArtifactNode when its artifact operator is gone")
-}
-
 func TestReconcile_ListMatchingNodesError(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	rf := newTestRulesfile()
@@ -913,75 +640,10 @@ func TestReconcile_ListMatchingNodesError(t *testing.T) {
 				return c.List(ctx, list, opts...)
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
 	require.Error(t, err)
-}
-
-func TestReconcile_ListNodeObjectsError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("rulesfile node list failed")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.Error(t, err)
-}
-
-func TestHandleDeletion_NoNodeObjects(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*instancev1alpha1.FalcoList); ok {
-					return fmt.Errorf("Falco list should not be called without node objects")
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	addInUseFinalizer(t, cl, rf)
-
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), rf)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
-	assert.NotContains(t, got.Finalizers, controllerhelper.NodeObjectsInUseFinalizer)
-}
-
-func TestHandleDeletion_NodeObjectsPresent(t *testing.T) {
-	rf := newTestRulesfile()
-	rfNode := newTestRulesfileNode()
-	r, cl := newTestReconciler(t, rf, rfNode)
-
-	err := r.handleDeletion(context.Background(), rf)
-	require.NoError(t, err)
-
-	node := &artifactv1alpha1.ArtifactNode{}
-	err = cl.Get(context.Background(),
-		types.NamespacedName{Name: testRulesfileNodeName(), Namespace: testutil.TestNamespace}, node)
-	assert.Error(t, err)
 }
 
 func TestHandleDeletion_EvictsCacheEntry(t *testing.T) {
@@ -993,8 +655,8 @@ func TestHandleDeletion_EvictsCacheEntry(t *testing.T) {
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
-	// No ArtifactNode objects are owned by this Rulesfile, so handleDeletion evicts the cache entry now.
-	err := r.handleDeletion(context.Background(), rf)
+	// No node lists or reports on this Rulesfile, so the deletion evicts the cache entry.
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), rf)
 	require.NoError(t, err)
 
 	_, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
@@ -1015,7 +677,7 @@ func TestHandleDeletion_SharedBlobSurvivesEviction(t *testing.T) {
 	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", sharedBlob))
 	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, "other-rulesfile", "", sharedBlob))
 
-	err := r.handleDeletion(context.Background(), rf)
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), rf)
 	require.NoError(t, err)
 
 	_, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
@@ -1030,7 +692,7 @@ func TestHandleDeletion_SharedBlobSurvivesEviction(t *testing.T) {
 
 func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	rf := newTestRulesfile()
-	rfNode := newTestRulesfileNode()
+	rfNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 	cacheDir := t.TempDir()
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, rf, rfNode)
 
@@ -1038,151 +700,12 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
 	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
-	err := r.handleDeletion(context.Background(), rf)
+	_, err := shared.HandleDeletion(context.Background(), r.aggregation(), rf)
 	require.NoError(t, err)
 
 	got, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	require.True(t, ok, "cache entry must survive while a node object still exists")
 	assert.Equal(t, blobPath, got)
-}
-
-func TestHandleDeletion_NodeObjectsBeingDeleted(t *testing.T) {
-	rf := newTestRulesfile()
-	rfNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
-		now := metav1.Now()
-		n.DeletionTimestamp = &now
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	r, cl := newTestReconciler(t, rf, rfNode, newTestNode(), newTestFalco(), newRunningFalcoPod())
-
-	err := r.handleDeletion(context.Background(), rf)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rfNode), got))
-	assert.NotEmpty(t, got.Finalizers, "the running node-side operator must retain responsibility for cleanup")
-}
-
-func TestHandleDeletion_ListError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(_ context.Context, _ client.WithWatch, list client.ObjectList, _ ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					return fmt.Errorf("list error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-
-	err := r.handleDeletion(context.Background(), rf)
-	require.Error(t, err)
-}
-
-func TestEnsureNodeObject_AlreadyExists(t *testing.T) {
-	rf := newTestRulesfile()
-	existing := newTestRulesfileNode()
-	r, cl := newTestReconciler(t, rf, existing)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, rf,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindRulesfile), controllerhelper.ArtifactKindRulesfile, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	list := &artifactv1alpha1.ArtifactNodeList{}
-	require.NoError(t, cl.List(context.Background(), list))
-	assert.Len(t, list.Items, 1)
-}
-
-func TestEnsureNodeObject_Creates(t *testing.T) {
-	rf := newTestRulesfile()
-	r, cl := newTestReconciler(t, rf)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, rf,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindRulesfile), controllerhelper.ArtifactKindRulesfile, testutil.TestNodeName)
-	require.NoError(t, err)
-
-	created := &artifactv1alpha1.ArtifactNode{}
-	require.NoError(t, cl.Get(context.Background(),
-		types.NamespacedName{Name: testRulesfileNodeName(), Namespace: testutil.TestNamespace}, created))
-	assert.Equal(t, testutil.TestNodeName, created.Spec.NodeName)
-	assert.Equal(t, testRulesfileName, created.Labels[controllerhelper.LabelArtifactParent])
-}
-
-func TestEnsureNodeObject_GetError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("get error")
-				}
-				return nil
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-
-	err := controllerhelper.EnsureNodeObject(context.Background(), r.Client, rf,
-		artifactv1alpha1.GroupVersion.WithKind(controllerhelper.KindRulesfile), controllerhelper.ArtifactKindRulesfile, testutil.TestNodeName)
-	require.Error(t, err)
-}
-
-func TestUpdateAggregateConditions_Empty(t *testing.T) {
-	rf := newTestRulesfile()
-	r, cl := newTestReconciler(t, rf)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	err := controllerhelper.UpdateAggregateConditions(context.Background(), r.Client, r.Scheme, rf, &rf.Status.Conditions, nodeList, ControllerName)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionUnknown, cond.Status)
-	assert.Equal(t, "NoNodesAssigned", cond.Reason)
-}
-
-func TestUpdateAggregateConditions_WithNodeConditions(t *testing.T) {
-	rf := newTestRulesfile()
-	r, cl := newTestReconciler(t, rf)
-
-	nodeList := &artifactv1alpha1.ArtifactNodeList{
-		Items: []artifactv1alpha1.ArtifactNode{
-			{
-				Spec: artifactv1alpha1.ArtifactNodeSpec{NodeName: testutil.TestNodeName},
-				Status: artifactv1alpha1.ArtifactNodeStatus{
-					Conditions: []metav1.Condition{
-						{
-							Type:    commonv1alpha1.ConditionProgrammed.String(),
-							Status:  metav1.ConditionTrue,
-							Reason:  "Programmed",
-							Message: "ok",
-						},
-					},
-				},
-			},
-		},
-	}
-
-	err := controllerhelper.UpdateAggregateConditions(context.Background(), r.Client, r.Scheme, rf, &rf.Status.Conditions, nodeList, ControllerName)
-	require.NoError(t, err)
-
-	got := &artifactv1alpha1.Rulesfile{}
-	require.NoError(t, cl.Get(context.Background(), client.ObjectKeyFromObject(rf), got))
-	cond := apimeta.FindStatusCondition(got.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
-	require.NotNil(t, cond)
-	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 }
 
 func TestFetchAndCacheArtifactMeta_NoSources(t *testing.T) {
@@ -1715,7 +1238,6 @@ func TestFindRulesfilesForNode_ListError(t *testing.T) {
 				return nil
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	reqs := controllerhelper.EnqueueAllOfType(context.Background(), cl, &artifactv1alpha1.RulesfileList{})
 	assert.Nil(t, reqs)
@@ -1745,7 +1267,6 @@ func TestFindRulesfilesForConfigMap_ListError(t *testing.T) {
 				return nil
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cm", Namespace: testutil.TestNamespace}}
@@ -1795,7 +1316,6 @@ func TestFindRulesfilesForPlugin_ListError(t *testing.T) {
 				return nil
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		WithIndex(&artifactv1alpha1.Rulesfile{}, index.PluginOnRulesfile, index.RulesfileByPluginDependency).
 		Build()
 	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
@@ -1806,97 +1326,20 @@ func TestFindRulesfilesForPlugin_ListError(t *testing.T) {
 
 // ── Reconcile error-path coverage ───────────────────────────────────────────
 
-func TestReconcile_DeleteStaleNodeError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	// Selector requires env=prod; testutil.TestNodeName has no such label → stale.
-	rf := newTestRulesfile(withRulesfileSelector())
-	staleNode := newTestRulesfileNode()
-	plainNode := newTestNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, staleNode, plainNode).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("delete failed")
-				}
-				return c.Delete(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.Error(t, err)
-}
-
-func TestReconcile_EnsureNodeObjectError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	node := newTestNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, node, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("create failed")
-				}
-				return c.Create(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.Error(t, err)
-}
-
 func TestReconcile_EnsureInUseFinalizerError(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
 	rf := newTestRulesfile()
 	node := newTestNode()
-	rfNode := newTestRulesfileNode() // pre-existing so ensureNodeObject is a no-op
+	rfNode := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName)
 	cl := fake.NewClientBuilder().
 		WithScheme(s).
-		WithObjects(rf, node, rfNode, newTestFalco(), newRunningFalcoPod()).
+		WithObjects(rf, node, rfNode, testutil.NewTestFalco(), testutil.NewRunningFalcoPod()).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 				return fmt.Errorf("patch failed")
 			},
 		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.Error(t, err)
-}
-
-func TestReconcile_SecondListNodeObjectsError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	node := newTestNode()
-	rfNode := newTestRulesfileNode() // pre-existing so ensureNodeObject is a no-op
-	var listCount int
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, node, rfNode).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-				if _, ok := list.(*artifactv1alpha1.ArtifactNodeList); ok {
-					listCount++
-					if listCount == 2 {
-						return fmt.Errorf("second list error")
-					}
-				}
-				return c.List(ctx, list, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
 	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
@@ -2023,31 +1466,7 @@ func TestAppendYAMLRequirements_PluginVersionsWithAlternatives(t *testing.T) {
 	assert.Equal(t, "0.7.0", meta.Dependencies[0].Alternatives[0].Version)
 }
 
-// ── handleDeletion error path ────────────────────────────────────────────────
-
-func TestHandleDeletion_DeleteError(t *testing.T) {
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	rfNode := newTestRulesfileNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, rfNode).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-				if _, ok := obj.(*artifactv1alpha1.ArtifactNode); ok {
-					return fmt.Errorf("delete error")
-				}
-				return c.Delete(ctx, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), rf)
-	require.Error(t, err)
-}
-
-// ── fetchAndCacheBlob tests ────────────────────────────────────────────────
+// ── HandleDeletion error path ────────────────────────────────────────────────
 
 // newTestReconcilerWithCacheAndPuller creates a RulesfileAggregatorReconciler with a real,
 // loaded artifact Cache rooted at cacheDir, and an injected mock OCI puller.
@@ -2060,7 +1479,6 @@ func newTestReconcilerWithCacheAndPuller(
 		WithScheme(s).
 		WithObjects(objs...).
 		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
 		Build()
 	// Zero grace period: a dereferenced blob is removed from disk immediately.
 	cache := artifactcache.NewCache(cacheDir, artifactcache.WithEvictionGracePeriod(0))
@@ -2148,144 +1566,6 @@ func TestFetchAndCacheBinary_PullError(t *testing.T) {
 	err := r.fetchAndCacheBlob(context.Background(), rf)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry down")
-}
-
-func TestReconcile_NewNodeKeepsResolvedRevision(t *testing.T) {
-	const emptyCache = "empty after restart"
-	ctx := context.Background()
-	rf := newTestRulesfile(withRulesfileOCI())
-	rf.Spec.OCIArtifact.Image.Repository = testRulesfileRepository
-	rf.Generation = 1
-	layer, err := pullerfake.MakeTarGz("rules.yaml", []byte("rules from revision A"))
-	require.NoError(t, err)
-	mockPuller := &pullerfake.MockOCIPuller{
-		ConfigResult: &puller.ArtifactConfig{}, ConfigDigest: testRulesfileDigest,
-		Result:       &puller.RegistryResult{RootDigest: testRulesfileDigest, Type: puller.Rulesfile},
-		LayerContent: layer,
-	}
-	r := newTestReconcilerWithCacheAndPuller(t, mockPuller, t.TempDir(), rf, newTestNode(), newTestFalco(), newRunningFalcoPod())
-	_, err = r.Reconcile(ctx, testutil.Request(rf.Name))
-	require.NoError(t, err)
-	require.Len(t, mockPuller.PullCalls, 1)
-
-	mockPuller.ConfigDigest = testNextRulesfileDigest
-	mockPuller.ResolveDigestResult = mockPuller.ConfigDigest
-	added := newTestNode()
-	added.Name = "new-node"
-	require.NoError(t, r.Create(ctx, added))
-	pod := newRunningFalcoPod()
-	pod.Name = "new-falco"
-	pod.Spec.NodeName = added.Name
-	require.NoError(t, r.Create(ctx, pod))
-
-	for _, state := range []string{"warm", "reloaded", emptyCache} {
-		t.Run(state, func(t *testing.T) {
-			if state != "warm" {
-				cacheDir := r.cache.Dir()
-				if state == emptyCache {
-					cacheDir = t.TempDir()
-				}
-				r.cache = artifactcache.NewCache(cacheDir)
-				require.NoError(t, r.cache.Load())
-			}
-			if state == emptyCache {
-				mockPuller.PullErr = fmt.Errorf("revision unavailable")
-				_, reconcileErr := r.Reconcile(ctx, testutil.Request(rf.Name))
-				require.ErrorContains(t, reconcileErr, "revision unavailable")
-				_, ok := r.cache.Lookup("Rulesfile", rf.Namespace, rf.Name, "")
-				require.False(t, ok)
-				mockPuller.PullErr = nil
-			}
-			pullsBefore := len(mockPuller.PullCalls)
-			_, reconcileErr := r.Reconcile(ctx, testutil.Request(rf.Name))
-			require.NoError(t, reconcileErr)
-			wantPulls := pullsBefore
-			if state == emptyCache {
-				wantPulls++
-			}
-			require.Len(t, mockPuller.PullCalls, wantPulls)
-			child := &artifactv1alpha1.ArtifactNode{}
-			require.NoError(t, r.Get(ctx, client.ObjectKey{
-				Namespace: rf.Namespace,
-				Name:      controllerhelper.NodeObjectName(controllerhelper.ArtifactKindRulesfile, rf.Name, added.Name),
-			}, child))
-			require.Equal(t, added.Name, child.Spec.NodeName)
-			got := &artifactv1alpha1.Rulesfile{}
-			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(rf), got))
-			require.Equal(t, testRulesfileDigest, got.Status.ArtifactMeta.Digest)
-			require.Equal(t, got.Generation, got.Status.ObservedGeneration)
-			require.Len(t, mockPuller.FetchConfigCalls, 1)
-			require.Len(t, mockPuller.FetchContentCalls, 1)
-			require.Empty(t, mockPuller.ResolveDigestCalls)
-			for _, call := range mockPuller.PullCalls {
-				require.Equal(t, "ghcr.io/test/rulesfile@"+testRulesfileDigest, call.Ref)
-			}
-			request := httptest.NewRequestWithContext(ctx, http.MethodGet,
-				"/v1/artifacts/rulesfiles/"+rf.Namespace+"/"+rf.Name+"?digest="+testRulesfileDigest, http.NoBody)
-			response := httptest.NewRecorder()
-			artifactserver.New(r.cache).Handler().ServeHTTP(response, request)
-			require.Equal(t, http.StatusOK, response.Code)
-			require.Equal(t, "rules from revision A", response.Body.String())
-			require.Equal(t, testRulesfileDigest, response.Header().Get(artifact.ArtifactDigestHeader))
-		})
-	}
-}
-
-func TestReconcile_ClearFinalizersInStalePath_Error(t *testing.T) {
-	// Selector requires env=prod; plain node doesn't have that label → staleNode is stale.
-	// staleNode has a finalizer and a Falco pod still runs there, so orphan detection calls
-	// Node.Get. The interceptor returns a non-404 error that propagates to Reconcile.
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile(withRulesfileSelector())
-	staleNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	plainNode := newTestNode()
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, staleNode, plainNode, newTestFalco(), newRunningFalcoPod()).
-		WithStatusSubresource(&artifactv1alpha1.Rulesfile{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*corev1.Node); ok {
-					return fmt.Errorf("node lookup error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	_, err := r.Reconcile(context.Background(), testutil.Request(testRulesfileName))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "node lookup error")
-}
-
-func TestHandleDeletion_ClearFinalizersError(t *testing.T) {
-	// RulesfileNode has a finalizer and a Falco pod still runs on its node, so orphan detection
-	// checks the Kubernetes Node via Get. The interceptor fails it with a non-404 error.
-	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme)
-	rf := newTestRulesfile()
-	rfNode := newTestRulesfileNode(func(n *artifactv1alpha1.ArtifactNode) {
-		n.Finalizers = []string{"some-finalizer"}
-	})
-	cl := fake.NewClientBuilder().
-		WithScheme(s).
-		WithObjects(rf, rfNode, newTestFalco(), newRunningFalcoPod()).
-		WithInterceptorFuncs(interceptor.Funcs{
-			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-				if _, ok := obj.(*corev1.Node); ok {
-					return fmt.Errorf("node lookup error")
-				}
-				return c.Get(ctx, key, obj, opts...)
-			},
-		}).
-		WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeOwnerKind, index.ArtifactNodeOwnerKindIndexer).
-		Build()
-	r := NewRulesfileAggregatorReconciler(cl, s, events.NewFakeRecorder(100), nil)
-	err := r.handleDeletion(context.Background(), rf)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "node lookup error")
 }
 
 func TestReconcile_FetchAndCacheBinaryError(t *testing.T) {
@@ -2507,4 +1787,129 @@ func TestFetchAndCacheArtifactMeta_RemovingAndReaddingOCIResolvesAgain(t *testin
 	require.Equal(t, mockPuller.ConfigDigest, rf.Status.ArtifactMeta.Digest)
 	require.Equal(t, []string{artifact.ResolveReference(oci), artifact.ResolveReference(oci)}, mockPuller.FetchConfigCalls,
 		"re-adding an OCI source is a new resolution, not reuse of removed metadata")
+}
+
+const newUID = "new-uid"
+
+func TestReconcile_AggregatesFromTheArtifactNode(t *testing.T) {
+	const uid = "rulesfile-uid"
+	programmed := func(status metav1.ConditionStatus) []metav1.Condition {
+		return []metav1.Condition{{Type: "Programmed", Status: status, Reason: "Programmed", ObservedGeneration: 1}}
+	}
+
+	for name, tc := range map[string]struct {
+		conditions     []metav1.Condition
+		wantProgrammed bool
+	}{
+		"the node reports programmed":   {programmed(metav1.ConditionTrue), true},
+		"the node reports failure":      {programmed(metav1.ConditionFalse), false},
+		"the node has not reported yet": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) { r.Generation, r.UID = 1, uid })
+			node := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName, func(n *artifactv1alpha1.ArtifactNode) {
+				n.Status.Artifacts[0].UID = uid
+				n.Status.Artifacts[0].Conditions = tc.conditions
+			})
+			r, cl := newTestReconciler(t, rf, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+			_, err := r.Reconcile(t.Context(), testutil.Request(rf.Name))
+			require.NoError(t, err)
+
+			require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(rf), rf))
+			assert.Equal(t, tc.wantProgrammed, apimeta.IsStatusConditionTrue(rf.Status.Conditions, "Programmed"))
+		})
+	}
+}
+
+func TestReconcile_APreviousIncarnationsEntryIsNotCreditedToTheNewRulesfile(t *testing.T) {
+	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) { r.Generation, r.UID = 1, newUID })
+	node := testutil.NewReportingArtifactNode("Rulesfile", testRulesfileName, func(n *artifactv1alpha1.ArtifactNode) {
+		n.Spec.Artifacts[0].UID = newUID
+		n.Status.Artifacts[0].UID = "old-uid"
+		n.Status.Artifacts[0].Conditions = []metav1.Condition{
+			{Type: "Programmed", Status: metav1.ConditionTrue, Reason: "Programmed", ObservedGeneration: 1},
+		}
+	})
+	r, cl := newTestReconciler(t, rf, newTestNode(), testutil.NewTestFalco(), testutil.NewRunningFalcoPod(), node)
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(rf.Name))
+	require.NoError(t, err)
+
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(rf), rf))
+	assert.False(t, apimeta.IsStatusConditionTrue(rf.Status.Conditions, "Programmed"),
+		"the deleted rulesfile's success must not make its replacement look programmed")
+}
+
+func TestReconcile_DeletionWaitsForNodeCleanup(t *testing.T) {
+	rf := newTestRulesfile(func(r *artifactv1alpha1.Rulesfile) {
+		r.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+	})
+	artifactNode := testutil.NewTestArtifactNode()
+	artifactNode.Spec.Artifacts = []artifactv1alpha1.NodeArtifactRef{{Kind: "Rulesfile", Name: rf.Name}}
+	r, cl := newTestReconciler(t, rf, artifactNode)
+	require.NoError(t, cl.Delete(t.Context(), rf))
+
+	_, err := r.Reconcile(t.Context(), testutil.Request(rf.Name))
+	require.NoError(t, err)
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(rf), rf))
+	assert.Contains(t, rf.Finalizers, controllerhelper.NodeObjectsInUseFinalizer,
+		"a node's spec still lists the rulesfile, so its files may remain: the parent must stay")
+
+	// The operator drops the assignment and the node has nothing left to report.
+	require.NoError(t, cl.Get(t.Context(), client.ObjectKeyFromObject(artifactNode), artifactNode))
+	artifactNode.Spec.Artifacts = nil
+	require.NoError(t, cl.Update(t.Context(), artifactNode))
+
+	_, err = r.Reconcile(t.Context(), testutil.Request(rf.Name))
+	require.NoError(t, err)
+	err = cl.Get(t.Context(), client.ObjectKeyFromObject(rf), rf)
+	assert.True(t, k8serrors.IsNotFound(err), "with every node clean the parent is released")
+}
+
+var errBoom = errors.New("boom")
+
+func TestHandleDeletion_Errors(t *testing.T) {
+	deleting := func() *artifactv1alpha1.Rulesfile {
+		return newTestRulesfile(func(p *artifactv1alpha1.Rulesfile) {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+			p.Finalizers = []string{controllerhelper.NodeObjectsInUseFinalizer}
+		})
+	}
+	tests := []struct {
+		name  string
+		funcs interceptor.Funcs
+	}{
+		{
+			name: "the ArtifactNodes cannot be listed",
+			funcs: interceptor.Funcs{List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+				return errBoom
+			}},
+		},
+		{
+			name: "the finalizer cannot be released",
+			funcs: interceptor.Funcs{Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+				return errBoom
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rulesfile := deleting()
+			r, cl := newTestReconciler(t, rulesfile)
+			r.Client = interceptor.NewClient(cl.(client.WithWatch), tt.funcs)
+
+			_, err := shared.HandleDeletion(t.Context(), r.aggregation(), rulesfile)
+
+			require.ErrorIs(t, err, errBoom)
+		})
+	}
+}
+
+func TestSetupWithManager(t *testing.T) {
+	r, _ := newTestReconciler(t)
+	mgr := testutil.NewUnstartedManager(t, testutil.Scheme(t, artifactv1alpha1.AddToScheme, instancev1alpha1.AddToScheme))
+
+	require.NoError(t, r.SetupWithManager(mgr))
 }

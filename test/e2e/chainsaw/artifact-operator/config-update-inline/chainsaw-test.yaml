@@ -15,8 +15,9 @@ spec:
     - The disk file at the SAME path now contains "log_level: debug".
 
     Then repeat create/update/delete for a Config whose valid Kubernetes name exceeds
-    the label-value limit. Its ArtifactNode must retain the full owner identity while
-    using a valid searchable label. Removing it must leave the original Config intact.
+    the label-value limit (63 characters). The node's ArtifactNode must list it, and the
+    sidecar report on it, under the full name, and the installed file must carry the full
+    name too. Removing it must leave the original Config intact.
 
   bindings:
     - name: falco_name
@@ -27,9 +28,6 @@ spec:
       value: config-update-inline
     - name: long_config_name
       value: config-update-inline-name-longer-than-sixty-three-characters-regression
-    - name: long_config_label
-      # First 63 hexadecimal characters of SHA256(long_config_name).
-      value: eb3188f87c92351cbcce42cbc112dde2408eb198ba8ad9aeb40eaf6b3dd8f00
 
   steps:
     - name: "Step 01: Create-falco"
@@ -173,8 +171,10 @@ spec:
                 config:
                   log_level: info
 
-    - name: "Step 10: Assert-long-config-owner-and-installed-file"
-      description: The searchable label is valid while the owner reference preserves the complete Config name.
+    - name: "Step 10: Assert-long-config-listed-and-installed"
+      description: |
+        Names are not label values: the ArtifactNode lists the Config under its complete name, and its entry
+        in the sidecar's report carries that name, the condition and the installed file.
       try:
         - assert:
             resource:
@@ -182,19 +182,16 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($long_config_label)
-                  artifact.falcosecurity.dev/kind: config
-                ownerReferences:
+              spec:
+                (artifacts[?kind == 'Config' && name == $long_config_name]):
                   - kind: Config
-                    name: ($long_config_name)
-                    controller: true
               status:
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: (join('', ['/etc/falco/config.d/60-03-', $long_config_name, '-inline.yaml']))
-                    priority: 60
+                (artifacts[?kind == 'Config' && name == $long_config_name]):
+                  - (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: (join('', ['/etc/falco/config.d/60-03-', $long_config_name, '-inline.yaml']))
+                        priority: 60
 
     - name: "Step 11: Assert-long-config-initial-content"
       description: Match this exact Config's filename so the original Config cannot satisfy the content assertion.
@@ -260,7 +257,7 @@ spec:
               value: "log_level: debug"
 
     - name: "Step 14: Delete-long-config"
-      description: Encoded parent-label lookup must find and remove the owned ArtifactNode during cleanup.
+      description: The ArtifactNode must stop listing the Config, whatever the length of its name.
       try:
         - delete:
             ref:
@@ -268,13 +265,15 @@ spec:
               kind: Config
               name: ($long_config_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $long_config_label]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Config' && name == $long_config_name]):
+                  - kind: Config
 
     - name: "Step 15: Assert-long-config-file-removed"
       description: Kubernetes deletion is not sufficient; the real node file must also be absent.

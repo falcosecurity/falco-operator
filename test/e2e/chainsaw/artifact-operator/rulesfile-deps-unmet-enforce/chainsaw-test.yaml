@@ -86,19 +86,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfied
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfied
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfied
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfied
 
     - name: "Step 04: Assert-no-file-on-filesystem"
       description: ensureRulesfile was skipped; no file should be written.
@@ -332,7 +330,7 @@ spec:
 
     - name: "Step 08: Delete-rulesfile"
       description: |
-        Deleting a Rulesfile with a rejected update must clean up its ArtifactNode
+        Deleting a Rulesfile with a rejected update must drop it from the node's ArtifactNode
         and release the ConfigMap reference before automatic test cleanup.
       try:
         - delete:
@@ -341,13 +339,24 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
         - assert:
             resource:
               apiVersion: v1

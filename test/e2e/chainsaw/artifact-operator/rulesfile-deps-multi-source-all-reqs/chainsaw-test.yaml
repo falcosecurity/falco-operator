@@ -137,25 +137,23 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'InlineArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'ConfigMapArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-deps-multi-source-all-reqs-test-inline.yaml
-                    priority: 50
-                (installedArtifacts[?medium == 'configmap']):
-                  - path: /etc/falco/rules.d/50-02-rulesfile-deps-multi-source-all-reqs-test-configmap.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'InlineArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'ConfigMapArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-deps-multi-source-all-reqs-test-inline.yaml
+                        priority: 50
+                    (installedArtifacts[?medium == 'configmap']):
+                      - path: /etc/falco/rules.d/50-02-rulesfile-deps-multi-source-all-reqs-test-configmap.yaml
+                        priority: 50
 
     - name: "Step 07: Assert-inline-file-on-filesystem"
       use:

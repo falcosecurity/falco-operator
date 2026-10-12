@@ -20,641 +20,121 @@ package plugin
 import (
 	"context"
 	"errors"
-	"fmt"
 
-	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	kerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
+	"github.com/falcosecurity/falco-operator/controllers/artifact/shared"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
-	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
-	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
-const (
-	// pluginNodeFinalizer is the finalizer placed on PluginNode objects by this controller.
-	pluginNodeFinalizer = "pluginnode.artifact.falcosecurity.dev/finalizer"
-	// fieldManager is the name used to identify the controller's managed fields.
-	fieldManager = "artifact-plugin"
-)
+// kind is the artifact kind this reconciler handles.
+const kind = artifact.KindPlugin
 
 // NewPluginReconciler creates a new PluginReconciler instance.
-// fetcher is the shared artifact fetcher, configured with the central artifact server's URL,
-// TLS/mTLS, and retry policy, used to download OCI artifacts.
-func NewPluginReconciler(
-	cl client.Client,
-	scheme *runtime.Scheme,
-	recorder events.EventRecorder,
-	nodeName, namespace string,
-	enforceRequirements bool,
-	fetcher artifact.ArtifactFetcher,
-	nodeManager *node.Manager,
-) *PluginReconciler {
-	return &PluginReconciler{
-		Client:              cl,
-		Scheme:              scheme,
-		recorder:            recorder,
-		fetcher:             fetcher,
-		store:               nodeManager,
-		nodeName:            nodeName,
-		namespace:           namespace,
-		enforceRequirements: enforceRequirements,
-	}
+func NewPluginReconciler(cl client.Client, recorder events.EventRecorder, n *node.Node) *PluginReconciler {
+	return &PluginReconciler{Client: cl, recorder: recorder, node: n}
 }
 
-// PluginReconciler reconciles a PluginNode object assigned to this node.
+// PluginReconciler reconciles the Plugins assigned to this node by its ArtifactNode.
 type PluginReconciler struct {
 	client.Client
-	Scheme              *runtime.Scheme
-	recorder            events.EventRecorder
-	fetcher             artifact.ArtifactFetcher
-	store               *node.Manager
-	nodeName            string
-	namespace           string
-	enforceRequirements bool
+	recorder events.EventRecorder
+	node     *node.Node
 }
 
-// Reconcile reconciles the PluginNode assigned to this node.
-// It reads the parent Plugin for spec, applies local filesystem changes and plugin configuration,
-// and writes resulting conditions to the PluginNode status only.
-func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Result, reterr error) {
+// Reconcile reconciles the Plugin named by req, on this node. When the spec of the node's ArtifactNode lists it,
+// it is installed. When it does not, or the Plugin is gone, whatever this node holds for it is removed: the node
+// controller asks for that whenever the spec stops listing an artifact, and a single reconcile per artifact at a
+// time is what keeps an install and a removal from overlapping.
+func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	return shared.ReconcileArtifact(ctx, r.Client, r.node, req, &artifactv1alpha1.Plugin{}, r.Cleanup)
+}
+
+// Cleanup removes everything installed for the Plugin named name: its entry in the shared plugin
+// config first, then its binary. It returns a *node.BlockedError while a Rulesfile on this node
+// still requires the plugin's config, after publishing a DeletionBlocked condition so the parent shows why
+// the plugin is still there. It is idempotent.
+//
+// Removal needs only what installation recorded, which the node holds under the plugin's key: the parent
+// may be gone, or be another incarnation than the one that installed the files.
+func (r *PluginReconciler) Cleanup(ctx context.Context, name string) error {
 	logger := log.FromContext(ctx)
-
-	nodeObj := &artifactv1alpha1.ArtifactNode{}
-	if err := r.Get(ctx, req.NamespacedName, nodeObj); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+	err := r.node.Remove(ctx, artifact.Ref{Kind: kind, Name: name})
+	if err == nil {
+		return nil
 	}
-	oldStatus := nodeObj.Status.DeepCopy()
-
-	// Handle deletion: clean up local resources then release the finalizer.
-	if ok, err := r.handleDeletion(ctx, nodeObj); ok || err != nil {
-		return ctrl.Result{}, err
+	blocked, ok := errors.AsType[*node.BlockedError](err)
+	if !ok {
+		logger.Error(err, "unable to remove installed plugin artifacts from disk", "plugin", name)
+		return err
 	}
-
-	// Ensure our finalizer is set on the node object.
-	if ok, err := controllerhelper.EnsureFinalizer(ctx, r.Client, pluginNodeFinalizer, nodeObj); ok || err != nil {
-		return ctrl.Result{}, err
+	logger.Info("Plugin removal blocked: plugin config still required by a Rulesfile on this node",
+		"plugin", name, "configName", blocked.Name, "blockedBy", blocked.BlockedBy)
+	if publishErr := r.publishDeletionBlocked(ctx, name, blocked); publishErr != nil {
+		return publishErr
 	}
-
-	// Fetch the parent Plugin to get the spec.
-	plugin, err := r.getParentPlugin(ctx, nodeObj)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-	if plugin == nil {
-		logger.V(2).Info("Parent Plugin not found; waiting for GC")
-		return ctrl.Result{}, nil
-	}
-
-	// Patches the node object status on return (deferred so it always runs).
-	// Programmed is a gateway condition: True only when all other conditions are True. In advise
-	// mode, DependenciesSatisfied is excluded from the gate since it's advisory only.
-	defer func() {
-		r.store.SyncAllInstalledStatus(
-			node.KeyFromObj(node.KindPlugin, plugin),
-			[]artifact.Medium{artifact.MediumOCI}, &nodeObj.Status.InstalledArtifacts,
-		)
-		skipDependenciesSatisfied := func(condType string) bool {
-			return !r.enforceRequirements && condType == commonv1alpha1.ConditionDependenciesSatisfied.String()
-		}
-		observedGeneration := plugin.Generation
-		if r.enforceRequirements {
-			observedGeneration = plugin.Status.ObservedGeneration
-		}
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
-			nodeObj.Status.Conditions, skipDependenciesSatisfied,
-			artifact.ReasonProgrammed, artifact.MessageProgrammed, artifact.ReasonProgramFailed,
-			plugin.GetGeneration(), observedGeneration,
-		))
-		var patchErr error
-		if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {
-			patchErr = controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager)
-			if patchErr != nil {
-				logger.Error(patchErr, "unable to patch PluginNode status")
-			}
-		}
-		reterr = kerrors.NewAggregate([]error{reterr, patchErr})
-	}()
-
-	// Enforce reference resolution before the generation gate below.
-	if err := r.enforceReferenceResolution(ctx, plugin, nodeObj); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// In enforce mode, waits until the instance operator has processed the current spec
-	// generation before running compatibility checks or filesystem changes.
-	if r.enforceRequirements {
-		if controllerhelper.WaitForObservedGeneration(logger, plugin.Status.ObservedGeneration, plugin.Generation) {
-			return ctrl.Result{}, nil
-		}
-	} else {
-		logger.Info("instance operator has processed current spec generation; proceeding",
-			"observedGeneration", plugin.Status.ObservedGeneration,
-			"specGeneration", plugin.Generation)
-	}
-
-	// Check plugin compatibility with the running Falco instance.
-	skip, compatErr := r.enforcePluginCompatibility(ctx, plugin, nodeObj)
-	if compatErr != nil {
-		return ctrl.Result{}, compatErr
-	}
-	if skip {
-		// If the artifact was never installed on this node, explicitly mark installation
-		// conditions as False so the aggregator sees them. Without this, absent conditions
-		// let another node's True status win unopposed in AggregateConditions, making the
-		// Plugin-level status show ConfigProgrammed=True even when DependenciesSatisfied=False.
-		// When alreadyInstalled=true (update-rejected), the old version is still on disk and
-		// ConfigProgrammed/OCIArtifactProgrammed correctly remain True; don't touch them.
-		key := node.KeyFromObj(node.KindPlugin, plugin)
-		if r.store.FindInstalled(key, artifact.MediumOCI) == nil {
-			reason, msg := artifact.DependenciesNotSatisfiedReasonFromCondition(nodeObj.Status.Conditions)
-			gen := plugin.GetGeneration()
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
-				metav1.ConditionFalse, reason, msg, gen,
-			))
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
-				metav1.ConditionFalse, reason, msg, gen,
-			))
-		}
-		return ctrl.Result{}, nil
-	}
-
-	// ensurePlugin stores the Plugin artifact on disk. A transient fetch failure requeues via
-	// RequeueAfter instead of returning an error, which would otherwise tie up this worker for
-	// controller-runtime's retry backoff.
-	if err := r.ensurePlugin(ctx, plugin, nodeObj); err != nil {
-		return controllerhelper.ResultForEnsureError(logger, err)
-	}
-
-	// Ensure the plugin configuration is written to the config file.
-	if err := r.ensurePluginConfig(ctx, plugin, nodeObj); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
+	return err
 }
 
-// getParentPlugin retrieves the parent Plugin via the node object's ownerRef, verifying by UID
-// that it's still the generation nodeObj was created for (see GetVerifiedOwner's doc).
-func (r *PluginReconciler) getParentPlugin(ctx context.Context, nodeObj *artifactv1alpha1.ArtifactNode) (*artifactv1alpha1.Plugin, error) {
-	plugin := &artifactv1alpha1.Plugin{}
-	ok, err := controllerhelper.GetVerifiedOwner(ctx, r.Client, nodeObj, controllerhelper.KindPlugin, plugin)
-	if err != nil || !ok {
-		return nil, err
+// publishDeletionBlocked puts a DeletionBlocked condition on the plugin's status entry, so that the parent
+// shows why the plugin is still on the node. The entry is the one the node holds, which may be for an
+// earlier incarnation of the plugin than the live one; the live one, when there is one, gets the Event and
+// lends its generation.
+func (r *PluginReconciler) publishDeletionBlocked(ctx context.Context, name string, blocked *node.BlockedError) error {
+	blockedOn := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: r.node.Namespace(), Name: name}}
+	parent := &artifactv1alpha1.Plugin{}
+	switch err := r.Get(ctx, client.ObjectKeyFromObject(blockedOn), parent); {
+	case err == nil:
+		blockedOn.UID, blockedOn.Generation = parent.UID, parent.Generation
+		artifact.RecordWarning(r.recorder, parent, artifact.ReasonDependenciesNotSatisfied, "%s", blocked.Error())
+	case !k8serrors.IsNotFound(err):
+		return err
 	}
-	return plugin, nil
+	if entry, ok := r.node.StatusEntry(kind, name); ok {
+		blockedOn.UID = types.UID(entry.UID)
+	}
+	if blockedOn.UID == "" {
+		// The plugin is gone and the node knows of it from its files alone. An entry needs a uid, and one
+		// without would get every later write of the node's status rejected, so the block is only logged.
+		log.FromContext(ctx).Info("Not reporting the blocked removal: the plugin is gone and the node has no status entry for it",
+			"plugin", name)
+		return nil
+	}
+	status, _ := r.node.StatusFor(kind, blockedOn)
+	apimeta.SetStatusCondition(&status.Conditions, common.NewDeletionBlockedCondition(
+		metav1.ConditionTrue, artifact.ReasonPluginConfigStillRequired, blocked.Error(), blockedOn.Generation,
+	))
+	r.node.PublishStatus(kind, blockedOn, status)
+	return nil
 }
 
-// handleDeletion cleans up local filesystem resources and the plugin config entry,
-// then removes the finalizer from the PluginNode. A true result stops normal reconciliation,
-// including when cleanup is still blocked by a dependent Rulesfile.
-func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifactv1alpha1.ArtifactNode) (bool, error) {
-	if nodeObj.DeletionTimestamp.IsZero() {
-		return false, nil
-	}
-	logger := log.FromContext(ctx)
-
-	if !controllerutil.ContainsFinalizer(nodeObj, pluginNodeFinalizer) {
-		return true, nil
-	}
-
-	logger.Info("PluginNode marked for deletion, cleaning up")
-
-	// Installed ownership survives a missing parent or a rejected config-name update.
-	var pluginName string
-	plugin := &artifactv1alpha1.Plugin{}
-	for _, ref := range nodeObj.OwnerReferences {
-		if ref.Kind != controllerhelper.KindPlugin || ref.Controller == nil || !*ref.Controller {
-			continue
-		}
-		pluginName = ref.Name
-		parent, err := r.getParentPlugin(ctx, nodeObj)
-		if err != nil {
-			return false, err
-		}
-		plugin.ObjectMeta = metav1.ObjectMeta{Namespace: nodeObj.Namespace, Name: ref.Name, UID: ref.UID}
-		if parent != nil {
-			plugin.Generation = parent.Generation
-		}
-		break
-	}
-
-	// Removes this plugin's entry from the shared config YAML before removing the binary.
-	if pluginName != "" {
-		if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
-			if blocked, ok := errors.AsType[*node.BlockedError](err); ok {
-				logger.Info("PluginNode deletion blocked: plugin config still required by a Rulesfile on this node",
-					"configName", blocked.Name, "blockedBy", blocked.BlockedBy)
-				artifact.RecordWarning(r.recorder, nodeObj, artifact.ReasonDependenciesNotSatisfied, "%s", blocked.Error())
-				// Sets a DeletionBlocked condition so the instance-level aggregator can propagate
-				// the block onto the parent Plugin's status.
-				oldStatus := nodeObj.Status.DeepCopy()
-				apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDeletionBlockedCondition(
-					metav1.ConditionTrue, artifact.ReasonPluginConfigStillRequired, blocked.Error(), plugin.Generation,
-				))
-				if !apiequality.Semantic.DeepEqual(*oldStatus, nodeObj.Status) {
-					if patchErr := controllerhelper.PatchStatusSSA(ctx, r.Client, r.Scheme, nodeObj, fieldManager); patchErr != nil {
-						logger.Error(patchErr, "unable to patch PluginNode status with DeletionBlocked condition")
-						return true, patchErr
-					}
-				}
-				return true, nil
-			}
-			logger.Error(err, "unable to remove plugin config on deletion")
-			return false, err
-		}
-	}
-
-	// Binary second: remove the plugin binary from disk. OwnerReferences never carry a
-	// namespace; nodeObj's own namespace is the plugin's.
-	key := node.Key{Kind: node.KindPlugin, Namespace: nodeObj.Namespace, Name: pluginName}
-	if err := r.store.Remove(ctx, key); err != nil {
-		logger.Error(err, "unable to remove installed plugin artifacts from disk")
-		return false, err
-	}
-
-	patch := client.MergeFrom(nodeObj.DeepCopy())
-	controllerutil.RemoveFinalizer(nodeObj, pluginNodeFinalizer)
-	if err := r.Patch(ctx, nodeObj, patch); err != nil {
-		logger.Error(err, "unable to remove finalizer from PluginNode")
-		return false, err
-	}
-	return true, nil
-}
-
-// SetupWithManager registers the controller with the Manager.
-// versionEvents is the channel produced by node.Manager; a GenericEvent on this
-// channel re-enqueues all PluginNodes on this node to re-evaluate their compatibility
-// requirements against the updated Falco capability set.
+// SetupWithManager registers the controller: one reconcile per Plugin, woken by the
+// Plugin itself, by its assignment on this node, and by a change of Falco's
+// reported capabilities (versionEvents), which can satisfy a requirement that blocked an install.
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
-	nodeFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		n, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || n.Spec.NodeName != r.nodeName {
-			return false
-		}
-		for _, ref := range n.GetOwnerReferences() {
-			if ref.Controller != nil && *ref.Controller && ref.Kind == controllerhelper.KindPlugin {
-				return true
-			}
-		}
-		return false
-	})
-
-	// Re-enqueues every PluginNode on this node when any RulesfileNode on this node changes, so
-	// a Plugin config removal blocked by node.Manager.RemovePluginConfig is
-	// re-evaluated once the blocking Rulesfile's requirement changes or the RulesfileNode is
-	// removed.
-	rulesfileNodeFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		n, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || n.Spec.NodeName != r.nodeName {
-			return false
-		}
-		for _, ref := range n.GetOwnerReferences() {
-			if ref.Controller != nil && *ref.Controller && ref.Kind == controllerhelper.KindRulesfile {
-				return true
-			}
-		}
-		return false
-	})
-
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&artifactv1alpha1.ArtifactNode{}, builder.WithPredicates(nodeFilter)).
-		Watches(
-			&artifactv1alpha1.Plugin{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodeObjectForPlugin),
-		).
-		Watches(
-			&corev1.Secret{},
-			handler.EnqueueRequestsFromMapFunc(r.findNodeObjectsForSecret),
-		).
-		Watches(
-			&artifactv1alpha1.ArtifactNode{},
-			handler.EnqueueRequestsFromMapFunc(r.findAllNodeObjectsOnVersionChange),
-			builder.WithPredicates(rulesfileNodeFilter),
-		).
-		WatchesRawSource(source.Channel(versionEvents, handler.EnqueueRequestsFromMapFunc(r.findAllNodeObjectsOnVersionChange))).
+		For(&artifactv1alpha1.Plugin{}, builder.WithPredicates(shared.ParentChanged())).
+		Watches(&artifactv1alpha1.ArtifactNode{}, shared.AssignmentHandler(kind)).
+		WatchesRawSource(source.Channel(versionEvents, handler.EnqueueRequestsFromMapFunc(shared.AssignedRequests(r.Client, r.node, kind)))).
+		// The node controller asks for the removal of what the node holds for an artifact the spec of its ArtifactNode no
+		// longer lists.
+		WatchesRawSource(source.Channel(r.node.RemovalRequests(kind), &handler.EnqueueRequestForObject{})).
 		Named("artifact-plugin").
-		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "artifact-plugin", &artifactv1alpha1.ArtifactNode{})).
+		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "artifact-plugin", &artifactv1alpha1.Plugin{})).
 		Complete(r)
-}
-
-// findAllNodeObjectsOnVersionChange re-enqueues every PluginNode on this node when Falco's
-// reported capabilities change, so a blocked plugin can be re-evaluated and installed once its
-// compatibility requirement is satisfied.
-func (r *PluginReconciler) findAllNodeObjectsOnVersionChange(ctx context.Context, _ client.Object) []reconcile.Request {
-	logger := log.FromContext(ctx)
-	nodeList := &artifactv1alpha1.ArtifactNodeList{}
-	if err := r.List(ctx, nodeList,
-		client.InNamespace(r.namespace),
-		client.MatchingFields{index.ArtifactNodeOwnerKind: controllerhelper.KindPlugin, index.ArtifactNodeNodeName: r.nodeName},
-	); err != nil {
-		logger.Error(err, "unable to list ArtifactNodes (plugin) on Falco versions change")
-		return nil
-	}
-	reqs := make([]reconcile.Request, len(nodeList.Items))
-	for i := range nodeList.Items {
-		reqs[i] = reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&nodeList.Items[i])}
-	}
-	return reqs
-}
-
-// findNodeObjectForPlugin maps a Plugin event to this node's PluginNode request.
-func (r *PluginReconciler) findNodeObjectForPlugin(_ context.Context, obj client.Object) []reconcile.Request {
-	name := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, obj.GetName(), r.nodeName)
-	return []reconcile.Request{
-		{NamespacedName: client.ObjectKey{Namespace: obj.GetNamespace(), Name: name}},
-	}
-}
-
-// findNodeObjectsForSecret maps a Secret event to PluginNode requests on this node.
-func (r *PluginReconciler) findNodeObjectsForSecret(ctx context.Context, secret client.Object) []reconcile.Request {
-	logger := log.FromContext(ctx)
-	pluginList := &artifactv1alpha1.PluginList{}
-	indexKey := secret.GetNamespace() + "/" + secret.GetName()
-	if err := r.List(ctx, pluginList, client.MatchingFields{index.SecretOnPlugin: indexKey}); err != nil {
-		logger.Error(err, "unable to list Plugins by Secret index")
-		return nil
-	}
-	reqs := make([]reconcile.Request, len(pluginList.Items))
-	for i := range pluginList.Items {
-		name := controllerhelper.NodeObjectName(controllerhelper.ArtifactKindPlugin, pluginList.Items[i].Name, r.nodeName)
-		reqs[i] = reconcile.Request{
-			NamespacedName: client.ObjectKey{Namespace: pluginList.Items[i].Namespace, Name: name},
-		}
-	}
-	return reqs
-}
-
-// ensurePlugin ensures that the Plugin artifact is stored on the local filesystem.
-func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode) error {
-	gen := plugin.GetGeneration()
-	logger := log.FromContext(ctx)
-
-	key := node.KeyFromObj(node.KindPlugin, plugin)
-
-	if plugin.Spec.OCIArtifact == nil {
-		// OCI spec removed while the Plugin CR still exists: removes the config entry, then the
-		// binary.
-		if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
-			logger.Error(err, "unable to remove plugin config during OCI spec removal")
-			return err
-		}
-		if _, removed, err := r.store.RemoveIfInstalled(ctx, key, artifact.MediumOCI); err != nil {
-			logger.Error(err, "unable to remove stale plugin binary")
-			return err
-		} else if removed {
-			artifact.RecordStoreEvent(r.recorder, plugin, artifact.StoreActionRemoved, artifact.MediumOCI)
-			artifact.ClearInstalled(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI)
-		}
-		// Removes the OCIArtifactProgrammed condition instead of leaving it stale. Mirrors
-		// ensureRulesfile's per-medium stale-cleanup behavior.
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionOCIArtifactProgrammed.String())
-		return nil
-	}
-
-	parentSpecHash := ""
-	expectedDigest := ""
-	if plugin.Status.ArtifactMeta != nil {
-		parentSpecHash = plugin.Status.ArtifactMeta.SpecHash
-		expectedDigest = plugin.Status.ArtifactMeta.Digest
-	}
-	current := r.store.FindInstalled(key, artifact.MediumOCI)
-
-	// Fetches from the artifact server unless the spec hash is unchanged and the disk file is
-	// intact.
-	needFetch := current == nil || parentSpecHash == "" || current.SpecHash != parentSpecHash
-	if !needFetch {
-		if ok, err := r.store.Verify(ctx, current); err != nil {
-			logger.V(3).Info("plugin artifact disk verify failed; re-fetching", "err", err)
-		} else if !ok {
-			logger.V(4).Info("plugin artifact missing or corrupted on disk; re-fetching")
-		} else {
-			logger.V(4).Info("plugin artifact verified on disk; skipping fetch")
-			// Mirrors the cache into status even though this reconcile didn't call Store: see
-			// Manager.SyncInstalledStatus's doc comment for why a write gated on a StoreAction
-			// would leave status permanently behind the cache.
-			r.store.SyncInstalledStatus(key, artifact.MediumOCI, &nodeObj.Status.InstalledArtifacts)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
-				metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, gen,
-			))
-			return nil
-		}
-	}
-
-	result, err := r.fetcher.FetchOCI(ctx, plugin.Namespace, plugin.Name, artifact.KindPlugin, expectedDigest)
-	if err != nil {
-		logger.Error(err, "unable to fetch plugin artifact")
-		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
-			metav1.ConditionFalse, artifact.ReasonOCIArtifactProgramFailed,
-			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
-		))
-		return err
-	}
-	ociAction, _, err := r.store.StorePlugin(ctx, plugin, result)
-	if err != nil {
-		logger.Error(err, "unable to store plugin artifact")
-		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
-			metav1.ConditionFalse, artifact.ReasonOCIArtifactProgramFailed,
-			fmt.Sprintf(artifact.MessageFormatOCIArtifactStoreFailed, err.Error()), gen,
-		))
-		return err
-	}
-	// Persist specHash even when StoreActionUnchanged (same content, different spec).
-	r.store.UpdateInstalledSpecHash(key, artifact.MediumOCI, parentSpecHash)
-	r.store.SyncInstalledStatus(key, artifact.MediumOCI, &nodeObj.Status.InstalledArtifacts)
-	artifact.RecordStoreEvent(r.recorder, plugin, ociAction, artifact.MediumOCI)
-	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewOCIArtifactProgrammedCondition(
-		metav1.ConditionTrue, artifact.ReasonOCIArtifactProgrammed, artifact.MessageOCIArtifactProgrammed, gen,
-	))
-	return nil
-}
-
-func (r *PluginReconciler) enforceReferenceResolution(
-	ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode,
-) error {
-	var checks []controllerhelper.ReferenceCheck
-	if ociArt := plugin.Spec.OCIArtifact; ociArt != nil && ociArt.Registry != nil {
-		if reg := ociArt.Registry; reg.Auth != nil && reg.Auth.SecretRef != nil {
-			checks = append(checks, controllerhelper.SecretReferenceCheck(plugin.Namespace, reg.Auth.SecretRef.Name))
-		}
-	}
-	return controllerhelper.ResolveReferences(ctx, r.Client, r.recorder, plugin, &nodeObj.Status.Conditions, checks...)
-}
-
-// enforcePluginCompatibility verifies that the plugin's declared requirements (from
-// parent.Status.ArtifactMeta, populated by the instance operator) are satisfied by the
-// running Falco instance.
-//
-// In enforce mode (r.enforceRequirements=true): a missing ArtifactMeta blocks installation.
-// In advise mode: a missing ArtifactMeta is treated as no requirements, allowing install.
-func (r *PluginReconciler) enforcePluginCompatibility(
-	ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode,
-) (bool, error) {
-	gen := plugin.GetGeneration()
-	logger := log.FromContext(ctx)
-	key := node.KeyFromObj(node.KindPlugin, plugin)
-
-	if plugin.Spec.OCIArtifact == nil {
-		logger.Info("Skipping compatibility check: no OCI artifact configured")
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionDependenciesSatisfied.String())
-		return false, nil
-	}
-
-	if plugin.Status.ArtifactMeta == nil {
-		if r.enforceRequirements {
-			msg := "OCI artifact metadata not yet available; instance operator has not fetched it"
-			logger.Info(msg)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionUnknown, artifact.ReasonDependenciesUnknown, msg, gen,
-			))
-			return true, nil
-		}
-		logger.Info("ArtifactMeta not yet available; proceeding without compatibility check in advise mode")
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-			metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, gen,
-		))
-		return false, nil
-	}
-
-	if len(plugin.Status.ArtifactMeta.Requirements) == 0 {
-		if r.enforceRequirements {
-			baseMsg := "artifact metadata declares no requirements; installation blocked in enforce mode"
-			reason, msg := artifact.ReasonDependenciesUnknown, baseMsg
-			if r.store.FindInstalled(key, artifact.MediumOCI) != nil {
-				reason = artifact.ReasonDependenciesNotSatisfiedUpdateRejected
-				msg = baseMsg + artifact.MessageSuffixUpdateRejected
-			}
-			logger.Info(msg)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionUnknown, reason, msg, gen,
-			))
-			return true, nil
-		}
-		logger.Info("Plugin declares no requirements; proceeding in advise mode")
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-			metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, gen,
-		))
-		return false, nil
-	}
-
-	alreadyInstalled := r.store.FindInstalled(key, artifact.MediumOCI) != nil
-	for _, req := range plugin.Status.ArtifactMeta.Requirements {
-		provided, found, ok, semverErr := r.store.CheckRequirement(req.Name, req.Version)
-		if semverErr != nil {
-			logger.Error(semverErr, "Unable to compare plugin requirement versions",
-				"capability", req.Name, "provided", provided, "required", req.Version)
-			msg := fmt.Sprintf("Unable to compare %s versions: %s", req.Name, semverErr.Error())
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionUnknown, artifact.ReasonDependenciesUnknown, msg, gen,
-			))
-			return false, semverErr
-		}
-		if !found {
-			// Covers both "Falco not yet observed" and "capability never reported"; both are a
-			// temporary state that resolves once the version-change watch re-triggers.
-			baseMsg := fmt.Sprintf(artifact.MessageFormatDependenciesCapabilityMissing, req.Name, req.Version)
-			logger.Info("Plugin dependency not advertised by Falco", "capability", req.Name, "required", req.Version)
-			skip, reason, msg := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, alreadyInstalled, baseMsg)
-			artifact.RecordWarning(r.recorder, plugin, reason, msg)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionFalse, reason, msg, gen,
-			))
-			return skip, nil
-		}
-
-		if !ok {
-			var baseMsg string
-			if req.Name == compat.CapabilityPluginAPIVersion {
-				baseMsg = fmt.Sprintf(artifact.MessageFormatPluginAPIMajorMismatch, req.Version, provided)
-			} else {
-				baseMsg = fmt.Sprintf(artifact.MessageFormatDependenciesNotSatisfied, req.Name, req.Version, provided)
-			}
-			logger.Info("Plugin dependency not satisfied", "capability", req.Name, "provided", provided, "required", req.Version)
-			skip, reason, msg := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, alreadyInstalled, baseMsg)
-			artifact.RecordWarning(r.recorder, plugin, reason, msg)
-			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-				metav1.ConditionFalse, reason, msg, gen,
-			))
-			return skip, nil
-		}
-		logger.Info("Plugin requirement satisfied", "capability", req.Name, "provided", provided, "required", req.Version)
-	}
-
-	logger.Info("All plugin requirements satisfied")
-	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
-		metav1.ConditionTrue, artifact.ReasonDependenciesSatisfied, artifact.MessageDependenciesSatisfied, gen,
-	))
-	return false, nil
-}
-
-// ensurePluginConfig writes the plugin configuration to the shared config file.
-// A no-op when the plugin has no OCI artifact (see ensurePlugin's stale cleanup). The config
-// file path and content hash are tracked in the OCI InstalledArtifact's Config sub-field, so
-// StoreActionUnchanged fires when the YAML content is unchanged between reconciles.
-//
-// Aggregate-file bookkeeping (rename handling, serialization, the write, and registering the
-// resulting name as provided) lives in node.Manager.AddPluginConfig.
-func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode) error {
-	gen := plugin.GetGeneration()
-	if plugin.Spec.OCIArtifact == nil {
-		// ensurePlugin already removed this plugin's config entry (if any) during stale cleanup.
-		// Removes the ConfigProgrammed condition instead of leaving it stale.
-		apimeta.RemoveStatusCondition(&nodeObj.Status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String())
-		return nil
-	}
-
-	logger := log.FromContext(ctx)
-	logger.Info("Ensuring plugin configuration")
-
-	configAction, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
-	if err != nil {
-		if blocked, ok := errors.AsType[*node.BlockedError](err); ok {
-			logger.Info("Plugin config rename deferred: old name still required by a Rulesfile on this node",
-				"blockedBy", blocked.BlockedBy)
-			return err
-		}
-		logger.Error(err, "unable to store plugin config")
-		artifact.RecordWarning(r.recorder, plugin,
-			artifact.ReasonInlinePluginConfigStoreFailed, artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error())
-		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
-			metav1.ConditionFalse, artifact.ReasonConfigProgramFailed,
-			fmt.Sprintf(artifact.MessageFormatInlinePluginConfigStoreFailed, err.Error()), gen,
-		))
-		return err
-	}
-
-	artifact.RecordStoreEvent(r.recorder, plugin, configAction, artifact.MediumInline)
-	// Mirrors the shared config file's current path from the manager's cache (keyed by
-	// PluginConfigKey, not per-Plugin-CR status) unconditionally, regardless of configAction: a
-	// re-add the cache already knows is unchanged must still populate this Plugin's own Config
-	// sub-entry if an earlier reconcile's status patch never landed. UpdateInstalledConfig no-ops
-	// if there's no matching OCI entry yet (the binary itself isn't tracked) or the cache has none.
-	if sharedFile := r.store.FindInstalled(node.PluginConfigKey, artifact.MediumInline); sharedFile != nil {
-		artifact.UpdateInstalledConfig(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, sharedFile)
-	}
-	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
-		metav1.ConditionTrue, artifact.ReasonConfigProgrammed, artifact.MessageConfigProgrammed, gen,
-	))
-	return nil
 }

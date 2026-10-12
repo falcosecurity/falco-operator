@@ -257,25 +257,56 @@ spec:
                     reason: ProgramFailed
                     (contains(message, 'basic credential not found')): true
 
-    - name: "Step 11: Assert-no-artifact-nodes"
-      description: Neither failed metadata fetch may create a per-node artifact assignment.
+    - name: "Step 11: Assert-nothing-reported-installed"
+      description: |
+        Neither failed metadata fetch may get anything installed. Both Rulesfiles select the node and are assigned
+        to it, but the node waits for metadata the instance operator never produced, so its ArtifactNode reports no
+        installed file for either.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'Programmed' && status == 'True'] || `[]`)): 0
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $anonymous_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $anonymous_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'Programmed' && status == 'True'] || `[]`)): 0
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Rulesfile
         - error:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($anonymous_name)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $anonymous_name && length(installedArtifacts || `[]`) > `0`]):
+                  - kind: Rulesfile
 
     - name: "Step 12: Assert-wrong-credentials-file-absent"
       description: The receiving Falco must not have the unauthorized rules file; failed exec is not absence.
@@ -438,21 +469,44 @@ spec:
             content: bash ../../common/scripts/check_artifact_cache_status.sh
 
     - name: "Step 18: Delete-recovered-rules"
-      description: Ordinary deletion must release the recovered Rulesfile and its ArtifactNode.
+      description: Ordinary deletion must release the recovered Rulesfile and drop it from the node's ArtifactNode.
       try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
         - delete:
             ref:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 19: Assert-deleted-file-absent"
       description: Deletion must remove the recovered file from the existing Falco Pod.

@@ -24,7 +24,7 @@ spec:
          Programmed=True, file present on the node.
       3. Deleting the Plugin is then blocked: the per-node artifact operator on the
          node running Falco refuses to remove the plugin's config/binary (and
-         therefore its own ArtifactNode finalizer) because the Rulesfile still
+         therefore its own ArtifactNode status entry) because the Rulesfile still
          structurally depends on it: tracked authoritatively in-memory by that
          node's node.Manager, not by any status field on the Plugin CR.
          That keeps the ArtifactNode around, which in turn keeps the Plugin's own
@@ -115,19 +115,17 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfied
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'False'
-                    reason: DependenciesNotSatisfied
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfied
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'False'
+                        reason: DependenciesNotSatisfied
 
     - name: "Step 04: Assert-no-file-on-filesystem"
       description: ensureRulesfile was skipped; the rules file must not be written.
@@ -205,20 +203,18 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'OCIArtifactProgrammed']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'oci']):
-                  - path: (join('', ['/etc/falco/rules.d/', $oci_file]))
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'oci']):
+                      - path: (join('', ['/etc/falco/rules.d/', $oci_file]))
+                        priority: 50
 
     - name: "Step 08: Assert-file-on-filesystem"
       use:
@@ -248,12 +244,10 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($plugin_name)
-                  artifact.falcosecurity.dev/kind: plugin
               status:
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     - name: "Step 10: Delete-plugin-blocked"
       description: |
@@ -284,7 +278,7 @@ spec:
               metadata:
                 name: ($plugin_name)
                 namespace: ($namespace)
-                (contains(finalizers, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
               status:
                 (conditions[?type == 'DeletionBlocked']):
                   - status: 'True'
@@ -316,13 +310,15 @@ spec:
               kind: Rulesfile
               name: ($rulesfile_name)
               namespace: ($namespace)
-        - wait:
-            apiVersion: artifact.falcosecurity.dev/v1alpha1
-            kind: ArtifactNode
-            namespace: ($namespace)
-            selector: (join('', ['artifact.falcosecurity.dev/parent=', $rulesfile_name]))
-            for:
-              deletion: {}
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
 
     - name: "Step 14: Wait-plugin-deleted"
       description: Once the Rulesfile no longer references the plugin, the blocked deletion should complete.

@@ -28,8 +28,6 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 )
 
-const testNamespace = "test-ns"
-
 func TestConfigByConfigMapRef(t *testing.T) {
 	tests := []struct {
 		name   string

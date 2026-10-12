@@ -1,0 +1,210 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-config-rename-blocked
+spec:
+  description: |
+    A Plugin's entry in the shared plugin configuration is named after spec.config.name. While a Rulesfile on the
+    node requires that name, the entry cannot be renamed: the rules would lose the plugin they depend on. That is
+    not a failed installation. The Plugin says why in its ConfigProgrammed condition (PluginConfigStillRequired),
+    the entry and the binary stay as they are, and the sidecar tries again every few seconds, so the Plugin
+    recovers as soon as the rename is taken back.
+
+    Scenarios:
+    1. The container plugin is installed under the config name container, and rules requiring container are
+       installed.
+    2. The Plugin's config name is changed. The Plugin reports ConfigProgrammed=False with reason
+       PluginConfigStillRequired, a Warning Event says the same, and the installed entry is still container.
+    3. The config name is changed back. The Plugin is Programmed again.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-rename-blocked-test
+    - name: plugin_name
+      value: container-rename-blocked
+    - name: config_name
+      value: container
+    - name: rulesfile_name
+      value: rename-blocked-rules
+    - name: test_name
+      value: plugin-config-rename-blocked
+    - name: oci_registry
+      value: registry.oci-registry.svc.cluster.local:5000
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: Real Falco in a single Deployment Pod.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Install-container-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: ($oci_registry)
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container
+
+    - name: "Step 03: Install-rules-requiring-container"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: ($oci_registry)
+                    plainHTTP: true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Rename-the-config-entry"
+      description: |
+        The rules still require the name container, so the entry keeps it and the Plugin reports the block.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                config:
+                  name: container-renamed
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'False'
+                    reason: PluginConfigStillRequired
+                    observedGeneration: 2
+                (conditions[?type == 'OCIArtifactProgrammed']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+        - assert:
+            resource:
+              apiVersion: events.k8s.io/v1
+              kind: Event
+              metadata:
+                namespace: ($namespace)
+              type: Warning
+              reason: PluginConfigStillRequired
+              regarding:
+                kind: Plugin
+                name: ($plugin_name)
+
+    - name: "Step 05: Assert-the-installed-entry-is-unchanged"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($config_name)
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
+
+    - name: "Step 06: Take-the-rename-back"
+      description: The sidecar retries the blocked change every few seconds, so the Plugin recovers by itself.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                config:
+                  name: container
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ConfigProgrammed']):
+                  - status: 'True'
+                    observedGeneration: 3
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 07: Delete-rulesfile-then-plugin"
+      description: The rules go first, so that the plugin they require is free to go.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

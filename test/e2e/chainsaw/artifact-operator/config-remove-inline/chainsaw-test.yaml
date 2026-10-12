@@ -91,11 +91,9 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (length(installedArtifacts) == `2`): true
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (length(installedArtifacts) == `2`): true
 
     - name: "Step 05: Assert-both-files-on-filesystem"
       use:
@@ -146,13 +144,11 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($config_name)
-                  artifact.falcosecurity.dev/kind: config
               status:
-                (length(installedArtifacts) == `1`): true
-                (installedArtifacts[?medium == 'configmap']):
-                  - path: /etc/falco/config.d/50-02-config-remove-inline-test-configmap.yaml
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - (length(installedArtifacts) == `1`): true
+                    (installedArtifacts[?medium == 'configmap']):
+                      - path: /etc/falco/config.d/50-02-config-remove-inline-test-configmap.yaml
 
     - name: "Step 08: Assert-inline-file-deleted"
       use:

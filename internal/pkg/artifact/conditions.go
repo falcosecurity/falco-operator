@@ -18,42 +18,41 @@ package artifact
 
 // Condition reasons.
 const (
-	// ReasonArtifactRemoveFailed indicates the artifact failed to be removed.
+	// ReasonArtifactRemoveFailed indicates a source withdrawn from the spec could not be removed from the node.
 	ReasonArtifactRemoveFailed = "ArtifactRemoveFailed"
-	// ReasonPluginArtifactsRemoved indicates all plugin artifacts (OCI files and config) were removed successfully.
-	ReasonPluginArtifactsRemoved = "PluginArtifactsRemoved"
+
+	// The reasons and messages a store Event carries. The medium is not part of the reason: the
+	// per-medium condition already names it, and the message says which one it was. One reason
+	// per outcome rather than one per outcome-and-medium.
+	ReasonArtifactStored          = "ArtifactStored"
+	ReasonArtifactUpdated         = "ArtifactUpdated"
+	ReasonArtifactRemoved         = "ArtifactRemoved"
+	ReasonArtifactPriorityChanged = "ArtifactPriorityChanged"
+
+	MessageArtifactStored          = "%s artifact stored successfully"
+	MessageArtifactUpdated         = "%s artifact updated successfully"
+	MessageArtifactRemoved         = "%s artifact removed successfully"
+	MessageArtifactPriorityChanged = "%s artifact moved to reflect its new priority"
 	// ReasonReferenceResolved indicates the reference was resolved successfully.
 	ReasonReferenceResolved = "ReferenceResolved"
 	// ReasonReferenceResolutionFailed indicates the reference failed to resolve.
 	ReasonReferenceResolutionFailed = "ReferenceResolutionFailed"
 	// ReasonOCIArtifactStored indicates the OCI artifact was stored successfully.
-	ReasonOCIArtifactStored = "OCIArtifactStored"
 	// ReasonOCIArtifactUpdated indicates the OCI artifact was updated successfully.
-	ReasonOCIArtifactUpdated = "OCIArtifactUpdated"
 	// ReasonOCIArtifactRemoved indicates the OCI artifact was removed from the filesystem.
-	ReasonOCIArtifactRemoved = "OCIArtifactRemoved"
 	// ReasonOCIArtifactPriorityChanged indicates the OCI artifact priority changed and the file was renamed.
-	ReasonOCIArtifactPriorityChanged = "OCIArtifactPriorityChanged"
 	// ReasonOCIArtifactStoreFailed indicates the OCI artifact failed to store.
 	ReasonOCIArtifactStoreFailed = "OCIArtifactStoreFailed"
 	// ReasonInlineArtifactStored indicates an inline artifact was stored successfully.
-	ReasonInlineArtifactStored = "InlineArtifactStored"
 	// ReasonInlineArtifactUpdated indicates an inline artifact was updated successfully.
-	ReasonInlineArtifactUpdated = "InlineArtifactUpdated"
 	// ReasonInlineArtifactRemoved indicates an inline artifact was removed from the filesystem.
-	ReasonInlineArtifactRemoved = "InlineArtifactRemoved"
 	// ReasonInlineArtifactPriorityChanged indicates an inline artifact priority changed and the file was renamed.
-	ReasonInlineArtifactPriorityChanged = "InlineArtifactPriorityChanged"
 	// ReasonInlineRulesStoreFailed indicates inline rules failed to store.
 	ReasonInlineRulesStoreFailed = "InlineRulesStoreFailed"
 	// ReasonConfigMapArtifactStored indicates a ConfigMap artifact was stored successfully.
-	ReasonConfigMapArtifactStored = "ConfigMapArtifactStored"
 	// ReasonConfigMapArtifactUpdated indicates a ConfigMap artifact was updated successfully.
-	ReasonConfigMapArtifactUpdated = "ConfigMapArtifactUpdated"
 	// ReasonConfigMapArtifactRemoved indicates a ConfigMap artifact was removed from the filesystem.
-	ReasonConfigMapArtifactRemoved = "ConfigMapArtifactRemoved"
 	// ReasonConfigMapArtifactPriorityChanged indicates a ConfigMap artifact priority changed and the file was renamed.
-	ReasonConfigMapArtifactPriorityChanged = "ConfigMapArtifactPriorityChanged"
 	// ReasonConfigMapRulesStoreFailed indicates rules from a ConfigMap failed to store.
 	ReasonConfigMapRulesStoreFailed = "ConfigMapRulesStoreFailed"
 	// ReasonInlineConfigStoreFailed indicates inline configuration failed to store.
@@ -62,14 +61,16 @@ const (
 	ReasonConfigMapConfigStoreFailed = "ConfigMapConfigStoreFailed"
 	// ReasonInlinePluginConfigStoreFailed indicates the plugin configuration failed to store.
 	ReasonInlinePluginConfigStoreFailed = "InlinePluginConfigStoreFailed"
-	// ReasonReconciled indicates the artifact was reconciled successfully.
-	ReasonReconciled = "Reconciled"
-	// ReasonReconcileFailed indicates the artifact failed to reconcile.
-	ReasonReconcileFailed = "ReconcileFailed"
 	// ReasonProgrammed indicates the artifact was programmed successfully.
 	ReasonProgrammed = "Programmed"
 	// ReasonProgramFailed indicates the artifact failed to program.
 	ReasonProgramFailed = "ProgramFailed"
+	// ReasonInvalidSelector indicates the artifact's node selector is not a valid label selector, so the artifact
+	// is assigned to no node.
+	ReasonInvalidSelector = "InvalidSelector"
+	// ReasonNodeCapacityExceeded indicates a node already lists the maximum number of artifacts, so this
+	// artifact is not assigned to it.
+	ReasonNodeCapacityExceeded = "NodeCapacityExceeded"
 	// ReasonOCIArtifactProgrammed indicates the OCI-sourced artifact was stored successfully.
 	ReasonOCIArtifactProgrammed = "OCIArtifactProgrammed"
 	// ReasonOCIArtifactProgramFailed indicates the OCI-sourced artifact failed to store.
@@ -107,38 +108,15 @@ const (
 
 // Condition messages.
 const (
-	// MessageOCIArtifactPriorityChanged is the message when an OCI artifact priority changed and the file was renamed.
-	MessageOCIArtifactPriorityChanged = "OCI artifact priority changed, file renamed"
-	// MessageInlineArtifactPriorityChanged is the message when an inline artifact priority changed and the file was renamed.
-	MessageInlineArtifactPriorityChanged = "Inline artifact priority changed, file renamed"
-	// MessageConfigMapArtifactPriorityChanged is the message when a ConfigMap artifact priority changed and the file was renamed.
-	MessageConfigMapArtifactPriorityChanged = "ConfigMap artifact priority changed, file renamed"
-	// MessageConfigReconciled is the message when config is reconciled successfully.
-	MessageConfigReconciled = "Config reconciled successfully"
-	// MessagePluginReconciled is the message when plugin is reconciled successfully.
-	MessagePluginReconciled = "Plugin reconciled successfully"
-	// MessageRulesfileReconciled is the message when rulesfile is reconciled successfully.
-	MessageRulesfileReconciled = "Rulesfile reconciled successfully"
-	// MessagePluginArtifactsRemoved is the message when plugin artifacts are removed.
-	MessagePluginArtifactsRemoved = "Plugin artifacts removed successfully"
 	// MessageOCIArtifactStored is the message when OCI artifact is stored successfully.
-	MessageOCIArtifactStored = "OCI artifact stored successfully"
 	// MessageOCIArtifactUpdated is the message when OCI artifact is updated successfully.
-	MessageOCIArtifactUpdated = "OCI artifact updated successfully"
 	// MessageOCIArtifactRemoved is the message when OCI artifact is removed from the filesystem.
-	MessageOCIArtifactRemoved = "OCI artifact removed from filesystem"
 	// MessageInlineArtifactStored is the message when an inline artifact is stored successfully.
-	MessageInlineArtifactStored = "Inline artifact stored successfully"
 	// MessageInlineArtifactUpdated is the message when an inline artifact is updated successfully.
-	MessageInlineArtifactUpdated = "Inline artifact updated successfully"
 	// MessageInlineArtifactRemoved is the message when an inline artifact is removed from the filesystem.
-	MessageInlineArtifactRemoved = "Inline artifact removed from filesystem"
 	// MessageConfigMapArtifactStored is the message when a ConfigMap artifact is stored successfully.
-	MessageConfigMapArtifactStored = "ConfigMap artifact stored successfully"
 	// MessageConfigMapArtifactUpdated is the message when a ConfigMap artifact is updated successfully.
-	MessageConfigMapArtifactUpdated = "ConfigMap artifact updated successfully"
 	// MessageConfigMapArtifactRemoved is the message when a ConfigMap artifact is removed from the filesystem.
-	MessageConfigMapArtifactRemoved = "ConfigMap artifact removed from filesystem"
 	// MessageProgrammed is the message when the artifact is programmed successfully.
 	MessageProgrammed = "All artifacts sources were programmed successfully"
 	// MessageOCIArtifactProgrammed is the message when the OCI-sourced artifact is stored successfully.
@@ -149,14 +127,13 @@ const (
 	MessageConfigMapArtifactProgrammed = "ConfigMap artifact stored successfully"
 	// MessageConfigProgrammed is the message when the plugin config entry is written successfully.
 	MessageConfigProgrammed = "Plugin configuration stored successfully"
-	// MessageProgramFailed is the message when not all conditions are satisfied.
-	MessageProgramFailed = "Not all conditions are satisfied"
 	// MessageReferencesResolved is the message when all references are resolved successfully.
 	MessageReferencesResolved = "All references were resolved successfully"
 	// MessageDependenciesSatisfied is the message when all plugin requirements are met.
 	MessageDependenciesSatisfied = "All plugin requirements are satisfied"
-	// MessageDependenciesUnknown is the message when the Falco API is unreachable.
-	MessageDependenciesUnknown = "Falco API unreachable; plugin requirements could not be verified"
+	// MessageRequirementsUndeclared is the message when the artifact's metadata declares no
+	// requirements at all and enforce mode will not install on that basis.
+	MessageRequirementsUndeclared = "artifact metadata declares no requirements; installation blocked in enforce mode"
 	// MessageSuffixInstalledAnyway is appended to a not-satisfied message when the artifact is
 	// installed anyway because requirement enforcement is disabled.
 	MessageSuffixInstalledAnyway = "; installed anyway because requirement enforcement is disabled (--enforce-requirements=false)"
@@ -171,8 +148,6 @@ const (
 	MessageFormatConfigStoreFailed = "Failed to store config: %s"
 	// MessageFormatOCIArtifactStoreFailed is the format for OCI artifact store failure message.
 	MessageFormatOCIArtifactStoreFailed = "Failed to store OCI artifact: %s"
-	// MessageFormatPluginArtifactsRemoveFailed is the format for plugin artifacts remove failure message.
-	MessageFormatPluginArtifactsRemoveFailed = "Failed to remove plugin artifacts: %s"
 	// MessageFormatConfigMapRulesStoreFailed is the format for ConfigMap rules store failure message.
 	MessageFormatConfigMapRulesStoreFailed = "Failed to store ConfigMap rules: %s"
 	// MessageFormatConfigMapConfigStoreFailed is the format for ConfigMap config store failure message.
@@ -181,8 +156,6 @@ const (
 	MessageFormatInlineRulesStoreFailed = "Failed to store inline rules: %s"
 	// MessageFormatReferenceResolutionFailed is the format for Reference resolution failure message.
 	MessageFormatReferenceResolutionFailed = "Failed to resolve Reference: %s"
-	// MessageFormatReferenceResolved is the format for Reference resolved message.
-	MessageFormatReferenceResolved = "Reference %q resolved successfully"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.
 	MessageFormatInlinePluginConfigStoreFailed = "Failed to store inline plugin config: %v"
 	// MessageFormatDependenciesNotSatisfied is the format for unmet plugin requirement messages.
@@ -191,14 +164,8 @@ const (
 	MessageFormatPluginAPIMajorMismatch = "Plugin requires plugin_api_version %s but Falco reports %s: major versions are incompatible"
 	// MessageFormatDependenciesCapabilityMissing is the format when Falco does not advertise a required capability.
 	MessageFormatDependenciesCapabilityMissing = "Plugin requires %s >= %s but Falco does not advertise this capability"
-	// MessageFormatDependenciesMetadataFetchFailed is the format when OCI metadata cannot be fetched.
-	MessageFormatDependenciesMetadataFetchFailed = "Failed to fetch plugin metadata: %s"
-	// MessageFormatFalcoVersionsFetchFailed is the format when the Falco /versions endpoint cannot be reached.
-	MessageFormatFalcoVersionsFetchFailed = "Failed to fetch Falco versions: %s"
 	// MessageFormatRequirementNotSatisfied is the format when a Falco engine requirement version is not met.
 	MessageFormatRequirementNotSatisfied = "requires %s >= %s but Falco reports %s"
-	// MessageFormatRequirementAPIMajorMismatch is the format when a plugin_api_version major version differs.
-	MessageFormatRequirementAPIMajorMismatch = "requires plugin_api_version %s but Falco reports %s: major versions are incompatible"
 	// MessageFormatRequirementMissing is the format when a Falco engine requirement is not in the /versions response.
 	MessageFormatRequirementMissing = "requires %s >= %s but Falco does not report this capability"
 	// MessageFormatDependencyNotSatisfiedWithAlternatives is the format when a plugin dependency and all its

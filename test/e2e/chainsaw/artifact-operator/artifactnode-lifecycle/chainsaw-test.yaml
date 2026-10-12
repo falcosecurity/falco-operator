@@ -1,0 +1,844 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-lifecycle
+spec:
+  description: |
+    Exercises when the assignment controller deletes an ArtifactNode and how that interacts with the
+    finalizer the artifact operator puts on it, and with the parents that list it. It runs on KWOK fake
+    nodes with stub Falco pods, so no artifact operator runs: each step simulates it. The simulated
+    operator does what the real one does, in the same order: it puts its finalizer on its node's object,
+    reports on the artifacts assigned to it, and, once an artifact is no longer assigned, removes its
+    files and withdraws its status entry (see common/scripts/simulate_sidecar_report.sh). It releases the
+    finalizer only when the object is being deleted.
+
+    Rules under test (design: docs/superpowers/specs/2026-09-19-per-node-artifact-assignment-design.md):
+      - An ArtifactNode with nothing assigned is kept while its status still reports an artifact, since
+        files for it may remain on the node.
+      - It is deleted once nothing is assigned and the status is empty, and the deletion then waits for
+        the artifact operator's finalizer: the controller never releases it while the node still runs Falco.
+      - The controller does not touch an object that is being deleted, and creates a new one once the old
+        one is gone if something is assigned by then.
+      - When the node itself is gone no artifact operator can release anything, so the controller
+        clears the finalizer and deletes the object.
+      - A parent that is deleted stays until no node lists it or reports on it.
+
+    Scenarios (node a, then node b):
+    1. Assigned: the object exists, is labelled for its node, and the parent is Pending. After the
+       simulated operator reports, the parent is Programmed.
+    2. The parent stops selecting the node while the operator still reports on it: the object stays with
+       an empty spec and its status entry, and the parent reverts to NoNodesAssigned.
+    3. The operator withdraws its entry: the object is deleted but held by the finalizer, and is gone once
+       the finalizer is released.
+    4. The parent selects the node again and stops again, this time with the deletion held by the
+       finalizer. While the object is Terminating the controller leaves it alone. When the finalizer is
+       released, a new object (new uid) is created for the now assigned parent.
+    5. The node is relabeled so that it no longer matches, with the finalizer held: the object is deleted
+       but not released, since the node still runs Falco. Relabelled back, it is recreated.
+    6. The node is deleted while the finalizer is held: the controller clears it and deletes the object.
+    7. A parent is deleted while a node still reports on it (node b): the parent stays, the object stays
+       with an empty spec, and once the operator withdraws its entry both the parent and, after the
+       finalizer is released, the object are gone.
+
+  bindings:
+    - name: rulesfile_name
+      value: lifecycle-rulesfile
+    - name: test_name
+      value: artifactnode-lifecycle
+    - name: falco_name
+      value: lifecycle-falco
+    - name: node_a_name
+      value: (join('-', ['lifecycle-a', $namespace]))
+    - name: node_b_name
+      value: (join('-', ['lifecycle-b', $namespace]))
+    - name: falco_pod_a_name
+      value: (join('-', ['falco-pod-a', $namespace]))
+    - name: falco_pod_b_name
+      value: (join('-', ['falco-pod-b', $namespace]))
+    - name: sidecar_finalizer
+      value: artifactnode.artifact.falcosecurity.dev/sidecar
+
+  steps:
+    - name: "Step 01: Create-fake-node-a"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_a_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 01b: Create-falco-cr"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 01c: Create-falco-pod-on-node-a"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_a_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_a_name)
+
+    - name: "Step 02: Create-rulesfile"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw lifecycle rule
+                    desc: Rule used to verify the lifecycle of an ArtifactNode.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=lifecycle"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 03: Assert-assigned-labelled-and-pending"
+      description: Scenario 1. Nothing reports yet, so the parent is Pending.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                labels:
+                  artifact.falcosecurity.dev/node: ($node_a_name)
+                (deletionTimestamp == null): true
+              spec:
+                nodeName: ($node_a_name)
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 04: Operator-claims-the-object-and-reports"
+      description: |
+        Scenario 1. The simulated artifact operator puts its finalizer on its node's object and reports
+        the Rulesfile programmed.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Rulesfile
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 05: Parent-stops-selecting-the-node"
+      description: Scenario 2. The node and its Falco pod are unchanged; only the Rulesfile's own selector.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: selects-nothing
+
+    - name: "Step 06: Assert-kept-while-the-status-reports"
+      description: |
+        Scenario 2. Files for the Rulesfile may still be on the node, so the object stays: an empty spec, the
+        status entry, not being deleted. The parent has no node any more.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (length(artifacts || `[]`)): 0
+              status:
+                (length(artifacts)): 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 07: Hold-check-it-stays-while-the-status-reports"
+      description: Scenario 2. Nothing may delete the object in the meantime.
+      try:
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              status:
+                (length(artifacts)): 1
+
+    - name: "Step 08: Operator-withdraws-its-entry"
+      description: |
+        Scenario 3. The simulated operator has removed the Rulesfile's files. The status update alone must
+        make the controller delete the object.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_a_name)
+              - name: KINDS
+                value: Rulesfile
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+
+    - name: "Step 09: Assert-deleted-but-held-by-the-finalizer"
+      description: |
+        Scenario 3. The object is being deleted, and stays: the controller never releases the artifact operator's
+        finalizer while the node runs Falco.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+
+    - name: "Step 10: Operator-releases-the-finalizer"
+      description: Scenario 3.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers: []
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 11: Select-the-node-again-and-claim-the-new-object"
+      description: Scenario 4. A new object is created, and the simulated operator claims it again.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+
+    - name: "Step 12: Stop-selecting-again-with-nothing-reported"
+      description: |
+        Scenario 4. This operator reported nothing for the new object, so its spec is emptied and it is deleted,
+        held by the finalizer.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: selects-nothing
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+              spec:
+                (length(artifacts || `[]`)): 0
+
+    - name: "Step 13: Select-the-node-while-the-object-is-terminating"
+      description: |
+        Scenario 4. The controller must leave a terminating object alone: it does not write to it at all, and it
+        does not bring it back as a live object. Its spec stays empty, as it was when the object was deleted, and
+        its resourceVersion does not change.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NAME
+                value: ($node_a_name)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: JSONPATH
+                value: '{.metadata.uid}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            outputs:
+              - name: terminating_uid
+                value: ($stdout)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NAME
+                value: ($node_a_name)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: JSONPATH
+                value: '{.metadata.resourceVersion}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            outputs:
+              - name: terminating_resource_version
+                value: ($stdout)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                uid: ($terminating_uid)
+                resourceVersion: ($terminating_resource_version)
+                (deletionTimestamp != null): true
+              spec:
+                (length(artifacts || `[]`)): 0
+
+    - name: "Step 14: Release-the-finalizer-and-assert-a-new-object"
+      description: |
+        Scenario 4. Once the old object is gone, the assignment that arrived while it was terminating gets a new
+        one, with another uid than the one recorded here just before releasing the old one.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NAME
+                value: ($node_a_name)
+              - name: RESOURCE
+                value: artifactnodes.artifact.falcosecurity.dev
+              - name: JSONPATH
+                value: '{.metadata.uid}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            outputs:
+              - name: old_uid
+                value: ($stdout)
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers: []
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (uid != $old_uid): true
+                (deletionTimestamp == null): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+
+    - name: "Step 15: Claim-again-and-relabel-the-node-away"
+      description: |
+        Scenario 5. The node still exists and still runs its Falco pod, but no longer matches the Rulesfile.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_a_name)
+                labels:
+                  chainsaw-node-group: relabeled-away
+
+    - name: "Step 16: Assert-deleted-but-not-released"
+      description: |
+        Scenario 5. Deleted because nothing is assigned, and held: the node is there, so the artifact operator
+        is expected to release the finalizer itself.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 17: Release-and-relabel-back"
+      description: Scenario 5. The object goes, and comes back once the node matches again.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers: []
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - patch:
+            resource:
+              apiVersion: v1
+              kind: Node
+              metadata:
+                name: ($node_a_name)
+                labels:
+                  chainsaw-node-group: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+
+    - name: "Step 18: Claim-and-delete-the-node"
+      description: |
+        Scenario 6. No artifact operator can run on a node that is gone, so the controller must not wait for the
+        finalizer: it clears it and deletes the object. The parent has no node any more.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_a_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_a_name)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_a_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 19: Create-fake-node-b-and-its-pod"
+      description: Scenario 7 runs on a second node, so it does not depend on what the previous scenarios left.
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_b_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 19b: Create-falco-pod-on-node-b"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_b_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_b_name)
+
+    - name: "Step 20: Claim-and-report-on-node-b"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: Pending
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+                finalizers:
+                  - ($sidecar_finalizer)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Rulesfile
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+
+    - name: "Step 21: Delete-the-parent-without-waiting"
+      description: |
+        Scenario 7. Not chainsaw's own delete, which waits for the object to be gone and would time out against
+        the deletion that is meant to be held.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NAME
+                value: ($rulesfile_name)
+              - name: RESOURCE
+                value: rulesfiles.artifact.falcosecurity.dev
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
+
+    - name: "Step 22: Assert-the-parent-waits-for-the-node"
+      description: |
+        Scenario 7. The parent no longer wants any node, so the spec is emptied, but node b still reports
+        on it, so the parent stays and so does the object.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (length(artifacts || `[]`)): 0
+              status:
+                (length(artifacts)): 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+
+    - name: "Step 23: Operator-withdraws-and-the-parent-is-released"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_b_name)
+              - name: KINDS
+                value: Rulesfile
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: Rulesfile
+            name: ($rulesfile_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 24: Assert-the-object-is-deleted-and-held-then-release"
+      description: Scenario 7. Nothing is assigned and nothing reported, so the object follows, held by the finalizer.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+                (contains(finalizers || `[]`, $sidecar_finalizer)): true
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_b_name)
+                namespace: ($namespace)
+                finalizers: []
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_b_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 25: Delete-node-b-and-the-falco-cr"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_b_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: |
+        Best-effort release of the simulated finalizer and withdrawal of the simulated entries. Without it, a
+        failure while an object is held would leave the parent, and this test's namespace, stuck deleting
+        once the fake nodes below are gone.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: KINDS
+            value: Rulesfile,Plugin,Config
+          - name: WITHDRAW
+            value: "true"
+          - name: STRIP_FINALIZERS
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
+    - description: Best-effort cleanup of both fake Nodes, cluster-scoped, so a mid-test failure must not leave them behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_a_name)
+    - delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_b_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

@@ -200,24 +200,22 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (installedArtifacts[?medium == 'oci']):
-                  - path: /etc/falco/rules.d/50-01-rulesfile-oci-all-sources-test-oci.yaml
-                    priority: 50
-                (installedArtifacts[?medium == 'configmap']):
-                  - path: /etc/falco/rules.d/50-02-rulesfile-oci-all-sources-test-configmap.yaml
-                    priority: 50
-                (installedArtifacts[?medium == 'inline']):
-                  - path: /etc/falco/rules.d/50-03-rulesfile-oci-all-sources-test-inline.yaml
-                    priority: 50
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (installedArtifacts[?medium == 'oci']):
+                      - path: /etc/falco/rules.d/50-01-rulesfile-oci-all-sources-test-oci.yaml
+                        priority: 50
+                    (installedArtifacts[?medium == 'configmap']):
+                      - path: /etc/falco/rules.d/50-02-rulesfile-oci-all-sources-test-configmap.yaml
+                        priority: 50
+                    (installedArtifacts[?medium == 'inline']):
+                      - path: /etc/falco/rules.d/50-03-rulesfile-oci-all-sources-test-inline.yaml
+                        priority: 50
 
     - name: "Step 09: Assert-oci-file-present"
       use:
@@ -304,16 +302,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
 
     - name: "P1-Step02: Assert-inline-file-absent"
       use:
@@ -364,16 +360,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
 
     - name: "P1-Step04: Assert-cm-file-absent"
       use:
@@ -425,16 +419,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P1-Step06: Assert-oci-file-absent"
       use:
@@ -509,15 +501,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     # ── P2: I → O → C ──────────────────────────────────────────────────────────
 
@@ -556,16 +546,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
 
     - name: "P2-Step02: Assert-inline-file-absent"
       use:
@@ -616,16 +604,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
 
     - name: "P2-Step04: Assert-oci-file-absent"
       use:
@@ -677,16 +663,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P2-Step06: Assert-cm-file-absent"
       use:
@@ -761,15 +745,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     # ── P3: C → I → O ──────────────────────────────────────────────────────────
 
@@ -808,16 +790,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
 
     - name: "P3-Step02: Assert-cm-file-absent"
       use:
@@ -868,16 +848,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
 
     - name: "P3-Step04: Assert-inline-file-absent"
       use:
@@ -929,16 +907,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'OCIArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P3-Step06: Assert-oci-file-absent"
       use:
@@ -1013,15 +989,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     # ── P4: C → O → I ──────────────────────────────────────────────────────────
 
@@ -1060,16 +1034,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
 
     - name: "P4-Step02: Assert-cm-file-absent"
       use:
@@ -1120,16 +1092,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
 
     - name: "P4-Step04: Assert-oci-file-absent"
       use:
@@ -1181,16 +1151,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'InlineArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'InlineArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P4-Step06: Assert-inline-file-absent"
       use:
@@ -1265,15 +1233,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     # ── P5: O → I → C ──────────────────────────────────────────────────────────
 
@@ -1312,16 +1278,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
 
     - name: "P5-Step02: Assert-oci-file-absent"
       use:
@@ -1372,16 +1336,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
 
     - name: "P5-Step04: Assert-inline-file-absent"
       use:
@@ -1433,16 +1395,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P5-Step06: Assert-cm-file-absent"
       use:
@@ -1517,15 +1477,13 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 3
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 3
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
 
     # ── P6: O → C → I ──────────────────────────────────────────────────────────
 
@@ -1564,16 +1522,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 2
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 2
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'OCIArtifactProgrammed'])): 0
 
     - name: "P6-Step02: Assert-oci-file-absent"
       use:
@@ -1624,16 +1580,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 1
-                (conditions[?type == 'DependenciesSatisfied']):
-                  - status: 'True'
-                (conditions[?type == 'Programmed']):
-                  - status: 'True'
-                (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DependenciesSatisfied']):
+                      - status: 'True'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+                    (length(conditions[?type == 'ConfigMapArtifactProgrammed'])): 0
 
     - name: "P6-Step04: Assert-cm-file-absent"
       use:
@@ -1685,16 +1639,14 @@ spec:
               kind: ArtifactNode
               metadata:
                 namespace: ($namespace)
-                labels:
-                  artifact.falcosecurity.dev/parent: ($rulesfile_name)
-                  artifact.falcosecurity.dev/kind: rulesfile
               status:
-                (length(installedArtifacts || `[]`)): 0
-                (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
-                (length(conditions[?type == 'InlineArtifactProgrammed'] || `[]`)): 0
-                (conditions[?type == 'Programmed']):
-                  - status: 'False'
-                    reason: ProgramFailed
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 0
+                    (length(conditions[?type == 'DependenciesSatisfied'] || `[]`)): 0
+                    (length(conditions[?type == 'InlineArtifactProgrammed'] || `[]`)): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                        reason: ProgramFailed
 
     - name: "P6-Step06: Assert-inline-file-absent"
       use:

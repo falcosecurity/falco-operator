@@ -16,16 +16,6 @@
 
 package v1alpha1
 
-// InstalledArtifactConfig tracks a generated configuration file derived from an installed artifact.
-// Currently used for Plugin artifacts to record the plugins-config-inline.yaml entry that Falco
-// needs to discover and load the plugin. Binary and config are one lifecycle unit: the config is
-// always created and removed alongside the binary.
-type InstalledArtifactConfig struct {
-	// Path is the absolute on-disk path of the generated config file.
-	// +kubebuilder:validation:Required
-	Path string `json:"path"`
-}
-
 // InstalledArtifact describes a single artifact file currently on disk.
 // The medium field is the list map key: at most one entry per medium exists.
 type InstalledArtifact struct {
@@ -49,9 +39,4 @@ type InstalledArtifact struct {
 	// artifact must be re-fetched regardless of disk integrity.
 	// +optional
 	SpecHash string `json:"specHash,omitempty"`
-	// Config tracks the generated configuration file derived from this artifact.
-	// Populated only for Plugin artifacts (the plugins-config-inline.yaml shared config file).
-	// Binary and config share the same lifecycle: no binary means no config, and vice versa.
-	// +optional
-	Config *InstalledArtifactConfig `json:"config,omitempty"`
 }

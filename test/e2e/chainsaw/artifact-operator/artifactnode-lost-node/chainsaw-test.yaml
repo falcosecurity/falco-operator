@@ -1,0 +1,263 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-lost-node
+spec:
+  description: |
+    A deleted artifact waits for every node that holds it: each sidecar removes what it installed and withdraws
+    its status entry, and only then is the artifact released. A node that is down cannot do that. Its Falco pod
+    stays Running, since a DaemonSet pod tolerates an unreachable node, so its ArtifactNode stays too, with the
+    entries its sidecar published. Without a limit, one node that is down would keep every deleted artifact it held
+    from ever going. So a node that has been unreachable for more than 5 minutes no longer holds a deleted artifact
+    back. If it comes back, its sidecar finds the artifact gone from the spec and removes it by itself.
+
+    It runs on a KWOK fake node with a stub Falco pod, so no artifact operator runs there: the report is simulated
+    (see common/scripts/simulate_sidecar_report.sh) and is never withdrawn, as on a node that is down. The node is
+    made to look unreachable for an hour with the taint the node lifecycle controller puts on such a node.
+
+    Scenarios:
+    1. A Config is assigned to the node and reported Programmed.
+    2. The Config is deleted. The operator drops it from the ArtifactNode's spec, the entry stays in its status, and
+       the Config is kept.
+    3. The node becomes unreachable, long ago. The Config is released, although the ArtifactNode is still there
+       with its entry.
+
+  bindings:
+    - name: config_name
+      value: lost-node-config
+    - name: test_name
+      value: artifactnode-lost-node
+    - name: falco_name
+      value: lost-node-falco
+    - name: node_name
+      value: (join('-', ['lost-node', $namespace]))
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Create-falco-cr-and-pod"
+      description: |
+        The pod tolerates every taint, as a DaemonSet pod tolerates an unreachable node: it stays on the node, and
+        Running, when the node is marked unreachable.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($falco_pod_name)
+                namespace: ($namespace)
+                labels:
+                  app.kubernetes.io/instance: ($falco_name)
+              spec:
+                nodeName: ($node_name)
+                tolerations:
+                  - operator: Exists
+                containers:
+                  - name: pause
+                    image: registry.k8s.io/pause:3.9
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($falco_pod_name)
+                namespace: ($namespace)
+              status:
+                phase: Running
+
+    - name: "Step 03: Create-config-and-report"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                config:
+                  json_output: false
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (artifacts[*].name):
+                  - ($config_name)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: KINDS
+                value: Config
+              - name: CONDITIONS
+                value: Programmed:True:SimulatedHealthy
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 04: Delete-the-config"
+      description: |
+        Scenario 2. Nobody withdraws the entry, as on a node that is down, so the Config is kept while the node is
+        reachable.
+      try:
+        - script:
+            env:
+              - name: RESOURCE
+                value: configs.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($config_name)
+              - name: NAMESPACE
+                value: ($namespace)
+            content: bash ../../common/scripts/delete_resource_no_wait.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                (length(artifacts || `[]`)): 0
+              status:
+                (artifacts[*].name):
+                  - ($config_name)
+        - sleep:
+            duration: 10s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+                (deletionTimestamp != null): true
+
+    - name: "Step 05: Lose-the-node"
+      description: Scenario 3. The node has been unreachable for an hour, and no longer holds the Config back.
+      try:
+        - script:
+            env:
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: RESOURCE
+                value: configs.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($config_name)
+              - name: NAMESPACE
+                value: ($namespace)
+            content: bash ../../common/scripts/mark_node_unreachable_until_gone.sh
+
+    - name: "Step 06: Assert-the-artifactnode-is-still-there"
+      description: The Config was released because the node is lost, not because its ArtifactNode went.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              status:
+                (artifacts[*].name):
+                  - ($config_name)
+
+    - name: "Step 07: Cleanup"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: KINDS
+                value: Config
+              - name: WITHDRAW
+                value: "true"
+            content: |
+              bash ../../common/scripts/simulate_sidecar_report.sh
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort withdrawal of the simulated entries and finalizers, so the namespace can be deleted.
+      script:
+        env:
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: KINDS
+            value: Rulesfile,Plugin,Config
+          - name: WITHDRAW
+            value: "true"
+          - name: STRIP_FINALIZERS
+            value: "true"
+        content: bash ../../common/scripts/simulate_sidecar_report_all_nodes.sh
+    - description: Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not leave it behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)

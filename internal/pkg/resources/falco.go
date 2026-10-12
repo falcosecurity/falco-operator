@@ -142,11 +142,6 @@ var FalcoDefaults = &InstanceDefaults{
 			Verbs:     []string{"get", "list", "watch"},
 		},
 		{
-			APIGroups: []string{""},
-			Resources: []string{"secrets"},
-			Verbs:     []string{"get", "list", "watch"},
-		},
-		{
 			APIGroups: []string{"events.k8s.io"},
 			Resources: []string{"events"},
 			Verbs:     []string{"create", "patch"},
@@ -159,12 +154,12 @@ var FalcoDefaults = &InstanceDefaults{
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 			Resources: []string{"artifactnodes"},
-			Verbs:     []string{"get", "list", "watch", "update", "patch"},
+			Verbs:     []string{"get", "list", "watch", "patch"}, // patch: its own finalizer on its node's object
 		},
 		{
 			APIGroups: []string{artifactv1alpha1.GroupVersion.Group},
 			Resources: []string{"artifactnodes/status"},
-			Verbs:     []string{"get", "update", "patch"},
+			Verbs:     []string{"get", "patch"},
 		},
 	},
 	VolumeMounts: []corev1.VolumeMount{

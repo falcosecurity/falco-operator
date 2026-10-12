@@ -48,6 +48,10 @@ func (w *VersionsWatcher) SetSink(sink func(*Versions)) {
 	w.sink = sink
 }
 
+// NeedLeaderElection reports that the watcher runs on every pod, not just the leader: it reads
+// the capabilities of the Falco it shares a pod with, which are that pod's own.
+func (w *VersionsWatcher) NeedLeaderElection() bool { return false }
+
 // Start implements manager.Runnable. It polls until ctx is canceled.
 func (w *VersionsWatcher) Start(ctx context.Context) error {
 	logger := ctrllog.FromContext(ctx)

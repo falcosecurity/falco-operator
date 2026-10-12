@@ -38,10 +38,14 @@ type kvSink struct {
 	name string
 }
 
-func (s *kvSink) Init(_ logr.RuntimeInfo)           {}
-func (s *kvSink) Enabled(_ int) bool                { return true }
-func (s *kvSink) Info(_ int, _ string, _ ...any)    {}
+func (s *kvSink) Init(_ logr.RuntimeInfo) {}
+
+func (s *kvSink) Enabled(_ int) bool { return true }
+
+func (s *kvSink) Info(_ int, _ string, _ ...any) {}
+
 func (s *kvSink) Error(_ error, _ string, _ ...any) {}
+
 func (s *kvSink) WithName(name string) logr.LogSink {
 	newName := name
 	if s.name != "" {
@@ -49,6 +53,7 @@ func (s *kvSink) WithName(name string) logr.LogSink {
 	}
 	return &kvSink{kvs: s.kvs, name: newName}
 }
+
 func (s *kvSink) WithValues(kvs ...any) logr.LogSink {
 	merged := make([]any, len(s.kvs)+len(kvs))
 	copy(merged, s.kvs)

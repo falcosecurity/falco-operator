@@ -1,0 +1,357 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-namespaces
+spec:
+  description: |
+    An ArtifactNode belongs to a (namespace, node) pair: it lists the artifacts of its own namespace only, and
+    exists only while a Falco pod of that namespace runs on the node. This test puts two namespaces on one node
+    and checks that neither affects the other. It runs on a KWOK fake node with stub Falco pods.
+
+    The test's own namespace is one of them; a second one, named after it, is created by the test and removed
+    with it.
+
+    Scenarios:
+    1. Falco runs on the node in the second namespace only. A Rulesfile in each namespace selects the node: only
+       the second namespace gets an ArtifactNode. The first has no Falco pod on the node, so nothing there could
+       act on an assignment.
+    2. Falco runs in the first namespace too: it gets its own ArtifactNode, with its own artifact only, though
+       both Rulesfiles have the same name.
+    3. The Rulesfile of the first namespace is deleted: its ArtifactNode is deleted with it, and the other
+       namespace's is untouched.
+    4. The Falco pod of the second namespace goes and comes back within the grace: only its own ArtifactNode is
+       affected, if at all.
+
+  bindings:
+    - name: test_name
+      value: artifactnode-namespaces
+    - name: other_namespace
+      value: (join('-', [$namespace, 'other']))
+    - name: rulesfile_name
+      value: shared-name-rulesfile
+    - name: falco_name
+      value: namespaces-falco
+    - name: node_name
+      value: (join('-', ['namespaces', $namespace]))
+    - name: falco_pod_name
+      value: (join('-', ['falco-pod', $namespace]))
+    - name: falco_pod_other_name
+      value: (join('-', ['falco-pod-other', $namespace]))
+
+  steps:
+    - name: "Step 01: Create-fake-node-and-the-second-namespace"
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Namespace
+              metadata:
+                name: ($other_namespace)
+                labels:
+                  artifact.falcosecurity.dev/trust: "true"
+
+    - name: "Step 01b: Create-fake-node"
+      use:
+        template: ../../common/_step_templates/apply-fake-node.yaml
+        with:
+          bindings:
+            - name: node_name
+              value: ($node_name)
+            - name: node_arch
+              value: amd64
+            - name: node_group
+              value: ($namespace)
+
+    - name: "Step 02: Falco-runs-in-the-second-namespace-only"
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($other_namespace)
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($falco_pod_other_name)
+                namespace: ($other_namespace)
+                labels:
+                  app.kubernetes.io/instance: ($falco_name)
+              spec:
+                nodeName: ($node_name)
+                tolerations:
+                  - key: kwok.x-k8s.io/node
+                    value: fake
+                    effect: NoSchedule
+                containers:
+                  - name: pause
+                    image: registry.k8s.io/pause:3.9
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                name: ($falco_pod_other_name)
+                namespace: ($other_namespace)
+              status:
+                phase: Running
+
+    - name: "Step 03: Create-a-rulesfile-in-each-namespace"
+      description: Same name, same selector, same node. Only the namespace differs.
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw namespaces rule
+                    desc: Rule used to verify that namespaces are independent.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=namespaces"
+                    priority: DEBUG
+                    tags: [test]
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($other_namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw-node-group: ($namespace)
+                inlineRules:
+                  - rule: Chainsaw namespaces rule
+                    desc: Rule used to verify that namespaces are independent.
+                    condition: "evt.type = execve"
+                    output: "process=%proc.cmdline marker=namespaces"
+                    priority: DEBUG
+                    tags: [test]
+
+    - name: "Step 04: Assert-only-the-namespace-with-falco-gets-an-object"
+      description: |
+        Scenario 1. The rulesfile of the first namespace selects the node, but no Falco of that namespace runs
+        there, so it has nothing to be assigned to and says it has no node.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($other_namespace)
+              spec:
+                nodeName: ($node_name)
+                (artifacts[*].name):
+                  - ($rulesfile_name)
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 05: Falco-comes-to-the-first-namespace"
+      description: |
+        The Falco CR first, as in a cluster, where its pods are created from it: a pod counts only when it belongs
+        to a Falco CR of its namespace.
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+
+    - name: "Step 05b: Create-its-pod-on-the-node"
+      use:
+        template: ../../common/_step_templates/create-falco-pod-on-fake-node.yaml
+        with:
+          bindings:
+            - name: pod_name
+              value: ($falco_pod_name)
+            - name: falco_name
+              value: ($falco_name)
+            - name: node_name
+              value: ($node_name)
+
+    - name: "Step 06: Assert-each-namespace-has-its-own-object"
+      description: Scenario 2. Each lists its own artifact; the objects have the same name and are different objects.
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+              spec:
+                nodeName: ($node_name)
+                (length(artifacts)): 1
+                (artifacts[0].name): ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($other_namespace)
+              spec:
+                nodeName: ($node_name)
+                (length(artifacts)): 1
+                (artifacts[0].name): ($rulesfile_name)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: OTHER_NAMESPACE
+                value: ($other_namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: NAMESPACES
+                value: (join('', [$namespace, ' ', $other_namespace]))
+            content: bash ../../common/scripts/assert_artifactnode_lists_namespace_uid.sh
+
+    - name: "Step 07: Delete-the-rulesfile-of-the-first-namespace"
+      description: Scenario 3.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - wait:
+            apiVersion: artifact.falcosecurity.dev/v1alpha1
+            kind: ArtifactNode
+            name: ($node_name)
+            namespace: ($namespace)
+            for:
+              deletion: {}
+
+    - name: "Step 08: Assert-the-other-namespace-is-untouched"
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($other_namespace)
+                (deletionTimestamp == null): true
+              spec:
+                (length(artifacts)): 1
+                (artifacts[0].name): ($rulesfile_name)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($other_namespace)
+                (deletionTimestamp == null): true
+
+    - name: "Step 09: The-second-namespaces-pod-goes-and-comes-back"
+      description: |
+        Scenario 4. The first namespace has nothing left to lose. The second's ArtifactNode must survive the
+        replacement of its pod, and the first namespace must not see anything happen.
+      try:
+        - script:
+            env:
+              - name: OTHER_NAMESPACE
+                value: ($other_namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+              - name: POD_NAME
+                value: ($falco_pod_other_name)
+              - name: NAMESPACE
+                value: ($other_namespace)
+              - name: ABSENCE_SECONDS
+                value: "10"
+              - name: SETTLE_SECONDS
+                value: "5"
+            content: bash ../../common/scripts/recreate_pod_within_grace.sh
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                name: ($node_name)
+                namespace: ($namespace)
+
+    - name: "Step 10: Delete-the-node-and-the-falco-crs"
+      try:
+        - delete:
+            ref:
+              apiVersion: v1
+              kind: Node
+              name: ($node_name)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($namespace)
+        - delete:
+            ref:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              name: ($falco_name)
+              namespace: ($other_namespace)
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh
+    - description: Best-effort cleanup of the fake Node, cluster-scoped, so a mid-test failure must not leave it behind.
+      delete:
+        ref:
+          apiVersion: v1
+          kind: Node
+          name: ($node_name)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($namespace)
+    - delete:
+        ref:
+          apiVersion: instance.falcosecurity.dev/v1alpha1
+          kind: Falco
+          name: ($falco_name)
+          namespace: ($other_namespace)

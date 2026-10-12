@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Verify the shared plugins-config file on a Falco node is present but no longer contains an
-# entry for a specific plugin: the inverse of check_plugin_config_on_node.sh. Since
-# RemovePluginConfigByName started keeping this file on disk permanently (see
-# internal/pkg/node/pluginconfig.go: Falco's own file-watch on this path does not
-# reliably survive the file being deleted and later recreated), "the last plugin was removed" is
-# expressed as an empty file ("plugins: []"), not an absent one.
+# entry for a specific plugin: the inverse of check_plugin_config_on_node.sh. The node keeps
+# this file on disk for good (see internal/pkg/node/pluginconfig.go: Falco's own file-watch on
+# this path does not reliably survive the file being deleted and later recreated), so "the last
+# plugin was removed" is an empty file ("plugins: []"), not an absent one.
 # Parses the file as YAML (via yq) rather than grepping text, so it can't be fooled by another
 # plugin's entry sharing a substring with PLUGIN_NAME.
 # Env vars:

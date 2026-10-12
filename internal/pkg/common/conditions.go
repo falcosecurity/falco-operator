@@ -24,9 +24,21 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
-// msgNoConditionsToGateOn is the Programmed message used when there are no
-// non-Programmed conditions to gate on.
-const msgNoConditionsToGateOn = "no conditions to gate on"
+// msgNoConditionsToGateOn is the Programmed message of an artifact that has no condition to gate on: its spec
+// declares no source, so there is nothing to install.
+const msgNoConditionsToGateOn = "The artifact declares no source, so there is nothing to install (no conditions to gate on)"
+
+// The reasons of a Programmed condition that says nothing about an installation yet.
+const (
+	// ReasonPending is the reason of a condition the nodes have not all reported for the artifact's generation.
+	// It is also the reason of the Programmed condition an artifact is created with.
+	ReasonPending = "Pending"
+	// ReasonGenerationPending is the reason of Programmed on a node while the artifact's generation has not been
+	// processed there, by the instance operator or by the node itself.
+	ReasonGenerationPending = "GenerationPending"
+	// ReasonNoNodesAssigned is the reason of Programmed on an artifact no node is expected to report on.
+	ReasonNoNodesAssigned = "NoNodesAssigned"
+)
 
 // NewCondition creates a new metav1.Condition with the given parameters.
 func NewCondition(
@@ -109,12 +121,12 @@ func ComputeProgrammedCondition(
 	}
 	if observedGeneration != generation {
 		msg := fmt.Sprintf("Waiting for the instance operator to process generation %d", generation)
-		return NewProgrammedCondition(metav1.ConditionUnknown, "GenerationPending", msg, generation)
+		return NewProgrammedCondition(metav1.ConditionUnknown, ReasonGenerationPending, msg, generation)
 	}
 	if stale != nil {
 		msg := fmt.Sprintf("Waiting for %s to be evaluated for generation %d (last observed %d)",
 			stale.Type, generation, stale.ObservedGeneration)
-		return NewProgrammedCondition(metav1.ConditionUnknown, "GenerationPending", msg, generation)
+		return NewProgrammedCondition(metav1.ConditionUnknown, ReasonGenerationPending, msg, generation)
 	}
 	if n > 0 {
 		return NewProgrammedCondition(metav1.ConditionTrue, trueReason, trueMessage, generation)

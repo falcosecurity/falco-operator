@@ -29,23 +29,35 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
-// removeConfig removes plugin's entry, resolved via ResolveConfigName. Test-only: production
+// installedPluginName is the shared file's entry plugin currently holds, or "" if it holds none.
+// Production resolves the owner itself and calls claimedNameLocked; these tests start from the CR,
+// so they get the one-step form here rather than in the node's own code.
+func (n *Node) installedPluginName(plugin *artifactv1alpha1.Plugin) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	owner := pluginOwner(plugin)
+	return n.claimedNameLocked(&owner)
+}
+
+// removeConfig removes plugin's entry, resolved via resolveConfigName. Test-only: production
 // code always resolves the config name itself and calls removeByName directly.
 func (pc *pluginsConfig) removeConfig(plugin *artifactv1alpha1.Plugin) {
-	pc.removeByName(ResolveConfigName(plugin))
+	pc.removeByName(resolveConfigName(plugin))
 }
 
 // isEmpty reports whether pc has no configs and no load_plugins entries. Test-only.
@@ -58,21 +70,21 @@ func defaultLibraryPath(t *testing.T, name string) string {
 	return testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), name, priority.DefaultPriority, artifact.MediumOCI, artifact.KindPlugin)
 }
 
-func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
+func TestNode_ObservationPreservesDesiredPluginConfig(t *testing.T) {
 	ctx := context.Background()
 	mockFS := fsfake.NewMockFileSystem()
-	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	m := newArtifacts(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "container"}}
-	fetcher := &artifact.Fetcher{}
-	_, file, err := m.AddPluginConfig(ctx, plugin, fetcher)
+	_, file, err := m.AddPluginConfig(ctx, plugin)
 	require.NoError(t, err)
-	rulesKey := Key{Kind: KindRulesfile, Name: "rules"}
+	rulesKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "rules"}
 	metadata := &commonv1alpha1.ArtifactMeta{
 		Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.7.0"}},
 	}
+	fetcher := &artifact.Fetcher{}
 	rulesContent, err := fetcher.FetchInline(ctx, []byte("test rules"))
 	require.NoError(t, err)
-	_, _, err = m.StoreRulesfile(ctx, rulesKey.Namespace, rulesKey.Name, 50, artifact.MediumOCI, rulesContent, metadata, false)
+	_, _, err = m.StoreRulesfile(ctx, rulesKey.Name, 50, artifact.MediumOCI, rulesContent, metadata, false)
 	require.NoError(t, err)
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1", "external": "1.0.0"}).Result)
 	content := string(mockFS.Files[file.Path])
@@ -81,17 +93,17 @@ func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(nil).Result)
 	p, ok := m.provides["container"]
 	require.True(t, ok, "a configured plugin keeps its structural registration")
-	assert.Equal(t, PluginConfigKey, p.Key)
+	assert.False(t, p.ObservedOnly, "it stays a configured plugin")
 	assert.Empty(t, p.Version, "only its confirmed runtime version is invalidated")
 	assert.NotContains(t, m.provides, "external", "an observation-only entry has no desired registration to preserve")
-	assert.Equal(t, "container", m.installedPluginNameLocked(plugin))
+	assert.Equal(t, "container", m.installedPluginName(plugin))
 	assert.Equal(t, []string{"container"}, m.pluginsConfig.LoadPlugins)
-	assert.Equal(t, metadata, m.rulesfiles[rulesfileSourceKey{Key: rulesKey, Medium: artifact.MediumOCI}][0].Metadata)
+	assert.Equal(t, metadata, m.requiresLocked(rulesKey, artifact.MediumOCI)[0].Metadata)
 	assert.Equal(t, content, string(mockFS.Files[file.Path]))
 	assert.Len(t, mockFS.WriteCalls, writes, "an observation must not rewrite or remove artifact files")
 	assert.Empty(t, mockFS.RemoveCalls)
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
-	assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.1"}, m.provides["container"])
+	assert.Equal(t, provided{Version: "0.7.1"}, m.provides["container"])
 }
 
 func TestPluginsConfig_AddConfig(t *testing.T) {
@@ -383,7 +395,6 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 
 	t.Run("changing spec.config.name removes stale entry via installed ownership", func(t *testing.T) {
 		m := newPluginConfigTestManager()
-		fetcher := &artifact.Fetcher{}
 
 		plugin := &artifactv1alpha1.Plugin{
 			ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
@@ -391,7 +402,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 				Config: &artifactv1alpha1.PluginConfig{Name: "json"},
 			},
 		}
-		_, _, err := m.AddPluginConfig(t.Context(), plugin, fetcher)
+		_, _, err := m.AddPluginConfig(t.Context(), plugin)
 		require.NoError(t, err)
 		require.Len(t, m.pluginsConfig.Configs, 1)
 		assert.Equal(t, "json", m.pluginsConfig.Configs[0].Name)
@@ -404,14 +415,14 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 
-		_, _, err = m.AddPluginConfig(t.Context(), pluginRenamed, fetcher)
+		_, _, err = m.AddPluginConfig(t.Context(), pluginRenamed)
 		require.NoError(t, err)
 
 		require.Len(t, m.pluginsConfig.Configs, 1)
 		assert.Equal(t, "json-v2", m.pluginsConfig.Configs[0].Name)
 		assert.Equal(t, []string{"json-v2"}, m.pluginsConfig.LoadPlugins)
 
-		require.NoError(t, m.RemovePluginConfig(t.Context(), fetcher, pluginRenamed))
+		require.NoError(t, m.RemovePluginConfig(t.Context(), pluginRenamed))
 		assert.True(t, m.pluginsConfig.isEmpty())
 	})
 
@@ -661,48 +672,6 @@ func TestInitConfig_MarshalYAML(t *testing.T) {
 	}
 }
 
-func TestResolveConfigName(t *testing.T) {
-	tests := []struct {
-		name     string
-		plugin   *artifactv1alpha1.Plugin
-		expected string
-	}{
-		{
-			name: "uses CR name when config is nil",
-			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
-			},
-			expected: "my-plugin",
-		},
-		{
-			name: "uses CR name when config name is empty",
-			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
-				Spec: artifactv1alpha1.PluginSpec{
-					Config: &artifactv1alpha1.PluginConfig{},
-				},
-			},
-			expected: "my-plugin",
-		},
-		{
-			name: "uses config name when set",
-			plugin: &artifactv1alpha1.Plugin{
-				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"},
-				Spec: artifactv1alpha1.PluginSpec{
-					Config: &artifactv1alpha1.PluginConfig{Name: "custom-name"},
-				},
-			},
-			expected: "custom-name",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, ResolveConfigName(tt.plugin))
-		})
-	}
-}
-
 func findPluginConfig(configs []pluginConfig, name string) *pluginConfig {
 	for i := range configs {
 		if configs[i].Name == name {
@@ -712,11 +681,11 @@ func findPluginConfig(configs []pluginConfig, name string) *pluginConfig {
 	return nil
 }
 
-func newPluginConfigTestManager() *Manager {
-	return NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+func newPluginConfigTestManager() *Node {
+	return newArtifacts(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 }
 
-func TestManager_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
+func TestNode_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
 	m := newPluginConfigTestManager()
 	pl := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: "json"},
@@ -725,7 +694,7 @@ func TestManager_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
 		},
 	}
 
-	action, file, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
+	action, file, err := m.AddPluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	assert.Equal(t, artifact.StoreActionAdded, action)
@@ -733,10 +702,10 @@ func TestManager_AddPluginConfig_WritesConfigForBasicPlugin(t *testing.T) {
 	require.Len(t, m.pluginsConfig.Configs, 1)
 	found := findPluginConfig(m.pluginsConfig.Configs, "json")
 	require.NotNil(t, found)
-	assert.Equal(t, "json", m.installedPluginNameLocked(pl))
+	assert.Equal(t, "json", m.installedPluginName(pl))
 }
 
-func TestManager_AddPluginConfig_WritesConfigWithInitConfig(t *testing.T) {
+func TestNode_AddPluginConfig_WritesConfigWithInitConfig(t *testing.T) {
 	m := newPluginConfigTestManager()
 	pl := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Name: "container"},
@@ -748,7 +717,7 @@ func TestManager_AddPluginConfig_WritesConfigWithInitConfig(t *testing.T) {
 		},
 	}
 
-	_, _, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	found := findPluginConfig(m.pluginsConfig.Configs, "container")
@@ -760,53 +729,50 @@ func TestManager_AddPluginConfig_WritesConfigWithInitConfig(t *testing.T) {
 
 	// Another plugin serializes the full aggregate again, including the owned init_config.
 	another := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, file, err := m.AddPluginConfig(t.Context(), another, &artifact.Fetcher{})
+	_, file, err := m.AddPluginConfig(t.Context(), another)
 	require.NoError(t, err)
 	require.NotNil(t, file)
-	data, err := m.store.(*artifact.LocalStore).FS.ReadFile(file.Path)
+	data, err := m.disk.(*artifact.LocalStore).FS.ReadFile(file.Path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "containerd:")
 	assert.Contains(t, string(data), "enabled: true")
 }
 
-func TestManager_AddPluginConfig_RenameRemovesStaleEntryWhenUnblocked(t *testing.T) {
+func TestNode_AddPluginConfig_RenameRemovesStaleEntryWhenUnblocked(t *testing.T) {
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "my-plugin"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
 	require.NotNil(t, findPluginConfig(m.pluginsConfig.Configs, "my-plugin"))
 
 	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "new-name"}
-	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	require.Len(t, m.pluginsConfig.Configs, 1)
 	assert.Nil(t, findPluginConfig(m.pluginsConfig.Configs, "my-plugin"))
 	assert.NotNil(t, findPluginConfig(m.pluginsConfig.Configs, "new-name"))
-	assert.Equal(t, "new-name", m.installedPluginNameLocked(pl))
+	assert.Equal(t, "new-name", m.installedPluginName(pl))
 }
 
-func TestManager_AddPluginConfig_SameConfigNameDoesNotRemoveEntry(t *testing.T) {
+func TestNode_AddPluginConfig_SameConfigNameDoesNotRemoveEntry(t *testing.T) {
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
 
-	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	require.Len(t, m.pluginsConfig.Configs, 1)
 }
 
-func TestManager_PluginConfigYAMLRoundTripPreservesNoOpAndOrder(t *testing.T) {
+func TestNode_PluginConfigYAMLRoundTripPreservesNoOpAndOrder(t *testing.T) {
 	ctx := t.Context()
 	fs := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
 	versions := compatfake.NewMockVersionsFetcher(nil)
-	before := NewManager(store, versions)
-	fetcher := &artifact.Fetcher{}
+	before := newArtifacts(store, versions)
 	pluginA := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "a", UID: "uid-a"},
 		Spec: artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{
@@ -815,28 +781,28 @@ func TestManager_PluginConfigYAMLRoundTripPreservesNoOpAndOrder(t *testing.T) {
 	}
 	pluginB := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "b", UID: "uid-b"}}
 	for _, plugin := range []*artifactv1alpha1.Plugin{pluginA, pluginB} {
-		_, _, err := before.AddPluginConfig(ctx, plugin, fetcher)
+		_, _, err := before.AddPluginConfig(ctx, plugin)
 		require.NoError(t, err)
 	}
-	file := before.FindInstalled(PluginConfigKey, artifact.MediumInline)
+	file := before.pluginsConfigFile
 	require.NotNil(t, file)
 	content := string(fs.Files[file.Path])
-	after := NewManager(store, versions)
+	after := newArtifacts(store, versions)
 	disk, err := after.ScanAll(ctx, artifact.KindConfig)
 	require.NoError(t, err)
-	after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
+	after.seedPluginsConfigFile(disk[pluginConfigFileName][0])
 	writes := len(fs.WriteCalls)
 	fs.WriteErr = errors.New("unexpected no-op write")
 	require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{pluginB, pluginA}))
 	assert.Len(t, fs.WriteCalls, writes, "reading an unchanged aggregate must not rewrite it")
-	assert.Equal(t, map[string]corev1.ObjectReference{"a": pluginOwner(pluginA), "b": pluginOwner(pluginB)}, after.pluginConfigOwners)
+	assert.Equal(t, map[string]ownerRef{"a": pluginOwner(pluginA), "b": pluginOwner(pluginB)}, after.ownersLocked())
 	require.Len(t, after.pluginsConfig.Configs, 2)
 	require.NotNil(t, after.pluginsConfig.Configs[0].InitConfig)
 	assert.JSONEq(t, string(pluginA.Spec.Config.InitConfig.Raw), string(after.pluginsConfig.Configs[0].InitConfig.Raw))
 	require.NotEqual(t, string(pluginA.Spec.Config.InitConfig.Raw), string(after.pluginsConfig.Configs[0].InitConfig.Raw),
 		"the fixture must exercise whitespace normalization when decoding init_config YAML")
 
-	action, _, err := after.AddPluginConfig(ctx, pluginA, fetcher)
+	action, _, err := after.AddPluginConfig(ctx, pluginA)
 
 	require.NoError(t, err)
 	assert.Equal(t, artifact.StoreActionUnchanged, action)
@@ -848,15 +814,14 @@ func TestManager_PluginConfigYAMLRoundTripPreservesNoOpAndOrder(t *testing.T) {
 	assert.Equal(t, "b", after.pluginsConfig.Configs[1].Name)
 }
 
-func TestManager_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *testing.T) {
+func TestNode_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *testing.T) {
 	ctx := t.Context()
 	fs := fsfake.NewMockFileSystem()
 	store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
 	versions := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
 		"kept": "0.7.4", "renamed": "0.7.4", "orphan": "0.7.4", "collision": "0.7.4",
 	})
-	before := NewManager(store, versions)
-	fetcher := &artifact.Fetcher{}
+	before := newArtifacts(store, versions)
 	kept := &artifactv1alpha1.Plugin{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "owner", UID: "old-uid"},
 		Spec: artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{
@@ -868,7 +833,7 @@ func TestManager_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *t
 	collision := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "collision", UID: "collision-uid"}}
 	orphan := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orphan", UID: "orphan-uid"}}
 	for _, plugin := range []*artifactv1alpha1.Plugin{kept, renamed, collision, orphan} {
-		_, _, err := before.AddPluginConfig(ctx, plugin, fetcher)
+		_, _, err := before.AddPluginConfig(ctx, plugin)
 		require.NoError(t, err)
 	}
 	current := kept.DeepCopy()
@@ -881,17 +846,17 @@ func TestManager_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *t
 		ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "other", UID: "other-uid"},
 		Spec:       artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{Name: "collision"}},
 	}
-	after := NewManager(store, versions)
+	after := newArtifacts(store, versions)
 	after.OnFalcoVersionsObserved(versions.Result)
 	disk, err := after.ScanAll(ctx, artifact.KindConfig)
 	require.NoError(t, err)
-	after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
+	after.seedPluginsConfigFile(disk[pluginConfigFileName][0])
 
 	require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{current, renamed, collision, other}))
 
 	require.Len(t, after.pluginsConfig.Configs, 1)
 	assert.Equal(t, []string{"kept"}, after.pluginsConfig.LoadPlugins)
-	assert.Equal(t, map[string]corev1.ObjectReference{"kept": pluginOwner(current)}, after.pluginConfigOwners,
+	assert.Equal(t, map[string]ownerRef{"kept": pluginOwner(current)}, after.ownersLocked(),
 		"ownership is claimed by the current CR, not recovered from history")
 	assert.Equal(t, kept.Spec.Config.LibraryPath, after.pluginsConfig.Configs[0].LibraryPath)
 	assert.Equal(t, kept.Spec.Config.OpenParams, after.pluginsConfig.Configs[0].OpenParams)
@@ -902,23 +867,23 @@ func TestManager_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *t
 		assert.Empty(t, after.provides[name].Version)
 	}
 	after.OnFalcoVersionsObserved(versions.Result)
-	assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.4"}, after.provides["kept"])
+	assert.Equal(t, provided{Version: "0.7.4"}, after.provides["kept"])
 	for _, name := range []string{"renamed", "orphan", "collision"} {
 		assert.True(t, after.provides[name].Removed, "a pre-reload observation must not resurrect a pruned alias")
 	}
-	file := after.FindInstalled(PluginConfigKey, artifact.MediumInline)
+	file := after.pluginsConfigFile
 	require.NotNil(t, file)
 	content, err := after.pluginsConfig.toString()
 	require.NoError(t, err)
 	assert.Equal(t, content, string(fs.Files[file.Path]))
-	_, _, err = after.AddPluginConfig(ctx, current, fetcher)
+	_, _, err = after.AddPluginConfig(ctx, current)
 	require.NoError(t, err)
 	assert.Equal(t, current.Spec.Config.LibraryPath, after.pluginsConfig.Configs[0].LibraryPath,
 		"only normal reconciliation applies the changed settings")
 	assert.Equal(t, current.Spec.Config.OpenParams, after.pluginsConfig.Configs[0].OpenParams)
 }
 
-func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testing.T) {
+func TestNode_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testing.T) {
 	const readFailure, writeFailure, renameFailure = "read failure", "write failure", "rename failure"
 	const missingFile, invalidYAML = "missing file", "invalid YAML"
 	for _, scenario := range []string{missingFile, invalidYAML, readFailure, writeFailure, renameFailure} {
@@ -926,12 +891,12 @@ func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testin
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-			before := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			before := newArtifacts(store, compatfake.NewMockVersionsFetcher(nil))
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "orphan", UID: "orphan-uid"}}
-			_, file, err := before.AddPluginConfig(ctx, plugin, &artifact.Fetcher{})
+			_, file, err := before.AddPluginConfig(ctx, plugin)
 			require.NoError(t, err)
-			after := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
-			after.SeedInstalled(PluginConfigKey, before.GetInstalled(PluginConfigKey))
+			after := newArtifacts(store, compatfake.NewMockVersionsFetcher(nil))
+			after.pluginsConfigFile = before.pluginsConfigFile
 			original := string(fs.Files[file.Path])
 			ioErr := errors.New("filesystem unavailable")
 			switch scenario {
@@ -942,23 +907,23 @@ func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testin
 			case readFailure:
 				fs.ReadErrFor = map[string]error{file.Path: ioErr}
 			case writeFailure:
-				fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): ioErr}
+				fs.WriteErrFor = map[string]error{artifact.StagingPath(file.Path): ioErr}
 			case renameFailure:
-				fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): ioErr}
+				fs.RenameErrFor = map[string]error{artifact.StagingPath(file.Path): ioErr}
 			}
 
 			err = after.restorePluginsConfig(ctx, nil)
 
 			if scenario == missingFile {
 				require.NoError(t, err)
-				assert.Nil(t, after.FindInstalled(PluginConfigKey, artifact.MediumInline))
+				assert.Nil(t, after.pluginsConfigFile)
 				assert.NotContains(t, fs.Files, file.Path)
 				return
 			}
 			if scenario != invalidYAML {
 				require.ErrorIs(t, err, ioErr)
 				assert.Equal(t, original, string(fs.Files[file.Path]), "failed recovery must not replace installed output")
-				assert.Empty(t, after.pluginConfigOwners, "failed recovery must not publish new ownership")
+				assert.Empty(t, after.ownersLocked(), "failed recovery must not publish new ownership")
 				fs.ReadErrFor, fs.WriteErrFor, fs.RenameErrFor = nil, nil, nil
 				require.NoError(t, after.restorePluginsConfig(ctx, nil), "recovery must be retryable")
 			} else {
@@ -966,92 +931,90 @@ func TestManager_RestorePluginsConfig_HandlesMissingCorruptAndFailedIO(t *testin
 			}
 			assert.Empty(t, after.pluginsConfig.Configs)
 			assert.Empty(t, after.pluginsConfig.LoadPlugins)
-			assert.Empty(t, after.pluginConfigOwners)
-			assert.NotContains(t, fs.Files, filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"))
+			assert.Empty(t, after.ownersLocked())
+			assert.NotContains(t, fs.Files, artifact.StagingPath(file.Path))
 			assert.Contains(t, string(fs.Files[file.Path]), "plugins: []")
-			intact, err := after.Verify(ctx, after.FindInstalled(PluginConfigKey, artifact.MediumInline))
+			intact, err := after.Verify(ctx, after.pluginsConfigFile)
 			require.NoError(t, err)
 			assert.True(t, intact)
 		})
 	}
 }
 
-func TestManager_AddPluginConfig_StoreFailureSurfacesError(t *testing.T) {
+func TestNode_AddPluginConfig_StoreFailureSurfacesError(t *testing.T) {
 	mockFS := fsfake.NewMockFileSystem()
 	mockFS.WriteErr = fmt.Errorf("disk full")
-	m := NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	m := newArtifacts(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "test-plugin"}}
 
-	_, _, err := m.AddPluginConfig(context.Background(), pl, &artifact.Fetcher{})
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "disk full")
 	assert.Empty(t, m.pluginsConfig.Configs, "a failed addition must not change the aggregate")
-	assert.Empty(t, m.pluginConfigOwners)
+	assert.Empty(t, m.ownersLocked())
 	assert.Empty(t, m.provides)
 }
 
-func TestManager_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
+func TestNode_PluginConfigWriteFailurePreservesCommittedState(t *testing.T) {
 	const removeOperation, renameOperation = "remove", "rename"
 	for _, operation := range []string{removeOperation, renameOperation, "update"} {
 		t.Run(operation, func(t *testing.T) {
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			falco := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"json": "0.7.4"})
-			m := NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, falco)
+			m := newArtifacts(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, falco)
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-			fetcher := &artifact.Fetcher{}
-			_, file, err := m.AddPluginConfig(ctx, plugin, fetcher)
+			_, file, err := m.AddPluginConfig(ctx, plugin)
 			require.NoError(t, err)
 			before := string(fs.Files[file.Path])
-			fs.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(file.Path), ".tmp", filepath.Base(file.Path)+".tmp"): fmt.Errorf("disk full")}
+			fs.WriteErrFor = map[string]error{artifact.StagingPath(file.Path): fmt.Errorf("disk full")}
 			switch operation {
 			case removeOperation:
-				err = m.RemovePluginConfig(ctx, fetcher, plugin)
+				err = m.RemovePluginConfig(ctx, plugin)
 			case renameOperation:
 				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
-				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin)
 			case "update":
 				plugin.Spec.Config = &artifactv1alpha1.PluginConfig{OpenParams: "changed"}
-				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin)
 			}
 			require.ErrorContains(t, err, "disk full")
 			assert.Equal(t, before, string(fs.Files[file.Path]))
-			assert.Equal(t, "json", m.installedPluginNameLocked(plugin))
+			assert.Equal(t, "json", m.installedPluginName(plugin))
 			assert.Equal(t, []string{"json"}, m.pluginsConfig.LoadPlugins)
-			assert.Equal(t, provided{Key: PluginConfigKey, Version: "0.7.4"}, m.provides["json"])
+			assert.Equal(t, provided{Version: "0.7.4"}, m.provides["json"])
 			fs.WriteErrFor = nil
 			assert.Equal(t, before, string(fs.Files[file.Path]))
 			// Retrying the same operation must still perform it, not mistake the failed
 			// in-memory mutation for a completed change.
 			if operation == removeOperation {
-				require.NoError(t, m.RemovePluginConfig(ctx, fetcher, plugin))
+				require.NoError(t, m.RemovePluginConfig(ctx, plugin))
 				assert.Empty(t, m.pluginsConfig.LoadPlugins)
 				assert.True(t, m.provides["json"].Removed)
 			} else {
-				_, _, err = m.AddPluginConfig(ctx, plugin, fetcher)
+				_, _, err = m.AddPluginConfig(ctx, plugin)
 				require.NoError(t, err)
 				assert.NotEqual(t, before, string(fs.Files[file.Path]))
 				if operation == renameOperation {
 					assert.True(t, m.provides["json"].Removed, "the post-install poll still reports the old name")
 					assert.Empty(t, m.provides["json"].Version)
-					assert.Equal(t, "renamed", m.installedPluginNameLocked(plugin))
+					assert.Equal(t, "renamed", m.installedPluginName(plugin))
 				}
 			}
 		})
 	}
 }
 
-func TestManager_RemovePluginConfig_EmptyAfterRemovalKeepsFileOnDisk(t *testing.T) {
+func TestNode_RemovePluginConfig_EmptyAfterRemovalKeepsFileOnDisk(t *testing.T) {
 	// Removing the last plugin config entry rewrites the file to an empty config instead of
 	// deleting it.
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, file, err := m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, file, err := m.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
 
-	err = m.RemovePluginConfig(context.Background(), fetcher, pl)
+	err = m.RemovePluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	assert.True(t, m.pluginsConfig.isEmpty())
@@ -1059,26 +1022,20 @@ func TestManager_RemovePluginConfig_EmptyAfterRemovalKeepsFileOnDisk(t *testing.
 	require.NoError(t, verifyErr)
 	assert.False(t, ok, "content changed (the json entry is gone), so the old file's hash must no longer verify")
 
-	require.Error(t, m.Remove(t.Context(), PluginConfigKey))
-	_, removed, err := m.RemoveIfInstalled(t.Context(), PluginConfigKey, artifact.MediumInline)
-	require.Error(t, err)
-	assert.False(t, removed)
-
-	content, readErr := m.store.(*artifact.LocalStore).FS.ReadFile(file.Path)
+	content, readErr := m.disk.(*artifact.LocalStore).FS.ReadFile(file.Path)
 	require.NoError(t, readErr, "the config file must still exist on disk, just rewritten empty")
 	assert.Contains(t, string(content), "plugins: []")
 }
 
-func TestManager_RemovePluginConfig_NotEmptyAfterRemovalWritesUpdatedConfig(t *testing.T) {
+func TestNode_RemovePluginConfig_NotEmptyAfterRemovalWritesUpdatedConfig(t *testing.T) {
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
-	_, _, err = m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "k8saudit"}}, fetcher)
+	_, _, err = m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "k8saudit"}})
 	require.NoError(t, err)
 
-	err = m.RemovePluginConfig(context.Background(), fetcher, pl)
+	err = m.RemovePluginConfig(context.Background(), pl)
 
 	require.NoError(t, err)
 	assert.False(t, m.pluginsConfig.isEmpty())
@@ -1086,152 +1043,84 @@ func TestManager_RemovePluginConfig_NotEmptyAfterRemovalWritesUpdatedConfig(t *t
 	assert.NotNil(t, findPluginConfig(m.pluginsConfig.Configs, "k8saudit"))
 }
 
-func TestManager_RemovePluginConfig_AlreadyAbsentIsANoOp(t *testing.T) {
+func TestNode_RemovePluginConfig_AlreadyAbsentIsANoOp(t *testing.T) {
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
-	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}})
 	require.NoError(t, err)
 
 	absent := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "nonexistent"}}
-	err = m.RemovePluginConfig(context.Background(), fetcher, absent)
+	err = m.RemovePluginConfig(context.Background(), absent)
 
 	require.NoError(t, err)
 	assert.False(t, m.pluginsConfig.isEmpty())
 	require.Len(t, m.pluginsConfig.Configs, 1)
 }
 
-func TestManager_RemovePluginConfig_RetainsTombstoneWithoutOwner(t *testing.T) {
+func TestNode_RemovePluginConfig_RetainsTombstoneWithoutOwner(t *testing.T) {
 	m := newPluginConfigTestManager()
-	fetcher := &artifact.Fetcher{}
 	pl := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}}
-	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
 	require.NoError(t, err)
-	require.Equal(t, "json", m.installedPluginNameLocked(pl))
+	require.Equal(t, "json", m.installedPluginName(pl))
 
-	require.NoError(t, m.RemovePluginConfig(context.Background(), fetcher, pl))
+	require.NoError(t, m.RemovePluginConfig(context.Background(), pl))
 
-	assert.Empty(t, m.installedPluginNameLocked(pl))
-	assert.NotContains(t, m.pluginConfigOwners, "json")
+	assert.Empty(t, m.installedPluginName(pl))
+	assert.NotContains(t, m.ownersLocked(), "json")
 	assert.True(t, m.provides["json"].Removed)
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"json": "0.7.4"}).Result)
 	assert.True(t, m.provides["json"].Removed, "a delayed observation must not restore the removed provider")
 	assert.Empty(t, m.provides["json"].Version)
 }
 
-func TestManager_Remove_ProtectsSharedPluginConfig(t *testing.T) {
-	const absentMedium = "absent medium"
-	for _, operation := range []string{"all", "medium", absentMedium} {
-		t.Run(operation, func(t *testing.T) {
-			ctx := t.Context()
-			fs := fsfake.NewMockFileSystem()
-			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-			m := NewManager(store, compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}))
-			fetcher := &artifact.Fetcher{}
-			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "container", UID: "uid-container"}}
-			_, shared, err := m.AddPluginConfig(ctx, plugin, fetcher)
-			require.NoError(t, err)
-			require.NotNil(t, shared)
-			unrelated := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "json", UID: "uid-json"}}
-			_, _, err = m.AddPluginConfig(ctx, unrelated, fetcher)
-			require.NoError(t, err)
-			rules, err := fetcher.FetchInline(ctx, []byte("test rules"))
-			require.NoError(t, err)
-			_, _, err = m.StoreRulesfile(ctx, plugin.Namespace, "rules", 50, artifact.MediumInline, rules,
-				&commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.7.0"}}}, true)
-			require.NoError(t, err)
-			config, owners, providers := m.pluginsConfig.clone(), maps.Clone(m.pluginConfigOwners), maps.Clone(m.provides)
-			installed := m.GetInstalled(PluginConfigKey)
-			files := maps.Clone(fs.Files)
-			writes, removals := len(fs.WriteCalls), len(fs.RemoveCalls)
-
-			if operation == "all" {
-				err = m.Remove(ctx, PluginConfigKey)
-			} else {
-				var removed bool
-				var path string
-				medium := artifact.MediumInline
-				if operation == absentMedium {
-					medium = artifact.MediumConfigMap
-				}
-				path, removed, err = m.RemoveIfInstalled(ctx, PluginConfigKey, medium)
-				assert.Empty(t, path)
-				assert.False(t, removed)
-			}
-
-			if operation == absentMedium {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-			}
-			assert.Equal(t, files, fs.Files, "artifact files must remain untouched")
-			assert.Len(t, fs.WriteCalls, writes)
-			assert.Len(t, fs.RemoveCalls, removals)
-			assert.Equal(t, installed, m.GetInstalled(PluginConfigKey))
-			assert.Equal(t, config, m.pluginsConfig)
-			assert.Equal(t, owners, m.pluginConfigOwners)
-			assert.Equal(t, providers, m.provides)
-			var blocked *BlockedError
-			require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, plugin), &blocked)
-
-			after := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
-			disk, err := after.ScanAll(ctx, artifact.KindConfig)
-			require.NoError(t, err)
-			after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
-			disk, err = after.ScanAll(ctx, artifact.KindRulesfile)
-			require.NoError(t, err)
-			after.SeedInstalled(Key{Kind: KindRulesfile, Namespace: plugin.Namespace, Name: "rules"}, disk["rules"])
-			require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{plugin, unrelated}))
-			assert.Equal(t, config, after.pluginsConfig)
-			assert.Equal(t, owners, after.pluginConfigOwners)
-			require.NoError(t, after.RemovePluginConfig(ctx, fetcher, plugin),
-				"disk files alone do not prove historical dependencies after restart")
-			require.NoError(t, after.RemovePluginConfig(ctx, fetcher, unrelated))
-		})
-	}
-}
-
-func TestManager_RemovePluginPreservesEquivalentLibraryPaths(t *testing.T) {
+func TestNode_RemovePluginPreservesEquivalentLibraryPaths(t *testing.T) {
 	for _, alias := range []string{"./a.so", "../plugins/a.so"} {
 		t.Run(alias, func(t *testing.T) {
 			ctx := t.Context()
 			store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-			before := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
-			fetcher := &artifact.Fetcher{}
+			before := newArtifacts(store, compatfake.NewMockVersionsFetcher(nil))
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "a", UID: "uid-a"}}
+			fetcher := &artifact.Fetcher{}
 			content, err := fetcher.FetchInline(ctx, []byte("shared binary"))
 			require.NoError(t, err)
 			content.Perm = testutil.MustPermFor(t, artifact.KindPlugin)
-			_, binary, err := before.StorePlugin(ctx, plugin, content)
+			info, err := artifact.InfoForKind(artifact.KindPlugin)
 			require.NoError(t, err)
-			_, _, err = before.AddPluginConfig(ctx, plugin, fetcher)
+			key := artifact.RefOf(artifact.KindPlugin, plugin)
+			_, err = before.storeSource(ctx, &info, key, artifact.MediumOCI,
+				desired{Priority: priority.DefaultPriority, claim: pluginClaim(plugin)}, content)
+			require.NoError(t, err)
+			binary := before.FindInstalled(key, artifact.MediumOCI)
+			require.NotNil(t, binary)
+			_, _, err = before.AddPluginConfig(ctx, plugin)
 			require.NoError(t, err)
 			other := &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "b", UID: "uid-b"},
 				Spec:       artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{LibraryPath: store.Dirs.Plugin + "/" + alias}},
 			}
-			_, _, err = before.AddPluginConfig(ctx, other, fetcher)
+			_, _, err = before.AddPluginConfig(ctx, other)
 			require.NoError(t, err)
-			require.NoError(t, before.RemovePluginConfig(ctx, fetcher, plugin))
-			key := KeyFromObj(KindPlugin, plugin)
-			after := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			require.NoError(t, before.RemovePluginConfig(ctx, plugin))
+			after := newArtifacts(store, compatfake.NewMockVersionsFetcher(nil))
 			disk, err := after.ScanAll(ctx, artifact.KindPlugin)
 			require.NoError(t, err)
 			after.SeedInstalled(key, disk[plugin.Name])
 			disk, err = after.ScanAll(ctx, artifact.KindConfig)
 			require.NoError(t, err)
-			after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
+			after.seedPluginsConfigFile(disk[pluginConfigFileName][0])
 			require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{other}))
 
-			for _, m := range []*Manager{before, after} {
-				require.Error(t, m.Remove(ctx, key), "another installed plugin still references the same library")
-				_, removed, err := m.RemoveIfInstalled(ctx, key, artifact.MediumOCI)
+			for _, m := range []*Node{before, after} {
+				removeErr := m.Remove(ctx, key)
+				require.Error(t, removeErr, "another installed plugin still references the same library")
+				_, removed, err := m.removeIfInstalled(ctx, key, artifact.MediumOCI)
 				require.Error(t, err)
 				assert.False(t, removed)
 				intact, err := m.Verify(ctx, binary)
 				require.NoError(t, err)
 				assert.True(t, intact)
 			}
-			require.NoError(t, after.RemovePluginConfig(ctx, fetcher, other))
+			require.NoError(t, after.RemovePluginConfig(ctx, other))
 			require.NoError(t, after.Remove(ctx, key))
 			intact, err := after.Verify(ctx, binary)
 			require.NoError(t, err)
@@ -1245,16 +1134,297 @@ func TestWritePluginsConfig_ClassifiesUnchangedContentCorrectly(t *testing.T) {
 	m := newPluginConfigTestManager()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	fetcher := &artifact.Fetcher{}
 	config := &pluginsConfig{}
 
-	action, file, err := m.writePluginsConfigLocked(context.Background(), fetcher, config, map[string]corev1.ObjectReference{})
+	action, file, err := m.writePluginsConfigLocked(context.Background(), config, map[string]ownerRef{})
 	require.NoError(t, err)
 	require.NotNil(t, file)
 	assert.Equal(t, artifact.StoreActionAdded, action, "first write of the shared config file is a real install")
 
-	action, _, err = m.writePluginsConfigLocked(context.Background(), fetcher, config, map[string]corev1.ObjectReference{})
+	action, _, err = m.writePluginsConfigLocked(context.Background(), config, map[string]ownerRef{})
 	require.NoError(t, err)
 	assert.Equal(t, artifact.StoreActionUnchanged, action,
 		"byte-identical content must not be misreported as a fresh install")
+}
+
+// TestNode_AddPluginConfig_DedupsFromItsOwnCacheNotTheCaller checks that the node decides from its
+// own record of the shared file whether a write can be skipped: a second call with an identical
+// plugin config writes nothing.
+func TestNode_AddPluginConfig_DedupsFromItsOwnCacheNotTheCaller(t *testing.T) {
+	m := newTestNode()
+
+	action1, file, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	assert.Equal(t, artifact.StoreActionAdded, action1)
+
+	action2, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+	assert.Equal(t, artifact.StoreActionUnchanged, action2)
+}
+
+func TestNode_RemovePluginConfig_AllowedWhenNothingRequiresIt(t *testing.T) {
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+
+	err = m.RemovePluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+}
+
+func TestNode_RemovePluginConfig_BlockedWhenSoleProvider(t *testing.T) {
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "my-rulesfile"}
+	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
+
+	err = m.RemovePluginConfig(context.Background(), testPlugin("container"))
+
+	require.Error(t, err)
+	var blocked *BlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, "container", blocked.Name)
+	assert.Contains(t, blocked.BlockedBy, rfKey)
+}
+
+func TestNode_RemovePluginConfig_AllowedWhenAlternativeCoversTheGroup(t *testing.T) {
+	m := newTestNodeWithFetcher(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
+		"container": "1.0.0", "container-alt": "1.0.0",
+	}))
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"))
+	require.NoError(t, err)
+
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "my-rulesfile"}
+	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "1.0.0"}}}})
+
+	err = m.RemovePluginConfig(context.Background(), testPlugin("container"))
+
+	require.NoError(t, err, "container-alt still satisfies the group, so removing container must be allowed")
+}
+
+func TestNode_RemovePluginConfig_ClearsProvidesOnSuccess(t *testing.T) {
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+	require.NoError(t, err)
+	require.NoError(t, m.RemovePluginConfig(context.Background(), testPlugin("container")))
+
+	// container must have been cleared from provides by the removal above; container-alt is now
+	// the sole remaining provider, so removing it next must be blocked.
+	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"))
+	require.NoError(t, err)
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "my-rulesfile"}
+	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "1.0.0"}}}})
+
+	err = m.RemovePluginConfig(context.Background(), testPlugin("container-alt"))
+	require.Error(t, err, "container was already cleared from provides, so container-alt is the sole remaining provider and its removal must be blocked")
+}
+
+func TestNode_AddPluginConfig_RenameBlockedWhenOldNameStillRequired(t *testing.T) {
+	m := newTestNode()
+	pl := testPlugin("container")
+	_, _, err := m.AddPluginConfig(context.Background(), pl)
+	require.NoError(t, err)
+
+	rfKey := artifact.Ref{Kind: artifact.KindRulesfile, Name: "my-rulesfile"}
+	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
+
+	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
+	_, _, err = m.AddPluginConfig(context.Background(), pl)
+
+	require.Error(t, err, "the old name \"container\" is still required, so the rename must be refused")
+	var blocked *BlockedError
+	require.ErrorAs(t, err, &blocked)
+	assert.Equal(t, "container", blocked.Name)
+}
+
+func TestNode_RemovePluginConfig_ChecksRemainingVersions(t *testing.T) {
+	dep := commonv1alpha1.ArtifactMetaDependency{
+		Name: "primary", Version: "1.0.0",
+		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{
+			{Name: "z-first", Version: "1.2.0"},
+			{Name: "a-second", Version: "2.0.0"},
+		},
+	}
+	tests := []struct {
+		name        string
+		versions    map[string]string
+		remove      string
+		wantBlocked bool
+	}{
+		{name: "unconfirmed alternatives", wantBlocked: true},
+		{name: "alternative too old", versions: map[string]string{"z-first": "1.1.0"}, wantBlocked: true},
+		{name: "alternative different major", versions: map[string]string{"z-first": "2.0.0"}, wantBlocked: true},
+		{name: "alternative invalid version", versions: map[string]string{"z-first": "invalid"}, wantBlocked: true},
+		{name: "compatible alternative", versions: map[string]string{"z-first": "1.3.0"}},
+		{name: "first alternative is decisive", versions: map[string]string{"z-first": "1.1.0", "a-second": "2.0.0"}, wantBlocked: true},
+		{name: "configured earlier alternative awaiting observation", versions: map[string]string{"a-second": "2.0.0"}, wantBlocked: true},
+		{name: "remove unused alternative", remove: "z-first"},
+		{name: "remove unrelated plugin", remove: "unrelated"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsfake.NewMockFileSystem()
+			m := newTestNodeOver(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			var configFile *artifact.File
+			for _, name := range []string{"primary", "z-first", "a-second", "unrelated"} {
+				_, file, err := m.AddPluginConfig(t.Context(), testPlugin(name))
+				require.NoError(t, err)
+				configFile = file
+			}
+			versions := map[string]string{"primary": "1.0.0"}
+			maps.Copy(versions, tt.versions)
+			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(versions).Result)
+			key := artifact.Ref{Kind: artifact.KindRulesfile, Name: "rules"}
+			installTestRulesfile(t, m, key, []commonv1alpha1.ArtifactMetaDependency{dep})
+			remove := tt.remove
+			if remove == "" {
+				remove = "primary"
+			}
+			before, err := fs.ReadFile(configFile.Path)
+			require.NoError(t, err)
+			err = m.RemovePluginConfig(t.Context(), testPlugin(remove))
+			if tt.wantBlocked {
+				var blocked *BlockedError
+				require.ErrorAs(t, err, &blocked)
+				assert.Equal(t, []artifact.Ref{key}, blocked.BlockedBy)
+				after, readErr := fs.ReadFile(configFile.Path)
+				require.NoError(t, readErr)
+				assert.Equal(t, before, after, "blocked removal must leave the shared config untouched")
+				return
+			}
+			require.NoError(t, err)
+			_, found, _, err := m.checkRequirement(remove, "1.0.0")
+			require.NoError(t, err)
+			assert.False(t, found)
+		})
+	}
+}
+
+func TestNode_RemovePluginConfig_StaleObservationCannotRestoreRemovedProvider(t *testing.T) {
+	ctx := t.Context()
+	falco := compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"json": "0.7.4", "container": "0.7.1"})
+	m := newTestNodeWithFetcher(falco)
+	for _, name := range []string{"json", "container"} {
+		_, _, err := m.AddPluginConfig(ctx, testPlugin(name))
+		require.NoError(t, err)
+	}
+	key := artifact.Ref{Kind: artifact.KindRulesfile, Name: "rules"}
+	installTestRulesfile(t, m, key, []commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container", Version: "0.7.0"}}}})
+	require.NoError(t, m.RemovePluginConfig(ctx, testPlugin("json")))
+	// Falco has not reloaded yet, so the next successful poll still reports both plugins.
+	m.OnFalcoVersionsObserved(falco.Result)
+	_, found, _, err := m.checkRequirement("json", "0.7.0")
+	require.NoError(t, err)
+	assert.False(t, found, "an observation must not undo our removal")
+	var blocked *BlockedError
+	require.ErrorAs(t, m.RemovePluginConfig(ctx, testPlugin("container")), &blocked)
+	assert.Equal(t, []artifact.Ref{key}, blocked.BlockedBy)
+	// Even a delayed old response after an observed unload cannot restore the name.
+	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
+	m.OnFalcoVersionsObserved(falco.Result)
+	require.ErrorAs(t, m.RemovePluginConfig(ctx, testPlugin("container")), &blocked)
+	// An explicit re-add, unlike a poll, makes json eligible again once observed.
+	_, _, err = m.AddPluginConfig(ctx, testPlugin("json"))
+	require.NoError(t, err)
+	require.NoError(t, m.RemovePluginConfig(ctx, testPlugin("container")))
+}
+
+func TestNode_RemovePluginConfig_ObservedExternalAlternativeStillWorks(t *testing.T) {
+	m := newTestNodeWithFetcher(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{
+		"json": "0.7.4", "container": "0.7.1",
+	}))
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"))
+	require.NoError(t, err)
+	installTestRulesfile(t, m, artifact.Ref{Kind: artifact.KindRulesfile, Name: "rules"},
+		[]commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container", Version: "0.7.0"}}}})
+	// container was loaded outside our shared config; it has not been explicitly removed.
+	require.NoError(t, m.RemovePluginConfig(t.Context(), testPlugin("json")))
+}
+
+func TestNode_RemovePluginConfig_RetryAfterConfigRemoval(t *testing.T) {
+	m := newTestNode()
+	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"))
+	require.NoError(t, err)
+	require.NoError(t, m.RemovePluginConfig(t.Context(), testPlugin("json")))
+	// A newly registered dependency cannot block retrying the remaining binary/finalizer
+	// cleanup: this config was already removed successfully in an earlier reconcile.
+	installTestRulesfile(t, m, artifact.Ref{Kind: artifact.KindRulesfile, Name: "new-rules"},
+		[]commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0"}})
+	require.NoError(t, m.RemovePluginConfig(t.Context(), testPlugin("json")))
+	_, _, err = m.AddPluginConfig(t.Context(), testPlugin("json"))
+	require.NoError(t, err)
+	var blocked *BlockedError
+	require.ErrorAs(t, m.RemovePluginConfig(t.Context(), testPlugin("json")), &blocked,
+		"an explicit re-add must restore normal deletion checks")
+}
+
+// TestNode_AddPluginConfig_ConcurrentWithCheckRequirement runs AddPluginConfig and
+// CheckRequirement concurrently to detect deadlocks or data races; run with -race.
+func TestNode_AddPluginConfig_ConcurrentWithCheckRequirement(t *testing.T) {
+	m := newTestNodeWithFetcher(compatfake.NewMockVersionsFetcher(map[string]string{"container": "0.7.1"}))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range 50 {
+			_, _, _, _ = m.checkRequirement("container", "0.4.0")
+		}
+	}()
+
+	for range 20 {
+		_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"))
+		require.NoError(t, err)
+	}
+	<-done
+}
+
+// A file taken over as found can hold an entry load_plugins does not name. Adding the plugin of that name makes
+// Falco load it, whether or not the entry itself had to change.
+func TestPluginsConfig_AddConfigLoadsAnEntryThatWasNotLoaded(t *testing.T) {
+	plugin := testPlugin("container")
+	for name, existing := range map[string]pluginConfig{
+		"an identical entry": {Name: "container", LibraryPath: "/plugins/container.so"},
+		"a different entry":  {Name: "container", LibraryPath: "/elsewhere/container.so"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pc := &pluginsConfig{Configs: []pluginConfig{existing}}
+
+			require.NoError(t, pc.addConfig("/plugins", plugin))
+
+			assert.Equal(t, []string{"container"}, pc.LoadPlugins)
+			require.Len(t, pc.Configs, 1)
+			assert.Equal(t, "/plugins/container.so", pc.Configs[0].LibraryPath)
+		})
+	}
+}
+
+// The entry names the binary where the node installs it, which is the node's own plugin directory and not the
+// default one.
+func TestNode_AddPluginConfig_NamesTheBinaryInTheNodesOwnDirectory(t *testing.T) {
+	dirs := artifact.ArtifactDirs{Rulesfile: "/custom/rules.d", Plugin: "/custom/plugins", Config: "/custom/config.d"}
+	scheme := runtime.NewScheme()
+	require.NoError(t, artifactv1alpha1.AddToScheme(scheme))
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(testutil.NewTestArtifactNode()).
+		WithStatusSubresource(&artifactv1alpha1.ArtifactNode{}).Build()
+	n, err := New(&Config{
+		Fetcher: newTestFetcher(cl), Client: cl, NodeName: testutil.TestNodeName, Namespace: testutil.TestNamespace,
+		FalcoBaseURL: compat.DefaultBaseURL, ReloadCooldown: DefaultReloadCooldown, Dirs: dirs,
+		Store:        &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: dirs},
+		FalcoFetcher: compatfake.NewMockVersionsFetcher(nil),
+	})
+	require.NoError(t, err)
+
+	_, file, err := n.AddPluginConfig(t.Context(), testPlugin("container"))
+
+	require.NoError(t, err)
+	require.NotNil(t, file)
+	assert.Equal(t, "/custom/config.d", filepath.Dir(file.Path))
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	require.Len(t, n.pluginsConfig.Configs, 1)
+	assert.Equal(t, "/custom/plugins/container.so", n.pluginsConfig.Configs[0].LibraryPath)
 }
