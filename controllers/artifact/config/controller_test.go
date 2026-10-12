@@ -46,7 +46,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
@@ -149,7 +149,7 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 		Build()
 
 	mockFS := fsfake.NewMockFileSystem()
-	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	store := node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	seedInstalledCacheFromObjs(store, objs)
 
 	return &ConfigReconciler{
@@ -168,25 +168,25 @@ func newTestReconciler(t *testing.T, objs ...client.Object) (*ConfigReconciler, 
 // cache, keyed by the owning Rulesfile/Plugin/Config's Kind+Name. Filesystem decisions are made
 // from that cache, never from status, so a test simulating "this was already installed" must
 // seed the cache the same way a real restart would, not just set status on the object.
-func seedInstalledCacheFromObjs(store *nodeartifacts.Manager, objs []client.Object) {
+func seedInstalledCacheFromObjs(store *node.Manager, objs []client.Object) {
 	for _, obj := range objs {
-		node, ok := obj.(*artifactv1alpha1.ArtifactNode)
-		if !ok || len(node.Status.InstalledArtifacts) == 0 {
+		artifactNode, ok := obj.(*artifactv1alpha1.ArtifactNode)
+		if !ok || len(artifactNode.Status.InstalledArtifacts) == 0 {
 			continue
 		}
-		for _, ref := range node.OwnerReferences {
-			var kind nodeartifacts.Kind
+		for _, ref := range artifactNode.OwnerReferences {
+			var kind node.Kind
 			switch ref.Kind {
 			case controllerhelper.KindRulesfile:
-				kind = nodeartifacts.KindRulesfile
+				kind = node.KindRulesfile
 			case controllerhelper.KindPlugin:
-				kind = nodeartifacts.KindPlugin
+				kind = node.KindPlugin
 			case controllerhelper.KindConfig:
-				kind = nodeartifacts.KindConfig
+				kind = node.KindConfig
 			default:
 				continue
 			}
-			store.SeedInstalled(nodeartifacts.Key{Kind: kind, Namespace: node.Namespace, Name: ref.Name}, node.Status.InstalledArtifacts)
+			store.SeedInstalled(node.Key{Kind: kind, Namespace: artifactNode.Namespace, Name: ref.Name}, artifactNode.Status.InstalledArtifacts)
 			break
 		}
 	}
@@ -195,7 +195,7 @@ func seedInstalledCacheFromObjs(store *nodeartifacts.Manager, objs []client.Obje
 func TestNewConfigReconciler(t *testing.T) {
 	s := testutil.Scheme(t, artifactv1alpha1.AddToScheme)
 	cl := fake.NewClientBuilder().WithScheme(s).Build()
-	store := nodeartifacts.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+	store := node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
 		compatfake.NewMockVersionsFetcher(nil))
 	r := NewConfigReconciler(cl, s, events.NewFakeRecorder(10), "my-node", "my-namespace", store)
 
@@ -385,7 +385,7 @@ func TestReconcile(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS := fsfake.NewMockFileSystem()
 				mockFS.WriteErr = tt.writeErr
-				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+				r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			}
 
 			if tt.triggerDeletion {
@@ -444,23 +444,23 @@ func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
 					config.Spec.ConfigMapRef = &commonv1alpha1.ConfigMapRef{Name: cm.Name}
 				}
 				config.Status.ObservedGeneration = config.Generation
-				node := newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef())
-				r, cl := newTestReconciler(t, config, cm, node)
+				artifactNode := newTestConfigNodeObj(withConfigFinalizer(), withConfigOwnerRef())
+				r, cl := newTestReconciler(t, config, cm, artifactNode)
 				fs := fsfake.NewMockFileSystem()
-				r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
-				key := nodeartifacts.KeyFromObj(nodeartifacts.KindConfig, config)
-				req := testutil.Request(node.Name)
+				r.store = node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+				key := node.KeyFromObj(node.KindConfig, config)
+				req := testutil.Request(artifactNode.Name)
 				_, err := r.Reconcile(ctx, req)
 				require.NoError(t, err)
-				require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
-				require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
-				previousInstalled := node.Status.DeepCopy().InstalledArtifacts
+				require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
+				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				previousInstalled := artifactNode.Status.DeepCopy().InstalledArtifacts
 				require.Len(t, previousInstalled, 1)
 				previousPath := previousInstalled[0].Path
 				previousContent := append([]byte(nil), fs.Files[previousPath]...)
 				if missingCondition {
-					apimeta.RemoveStatusCondition(&node.Status.Conditions, tc.conditionType.String())
-					require.NoError(t, cl.Status().Update(ctx, node))
+					apimeta.RemoveStatusCondition(&artifactNode.Status.Conditions, tc.conditionType.String())
+					require.NoError(t, cl.Status().Update(ctx, artifactNode))
 				}
 
 				// Change sources only once. Cleanup must succeed before the replacement is written.
@@ -483,10 +483,10 @@ func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
 				for range 2 {
 					_, err = r.Reconcile(ctx, req)
 					require.ErrorIs(t, err, removeErr)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
-					assert.True(t, apimeta.IsStatusConditionFalse(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()),
-						"%+v", node.Status.Conditions)
-					condition := apimeta.FindStatusCondition(node.Status.Conditions, tc.conditionType.String())
+					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
+					assert.True(t, apimeta.IsStatusConditionFalse(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()),
+						"%+v", artifactNode.Status.Conditions)
+					condition := apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String())
 					require.NotNil(t, condition)
 					assert.Equal(t, metav1.ConditionFalse, condition.Status)
 					assert.Equal(t, artifact.ReasonArtifactRemoveFailed, condition.Reason)
@@ -494,35 +494,35 @@ func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
 					assert.Contains(t, condition.Message, removeErr.Error())
 					assert.Equal(t, previousContent, fs.Files[previousPath])
 					assert.NotContains(t, fs.Files, nextPath)
-					assert.Equal(t, previousInstalled, node.Status.InstalledArtifacts)
+					assert.Equal(t, previousInstalled, artifactNode.Status.InstalledArtifacts)
 					assert.Equal(t, previousInstalled, r.store.GetInstalled(key))
 				}
 
 				fs.RemoveErr = nil
 				_, err = r.Reconcile(ctx, req)
 				require.NoError(t, err)
-				require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
-				assert.Nil(t, apimeta.FindStatusCondition(node.Status.Conditions, tc.conditionType.String()))
-				require.True(t, apimeta.IsStatusConditionTrue(node.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
+				require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
+				assert.Nil(t, apimeta.FindStatusCondition(artifactNode.Status.Conditions, tc.conditionType.String()))
+				require.True(t, apimeta.IsStatusConditionTrue(artifactNode.Status.Conditions, commonv1alpha1.ConditionProgrammed.String()))
 				assert.NotContains(t, fs.Files, previousPath)
 				assert.Equal(t, []byte(nextContent), fs.Files[nextPath])
-				require.Len(t, node.Status.InstalledArtifacts, 1)
-				assert.Equal(t, nextPath, node.Status.InstalledArtifacts[0].Path)
-				assert.Equal(t, node.Status.InstalledArtifacts, r.store.GetInstalled(key))
+				require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
+				assert.Equal(t, nextPath, artifactNode.Status.InstalledArtifacts[0].Path)
+				assert.Equal(t, artifactNode.Status.InstalledArtifacts, r.store.GetInstalled(key))
 
-				stableStatus := node.Status.DeepCopy()
+				stableStatus := artifactNode.Status.DeepCopy()
 				writes, removes := len(fs.WriteCalls), len(fs.RemoveCalls)
 				for _, staleCondition := range []bool{false, true} {
 					if staleCondition {
 						// A stale status condition must also clear when nothing remains installed.
-						apimeta.SetStatusCondition(&node.Status.Conditions, common.NewCondition(tc.conditionType,
+						apimeta.SetStatusCondition(&artifactNode.Status.Conditions, common.NewCondition(tc.conditionType,
 							metav1.ConditionFalse, artifact.ReasonArtifactRemoveFailed, removeErr.Error(), config.Generation))
-						require.NoError(t, cl.Status().Update(ctx, node))
+						require.NoError(t, cl.Status().Update(ctx, artifactNode))
 					}
 					_, err = r.Reconcile(ctx, req)
 					require.NoError(t, err)
-					require.NoError(t, cl.Get(ctx, req.NamespacedName, node))
-					assert.Equal(t, *stableStatus, node.Status)
+					require.NoError(t, cl.Get(ctx, req.NamespacedName, artifactNode))
+					assert.Equal(t, *stableStatus, artifactNode.Status)
 					assert.Len(t, fs.WriteCalls, writes)
 					assert.Len(t, fs.RemoveCalls, removes)
 				}
@@ -547,7 +547,7 @@ func TestReconcile_GetErrorPropagates(t *testing.T) {
 		Scheme:   s,
 		recorder: events.NewFakeRecorder(100),
 		fetcher:  newTestFetcher(cl),
-		store: nodeartifacts.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+		store: node.NewManager(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
 			compatfake.NewMockVersionsFetcher(nil)),
 		nodeName:  testutil.TestNodeName,
 		namespace: testutil.TestNamespace,
@@ -858,7 +858,7 @@ func TestEnsureConfig(t *testing.T) {
 			if tt.writeErr != nil {
 				mockFS.WriteErr = tt.writeErr
 			}
-			r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 
 			err := r.ensureConfig(context.Background(), tt.config, nodeObj)
 
@@ -891,14 +891,14 @@ func TestEnsureConfig(t *testing.T) {
 func TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T) {
 	r, _ := newTestReconciler(t)
 	mockFS := fsfake.NewMockFileSystem()
-	r.store = nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 
 	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), testConfigName, 50, artifact.MediumInline, artifact.TypeConfig)
 	content := []byte(testConfigYAML)
 	hash := sha256hexForTest(content)
 	mockFS.Files[path] = content
 
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: testutil.TestNamespace, Name: testConfigName}
+	key := node.Key{Kind: node.KindConfig, Namespace: testutil.TestNamespace, Name: testConfigName}
 	r.store.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
 		{Path: path, Medium: string(artifact.MediumInline), Priority: 50, ContentHash: hash},
 	})

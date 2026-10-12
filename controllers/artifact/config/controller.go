@@ -43,7 +43,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 const (
@@ -59,7 +59,7 @@ func NewConfigReconciler(
 	scheme *runtime.Scheme,
 	recorder events.EventRecorder,
 	nodeName, namespace string,
-	nodeManager *nodeartifacts.Manager,
+	nodeManager *node.Manager,
 ) *ConfigReconciler {
 	return &ConfigReconciler{
 		Client:   cl,
@@ -82,7 +82,7 @@ type ConfigReconciler struct {
 	Scheme    *runtime.Scheme
 	recorder  events.EventRecorder
 	fetcher   artifact.ArtifactFetcher
-	store     *nodeartifacts.Manager
+	store     *node.Manager
 	nodeName  string
 	namespace string
 }
@@ -122,7 +122,7 @@ func (r *ConfigReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// Patch node object status via defer to ensure it's always called.
 	// Programmed is derived here as a gateway: True only when all other conditions are True.
 	defer func() {
-		key := nodeartifacts.KeyFromObj(nodeartifacts.KindConfig, config)
+		key := node.KeyFromObj(node.KindConfig, config)
 		r.store.SyncAllInstalledStatus(key, []artifact.Medium{artifact.MediumInline, artifact.MediumConfigMap}, &nodeObj.Status.InstalledArtifacts)
 		apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.ComputeProgrammedCondition(
 			nodeObj.Status.Conditions, nil,
@@ -190,7 +190,7 @@ func (r *ConfigReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 		}
 	}
 	// OwnerReferences never carry a namespace; nodeObj's own namespace is the config's.
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: nodeObj.Namespace, Name: configName}
+	key := node.Key{Kind: node.KindConfig, Namespace: nodeObj.Namespace, Name: configName}
 
 	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed config artifacts from disk")
@@ -283,7 +283,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 	gen := config.GetGeneration()
 	logger := log.FromContext(ctx)
 	p := config.Spec.Priority
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindConfig, config)
+	key := node.KeyFromObj(node.KindConfig, config)
 
 	// Stale-entry cleanup: remove files and conditions for mediums no longer in spec.
 	if config.Spec.Config == nil {

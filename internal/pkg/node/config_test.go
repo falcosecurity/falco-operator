@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -28,7 +28,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 func TestManager_StoreConfig_PartialPriorityMoveTracksInstalledFileAndRetries(t *testing.T) {
@@ -43,9 +43,9 @@ func TestManager_StoreConfig_PartialPriorityMoveTracksInstalledFileAndRetries(t 
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			dirs := artifact.DefaultArtifactDirs()
-			m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: dirs}, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: dirs}, compatfake.NewMockVersionsFetcher(nil))
 			fetcher := &artifact.Fetcher{}
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns", Name: "myfile"}
+			key := node.Key{Kind: node.KindConfig, Namespace: "ns", Name: "myfile"}
 			oldContent, err := fetcher.FetchInline(ctx, []byte("old config"))
 			require.NoError(t, err)
 			updatedContent, err := fetcher.FetchInline(ctx, []byte("updated config"))
@@ -120,7 +120,7 @@ func TestManager_StoreConfig_OnlyWritesConfig(t *testing.T) {
 			m := newTestManager()
 			content, err := (&artifact.Fetcher{}).FetchInline(t.Context(), []byte("test artifact"))
 			require.NoError(t, err)
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns", Name: "artifact"}
+			key := node.Key{Kind: node.KindConfig, Namespace: "ns", Name: "artifact"}
 
 			action, file, err := m.StoreConfig(t.Context(), key.Namespace, key.Name, 50, medium, content)
 
@@ -129,8 +129,8 @@ func TestManager_StoreConfig_OnlyWritesConfig(t *testing.T) {
 			require.NotNil(t, file)
 			assert.Equal(t, artifact.ArtifactPath(artifact.DefaultArtifactDirs(), key.Name, 50, medium, artifact.TypeConfig), file.Path)
 			assert.Equal(t, file, m.FindInstalled(key, medium))
-			for _, kind := range []nodeartifacts.Kind{nodeartifacts.KindRulesfile, nodeartifacts.KindPlugin} {
-				assert.Empty(t, m.GetInstalled(nodeartifacts.Key{Kind: kind, Namespace: key.Namespace, Name: key.Name}))
+			for _, kind := range []node.Kind{node.KindRulesfile, node.KindPlugin} {
+				assert.Empty(t, m.GetInstalled(node.Key{Kind: kind, Namespace: key.Namespace, Name: key.Name}))
 			}
 			for _, artifactType := range []artifact.Type{artifact.TypeRulesfile, artifact.TypePlugin} {
 				disk, err := m.ScanAll(t.Context(), artifactType)
@@ -157,7 +157,7 @@ func TestManager_StoreConfig_ProtectsSharedPluginConfigPath(t *testing.T) {
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-			m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 			fetcher := &artifact.Fetcher{}
 			_, shared, err := m.AddPluginConfig(ctx, testPlugin("container"), fetcher)
 			require.NoError(t, err)
@@ -167,7 +167,7 @@ func TestManager_StoreConfig_ProtectsSharedPluginConfigPath(t *testing.T) {
 			content, err := fetcher.FetchInline(ctx, []byte("log_level: debug"))
 			require.NoError(t, err)
 
-			action, file, err := m.StoreConfig(ctx, "ns", nodeartifacts.PluginConfigKey.Name, tc.priority, tc.medium, content)
+			action, file, err := m.StoreConfig(ctx, "ns", node.PluginConfigKey.Name, tc.priority, tc.medium, content)
 
 			if tc.wantErr {
 				require.Error(t, err)
@@ -218,8 +218,8 @@ func TestManager_StoreConfig_IsolatesByNamespace(t *testing.T) {
 	_, _, err := m.StoreConfig(context.Background(), "ns-a", "myfile", 50, artifact.MediumInline, result)
 	require.NoError(t, err)
 
-	keyA := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns-a", Name: "myfile"}
-	keyB := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Namespace: "ns-b", Name: "myfile"}
+	keyA := node.Key{Kind: node.KindConfig, Namespace: "ns-a", Name: "myfile"}
+	keyB := node.Key{Kind: node.KindConfig, Namespace: "ns-b", Name: "myfile"}
 
 	assert.NotNil(t, m.FindInstalled(keyA, artifact.MediumInline), "ns-a's artifact must be tracked under its own namespace")
 	assert.Nil(t, m.FindInstalled(keyB, artifact.MediumInline), "ns-b must not see ns-a's artifact of the same kind+name")

@@ -15,7 +15,7 @@ spec:
       refuses to remove the plugin's on-disk config/binary, and therefore its
       own ArtifactNode finalizer, while a Rulesfile on that specific node still
       structurally depends on it (tracked authoritatively, in-memory, by that
-      node's nodeartifacts.Manager). When blocked this way, the per-node operator
+      node's node.Manager). When blocked this way, the per-node operator
       sets a DeletionBlocked=True condition (reason PluginConfigStillRequired) on
       the ArtifactNode, which the instance-level Plugin controller aggregates
       onto the parent Plugin's own status.
@@ -37,7 +37,7 @@ spec:
     Scenario C. Two Rulesfiles requiring the same Plugin: partial cleanup does
     not unblock it
       Two independent Rulesfiles both depend on the same Plugin. Deleting only
-      one of them must NOT unblock the Plugin's deletion: nodeartifacts.Manager
+      one of them must NOT unblock the Plugin's deletion: node.Manager
       tracks each Rulesfile as its own, separate requirer of the plugin config
       (RequirementGroup), so the other Rulesfile alone keeps the block in place.
       Only once both Rulesfiles are gone does the per-node block clear and the
@@ -323,7 +323,7 @@ spec:
     - name: "Step 13: B-Delete-rulesfile"
       description: |
         Delete the Rulesfile. Its removal drops the structural dependency the
-        per-node nodeartifacts.Manager was tracking, so the per-node artifact
+        per-node node.Manager was tracking, so the per-node artifact
         operator can now remove the plugin config and release its own
         ArtifactNode finalizer.
         kubectl --wait=false fires the delete without blocking: the ArtifactNode
@@ -447,7 +447,7 @@ spec:
       description: |
         Second, independent Rulesfile pointing at the same OCI artifact: it
         registers its own, separate structural requirement on "container" with
-        nodeartifacts.Manager (keyed by its own CR name), distinct from rulesfile-a's.
+        node.Manager (keyed by its own CR name), distinct from rulesfile-a's.
       try:
         - apply:
             resource:

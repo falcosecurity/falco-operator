@@ -3,7 +3,7 @@
 # artifact.falcosecurity.dev/node-objects-in-use finalizer. That finalizer only
 # clears once every owned ArtifactNode is actually gone, and each ArtifactNode's
 # own per-node artifact operator refuses to remove itself while a Rulesfile on
-# that node still structurally depends on the plugin (nodeartifacts.Manager),
+# that node still structurally depends on the plugin (node.Manager),
 # so this finalizer staying put is the real, authoritative signal that deletion
 # is blocked, not a name specific to "blocked by a rulesfile".
 #

@@ -63,7 +63,7 @@ falco-operator/
 │   ├── instance/                 # Shared instance reconciliation logic
 │   ├── managedfields/            # Managed fields comparison for SSA
 │   ├── mounts/                   # Volume mount helpers
-│   ├── nodeartifacts/            # Installed files, dependencies and Falco reloads
+│   ├── node/                     # Installed files, dependencies and Falco reloads
 │   ├── oci/                      # OCI client and puller
 │   ├── priority/                 # Priority ordering
 │   ├── resources/                # Pod/container generation, defaults, overlays

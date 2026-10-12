@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -30,16 +30,16 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
-func newTestManager() *nodeartifacts.Manager {
+func newTestManager() *node.Manager {
 	return newTestManagerWithFetcher(compatfake.NewMockVersionsFetcher(nil))
 }
 
-func newTestManagerWithFetcher(fetcher compat.VersionsFetcher) *nodeartifacts.Manager {
+func newTestManagerWithFetcher(fetcher compat.VersionsFetcher) *node.Manager {
 	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-	return nodeartifacts.NewManager(store, fetcher)
+	return node.NewManager(store, fetcher)
 }
 
 func TestManager_ScanAllPassesThroughToUnderlyingStore(t *testing.T) {
@@ -62,7 +62,7 @@ func TestManager_RemovePassesThroughToUnderlyingStore(t *testing.T) {
 	result := artifact.FetchResult{
 		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	key := node.Key{Kind: node.KindConfig, Name: "myfile"}
 	_, file, err := m.StoreConfig(context.Background(), "", "myfile", 50, artifact.MediumInline, result)
 	require.NoError(t, err)
 
@@ -79,7 +79,7 @@ func TestManager_FindInstalled_ReturnsWhatStoreWrote(t *testing.T) {
 	result := artifact.FetchResult{
 		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	key := node.Key{Kind: node.KindConfig, Name: "myfile"}
 
 	assert.Nil(t, m.FindInstalled(key, artifact.MediumInline), "nothing stored yet")
 
@@ -97,7 +97,7 @@ func TestManager_Remove_RemovesEveryInstalledMedium(t *testing.T) {
 	result := artifact.FetchResult{
 		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	key := node.Key{Kind: node.KindConfig, Name: "myfile"}
 	_, file, err := m.StoreConfig(context.Background(), "", "myfile", 50, artifact.MediumInline, result)
 	require.NoError(t, err)
 	_, otherFile, err := m.StoreConfig(context.Background(), "", "myfile", 50, artifact.MediumConfigMap, result)
@@ -115,7 +115,7 @@ func TestManager_Remove_RemovesEveryInstalledMedium(t *testing.T) {
 
 func TestManager_RemoveIfInstalled_NoOpWhenNothingInstalled(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	key := node.Key{Kind: node.KindConfig, Name: "myfile"}
 
 	path, removed, err := m.RemoveIfInstalled(context.Background(), key, artifact.MediumInline)
 
@@ -129,7 +129,7 @@ func TestManager_RemoveIfInstalled_RemovesWhenInstalled(t *testing.T) {
 	result := artifact.FetchResult{
 		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindConfig, Name: "myfile"}
+	key := node.Key{Kind: node.KindConfig, Name: "myfile"}
 	_, file, err := m.StoreConfig(context.Background(), "", "myfile", 50, artifact.MediumInline, result)
 	require.NoError(t, err)
 
@@ -146,7 +146,7 @@ func TestManager_RemoveIfInstalled_RemovesWhenInstalled(t *testing.T) {
 
 func TestManager_SeedInstalled_ThenFindInstalled(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}
+	key := node.Key{Kind: node.KindRulesfile, Name: "my-rules"}
 
 	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
 		{Path: "/x", Medium: "oci", Priority: 50, ContentHash: "h1", SpecHash: "s1"},
@@ -163,7 +163,7 @@ func TestManager_UpdateInstalledSpecHash_SetsSpecHashOnCachedEntry(t *testing.T)
 	result := artifact.FetchResult{
 		Content: []byte("hello"), ContentHash: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", Perm: 0o644,
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rules"}
+	key := node.Key{Kind: node.KindRulesfile, Name: "my-rules"}
 	_, _, err := m.StoreRulesfile(context.Background(), "", "my-rules", 50, artifact.MediumOCI, result, &commonv1alpha1.ArtifactMeta{}, true)
 	require.NoError(t, err)
 
@@ -182,7 +182,7 @@ func TestManager_UpdateInstalledSpecHash_SetsSpecHashOnCachedEntry(t *testing.T)
 // SyncInstalledStatus must mirror the cache unconditionally, regardless of any StoreAction.
 func TestManager_SyncInstalledStatus_MirrorsCacheEvenWhenStatusStartsEmpty(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "my-rules"}
 	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
 		{Path: "/x", Medium: "oci", Priority: 50, ContentHash: "h1", SpecHash: "s1"},
 	})
@@ -200,7 +200,7 @@ func TestManager_SyncInstalledStatus_MirrorsCacheEvenWhenStatusStartsEmpty(t *te
 // if the cache no longer has an entry for medium, status must not keep a stale one either.
 func TestManager_SyncInstalledStatus_ClearsStatusWhenCacheHasNoEntry(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "my-rules"}
 	status := []artifactv1alpha1.InstalledArtifact{{Path: "/stale", Medium: "oci"}}
 
 	m.SyncInstalledStatus(key, artifact.MediumOCI, &status)
@@ -214,7 +214,7 @@ func TestManager_SyncInstalledStatus_ClearsStatusWhenCacheHasNoEntry(t *testing.
 // upserting an entry or clearing a stale one.
 func TestManager_SyncAllInstalledStatus_SyncsEveryMediumGiven(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "my-rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "my-rules"}
 	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{
 		{Path: "/oci", Medium: "oci", Priority: 50, ContentHash: "h-oci"},
 		{Path: "/inline", Medium: "inline", Priority: 90, ContentHash: "h-inline"},
@@ -238,14 +238,14 @@ func TestManager_SyncAllInstalledStatus_SyncsEveryMediumGiven(t *testing.T) {
 func TestKeyFromObj(t *testing.T) {
 	plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: "ns"}}
 
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+	key := node.KeyFromObj(node.KindPlugin, plugin)
 
-	assert.Equal(t, nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: "ns", Name: "my-plugin"}, key)
+	assert.Equal(t, node.Key{Kind: node.KindPlugin, Namespace: "ns", Name: "my-plugin"}, key)
 }
 
 func TestManager_GetInstalled_ReturnsIndependentCopy(t *testing.T) {
 	m := newTestManager()
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Name: "my-plugin"}
+	key := node.Key{Kind: node.KindPlugin, Name: "my-plugin"}
 	m.SeedInstalled(key, []artifactv1alpha1.InstalledArtifact{{
 		Path: "/x", Medium: "oci", Config: &artifactv1alpha1.InstalledArtifactConfig{Path: "/config"},
 	}})

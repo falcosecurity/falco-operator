@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -30,7 +30,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 func testPlugin(name string) *artifactv1alpha1.Plugin {
@@ -49,7 +49,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-			m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 			fetcher := &artifact.Fetcher{}
 			plugin := testPlugin("plugin-cr")
 			plugin.Namespace, plugin.UID = "ns", "original-uid"
@@ -73,7 +73,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 			case blockedRename:
 				candidate.Spec.Config.Name = "renamed"
 				m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
-				installTestRulesfile(t, m, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: plugin.Namespace, Name: "rules"},
+				installTestRulesfile(t, m, node.Key{Kind: node.KindRulesfile, Namespace: plugin.Namespace, Name: "rules"},
 					[]commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
 			}
 			before, err := store.Read(ctx, config.Path)
@@ -89,7 +89,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 			assert.Equal(t, artifact.StoreActionNone, action)
 			assert.Nil(t, installed)
 			if scenario == blockedRename {
-				var blocked *nodeartifacts.BlockedError
+				var blocked *node.BlockedError
 				require.ErrorAs(t, err, &blocked)
 			}
 			_, _, err = m.AddPluginConfig(ctx, candidate, fetcher)
@@ -107,7 +107,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 				assert.True(t, intact, "installed bytes must survive the rejected update")
 			}
 			if scenario == configCollision {
-				assert.Nil(t, m.FindInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, candidate), artifact.MediumOCI))
+				assert.Nil(t, m.FindInstalled(node.KeyFromObj(node.KindPlugin, candidate), artifact.MediumOCI))
 				require.NoError(t, m.RemovePluginConfig(ctx, fetcher, plugin))
 				_, _, err = m.StorePlugin(ctx, candidate, newContent)
 				require.NoError(t, err)
@@ -153,13 +153,13 @@ func TestManager_RemovePluginConfig_BlockedWhenSoleProvider(t *testing.T) {
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
 
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
 
 	err = m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container"))
 
 	require.Error(t, err)
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, err, &blocked)
 	assert.Equal(t, "container", blocked.Name)
 	assert.Contains(t, blocked.BlockedBy, rfKey)
@@ -175,7 +175,7 @@ func TestManager_RemovePluginConfig_AllowedWhenAlternativeCoversTheGroup(t *test
 	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), fetcher)
 	require.NoError(t, err)
 
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "1.0.0"}}}})
 
 	err = m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container"))
@@ -194,7 +194,7 @@ func TestManager_RemovePluginConfig_ClearsProvidesOnSuccess(t *testing.T) {
 	// the sole remaining provider, so removing it next must be blocked.
 	_, _, err = m.AddPluginConfig(context.Background(), testPlugin("container-alt"), fetcher)
 	require.NoError(t, err)
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "1.0.0"}}}})
 
 	err = m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container-alt"))
@@ -208,14 +208,14 @@ func TestManager_AddPluginConfig_RenameBlockedWhenOldNameStillRequired(t *testin
 	_, _, err := m.AddPluginConfig(context.Background(), pl, fetcher)
 	require.NoError(t, err)
 
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
 
 	pl.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "renamed"}
 	_, _, err = m.AddPluginConfig(context.Background(), pl, fetcher)
 
 	require.Error(t, err, "the old name \"container\" is still required, so the rename must be refused")
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, err, &blocked)
 	assert.Equal(t, "container", blocked.Name)
 }
@@ -247,7 +247,7 @@ func TestManager_RemovePluginConfig_ChecksRemainingVersions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fs := fsfake.NewMockFileSystem()
-			m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			fetcher := &artifact.Fetcher{}
 			var configFile *artifact.File
 			for _, name := range []string{"primary", "z-first", "a-second", "unrelated"} {
@@ -258,7 +258,7 @@ func TestManager_RemovePluginConfig_ChecksRemainingVersions(t *testing.T) {
 			versions := map[string]string{"primary": "1.0.0"}
 			maps.Copy(versions, tt.versions)
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(versions).Result)
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"}
+			key := node.Key{Kind: node.KindRulesfile, Name: "rules"}
 			installTestRulesfile(t, m, key, []commonv1alpha1.ArtifactMetaDependency{dep})
 			remove := tt.remove
 			if remove == "" {
@@ -268,9 +268,9 @@ func TestManager_RemovePluginConfig_ChecksRemainingVersions(t *testing.T) {
 			require.NoError(t, err)
 			err = m.RemovePluginConfig(t.Context(), fetcher, testPlugin(remove))
 			if tt.wantBlocked {
-				var blocked *nodeartifacts.BlockedError
+				var blocked *node.BlockedError
 				require.ErrorAs(t, err, &blocked)
-				assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+				assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
 				after, readErr := fs.ReadFile(configFile.Path)
 				require.NoError(t, readErr)
 				assert.Equal(t, before, after, "blocked removal must leave the shared config untouched")
@@ -293,7 +293,7 @@ func TestManager_RemovePluginConfig_StaleObservationCannotRestoreRemovedProvider
 		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
 		require.NoError(t, err)
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Name: "rules"}
 	installTestRulesfile(t, m, key, []commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container", Version: "0.7.0"}}}})
 	require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("json")))
 	// Falco has not reloaded yet, so the next successful poll still reports both plugins.
@@ -301,9 +301,9 @@ func TestManager_RemovePluginConfig_StaleObservationCannotRestoreRemovedProvider
 	_, found, _, err := m.CheckRequirement("json", "0.7.0")
 	require.NoError(t, err)
 	assert.False(t, found, "an observation must not undo our removal")
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked)
-	assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+	assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
 	// Even a delayed old response after an observed unload cannot restore the name.
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "0.7.1"}).Result)
 	m.OnFalcoVersionsObserved(falco.Result)
@@ -321,7 +321,7 @@ func TestManager_RemovePluginConfig_ObservedExternalAlternativeStillWorks(t *tes
 	fetcher := &artifact.Fetcher{}
 	_, _, err := m.AddPluginConfig(t.Context(), testPlugin("json"), fetcher)
 	require.NoError(t, err)
-	installTestRulesfile(t, m, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "rules"},
+	installTestRulesfile(t, m, node.Key{Kind: node.KindRulesfile, Name: "rules"},
 		[]commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0", Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container", Version: "0.7.0"}}}})
 	// container was loaded outside our shared config; it has not been explicitly removed.
 	require.NoError(t, m.RemovePluginConfig(t.Context(), fetcher, testPlugin("json")))
@@ -335,12 +335,12 @@ func TestManager_RemovePluginConfig_RetryAfterConfigRemoval(t *testing.T) {
 	require.NoError(t, m.RemovePluginConfig(t.Context(), fetcher, testPlugin("json")))
 	// A newly registered dependency cannot block retrying the remaining binary/finalizer
 	// cleanup: this config was already removed successfully in an earlier reconcile.
-	installTestRulesfile(t, m, nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "new-rules"},
+	installTestRulesfile(t, m, node.Key{Kind: node.KindRulesfile, Name: "new-rules"},
 		[]commonv1alpha1.ArtifactMetaDependency{{Name: "json", Version: "0.7.0"}})
 	require.NoError(t, m.RemovePluginConfig(t.Context(), fetcher, testPlugin("json")))
 	_, _, err = m.AddPluginConfig(t.Context(), testPlugin("json"), fetcher)
 	require.NoError(t, err)
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(t.Context(), fetcher, testPlugin("json")), &blocked,
 		"an explicit re-add must restore normal deletion checks")
 }

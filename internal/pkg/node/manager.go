@@ -14,12 +14,12 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package nodeartifacts coordinates on-disk writes across the artifact-operator sidecar's
+// Package node coordinates on-disk writes across the artifact-operator sidecar's
 // three per-node reconcilers (Plugin, Rulesfile, Config), which write into the same Falco
 // config directories. This package controls what combination of files can be on disk; Falco
 // reloads are triggered explicitly by ReloadCoordinator (reloadcoordinator.go) after writes
 // settle, not by Falco's own file-watch.
-package nodeartifacts
+package node
 
 import (
 	"context"

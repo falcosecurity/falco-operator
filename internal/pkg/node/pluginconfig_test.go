@@ -14,9 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Internal test file for package nodeartifacts, covering the unexported types pluginConfig,
+// Internal test file for package node, covering the unexported types pluginConfig,
 // initConfig, and pluginsConfig.
-package nodeartifacts
+package node
 
 import (
 	"context"

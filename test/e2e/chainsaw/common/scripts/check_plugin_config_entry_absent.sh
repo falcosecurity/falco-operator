@@ -2,7 +2,7 @@
 # Verify the shared plugins-config file on a Falco node is present but no longer contains an
 # entry for a specific plugin: the inverse of check_plugin_config_on_node.sh. Since
 # RemovePluginConfigByName started keeping this file on disk permanently (see
-# internal/pkg/nodeartifacts/pluginconfig.go: Falco's own file-watch on this path does not
+# internal/pkg/node/pluginconfig.go: Falco's own file-watch on this path does not
 # reliably survive the file being deleted and later recreated), "the last plugin was removed" is
 # expressed as an empty file ("plugins: []"), not an absent one.
 # Parses the file as YAML (via yq) rather than grepping text, so it can't be fooled by another

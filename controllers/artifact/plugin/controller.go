@@ -47,7 +47,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/compat"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 const (
@@ -67,7 +67,7 @@ func NewPluginReconciler(
 	nodeName, namespace string,
 	enforceRequirements bool,
 	fetcher artifact.ArtifactFetcher,
-	nodeManager *nodeartifacts.Manager,
+	nodeManager *node.Manager,
 ) *PluginReconciler {
 	return &PluginReconciler{
 		Client:              cl,
@@ -87,7 +87,7 @@ type PluginReconciler struct {
 	Scheme              *runtime.Scheme
 	recorder            events.EventRecorder
 	fetcher             artifact.ArtifactFetcher
-	store               *nodeartifacts.Manager
+	store               *node.Manager
 	nodeName            string
 	namespace           string
 	enforceRequirements bool
@@ -130,7 +130,7 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	// mode, DependenciesSatisfied is excluded from the gate since it's advisory only.
 	defer func() {
 		r.store.SyncAllInstalledStatus(
-			nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin),
+			node.KeyFromObj(node.KindPlugin, plugin),
 			[]artifact.Medium{artifact.MediumOCI}, &nodeObj.Status.InstalledArtifacts,
 		)
 		skipDependenciesSatisfied := func(condType string) bool {
@@ -184,7 +184,7 @@ func (r *PluginReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 		// Plugin-level status show ConfigProgrammed=True even when DependenciesSatisfied=False.
 		// When alreadyInstalled=true (update-rejected), the old version is still on disk and
 		// ConfigProgrammed/OCIArtifactProgrammed correctly remain True; don't touch them.
-		key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+		key := node.KeyFromObj(node.KindPlugin, plugin)
 		if r.store.FindInstalled(key, artifact.MediumOCI) == nil {
 			reason, msg := artifact.DependenciesNotSatisfiedReasonFromCondition(nodeObj.Status.Conditions)
 			gen := plugin.GetGeneration()
@@ -261,7 +261,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 	// Removes this plugin's entry from the shared config YAML before removing the binary.
 	if pluginName != "" {
 		if err := r.store.RemovePluginConfig(ctx, r.fetcher, plugin); err != nil {
-			if blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err); ok {
+			if blocked, ok := errors.AsType[*node.BlockedError](err); ok {
 				logger.Info("PluginNode deletion blocked: plugin config still required by a Rulesfile on this node",
 					"configName", blocked.Name, "blockedBy", blocked.BlockedBy)
 				artifact.RecordWarning(r.recorder, nodeObj, artifact.ReasonDependenciesNotSatisfied, "%s", blocked.Error())
@@ -286,7 +286,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 
 	// Binary second: remove the plugin binary from disk. OwnerReferences never carry a
 	// namespace; nodeObj's own namespace is the plugin's.
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindPlugin, Namespace: nodeObj.Namespace, Name: pluginName}
+	key := node.Key{Kind: node.KindPlugin, Namespace: nodeObj.Namespace, Name: pluginName}
 	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed plugin artifacts from disk")
 		return false, err
@@ -302,7 +302,7 @@ func (r *PluginReconciler) handleDeletion(ctx context.Context, nodeObj *artifact
 }
 
 // SetupWithManager registers the controller with the Manager.
-// versionEvents is the channel produced by nodeartifacts.Manager; a GenericEvent on this
+// versionEvents is the channel produced by node.Manager; a GenericEvent on this
 // channel re-enqueues all PluginNodes on this node to re-evaluate their compatibility
 // requirements against the updated Falco capability set.
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
@@ -320,7 +320,7 @@ func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-ch
 	})
 
 	// Re-enqueues every PluginNode on this node when any RulesfileNode on this node changes, so
-	// a Plugin config removal blocked by nodeartifacts.Manager.RemovePluginConfig is
+	// a Plugin config removal blocked by node.Manager.RemovePluginConfig is
 	// re-evaluated once the blocking Rulesfile's requirement changes or the RulesfileNode is
 	// removed.
 	rulesfileNodeFilter := predicate.NewPredicateFuncs(func(obj client.Object) bool {
@@ -409,7 +409,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 	gen := plugin.GetGeneration()
 	logger := log.FromContext(ctx)
 
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+	key := node.KeyFromObj(node.KindPlugin, plugin)
 
 	if plugin.Spec.OCIArtifact == nil {
 		// OCI spec removed while the Plugin CR still exists: removes the config entry, then the
@@ -513,7 +513,7 @@ func (r *PluginReconciler) enforcePluginCompatibility(
 ) (bool, error) {
 	gen := plugin.GetGeneration()
 	logger := log.FromContext(ctx)
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindPlugin, plugin)
+	key := node.KeyFromObj(node.KindPlugin, plugin)
 
 	if plugin.Spec.OCIArtifact == nil {
 		logger.Info("Skipping compatibility check: no OCI artifact configured")
@@ -614,7 +614,7 @@ func (r *PluginReconciler) enforcePluginCompatibility(
 // StoreActionUnchanged fires when the YAML content is unchanged between reconciles.
 //
 // Aggregate-file bookkeeping (rename handling, serialization, the write, and registering the
-// resulting name as provided) lives in nodeartifacts.Manager.AddPluginConfig.
+// resulting name as provided) lives in node.Manager.AddPluginConfig.
 func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin, nodeObj *artifactv1alpha1.ArtifactNode) error {
 	gen := plugin.GetGeneration()
 	if plugin.Spec.OCIArtifact == nil {
@@ -629,7 +629,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 
 	configAction, _, err := r.store.AddPluginConfig(ctx, plugin, r.fetcher)
 	if err != nil {
-		if blocked, ok := errors.AsType[*nodeartifacts.BlockedError](err); ok {
+		if blocked, ok := errors.AsType[*node.BlockedError](err); ok {
 			logger.Info("Plugin config rename deferred: old name still required by a Rulesfile on this node",
 				"blockedBy", blocked.BlockedBy)
 			return err
@@ -650,7 +650,7 @@ func (r *PluginReconciler) ensurePluginConfig(ctx context.Context, plugin *artif
 	// re-add the cache already knows is unchanged must still populate this Plugin's own Config
 	// sub-entry if an earlier reconcile's status patch never landed. UpdateInstalledConfig no-ops
 	// if there's no matching OCI entry yet (the binary itself isn't tracked) or the cache has none.
-	if sharedFile := r.store.FindInstalled(nodeartifacts.PluginConfigKey, artifact.MediumInline); sharedFile != nil {
+	if sharedFile := r.store.FindInstalled(node.PluginConfigKey, artifact.MediumInline); sharedFile != nil {
 		artifact.UpdateInstalledConfig(&nodeObj.Status.InstalledArtifacts, artifact.MediumOCI, sharedFile)
 	}
 	apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewConfigProgrammedCondition(
