@@ -33,5 +33,5 @@ func (m *Manager) StoreConfig(ctx context.Context, namespace, name string, artif
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.storeLocked(ctx, namespace, name, artifactPriority, artifact.TypeConfig, medium, result)
+	return m.storeLocked(ctx, namespace, name, artifactPriority, artifact.KindConfig, medium, result)
 }

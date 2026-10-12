@@ -29,6 +29,7 @@ import (
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func TestManager_StoreConfig_PartialPriorityMoveTracksInstalledFileAndRetries(t *testing.T) {
@@ -53,7 +54,7 @@ func TestManager_StoreConfig_PartialPriorityMoveTracksInstalledFileAndRetries(t 
 			_, original, err := m.StoreConfig(ctx, key.Namespace, key.Name, tc.oldPriority, artifact.MediumInline, oldContent)
 			require.NoError(t, err)
 			require.NotNil(t, original)
-			newPath := artifact.ArtifactPath(dirs, key.Name, tc.newPriority, artifact.MediumInline, artifact.TypeConfig)
+			newPath := testutil.MustArtifactPath(t, dirs, key.Name, tc.newPriority, artifact.MediumInline, artifact.KindConfig)
 			replaceErr := errors.New("cannot replace moved config")
 			fs.RenameErrFor = map[string]error{filepath.Join(filepath.Dir(newPath), ".tmp", filepath.Base(newPath)+".tmp"): replaceErr}
 
@@ -127,12 +128,12 @@ func TestManager_StoreConfig_OnlyWritesConfig(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, artifact.StoreActionAdded, action)
 			require.NotNil(t, file)
-			assert.Equal(t, artifact.ArtifactPath(artifact.DefaultArtifactDirs(), key.Name, 50, medium, artifact.TypeConfig), file.Path)
+			assert.Equal(t, testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), key.Name, 50, medium, artifact.KindConfig), file.Path)
 			assert.Equal(t, file, m.FindInstalled(key, medium))
 			for _, kind := range []node.Kind{node.KindRulesfile, node.KindPlugin} {
 				assert.Empty(t, m.GetInstalled(node.Key{Kind: kind, Namespace: key.Namespace, Name: key.Name}))
 			}
-			for _, artifactType := range []artifact.Type{artifact.TypeRulesfile, artifact.TypePlugin} {
+			for _, artifactType := range []artifact.Kind{artifact.KindRulesfile, artifact.KindPlugin} {
 				disk, err := m.ScanAll(t.Context(), artifactType)
 				require.NoError(t, err)
 				assert.Empty(t, disk)
@@ -151,7 +152,6 @@ func TestManager_StoreConfig_ProtectsSharedPluginConfigPath(t *testing.T) {
 		{name: "reserved path", priority: 99, medium: artifact.MediumInline, wantErr: true},
 		{name: "different priority", priority: 50, medium: artifact.MediumInline},
 		{name: "configmap medium", priority: 99, medium: artifact.MediumConfigMap},
-		{name: "oci medium", priority: 99, medium: artifact.MediumOCI},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()

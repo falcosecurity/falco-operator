@@ -130,7 +130,9 @@ func (m *Manager) addPluginConfigLocked(ctx context.Context, plugin *artifactv1a
 	if oldName != "" && oldName != configName {
 		updated.removeByName(oldName)
 	}
-	updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
+	if err := updated.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin); err != nil {
+		return artifact.StoreActionNone, nil, err
+	}
 	owners := maps.Clone(m.pluginConfigOwners)
 	if oldName != configName {
 		delete(owners, oldName)
@@ -151,7 +153,7 @@ func (m *Manager) writePluginsConfigLocked(ctx context.Context, fetcher artifact
 		return artifact.StoreActionNone, nil, fmt.Errorf("prepare plugin config content: %w", err)
 	}
 	current := artifact.FindInstalled(m.installed[PluginConfigKey], artifact.MediumInline)
-	action, file, err := m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.TypeConfig, artifact.MediumInline, result)
+	action, file, err := m.store.Store(ctx, current, pluginConfigFileName, priority.MaxPriority, artifact.KindConfig, artifact.MediumInline, result)
 	if file != nil || err == nil {
 		m.upsertInstalledLocked(PluginConfigKey, action, artifact.MediumInline, file)
 	}
@@ -287,14 +289,16 @@ func (pc *pluginsConfig) clone() *pluginsConfig {
 	return &pluginsConfig{Configs: slices.Clone(pc.Configs), LoadPlugins: slices.Clone(pc.LoadPlugins)}
 }
 
-func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Plugin) {
-	config := pluginConfig{
-		LibraryPath: artifact.ArtifactPath(
-			artifact.ArtifactDirs{Plugin: pluginDir},
-			plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin,
-		),
-		Name: plugin.Name,
+func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Plugin) error {
+	libraryPath, err := artifact.ArtifactPath(
+		artifact.ArtifactDirs{Plugin: pluginDir},
+		plugin.Name, priority.DefaultPriority, artifact.MediumOCI, artifact.KindPlugin,
+	)
+	if err != nil {
+		return err
 	}
+
+	config := pluginConfig{LibraryPath: libraryPath, Name: plugin.Name}
 
 	if plugin.Spec.Config != nil {
 		if plugin.Spec.Config.InitConfig != nil && len(plugin.Spec.Config.InitConfig.Raw) > 0 {
@@ -316,19 +320,20 @@ func (pc *pluginsConfig) addConfig(pluginDir string, plugin *artifactv1alpha1.Pl
 	for i, c := range pc.Configs {
 		if c.Name == config.Name {
 			if c.isSame(&config) {
-				return
+				return nil
 			}
 			pc.Configs[i] = config
-			return
+			return nil
 		}
 	}
 	pc.Configs = append(pc.Configs, config)
 
 	// Add to LoadPlugins if not already present (use config.Name for consistency).
 	if slices.Contains(pc.LoadPlugins, config.Name) {
-		return
+		return nil
 	}
 	pc.LoadPlugins = append(pc.LoadPlugins, config.Name)
+	return nil
 }
 
 func (pc *pluginsConfig) removeByName(name string) {

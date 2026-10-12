@@ -56,17 +56,17 @@ import (
 
 func seedPlugin(t *testing.T, cache *artifactcache.Cache, ns, name, goos, goarch string, content []byte) {
 	t.Helper()
-	blobPath := artifactcache.BlobPath(cache.Dir(), "plugin", ns+"/"+name, "sha256:deadbeef", goos, goarch)
+	blobPath := artifactcache.BlobPath(cache.Dir(), "Plugin", ns+"/"+name, "sha256:deadbeef", goos, goarch)
 	require.NoError(t, cache.Store(blobPath, content, 0o755))
-	require.NoError(t, cache.Set("plugin", ns, name, goos+"-"+goarch, blobPath))
+	require.NoError(t, cache.Set("Plugin", ns, name, goos+"-"+goarch, blobPath))
 }
 
 func seedRulesfile(t *testing.T, cache *artifactcache.Cache, name string, content []byte) {
 	t.Helper()
 	const ns = "default"
-	blobPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", ns+"/"+name, "sha256:deadbeef", "", "")
+	blobPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", ns+"/"+name, "sha256:deadbeef", "", "")
 	require.NoError(t, cache.Store(blobPath, content, 0o644))
-	require.NoError(t, cache.Set("rulesfile", ns, name, "", blobPath))
+	require.NoError(t, cache.Set("Rulesfile", ns, name, "", blobPath))
 }
 
 // servePluginCase and serveRulesfileCase share this shape: seed the cache (or don't), issue one
@@ -179,8 +179,8 @@ func TestServer_ServePlugin(t *testing.T) {
 		{
 			name: "indexed but missing from disk returns 503",
 			seed: func(t *testing.T, cache *artifactcache.Cache) {
-				blobPath := artifactcache.BlobPath(cache.Dir(), "plugin", "default/json", "sha256:deadbeef", "linux", "amd64")
-				require.NoError(t, cache.Set("plugin", "default", "json", "linux-amd64", blobPath)) // no Store call
+				blobPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "default/json", "sha256:deadbeef", "linux", "amd64")
+				require.NoError(t, cache.Set("Plugin", "default", "json", "linux-amd64", blobPath)) // no Store call
 			},
 			path:       "/v1/artifacts/plugins/default/json?os=linux&arch=amd64",
 			wantStatus: http.StatusServiceUnavailable,
@@ -764,9 +764,9 @@ func TestServer_ServeRequestedDigest(t *testing.T) {
 	const expectedDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	const otherDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	for _, variant := range []struct{ artifactType, goos, goarch, platform, path string }{
-		{"plugin", "linux", amd64Arch, "linux-amd64", "/v1/artifacts/plugins/ns/name?os=linux&arch=amd64"},
-		{"plugin", "linux", arm64Arch, "linux-arm64", "/v1/artifacts/plugins/ns/name?os=linux&arch=arm64"},
-		{"rulesfile", "", "", "", "/v1/artifacts/rulesfiles/ns/name?"},
+		{"Plugin", "linux", amd64Arch, "linux-amd64", "/v1/artifacts/plugins/ns/name?os=linux&arch=amd64"},
+		{"Plugin", "linux", arm64Arch, "linux-arm64", "/v1/artifacts/plugins/ns/name?os=linux&arch=arm64"},
+		{"Rulesfile", "", "", "", "/v1/artifacts/rulesfiles/ns/name?"},
 	} {
 		t.Run(variant.artifactType+"/"+variant.platform, func(t *testing.T) {
 			cache := artifactcache.NewCache(t.TempDir())
@@ -776,14 +776,14 @@ func TestServer_ServeRequestedDigest(t *testing.T) {
 			require.NoError(t, cache.Store(blob, []byte(content), 0o644))
 			require.NoError(t, cache.Set(variant.artifactType, "ns", "name", variant.platform, blob))
 			// A plugin index digest is shared across platforms, but the extracted binaries are not.
-			if variant.artifactType == "plugin" {
+			if variant.artifactType == "Plugin" {
 				otherArch := arm64Arch
 				if variant.goarch == arm64Arch {
 					otherArch = amd64Arch
 				}
-				otherPath := artifactcache.BlobPath(cache.Dir(), "plugin", "repo:tag", expectedDigest, "linux", otherArch)
+				otherPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "repo:tag", expectedDigest, "linux", otherArch)
 				require.NoError(t, cache.Store(otherPath, []byte("wrong architecture"), 0o755))
-				require.NoError(t, cache.Set("plugin", "ns", "name", "linux-"+otherArch, otherPath))
+				require.NoError(t, cache.Set("Plugin", "ns", "name", "linux-"+otherArch, otherPath))
 			}
 			handler := artifactserver.New(cache).Handler()
 			for _, tc := range []struct {

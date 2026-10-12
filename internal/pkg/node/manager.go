@@ -238,13 +238,13 @@ func (m *Manager) Verify(ctx context.Context, f *artifact.File) (bool, error) {
 
 // ScanAll is a read-only passthrough to the underlying ArtifactStore.ScanAll; it doesn't touch
 // the registry, so no locking is needed for correctness.
-func (m *Manager) ScanAll(ctx context.Context, artifactType artifact.Type) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
+func (m *Manager) ScanAll(ctx context.Context, artifactType artifact.Kind) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
 	return m.store.ScanAll(ctx, artifactType)
 }
 
 // storeLocked tracks the on-disk result, including partial moves. Caller holds m.mu.
 func (m *Manager) storeLocked(ctx context.Context, namespace, name string, artifactPriority int32,
-	artifactType artifact.Type, medium artifact.Medium, result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
+	artifactType artifact.Kind, medium artifact.Medium, result artifact.FetchResult) (artifact.StoreAction, *artifact.File, error) {
 	key := Key{Kind: kindForArtifactType(artifactType), Namespace: namespace, Name: name}
 	current := artifact.FindInstalled(m.installed[key], medium)
 	action, file, err := m.store.Store(ctx, current, name, artifactPriority, artifactType, medium, result)
@@ -303,12 +303,12 @@ func (m *Manager) upsertInstalledLocked(key Key, action artifact.StoreAction, me
 	m.installed[key] = entry
 }
 
-// kindForArtifactType maps an artifact.Type to the Kind its installed-cache entries use.
-func kindForArtifactType(t artifact.Type) Kind {
+// kindForArtifactType maps an artifact.Kind to the Kind its installed-cache entries use.
+func kindForArtifactType(t artifact.Kind) Kind {
 	switch t {
-	case artifact.TypePlugin:
+	case artifact.KindPlugin:
 		return KindPlugin
-	case artifact.TypeConfig:
+	case artifact.KindConfig:
 		return KindConfig
 	default:
 		return KindRulesfile

@@ -44,7 +44,7 @@ func TestCache_Load(t *testing.T) {
 			name: "cold start with no snapshot file succeeds with an empty index",
 			check: func(t *testing.T, _ string, c *artifactcache.Cache) {
 				t.Helper()
-				_, ok := c.Lookup("plugin", "ns", "json", "linux-amd64")
+				_, ok := c.Lookup("Plugin", "ns", "json", "linux-amd64")
 				assert.False(t, ok)
 			},
 		},
@@ -97,6 +97,26 @@ func TestCache_Load(t *testing.T) {
 	}
 }
 
+// A snapshot written by an older build indexes entries under lowercase artifact types. They are loaded under the
+// kind names used since, so their owners are still found and their blobs still counted.
+func TestCache_Load_RenamesLegacyArtifactTypes(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, artifactcache.BlobsDir), 0o750))
+	legacy := `{"version":1,"entries":[
+		{"artifactType":"plugin","namespace":"ns","name":"json","platformKey":"linux-amd64","blobPath":"blobs/p"},
+		{"artifactType":"rulesfile","namespace":"ns","name":"rules","blobPath":"blobs/r"}]}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "index.json"), []byte(legacy), 0o600))
+
+	c := artifactcache.NewCache(dir)
+	require.NoError(t, c.Load())
+
+	assert.Equal(t, []types.NamespacedName{{Namespace: "ns", Name: "json"}}, c.Owners("Plugin"))
+	assert.Equal(t, []types.NamespacedName{{Namespace: "ns", Name: "rules"}}, c.Owners("Rulesfile"))
+	assert.Empty(t, c.Owners("plugin"))
+	_, ok := c.Lookup("Plugin", "ns", "json", "linux-amd64")
+	assert.True(t, ok)
+}
+
 func TestCache_Load_BlobsDirCannotBeCreated(t *testing.T) {
 	base := t.TempDir()
 	// cacheDir itself is a regular file, so MkdirAll(cacheDir/blobs) can't create anything
@@ -123,12 +143,12 @@ func TestCache_Load_RestartResilience(t *testing.T) {
 	require.NoError(t, first.Load())
 	blobPath := filepath.Join(dir, "blobs", "plugin", "ref", "sha256-abc-linux-amd64")
 	require.NoError(t, first.Store(blobPath, []byte("content"), 0o755))
-	require.NoError(t, first.Set("plugin", "ns", "json", "linux-amd64", blobPath))
+	require.NoError(t, first.Set("Plugin", "ns", "json", "linux-amd64", blobPath))
 
 	second := artifactcache.NewCache(dir)
 	require.NoError(t, second.Load())
 
-	got, ok := second.Lookup("plugin", "ns", "json", "linux-amd64")
+	got, ok := second.Lookup("Plugin", "ns", "json", "linux-amd64")
 	require.True(t, ok)
 	assert.Equal(t, blobPath, got)
 }
@@ -138,8 +158,8 @@ func TestCache_Owners(t *testing.T) {
 		name, kind, otherKind string
 		platforms             []string
 	}{
-		{name: "plugin platform variants", kind: "plugin", otherKind: "rulesfile", platforms: []string{"linux-amd64", "linux-arm64"}},
-		{name: "platform independent rulesfile", kind: "rulesfile", otherKind: "plugin", platforms: []string{""}},
+		{name: "plugin platform variants", kind: "Plugin", otherKind: "Rulesfile", platforms: []string{"linux-amd64", "linux-arm64"}},
+		{name: "platform independent rulesfile", kind: "Rulesfile", otherKind: "Plugin", platforms: []string{""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := artifactcache.NewCache(t.TempDir())
@@ -202,8 +222,8 @@ func TestCache_Lookup(t *testing.T) {
 	blobArm64 := filepath.Join(dir, "blobs", "arm64")
 	require.NoError(t, c.Store(blobAmd64, []byte("x"), 0o755))
 	require.NoError(t, c.Store(blobArm64, []byte("x"), 0o755))
-	require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobAmd64))
-	require.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobArm64))
+	require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blobAmd64))
+	require.NoError(t, c.Set("Plugin", "ns", "json", "linux-arm64", blobArm64))
 
 	tests := []struct {
 		name        string
@@ -217,7 +237,7 @@ func TestCache_Lookup(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, ok := c.Lookup("plugin", "ns", "json", tt.platformKey)
+			got, ok := c.Lookup("Plugin", "ns", "json", tt.platformKey)
 			assert.Equal(t, tt.wantOK, ok)
 			if tt.wantOK {
 				assert.Equal(t, tt.wantBlob, got)
@@ -234,9 +254,9 @@ func TestCache_Set(t *testing.T) {
 
 		blobPath := filepath.Join(dir, "blobs", "v1")
 		require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", blobPath))
 
-		got, ok := c.Lookup("rulesfile", "ns", "rules", "")
+		got, ok := c.Lookup("Rulesfile", "ns", "rules", "")
 		require.True(t, ok)
 		assert.Equal(t, blobPath, got)
 		assert.True(t, c.BlobExists(blobPath))
@@ -249,9 +269,9 @@ func TestCache_Set(t *testing.T) {
 
 		blobPath := filepath.Join(dir, "blobs", "v1")
 		require.NoError(t, c.Store(blobPath, []byte("x"), 0o755))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", blobPath))
-		require.NoError(t, c.RemoveAll("rulesfile", "ns", "rules"))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", blobPath))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", blobPath))
+		require.NoError(t, c.RemoveAll("Rulesfile", "ns", "rules"))
 
 		_, err := os.Stat(blobPath)
 		assert.True(t, os.IsNotExist(err), "the blob must be removed with its only logical reference")
@@ -268,8 +288,8 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
 		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", oldBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", newBlob))
 
 		_, err := os.Stat(oldBlob)
 		assert.True(t, os.IsNotExist(err), "old blob should have been removed")
@@ -277,7 +297,7 @@ func TestCache_Set(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "old blob's .perm companion should have been removed")
 		assert.False(t, c.BlobExists(oldBlob))
 
-		got, ok := c.Lookup("rulesfile", "ns", "rules", "")
+		got, ok := c.Lookup("Rulesfile", "ns", "rules", "")
 		require.True(t, ok)
 		assert.Equal(t, newBlob, got)
 	})
@@ -287,13 +307,13 @@ func TestCache_Set(t *testing.T) {
 		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
 		require.NoError(t, c.Load())
 
-		oldBlob := artifactcache.BlobPath(dir, "plugin", "old-ref", "sha256:old", "linux", "amd64")
-		newBlob := artifactcache.BlobPath(dir, "plugin", "new-ref", "sha256:new", "linux", "amd64")
+		oldBlob := artifactcache.BlobPath(dir, "Plugin", "old-ref", "sha256:old", "linux", "amd64")
+		newBlob := artifactcache.BlobPath(dir, "Plugin", "new-ref", "sha256:new", "linux", "amd64")
 		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
 		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", oldBlob))
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", newBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", oldBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", newBlob))
 
 		_, err := os.Stat(filepath.Dir(oldBlob))
 		assert.True(t, os.IsNotExist(err), "old-ref's now-empty directory should have been removed")
@@ -307,13 +327,13 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		// Same ref, different digests: both blobs share one ref directory.
-		blob1 := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:aaa", "linux", "amd64")
-		blob2 := artifactcache.BlobPath(dir, "plugin", "shared-ref", "sha256:bbb", "linux", "amd64")
+		blob1 := artifactcache.BlobPath(dir, "Plugin", "shared-ref", "sha256:aaa", "linux", "amd64")
+		blob2 := artifactcache.BlobPath(dir, "Plugin", "shared-ref", "sha256:bbb", "linux", "amd64")
 		require.NoError(t, c.Store(blob1, []byte("v1"), 0o755))
 		require.NoError(t, c.Store(blob2, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blob1))
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blob2))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blob1))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blob2))
 
 		_, err := os.Stat(filepath.Dir(blob1))
 		assert.NoError(t, err, "shared ref directory must survive: blob2 still lives in it")
@@ -331,15 +351,15 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Store(sharedBlob, []byte("x"), 0o755))
 		require.NoError(t, c.Store(newBlob, []byte("y"), 0o755))
 
-		require.NoError(t, c.Set("plugin", "ns", "a", "", sharedBlob))
-		require.NoError(t, c.Set("plugin", "ns", "b", "", sharedBlob))
-		require.NoError(t, c.Set("plugin", "ns", "a", "", newBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "a", "", sharedBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "b", "", sharedBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "a", "", newBlob))
 
 		_, err := os.Stat(sharedBlob)
 		require.NoError(t, err, "shared blob must survive: CR b still references it")
 		assert.True(t, c.BlobExists(sharedBlob))
 
-		got, ok := c.Lookup("plugin", "ns", "b", "")
+		got, ok := c.Lookup("Plugin", "ns", "b", "")
 		require.True(t, ok)
 		assert.Equal(t, sharedBlob, got)
 	})
@@ -357,8 +377,8 @@ func TestCache_Set(t *testing.T) {
 		newBlob := filepath.Join(dir, "blobs", "v2")
 		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", oldBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", newBlob))
 
 		_, err := os.Stat(oldBlob)
 		require.NoError(t, err, "removal failure must not be fatal, and the directory stays behind")
@@ -375,15 +395,15 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Store(oldBlob, []byte("v1"), 0o755))
 		require.NoError(t, c.Store(newBlob, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", oldBlob))
-		require.NoError(t, c.Set("rulesfile", "ns", "rules", "", newBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", oldBlob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "rules", "", newBlob))
 
 		_, err := os.Stat(oldBlob)
 		assert.NoError(t, err, "old blob must still be on disk, pending eviction by Sweep")
 		assert.True(t, c.BlobExists(oldBlob),
 			"a lingering blob must still report as existing so EnsureBlob can reuse it without a registry re-pull")
 
-		got, ok := c.Lookup("rulesfile", "ns", "rules", "")
+		got, ok := c.Lookup("Rulesfile", "ns", "rules", "")
 		require.True(t, ok)
 		assert.Equal(t, newBlob, got)
 	})
@@ -398,15 +418,15 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, c.Store(blob, []byte("v1"), 0o755))
 		require.NoError(t, c.Store(other, []byte("v2"), 0o755))
 
-		require.NoError(t, c.Set("rulesfile", "ns", "a", "", blob))
-		require.NoError(t, c.Set("rulesfile", "ns", "a", "", other)) // dereferences blob, pending eviction
-		require.NoError(t, c.Set("rulesfile", "ns", "b", "", blob))  // re-referenced by a different CR
+		require.NoError(t, c.Set("Rulesfile", "ns", "a", "", blob))
+		require.NoError(t, c.Set("Rulesfile", "ns", "a", "", other)) // dereferences blob, pending eviction
+		require.NoError(t, c.Set("Rulesfile", "ns", "b", "", blob))  // re-referenced by a different CR
 
 		assert.True(t, c.BlobExists(blob))
 		_, err := os.Stat(blob)
 		assert.NoError(t, err)
 
-		got, ok := c.Lookup("rulesfile", "ns", "b", "")
+		got, ok := c.Lookup("Rulesfile", "ns", "b", "")
 		require.True(t, ok)
 		assert.Equal(t, blob, got)
 	})
@@ -418,9 +438,9 @@ func TestCache_Set(t *testing.T) {
 
 		// A relative blobPath can't be expressed relative to the (absolute) cacheDir via
 		// filepath.Rel, exercising persistIndexLocked's raw-fallback branch.
-		require.NoError(t, c.Set("plugin", "ns", "json", "", "relative/blob"))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "", "relative/blob"))
 
-		got, ok := c.Lookup("plugin", "ns", "json", "")
+		got, ok := c.Lookup("Plugin", "ns", "json", "")
 		require.True(t, ok)
 		assert.Equal(t, "relative/blob", got)
 	})
@@ -436,10 +456,10 @@ func TestCache_Set(t *testing.T) {
 		require.NoError(t, os.Chmod(dir, 0o500)) // read+execute only: no new files allowed
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		err := c.Set("plugin", "ns", "json", "", "/some/blob")
+		err := c.Set("Plugin", "ns", "json", "", "/some/blob")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "write snapshot")
-		_, ok := c.Lookup("plugin", "ns", "json", "")
+		_, ok := c.Lookup("Plugin", "ns", "json", "")
 		assert.False(t, ok, "a failed snapshot write must not change the live index")
 		assert.False(t, c.BlobExists("/some/blob"))
 	})
@@ -452,10 +472,10 @@ func TestCache_Set(t *testing.T) {
 		// index.json is occupied by a directory, so the tmp-file rename can't land.
 		require.NoError(t, os.Mkdir(filepath.Join(dir, "index.json"), 0o755))
 
-		err := c.Set("plugin", "ns", "json", "", "/some/blob")
+		err := c.Set("Plugin", "ns", "json", "", "/some/blob")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rename snapshot")
-		_, ok := c.Lookup("plugin", "ns", "json", "")
+		_, ok := c.Lookup("Plugin", "ns", "json", "")
 		assert.False(t, ok, "a failed snapshot rename must not change the live index")
 		assert.False(t, c.BlobExists("/some/blob"))
 	})
@@ -469,18 +489,18 @@ func TestCache_Set(t *testing.T) {
 		newBlob := filepath.Join(dir, "blobs", "new")
 		require.NoError(t, c.Store(oldBlob, []byte("old"), 0o755))
 		require.NoError(t, c.Store(newBlob, []byte("new"), 0o755))
-		require.NoError(t, c.Set("plugin", "ns", "json", "", oldBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "", oldBlob))
 
 		snapshotPath := filepath.Join(dir, "index.json")
 		backupPath := snapshotPath + ".backup"
 		require.NoError(t, os.Rename(snapshotPath, backupPath))
 		require.NoError(t, os.Mkdir(snapshotPath, 0o755))
 
-		err := c.Set("plugin", "ns", "json", "", newBlob)
+		err := c.Set("Plugin", "ns", "json", "", newBlob)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rename snapshot")
 
-		got, ok := c.Lookup("plugin", "ns", "json", "")
+		got, ok := c.Lookup("Plugin", "ns", "json", "")
 		require.True(t, ok)
 		assert.Equal(t, oldBlob, got)
 		assert.FileExists(t, oldBlob, "the old blob must not be evicted before the snapshot commits")
@@ -489,7 +509,7 @@ func TestCache_Set(t *testing.T) {
 
 		require.NoError(t, os.Remove(snapshotPath))
 		require.NoError(t, os.Rename(backupPath, snapshotPath))
-		require.NoError(t, c.Set("plugin", "ns", "json", "", newBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "", newBlob))
 		_, err = os.Stat(oldBlob)
 		assert.True(t, os.IsNotExist(err), "a successful retry must evict the old blob")
 	})
@@ -506,11 +526,11 @@ func TestCache_Set(t *testing.T) {
 				defer wg.Done()
 				blobPath := filepath.Join(dir, "blobs", "concurrent")
 				_ = c.Store(blobPath, []byte("x"), 0o755)
-				_ = c.Set("plugin", "ns", "concurrent", "", blobPath)
+				_ = c.Set("Plugin", "ns", "concurrent", "", blobPath)
 			}()
 			go func() {
 				defer wg.Done()
-				c.Lookup("plugin", "ns", "concurrent", "")
+				c.Lookup("Plugin", "ns", "concurrent", "")
 			}()
 		}
 		wg.Wait()
@@ -529,22 +549,22 @@ func TestCache_RemoveAll(t *testing.T) {
 		require.NoError(t, c.Store(blobAmd64, []byte("x"), 0o755))
 		require.NoError(t, c.Store(blobArm64, []byte("x"), 0o755))
 		require.NoError(t, c.Store(otherBlob, []byte("x"), 0o755))
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobAmd64))
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobArm64))
-		require.NoError(t, c.Set("plugin", "ns", "other-name", "", otherBlob))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blobAmd64))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-arm64", blobArm64))
+		require.NoError(t, c.Set("Plugin", "ns", "other-name", "", otherBlob))
 
-		require.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+		require.NoError(t, c.RemoveAll("Plugin", "ns", "json"))
 
-		_, ok := c.Lookup("plugin", "ns", "json", "linux-amd64")
+		_, ok := c.Lookup("Plugin", "ns", "json", "linux-amd64")
 		assert.False(t, ok)
-		_, ok = c.Lookup("plugin", "ns", "json", "linux-arm64")
+		_, ok = c.Lookup("Plugin", "ns", "json", "linux-arm64")
 		assert.False(t, ok)
 		_, err := os.Stat(blobAmd64)
 		assert.True(t, os.IsNotExist(err))
 		_, err = os.Stat(blobArm64)
 		assert.True(t, os.IsNotExist(err))
 
-		got, ok := c.Lookup("plugin", "ns", "other-name", "")
+		got, ok := c.Lookup("Plugin", "ns", "other-name", "")
 		require.True(t, ok, "unrelated CR's entry must survive RemoveAll for a different name")
 		assert.Equal(t, otherBlob, got)
 		_, err = os.Stat(otherBlob)
@@ -556,20 +576,20 @@ func TestCache_RemoveAll(t *testing.T) {
 		c := artifactcache.NewCache(dir)
 		require.NoError(t, c.Load())
 
-		require.NoError(t, c.RemoveAll("plugin", "ns", "missing"))
+		require.NoError(t, c.RemoveAll("Plugin", "ns", "missing"))
 
 		// A populated index must not be cloned just to discover that this CR is absent.
 		blobPath := filepath.Join(dir, "blobs", "other")
 		require.NoError(t, c.Store(blobPath, []byte("other"), 0o755))
-		require.NoError(t, c.Set("plugin", "ns", "other", "linux-amd64", blobPath))
-		require.NoError(t, c.Set("plugin", "other-ns", "missing", "linux-arm64", blobPath))
-		require.NoError(t, c.Set("rulesfile", "ns", "missing", "", blobPath))
+		require.NoError(t, c.Set("Plugin", "ns", "other", "linux-amd64", blobPath))
+		require.NoError(t, c.Set("Plugin", "other-ns", "missing", "linux-arm64", blobPath))
+		require.NoError(t, c.Set("Rulesfile", "ns", "missing", "", blobPath))
 		snapshotPath := filepath.Join(dir, "index.json")
 		before, err := os.ReadFile(snapshotPath)
 		require.NoError(t, err)
 
 		allocs := testing.AllocsPerRun(100, func() {
-			if err := c.RemoveAll("plugin", "ns", "missing"); err != nil {
+			if err := c.RemoveAll("Plugin", "ns", "missing"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -585,34 +605,34 @@ func TestCache_RemoveAll(t *testing.T) {
 		c := artifactcache.NewCache(dir, artifactcache.WithEvictionGracePeriod(0))
 		require.NoError(t, c.Load())
 		blobPath := filepath.Join(dir, "blobs", "shared")
-		require.NoError(t, c.Store(blobPath, []byte("plugin"), 0o755))
-		require.NoError(t, c.Set("plugin", "ns", "other", "linux-amd64", blobPath))
+		require.NoError(t, c.Store(blobPath, []byte("Plugin"), 0o755))
+		require.NoError(t, c.Set("Plugin", "ns", "other", "linux-amd64", blobPath))
 
 		var wg sync.WaitGroup
 		for range 20 {
 			wg.Go(func() {
-				assert.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobPath))
-				assert.NoError(t, c.Set("plugin", "ns", "json", "linux-arm64", blobPath))
+				assert.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blobPath))
+				assert.NoError(t, c.Set("Plugin", "ns", "json", "linux-arm64", blobPath))
 			})
 			wg.Go(func() {
-				assert.NoError(t, c.RemoveAll("plugin", "ns", "json"))
-				c.Lookup("plugin", "ns", "json", "linux-amd64")
+				assert.NoError(t, c.RemoveAll("Plugin", "ns", "json"))
+				c.Lookup("Plugin", "ns", "json", "linux-amd64")
 			})
 		}
 		wg.Wait()
-		require.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+		require.NoError(t, c.RemoveAll("Plugin", "ns", "json"))
 		assert.FileExists(t, blobPath, "another CR still references the shared blob")
 
 		restarted := artifactcache.NewCache(dir)
 		require.NoError(t, restarted.Load())
 		for _, platform := range []string{"linux-amd64", "linux-arm64"} {
-			_, ok := restarted.Lookup("plugin", "ns", "json", platform)
+			_, ok := restarted.Lookup("Plugin", "ns", "json", platform)
 			assert.False(t, ok)
 		}
-		got, ok := restarted.Lookup("plugin", "ns", "other", "linux-amd64")
+		got, ok := restarted.Lookup("Plugin", "ns", "other", "linux-amd64")
 		require.True(t, ok)
 		assert.Equal(t, blobPath, got)
-		require.NoError(t, c.RemoveAll("plugin", "ns", "other"))
+		require.NoError(t, c.RemoveAll("Plugin", "ns", "other"))
 		assert.NoFileExists(t, blobPath, "the last removal must release all references")
 	})
 
@@ -622,29 +642,29 @@ func TestCache_RemoveAll(t *testing.T) {
 		require.NoError(t, c.Load())
 
 		blobPath := filepath.Join(dir, "blobs", "json")
-		require.NoError(t, c.Store(blobPath, []byte("plugin"), 0o755))
-		require.NoError(t, c.Set("plugin", "ns", "json", "linux-amd64", blobPath))
+		require.NoError(t, c.Store(blobPath, []byte("Plugin"), 0o755))
+		require.NoError(t, c.Set("Plugin", "ns", "json", "linux-amd64", blobPath))
 
 		snapshotPath := filepath.Join(dir, "index.json")
 		backupPath := snapshotPath + ".backup"
 		require.NoError(t, os.Rename(snapshotPath, backupPath))
 		require.NoError(t, os.Mkdir(snapshotPath, 0o755))
 
-		err := c.RemoveAll("plugin", "ns", "json")
+		err := c.RemoveAll("Plugin", "ns", "json")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "rename snapshot")
-		got, ok := c.Lookup("plugin", "ns", "json", "linux-amd64")
+		got, ok := c.Lookup("Plugin", "ns", "json", "linux-amd64")
 		require.True(t, ok)
 		assert.Equal(t, blobPath, got)
 		assert.FileExists(t, blobPath, "the blob must not be evicted before the snapshot commits")
 
 		require.NoError(t, os.Remove(snapshotPath))
 		require.NoError(t, os.Rename(backupPath, snapshotPath))
-		require.NoError(t, c.RemoveAll("plugin", "ns", "json"))
+		require.NoError(t, c.RemoveAll("Plugin", "ns", "json"))
 
 		restarted := artifactcache.NewCache(dir)
 		require.NoError(t, restarted.Load())
-		_, ok = restarted.Lookup("plugin", "ns", "json", "linux-amd64")
+		_, ok = restarted.Lookup("Plugin", "ns", "json", "linux-amd64")
 		assert.False(t, ok, "a successful retry must remain removed after restart")
 		_, err = os.Stat(blobPath)
 		assert.True(t, os.IsNotExist(err))
@@ -655,9 +675,9 @@ func TestCache_LookupDigest(t *testing.T) {
 	oldDigest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	newDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	for _, tc := range []struct{ artifactType, goos, goarch, platform string }{
-		{"plugin", "linux", "amd64", "linux-amd64"},
-		{"plugin", "linux", "arm64", "linux-arm64"},
-		{"rulesfile", "", "", ""},
+		{"Plugin", "linux", "amd64", "linux-amd64"},
+		{"Plugin", "linux", "arm64", "linux-arm64"},
+		{"Rulesfile", "", "", ""},
 	} {
 		t.Run(tc.artifactType+"/"+tc.platform, func(t *testing.T) {
 			cache := artifactcache.NewCache(t.TempDir())
@@ -706,21 +726,21 @@ func TestCache_Ensure(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(time.Nanosecond))
 			require.NoError(t, cache.Load())
-			path := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:abc", "linux", "arm64")
+			path := artifactcache.BlobPath(cache.Dir(), "Plugin", "test/plugin", "sha256:abc", "linux", "arm64")
 			require.NoError(t, cache.Store(path, []byte("existing"), 0o755))
 			old := time.Now().Add(-time.Hour)
 			require.NoError(t, os.Chtimes(path, old, old))
 			if state != "orphan" {
-				require.NoError(t, cache.Set("plugin", "ns", "old", "linux-arm64", path))
+				require.NoError(t, cache.Set("Plugin", "ns", "old", "linux-arm64", path))
 			}
 			if state == "pending eviction" {
-				require.NoError(t, cache.RemoveAll("plugin", "ns", "old"))
+				require.NoError(t, cache.RemoveAll("Plugin", "ns", "old"))
 			}
 			if state == missingFile {
 				require.NoError(t, os.Remove(path))
 			}
 			calls := 0
-			err := cache.Ensure("plugin", "ns", "new", "linux-arm64", path, func() ([]byte, fs.FileMode, error) {
+			err := cache.Ensure("Plugin", "ns", "new", "linux-arm64", path, func() ([]byte, fs.FileMode, error) {
 				calls++
 				// A load can call back into the cache: it must run outside its mutex.
 				_, sweepErr := cache.Sweep(context.Background())
@@ -732,7 +752,7 @@ func TestCache_Ensure(t *testing.T) {
 			} else {
 				require.Zero(t, calls)
 			}
-			indexed, ok := cache.Lookup("plugin", "ns", "new", "linux-arm64")
+			indexed, ok := cache.Lookup("Plugin", "ns", "new", "linux-arm64")
 			require.True(t, ok)
 			require.Equal(t, path, indexed)
 			removed, err := cache.Sweep(t.Context())
@@ -748,27 +768,27 @@ func TestCache_EnsureFailureKeepsPreviousReference(t *testing.T) {
 		t.Run(failure, func(t *testing.T) {
 			cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, cache.Load())
-			oldPath := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:old", "", "")
-			newPath := artifactcache.BlobPath(cache.Dir(), "plugin", "test/plugin", "sha256:new", "", "")
+			oldPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "test/plugin", "sha256:old", "", "")
+			newPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "test/plugin", "sha256:new", "", "")
 			require.NoError(t, cache.Store(oldPath, []byte("old"), 0o755))
-			require.NoError(t, cache.Set("plugin", "ns", "plugin", "", oldPath))
+			require.NoError(t, cache.Set("Plugin", "ns", "Plugin", "", oldPath))
 			if failure == "persist" {
 				require.NoError(t, os.Mkdir(filepath.Join(cache.Dir(), "index.json.tmp"), 0o750))
 			}
-			err := cache.Ensure("plugin", "ns", "plugin", "", newPath, func() ([]byte, fs.FileMode, error) {
+			err := cache.Ensure("Plugin", "ns", "Plugin", "", newPath, func() ([]byte, fs.FileMode, error) {
 				if failure == "fetch" {
 					return nil, 0, errors.New("fetch failed")
 				}
 				return []byte("new"), 0o755, nil
 			})
 			require.Error(t, err)
-			indexed, ok := cache.Lookup("plugin", "ns", "plugin", "")
+			indexed, ok := cache.Lookup("Plugin", "ns", "Plugin", "")
 			require.True(t, ok)
 			require.Equal(t, oldPath, indexed)
 			require.FileExists(t, oldPath)
 			restarted := artifactcache.NewCache(cache.Dir())
 			require.NoError(t, restarted.Load())
-			indexed, ok = restarted.Lookup("plugin", "ns", "plugin", "")
+			indexed, ok = restarted.Lookup("Plugin", "ns", "Plugin", "")
 			require.True(t, ok)
 			require.Equal(t, oldPath, indexed, "failed persistence must not publish a partial index")
 		})

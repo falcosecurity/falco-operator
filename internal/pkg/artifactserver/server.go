@@ -234,129 +234,84 @@ func (s *Server) limitConcurrency(next http.Handler) http.Handler {
 // Handler returns the HTTP request multiplexer. Exported for testing.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/artifacts/plugins/", s.servePlugin)
-	mux.HandleFunc("/v1/artifacts/rulesfiles/", s.serveRulesfile)
+	// The server holds what the operator pulls from OCI registries: every kind with an OCI source.
+	infos := artifact.Kinds()
+	for i := range infos {
+		if info := &infos[i]; info.Accepts(artifact.MediumOCI) {
+			mux.HandleFunc(artifact.ServerPath(info.Kind), s.serve(info))
+		}
+	}
 	return s.limitConcurrency(mux)
 }
 
-// servePlugin handles GET /v1/artifacts/plugins/{namespace}/{name}?os=linux&arch=amd64
-// The binary must already be cached by the Plugin aggregator controller.
-func (s *Server) servePlugin(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusMethodNotAllowed)).Inc()
-		return
-	}
-
-	ns, name, ok := parsePath(r.URL.Path, "/v1/artifacts/plugins/")
-	if !ok {
-		http.Error(w, "path must be /v1/artifacts/plugins/{namespace}/{name}", http.StatusBadRequest)
-		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusBadRequest)).Inc()
-		return
-	}
-
-	if s.authorizer != nil && s.clientCAs != nil {
-		if err := s.authorizer.AuthorizeRequest(r, ns); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusForbidden)).Inc()
+// serve handles GET artifact.ServerPath(kind){namespace}/{name}. A plugin is served for the platform the request
+// names (?os=linux&arch=amd64, defaulting to the server's own); a rulesfile is platform-agnostic. The blob must
+// already be cached by the kind's aggregator controller.
+func (s *Server) serve(info *artifact.KindInfo) http.HandlerFunc {
+	kind := info.Kind
+	// The metric label and the log type are the kind in lowercase, "plugin": dashboards and alerts select on it.
+	label := strings.ToLower(string(kind))
+	prefix := artifact.ServerPath(kind)
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusMethodNotAllowed)).Inc()
 			return
 		}
-	}
 
-	goos := queryDefault(r, "os", runtime.GOOS)
-	goarch := queryDefault(r, "arch", runtime.GOARCH)
-
-	ctx := r.Context()
-	logger := log.FromContext(ctx).WithValues(
-		"artifact", ns+"/"+name,
-		"type", "plugin",
-		"os", goos,
-		"arch", goarch,
-		"caller", r.RemoteAddr,
-		"node", r.Header.Get(artifact.NodeNameHeader),
-	)
-	logger.V(1).Info("Artifact request received")
-
-	platformKey := goos + "-" + goarch
-	blobPath, ok, err := s.lookupRequestedBlob(r, "plugin", ns, name, platformKey)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusBadRequest)).Inc()
-		return
-	}
-	if !ok {
-		cacheLookupsTotal.WithLabelValues("plugin", "miss").Inc()
-		logger.Info("Requested plugin revision not yet cached; waiting for aggregator reconcile")
-		w.Header().Set("Retry-After", "10")
-		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
-		requestsTotal.WithLabelValues("plugin", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
-		requestDuration.WithLabelValues("plugin").Observe(time.Since(start).Seconds())
-		return
-	}
-	cacheLookupsTotal.WithLabelValues("plugin", "hit").Inc()
-
-	logger.V(1).Info("Serving plugin blob", "blob", blobPath)
-	status := serveBlob(w, r, blobPath)
-	requestsTotal.WithLabelValues("plugin", strconv.Itoa(status)).Inc()
-	requestDuration.WithLabelValues("plugin").Observe(time.Since(start).Seconds())
-}
-
-// serveRulesfile handles GET /v1/artifacts/rulesfiles/{namespace}/{name}
-// Rulesfiles are platform-agnostic; the binary must already be cached by the Rulesfile
-// aggregator controller.
-func (s *Server) serveRulesfile(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusMethodNotAllowed)).Inc()
-		return
-	}
-
-	ns, name, ok := parsePath(r.URL.Path, "/v1/artifacts/rulesfiles/")
-	if !ok {
-		http.Error(w, "path must be /v1/artifacts/rulesfiles/{namespace}/{name}", http.StatusBadRequest)
-		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusBadRequest)).Inc()
-		return
-	}
-	if s.authorizer != nil && s.clientCAs != nil {
-		if err := s.authorizer.AuthorizeRequest(r, ns); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusForbidden)).Inc()
+		ns, name, ok := parsePath(r.URL.Path, prefix)
+		if !ok {
+			http.Error(w, "path must be "+prefix+"{namespace}/{name}", http.StatusBadRequest)
+			requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusBadRequest)).Inc()
 			return
 		}
-	}
 
-	ctx := r.Context()
-	logger := log.FromContext(ctx).WithValues(
-		"artifact", ns+"/"+name,
-		"type", "rulesfile",
-		"caller", r.RemoteAddr,
-		"node", r.Header.Get(artifact.NodeNameHeader),
-	)
-	logger.V(1).Info("Artifact request received")
+		if s.authorizer != nil && s.clientCAs != nil {
+			if err := s.authorizer.AuthorizeRequest(r, ns); err != nil {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusForbidden)).Inc()
+				return
+			}
+		}
 
-	blobPath, ok, err := s.lookupRequestedBlob(r, "rulesfile", ns, name, "")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusBadRequest)).Inc()
-		return
-	}
-	if !ok {
-		cacheLookupsTotal.WithLabelValues("rulesfile", "miss").Inc()
-		logger.Info("Requested rulesfile revision not yet cached; waiting for aggregator reconcile")
-		w.Header().Set("Retry-After", "10")
-		http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
-		requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(http.StatusServiceUnavailable)).Inc()
-		requestDuration.WithLabelValues("rulesfile").Observe(time.Since(start).Seconds())
-		return
-	}
-	cacheLookupsTotal.WithLabelValues("rulesfile", "hit").Inc()
+		logger := log.FromContext(r.Context()).WithValues(
+			"artifact", ns+"/"+name,
+			"type", label,
+			"caller", r.RemoteAddr,
+			"node", r.Header.Get(artifact.NodeNameHeader),
+		)
+		platformKey := ""
+		if info.PlatformSpecific {
+			goos := queryDefault(r, "os", runtime.GOOS)
+			goarch := queryDefault(r, "arch", runtime.GOARCH)
+			logger = logger.WithValues("os", goos, "arch", goarch)
+			platformKey = goos + "-" + goarch
+		}
+		logger.V(1).Info("Artifact request received")
 
-	logger.V(1).Info("Serving rulesfile blob", "blob", blobPath)
-	status := serveBlob(w, r, blobPath)
-	requestsTotal.WithLabelValues("rulesfile", strconv.Itoa(status)).Inc()
-	requestDuration.WithLabelValues("rulesfile").Observe(time.Since(start).Seconds())
+		blobPath, ok, err := s.lookupRequestedBlob(r, string(kind), ns, name, platformKey)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusBadRequest)).Inc()
+			return
+		}
+		if !ok {
+			cacheLookupsTotal.WithLabelValues(label, "miss").Inc()
+			logger.Info("Requested " + label + " revision not yet cached; waiting for aggregator reconcile")
+			w.Header().Set("Retry-After", "10")
+			http.Error(w, "artifact not yet available; retry shortly", http.StatusServiceUnavailable)
+			requestsTotal.WithLabelValues(label, strconv.Itoa(http.StatusServiceUnavailable)).Inc()
+			requestDuration.WithLabelValues(label).Observe(time.Since(start).Seconds())
+			return
+		}
+		cacheLookupsTotal.WithLabelValues(label, "hit").Inc()
+
+		logger.V(1).Info("Serving "+label+" blob", "blob", blobPath)
+		status := serveBlob(w, r, blobPath)
+		requestsTotal.WithLabelValues(label, strconv.Itoa(status)).Inc()
+		requestDuration.WithLabelValues(label).Observe(time.Since(start).Seconds())
+	}
 }
 
 // lookupRequestedBlob binds a named cache entry to the requested immutable digest.

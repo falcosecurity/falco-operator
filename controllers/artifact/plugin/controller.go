@@ -460,7 +460,7 @@ func (r *PluginReconciler) ensurePlugin(ctx context.Context, plugin *artifactv1a
 		}
 	}
 
-	result, err := r.fetcher.FetchOCI(ctx, plugin.Namespace, plugin.Name, artifact.TypePlugin, expectedDigest)
+	result, err := r.fetcher.FetchOCI(ctx, plugin.Namespace, plugin.Name, artifact.KindPlugin, expectedDigest)
 	if err != nil {
 		logger.Error(err, "unable to fetch plugin artifact")
 		artifact.RecordWarning(r.recorder, plugin, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())

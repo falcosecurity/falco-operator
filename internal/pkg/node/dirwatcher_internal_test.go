@@ -37,6 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 const nonexistentDir = "/nonexistent-dir-xyzzy"
@@ -185,7 +186,7 @@ func TestPluginFilesHashes(t *testing.T) {
 		{
 			name: "aggregate bytes are hashed without parsing aliases or init config",
 			setup: func(t *testing.T, dirs artifact.ArtifactDirs) {
-				path := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+				path := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 				require.NoError(t, os.WriteFile(path, []byte("load_plugins: ["), 0o644))
 			},
 			wantLen: 1,
@@ -203,7 +204,7 @@ func TestPluginFilesHashes(t *testing.T) {
 		{
 			name: "unreadable aggregate is not an empty snapshot",
 			setup: func(t *testing.T, dirs artifact.ArtifactDirs) {
-				path := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+				path := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 				require.NoError(t, os.Mkdir(path, 0o755))
 			},
 			wantErr: true,
@@ -635,7 +636,7 @@ func TestDirWatcher_CheckPluginFilesChanged(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			dirs := artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: t.TempDir()}
-			configPath := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+			configPath := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 			require.NoError(t, os.WriteFile(configPath, []byte("load_plugins: [custom-alias]\n"), 0o644))
 			pluginPath := filepath.Join(dirs.Plugin, "my-container.so")
 			require.NoError(t, os.WriteFile(pluginPath, []byte("binary-a"), 0o755))
@@ -848,7 +849,7 @@ func TestDirWatcher_PluginSnapshotReadFailure(t *testing.T) {
 	for _, target := range []string{aggregate, "binary"} {
 		t.Run(target, func(t *testing.T) {
 			dirs := artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: t.TempDir()}
-			configPath := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+			configPath := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 			pluginPath := filepath.Join(dirs.Plugin, "container.so")
 			require.NoError(t, os.WriteFile(configPath, []byte("load_plugins: [container]\n"), 0o644))
 			require.NoError(t, os.WriteFile(pluginPath, []byte("binary-a"), 0o755))
@@ -884,7 +885,7 @@ func TestDirWatcher_PluginSnapshotReadFailure(t *testing.T) {
 
 func TestDirWatcher_PluginSnapshotInitiallyUnknown(t *testing.T) {
 	dirs := artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: t.TempDir()}
-	configPath := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+	configPath := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 	require.NoError(t, os.Mkdir(configPath, 0o755))
 	dw, err := NewDirWatcher(dirs, "", func() {})
 	require.NoError(t, err, "initial plugin reads are best effort")
@@ -914,7 +915,7 @@ func TestDirWatcher_PluginAliasDoesNotCauseReloads(t *testing.T) {
 	dirs := artifact.ArtifactDirs{Config: t.TempDir(), Rulesfile: t.TempDir(), Plugin: t.TempDir()}
 	pluginPath := filepath.Join(dirs.Plugin, "my-container.so")
 	require.NoError(t, os.WriteFile(pluginPath, []byte("binary"), 0o755))
-	configPath := artifact.ArtifactPath(dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.TypeConfig)
+	configPath := testutil.MustArtifactPath(t, dirs, pluginConfigFileName, 99, artifact.MediumInline, artifact.KindConfig)
 	config := fmt.Sprintf("plugins:\n- name: custom-alias\n  library_path: %s\nload_plugins: [custom-alias]\n", pluginPath)
 	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o644))
 	dw, err := NewDirWatcher(dirs, srv.URL, func() {})

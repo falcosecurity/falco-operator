@@ -65,15 +65,9 @@ func (am *Manager) fetchOCIAuthSecret(ctx context.Context, ref *commonv1alpha1.S
 	return secret, nil
 }
 
-func isExpectedOCIArtifactType(expected Type, actual puller.ArtifactType) bool {
-	switch expected {
-	case TypeRulesfile:
-		return actual == puller.Rulesfile
-	case TypePlugin:
-		return actual == puller.Plugin
-	default:
-		return false
-	}
+func isExpectedOCIArtifactType(expected Kind, actual puller.ArtifactType) bool {
+	info, err := InfoForKind(expected)
+	return err == nil && info.OCIArtifactType != "" && info.OCIArtifactType == actual
 }
 
 func (am *Manager) fetchOCICredentials(ctx context.Context, ociArtifact *commonv1alpha1.OCIArtifact) (auth.CredentialFunc, error) {

@@ -185,10 +185,10 @@ func TestRulesfileSources_Hash(t *testing.T) {
 	}
 }
 
-type configMapFetcherFunc func(context.Context, string, *commonv1alpha1.ConfigMapRef, Type) (FetchResult, error)
+type configMapFetcherFunc func(context.Context, string, *commonv1alpha1.ConfigMapRef, Kind) (FetchResult, error)
 
 func (f configMapFetcherFunc) FetchConfigMap(ctx context.Context, namespace string,
-	ref *commonv1alpha1.ConfigMapRef, kind Type,
+	ref *commonv1alpha1.ConfigMapRef, kind Kind,
 ) (FetchResult, error) {
 	return f(ctx, namespace, ref, kind)
 }
@@ -209,13 +209,13 @@ func TestResolveRulesfileSources_ConfigMapSnapshot(t *testing.T) {
 		result := FetchResult{Content: []byte("rules"), ContentHash: "content-hash", Perm: 0o644}
 		calls := 0
 		fetcher := configMapFetcherFunc(func(gotCtx context.Context, namespace string,
-			gotRef *commonv1alpha1.ConfigMapRef, kind Type,
+			gotRef *commonv1alpha1.ConfigMapRef, kind Kind,
 		) (FetchResult, error) {
 			calls++
 			require.Equal(t, ctx, gotCtx)
 			require.Equal(t, parent.Namespace, namespace)
 			require.Equal(t, ref, gotRef)
-			require.Equal(t, TypeRulesfile, kind)
+			require.Equal(t, KindRulesfile, kind)
 			return result, nil
 		})
 		sources, err := ResolveRulesfileSources(ctx, fetcher, parent)
@@ -234,7 +234,7 @@ func TestResolveRulesfileSources_ConfigMapSnapshot(t *testing.T) {
 
 	t.Run("returns no partial snapshot on fetch failure", func(t *testing.T) {
 		fetchErr := errors.New("ConfigMap unavailable")
-		fetcher := configMapFetcherFunc(func(context.Context, string, *commonv1alpha1.ConfigMapRef, Type) (FetchResult, error) {
+		fetcher := configMapFetcherFunc(func(context.Context, string, *commonv1alpha1.ConfigMapRef, Kind) (FetchResult, error) {
 			return FetchResult{Content: []byte("partial")}, fetchErr
 		})
 		sources, err := ResolveRulesfileSources(ctx, fetcher, parent)
@@ -247,7 +247,7 @@ func TestResolveRulesfileSources_ConfigMapSnapshot(t *testing.T) {
 		withoutConfigMap := parent.DeepCopy()
 		withoutConfigMap.Spec.ConfigMapRef = nil
 		calls := 0
-		fetcher := configMapFetcherFunc(func(context.Context, string, *commonv1alpha1.ConfigMapRef, Type) (FetchResult, error) {
+		fetcher := configMapFetcherFunc(func(context.Context, string, *commonv1alpha1.ConfigMapRef, Kind) (FetchResult, error) {
 			calls++
 			return FetchResult{}, errors.New("unexpected ConfigMap fetch")
 		})

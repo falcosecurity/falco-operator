@@ -32,6 +32,7 @@ import (
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 const (
@@ -189,7 +190,7 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				_, oldFile, err := m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, oldContent,
 					&commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}}, true)
 				require.NoError(t, err)
-				newPath := artifact.ArtifactPath(store.Dirs, key.Name, 20, artifact.MediumOCI, artifact.TypeRulesfile)
+				newPath := testutil.MustArtifactPath(t, store.Dirs, key.Name, 20, artifact.MediumOCI, artifact.KindRulesfile)
 				storeErr := errors.New("filesystem unavailable")
 				switch failure {
 				case writeFailure:
@@ -216,7 +217,7 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				intact, err := m.Verify(ctx, installed)
 				require.NoError(t, err)
 				require.True(t, intact)
-				disk, err := m.ScanAll(ctx, artifact.TypeRulesfile)
+				disk, err := m.ScanAll(ctx, artifact.KindRulesfile)
 				require.NoError(t, err)
 				require.Len(t, disk[key.Name], 1, "there must never be two active revisions of one source")
 				var blocked *node.BlockedError
@@ -263,7 +264,7 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				for _, artifactPriority := range []int32{60, 70} {
 					duplicate := installed[0]
 					duplicate.Priority = artifactPriority
-					duplicate.Path = artifact.ArtifactPath(store.Dirs, key.Name, artifactPriority, artifact.MediumOCI, artifact.TypeRulesfile)
+					duplicate.Path = testutil.MustArtifactPath(t, store.Dirs, key.Name, artifactPriority, artifact.MediumOCI, artifact.KindRulesfile)
 					require.NoError(t, fs.WriteFile(duplicate.Path, oldContent.Content, oldContent.Perm))
 					installed = append(installed, duplicate)
 					duplicates = append(duplicates, duplicate.Path)

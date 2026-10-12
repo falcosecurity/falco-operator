@@ -355,7 +355,7 @@ func (r *ConfigReconciler) ensureConfig(ctx context.Context, config *artifactv1a
 
 	// Store ConfigMap config if specified.
 	if config.Spec.ConfigMapRef != nil {
-		result, err := r.fetcher.FetchConfigMap(ctx, config.Namespace, config.Spec.ConfigMapRef, artifact.TypeConfig)
+		result, err := r.fetcher.FetchConfigMap(ctx, config.Namespace, config.Spec.ConfigMapRef, artifact.KindConfig)
 		if err != nil {
 			logger.Error(err, "unable to fetch config from ConfigMap reference")
 			artifact.RecordWarning(r.recorder, config,

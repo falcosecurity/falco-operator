@@ -16,18 +16,22 @@
 
 package artifact
 
-import "io/fs"
+import (
+	"io/fs"
 
-// Type represents different types of artifacts.
-type Type string
+	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+)
+
+// Kind is an artifact kind, spelled as the Kubernetes API Kind of its CRD.
+type Kind = artifactv1alpha1.ArtifactKind
 
 const (
-	// TypeRulesfile represents a rulesFile artifact.
-	TypeRulesfile Type = "rulesfile"
-	// TypePlugin represents a plugin artifact.
-	TypePlugin Type = "plugin"
-	// TypeConfig represents a config artifact.
-	TypeConfig Type = "config"
+	// KindRulesfile is the kind of a Rulesfile.
+	KindRulesfile = artifactv1alpha1.KindRulesfile
+	// KindPlugin is the kind of a Plugin.
+	KindPlugin = artifactv1alpha1.KindPlugin
+	// KindConfig is the kind of a Config.
+	KindConfig = artifactv1alpha1.KindConfig
 )
 
 // Medium represents how the artifact is distributed.
@@ -70,11 +74,14 @@ type File struct {
 	SpecHash    string // SHA-256 of the parent OCI artifact spec; only meaningful for MediumOCI
 }
 
-// PermFor returns the deterministic filesystem permission for the given artifact type.
-// Plugins need the execute bit for dlopen; rules and config files are read-only for Falco.
-func PermFor(t Type) fs.FileMode {
-	if t == TypePlugin {
-		return 0o755
+// PermFor returns the filesystem permission registered for kind: the execute bit for plugins,
+// which Falco dlopens, read-only for the rules and config files it merely reads. An
+// unregistered kind is an error rather than a default, so a kind that was never given a mode
+// cannot be written with someone else's.
+func PermFor(kind Kind) (fs.FileMode, error) {
+	info, err := InfoForKind(kind)
+	if err != nil {
+		return 0, err
 	}
-	return 0o644
+	return info.Perm, nil
 }

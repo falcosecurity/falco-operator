@@ -96,7 +96,7 @@ func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, _ string) (artifact.FetchResult, error) {
 	f.ociCallCount++
 	if f.ociErr != nil {
 		return artifact.FetchResult{}, f.ociErr
@@ -118,7 +118,7 @@ func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact
 }
 
 func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Type,
+	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
 ) (artifact.FetchResult, error) {
 	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
 }
@@ -1156,8 +1156,8 @@ func TestEnsurePluginConfig(t *testing.T) {
 
 			if tt.writeErr != nil {
 				mockFS := fsfake.NewMockFileSystem()
-				path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), "plugins-config",
-					priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig)
+				path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), "plugins-config",
+					priority.MaxPriority, artifact.MediumInline, artifact.KindConfig)
 				mockFS.WriteErrFor = map[string]error{filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp"): tt.writeErr}
 				r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			}
@@ -1830,10 +1830,10 @@ func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
 			goos, goarch, platform := runtime.GOOS, runtime.GOARCH, runtime.GOOS+"-"+runtime.GOARCH
 			oldDigest := digest.FromString("old OCI manifest").String()
 			newDigest := digest.FromString("new OCI manifest").String()
-			oldPath := artifactcache.BlobPath(cache.Dir(), "plugin", "artifact:old", oldDigest, goos, goarch)
-			newPath := artifactcache.BlobPath(cache.Dir(), "plugin", "artifact:new", newDigest, goos, goarch)
+			oldPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "artifact:old", oldDigest, goos, goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), "Plugin", "artifact:new", newDigest, goos, goarch)
 			require.NoError(t, cache.Store(oldPath, []byte("old artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("plugin", "default", "artifact", platform, oldPath))
+			require.NoError(t, cache.Set("Plugin", "default", "artifact", platform, oldPath))
 
 			srv := httptest.NewServer(artifactserver.New(cache).Handler())
 			defer srv.Close()
@@ -1880,7 +1880,7 @@ func TestEnsurePlugin_WaitsForExpectedOCIDigest(t *testing.T) {
 
 			// Once the expected digest is available, the retry installs it and records its spec.
 			require.NoError(t, cache.Store(newPath, []byte("new artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("plugin", "default", "artifact", platform, newPath))
+			require.NoError(t, cache.Set("Plugin", "default", "artifact", platform, newPath))
 			require.NoError(t, reconciler.ensurePlugin(ctx, parent, artifactNode))
 			require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
 			installed := artifactNode.Status.InstalledArtifacts[0]

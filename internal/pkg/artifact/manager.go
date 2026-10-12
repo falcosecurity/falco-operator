@@ -120,7 +120,7 @@ func (am *Manager) FetchContent(ctx context.Context, ociArtifact *commonv1alpha1
 // For platform-specific artifacts (plugins) supply goos and goarch; for platform-agnostic
 // artifacts (rulesfiles) pass empty strings; the pull still uses the server's own platform
 // to satisfy the puller API, but the cached blob has no platform suffix.
-func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1alpha1.OCIArtifact, artifactType Type,
+func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1alpha1.OCIArtifact, kind Kind,
 	goos, goarch string, cache *artifactcache.Cache, knownDigest string) (string, error) {
 	logger := log.FromContext(ctx)
 
@@ -141,13 +141,13 @@ func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1
 			return "", fmt.Errorf("resolve digest for %q: %w", ref, err)
 		}
 	}
-	blobPath := artifactcache.BlobPath(cache.Dir(), string(artifactType), ref, digest, goos, goarch)
+	blobPath := artifactcache.BlobPath(cache.Dir(), string(kind), ref, digest, goos, goarch)
 
 	platformKey := ""
 	if goos != "" && goarch != "" {
 		platformKey = goos + "-" + goarch
 	}
-	err = cache.Ensure(string(artifactType), am.namespace, name, platformKey, blobPath, func() ([]byte, fs.FileMode, error) {
+	err = cache.Ensure(string(kind), am.namespace, name, platformKey, blobPath, func() ([]byte, fs.FileMode, error) {
 		if knownDigest != "" {
 			creds, err = am.fetchOCICredentials(ctx, ociArt)
 			if err != nil {
@@ -178,8 +178,8 @@ func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1
 		if res.RootDigest != digest {
 			return nil, 0, fmt.Errorf("pulled OCI root digest %q does not match expected digest %q", res.RootDigest, digest)
 		}
-		if !isExpectedOCIArtifactType(artifactType, res.Type) {
-			return nil, 0, fmt.Errorf("pulled OCI artifact type %q does not match expected %q", res.Type, artifactType)
+		if !isExpectedOCIArtifactType(kind, res.Type) {
+			return nil, 0, fmt.Errorf("pulled OCI artifact of type %q cannot be installed as a %s", res.Type, kind)
 		}
 
 		file, err := common.ExtractSingleFileFromTarGz(ctx, &buf, 0)
@@ -187,7 +187,12 @@ func (am *Manager) EnsureBlob(ctx context.Context, name string, ociArt *commonv1
 			return nil, 0, fmt.Errorf("extract from OCI layer %q: %w", ref, err)
 		}
 
-		return file.Content, PermFor(artifactType), nil
+		perm, err := PermFor(kind)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		return file.Content, perm, nil
 	})
 	if err != nil {
 		return "", err
