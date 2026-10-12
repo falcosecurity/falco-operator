@@ -36,7 +36,7 @@ func (m *Manager) StorePlugin(ctx context.Context, plugin *artifactv1alpha1.Plug
 	if err := m.checkPluginOwnershipLocked(plugin); err != nil {
 		return artifact.StoreActionNone, nil, err
 	}
-	return m.storeLocked(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority, artifact.TypePlugin, artifact.MediumOCI, result)
+	return m.storeLocked(ctx, plugin.Namespace, plugin.Name, priority.DefaultPriority, artifact.KindPlugin, artifact.MediumOCI, result)
 }
 
 // ResolveConfigName returns the canonical plugin name used by Falco and referenced in a

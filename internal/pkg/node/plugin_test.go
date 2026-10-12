@@ -31,6 +31,7 @@ import (
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func testPlugin(name string) *artifactv1alpha1.Plugin {
@@ -56,7 +57,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 			plugin.Spec.Config = &artifactv1alpha1.PluginConfig{Name: "container"}
 			oldContent, err := fetcher.FetchInline(ctx, []byte("installed binary"))
 			require.NoError(t, err)
-			oldContent.Perm = artifact.PermFor(artifact.TypePlugin)
+			oldContent.Perm = testutil.MustPermFor(t, artifact.KindPlugin)
 			_, binary, err := m.StorePlugin(ctx, plugin, oldContent)
 			require.NoError(t, err)
 			_, config, err := m.AddPluginConfig(ctx, plugin, fetcher)
@@ -81,7 +82,7 @@ func TestManager_StorePlugin_ProtectsInstalledOwnership(t *testing.T) {
 			writes := len(fs.WriteCalls)
 			newContent, err := fetcher.FetchInline(ctx, []byte("candidate binary"))
 			require.NoError(t, err)
-			newContent.Perm = artifact.PermFor(artifact.TypePlugin)
+			newContent.Perm = testutil.MustPermFor(t, artifact.KindPlugin)
 
 			action, installed, err := m.StorePlugin(ctx, candidate, newContent)
 

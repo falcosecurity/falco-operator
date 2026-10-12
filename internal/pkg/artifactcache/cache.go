@@ -52,7 +52,7 @@ func BlobPath(cacheDir, artifactType, ref, digest, goos, goarch string) string {
 	if goos != "" && goarch != "" {
 		platformKey = goos + "-" + goarch
 	}
-	return filepath.Join(cacheDir, BlobsDir, artifactType, RefToPath(ref), blobName(digest, platformKey))
+	return filepath.Join(cacheDir, BlobsDir, strings.ToLower(artifactType), RefToPath(ref), blobName(digest, platformKey))
 }
 
 // blobName is the immutable digest/platform identity shared by writes and lookups.

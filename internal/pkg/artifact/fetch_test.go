@@ -39,7 +39,7 @@ const testFetchDigest = "sha256:111111111111111111111111111111111111111111111111
 func TestFetcher_FetchOCI(t *testing.T) {
 	tests := []struct {
 		name            string
-		artifactType    Type
+		artifactType    Kind
 		nodeName        string
 		handler         http.HandlerFunc
 		wantErrContains string
@@ -49,7 +49,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 	}{
 		{
 			name:         "plugin request includes os/arch query and node header",
-			artifactType: TypePlugin,
+			artifactType: KindPlugin,
 			nodeName:     "node-1",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Equal(t, runtime.GOOS, r.URL.Query().Get("os"))
@@ -62,7 +62,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		},
 		{
 			name:         "rulesfile request has no os/arch query",
-			artifactType: TypeRulesfile,
+			artifactType: KindRulesfile,
 			nodeName:     "node-2",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				assert.Empty(t, r.URL.Query().Get("os"))
@@ -75,7 +75,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		},
 		{
 			name:         "empty NodeName omits the header entirely",
-			artifactType: TypeRulesfile,
+			artifactType: KindRulesfile,
 			nodeName:     "",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
@@ -86,7 +86,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		},
 		{
 			name:         "rulesfile perm is 0o644 regardless of server response headers",
-			artifactType: TypeRulesfile,
+			artifactType: KindRulesfile,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
@@ -95,7 +95,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		},
 		{
 			name:         "plugin perm is 0o755 regardless of server response headers",
-			artifactType: TypePlugin,
+			artifactType: KindPlugin,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte("x"))
 			},
@@ -105,7 +105,7 @@ func TestFetcher_FetchOCI(t *testing.T) {
 		{
 			// RetryableError.Error() forwards the wrapped error's message regardless of retryability.
 			name:         "non-200 status returns an error",
-			artifactType: TypeRulesfile,
+			artifactType: KindRulesfile,
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusServiceUnavailable)
 			},
@@ -150,16 +150,16 @@ func TestFetcher_FetchOCI(t *testing.T) {
 
 func TestFetcher_FetchOCI_UnsupportedType(t *testing.T) {
 	f := &Fetcher{ServerURL: "http://example.invalid", HTTPClient: http.DefaultClient}
-	_, err := f.FetchOCI(context.Background(), "ns", "name", TypeConfig, testFetchDigest)
+	_, err := f.FetchOCI(context.Background(), "ns", "name", KindConfig, testFetchDigest)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "does not support type")
+	assert.Contains(t, err.Error(), "does not serve")
 }
 
 func TestFetcher_FetchOCI_RequestError(t *testing.T) {
 	// A ServerURL containing a raw control character makes http.NewRequestWithContext fail to build the request.
 	// The resulting error is permanent, not retryable.
 	f := &Fetcher{ServerURL: "http://\x7f", HTTPClient: http.DefaultClient}
-	_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+	_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "build artifact server request")
 	var retryErr *RetryableError
@@ -167,7 +167,7 @@ func TestFetcher_FetchOCI_RequestError(t *testing.T) {
 }
 
 func TestFetcher_FetchOCI_MissingServerURL(t *testing.T) {
-	for _, artifactType := range []Type{TypePlugin, TypeRulesfile} {
+	for _, artifactType := range []Kind{KindPlugin, KindRulesfile} {
 		t.Run(string(artifactType), func(t *testing.T) {
 			fetcher := &Fetcher{HTTPClient: http.DefaultClient}
 			result, err := fetcher.FetchOCI(t.Context(), "ns", "name", artifactType, testFetchDigest)
@@ -184,7 +184,7 @@ func TestFetcher_FetchOCI_ClientDoError(t *testing.T) {
 	srv.Close() // closed before use: any request against it fails at the transport level
 
 	f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-	_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+	_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "artifact server request for ns/name")
 	// A transport-level failure is retryable; this test only checks the error message text.
@@ -204,7 +204,7 @@ func (errBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
 func TestFetcher_FetchOCI_BodyReadError(t *testing.T) {
 	// A body-read failure is permanent and not retryable.
 	f := &Fetcher{ServerURL: "http://example.invalid", HTTPClient: &http.Client{Transport: errBodyTransport{}}}
-	_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+	_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read artifact server response body")
 	var retryErr *RetryableError
@@ -225,7 +225,7 @@ func TestFetcher_FetchOCI_Retryable(t *testing.T) {
 		defer srv.Close()
 
 		f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-		_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+		_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 		require.Error(t, err)
 
 		var retryErr *RetryableError
@@ -241,7 +241,7 @@ func TestFetcher_FetchOCI_Retryable(t *testing.T) {
 		defer srv.Close()
 
 		f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-		_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+		_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 		require.Error(t, err)
 
 		var retryErr *RetryableError
@@ -254,7 +254,7 @@ func TestFetcher_FetchOCI_Retryable(t *testing.T) {
 		srv.Close() // closed before use: any request against it fails at the transport level
 
 		f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-		_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+		_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 		require.Error(t, err)
 
 		var retryErr *RetryableError
@@ -271,7 +271,7 @@ func TestFetcher_FetchOCI_Retryable(t *testing.T) {
 		defer srv.Close()
 
 		f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-		_, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, testFetchDigest)
+		_, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, testFetchDigest)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "returned 400")
 
@@ -307,7 +307,7 @@ func TestRequeueDelay(t *testing.T) {
 }
 
 func TestFetcher_FetchOCI_RequiresConfirmedDigest(t *testing.T) {
-	for _, artifactType := range []Type{TypePlugin, TypeRulesfile} {
+	for _, artifactType := range []Kind{KindPlugin, KindRulesfile} {
 		t.Run(string(artifactType), func(t *testing.T) {
 			for _, tc := range []struct{ name, servedDigest string }{
 				{name: "older server without digest"},
@@ -358,7 +358,7 @@ func TestFetcher_FetchOCI_RequiresResolvedDigest(t *testing.T) {
 			}))
 			defer srv.Close()
 			f := &Fetcher{ServerURL: srv.URL, HTTPClient: srv.Client()}
-			result, err := f.FetchOCI(context.Background(), "ns", "name", TypeRulesfile, tc.expectedDigest)
+			result, err := f.FetchOCI(context.Background(), "ns", "name", KindRulesfile, tc.expectedDigest)
 			require.Error(t, err)
 			require.Equal(t, FetchResult{}, result)
 			var retryErr *RetryableError

@@ -199,11 +199,11 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			platforms := []string{"linux-amd64", "linux-arm64"}
 			paths := make([]string, 0, len(platforms))
 			for _, platform := range platforms {
-				path := artifactcache.BlobPath(cacheDir, "plugin", "repo:tag", testPluginDigest, "linux", strings.TrimPrefix(platform, "linux-"))
+				path := artifactcache.BlobPath(cacheDir, "Plugin", "repo:tag", testPluginDigest, "linux", strings.TrimPrefix(platform, "linux-"))
 				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
-				require.NoError(t, r.cache.Set("plugin", testutil.TestNamespace, testPluginName, platform, path))
+				require.NoError(t, r.cache.Set("Plugin", testutil.TestNamespace, testPluginName, platform, path))
 				if scenario == shared {
-					require.NoError(t, r.cache.Set("plugin", testutil.TestNamespace, "other", platform, path))
+					require.NoError(t, r.cache.Set("Plugin", testutil.TestNamespace, "other", platform, path))
 				}
 				paths = append(paths, path)
 			}
@@ -224,7 +224,7 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), testutil.Request(testPluginName))
 			if scenario == readError || scenario == persistError {
 				require.Error(t, err)
-				require.NotEmpty(t, r.cache.Owners("plugin"), "failed cleanup must retain the live index")
+				require.NotEmpty(t, r.cache.Owners("Plugin"), "failed cleanup must retain the live index")
 				for _, path := range paths {
 					require.FileExists(t, path)
 				}
@@ -235,18 +235,18 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 				}
 				reloaded := artifactcache.NewCache(cacheDir)
 				require.NoError(t, reloaded.Load())
-				require.Contains(t, reloaded.Owners("plugin"), types.NamespacedName{
+				require.Contains(t, reloaded.Owners("Plugin"), types.NamespacedName{
 					Namespace: testutil.TestNamespace, Name: testPluginName,
 				}, "failed cleanup must retain the durable index")
 				_, err = r.Reconcile(t.Context(), testutil.Request(testPluginName))
 			}
 			require.NoError(t, err)
-			require.NotContains(t, r.cache.Owners("plugin"), types.NamespacedName{
+			require.NotContains(t, r.cache.Owners("Plugin"), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testPluginName,
 			})
 			reloaded := artifactcache.NewCache(cacheDir)
 			require.NoError(t, reloaded.Load())
-			require.NotContains(t, reloaded.Owners("plugin"), types.NamespacedName{
+			require.NotContains(t, reloaded.Owners("Plugin"), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testPluginName,
 			}, "successful cleanup must survive restart")
 			removed, err := r.cache.Sweep(t.Context())
@@ -311,13 +311,13 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 
 			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, seed.Load())
-			missingPath := artifactcache.BlobPath(seed.Dir(), "plugin", "deleted:tag", testPluginDigest, "linux", "amd64")
-			sharedPath := artifactcache.BlobPath(seed.Dir(), "plugin", "shared:tag", testPluginDigest, "linux", "amd64")
+			missingPath := artifactcache.BlobPath(seed.Dir(), "Plugin", "deleted:tag", testPluginDigest, "linux", "amd64")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), "Plugin", "shared:tag", testPluginDigest, "linux", "amd64")
 			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
 			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
-			require.NoError(t, seed.Set("plugin", tc.namespace, "missing", "linux-amd64", missingPath))
-			require.NoError(t, seed.Set("plugin", tc.namespace, "missing-shared", "linux-amd64", sharedPath))
-			require.NoError(t, seed.Set("plugin", tc.namespace, survivor.Name, "linux-amd64", sharedPath))
+			require.NoError(t, seed.Set("Plugin", tc.namespace, "missing", "linux-amd64", missingPath))
+			require.NoError(t, seed.Set("Plugin", tc.namespace, "missing-shared", "linux-amd64", sharedPath))
+			require.NoError(t, seed.Set("Plugin", tc.namespace, survivor.Name, "linux-amd64", sharedPath))
 			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, cache.Load())
 			r := NewPluginAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
@@ -341,8 +341,8 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 			// Neither missing name has ever existed in this API server. Only the controller's
 			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
 			require.Eventually(t, func() bool {
-				_, missing := cache.Lookup("plugin", tc.namespace, "missing", "linux-amd64")
-				_, shared := cache.Lookup("plugin", tc.namespace, "missing-shared", "linux-amd64")
+				_, missing := cache.Lookup("Plugin", tc.namespace, "missing", "linux-amd64")
+				_, shared := cache.Lookup("Plugin", tc.namespace, "missing-shared", "linux-amd64")
 				return !missing && !shared
 			}, 10*time.Second, 20*time.Millisecond)
 			require.Eventually(t, func() bool {
@@ -353,12 +353,12 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 				return condition != nil && condition.Status == metav1.ConditionFalse
 			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
-			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("plugin"))
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("Plugin"))
 			require.NoFileExists(t, missingPath)
 			require.FileExists(t, sharedPath)
 			reloaded := artifactcache.NewCache(seed.Dir())
 			require.NoError(t, reloaded.Load())
-			require.Equal(t, cache.Owners("plugin"), reloaded.Owners("plugin"))
+			require.Equal(t, cache.Owners("Plugin"), reloaded.Owners("Plugin"))
 
 			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
 				response := httptest.NewRecorder()
@@ -929,24 +929,24 @@ func TestHandleDeletion_EvictsCacheEntries(t *testing.T) {
 	// An exclusively-referenced blob: gone once this CR's last node object disappears.
 	ownBlob := filepath.Join(cacheDir, "blobs", "own")
 	require.NoError(t, r.cache.Store(ownBlob, []byte("x"), 0o755))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", ownBlob))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64", ownBlob))
 
 	// A blob shared with another CR: refcount drops but the file survives.
 	sharedBlob := filepath.Join(cacheDir, "blobs", "shared")
 	require.NoError(t, r.cache.Store(sharedBlob, []byte("y"), 0o755))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-arm64", sharedBlob))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, "other-plugin", "", sharedBlob))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-arm64", sharedBlob))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, "other-plugin", "", sharedBlob))
 
 	// No ArtifactNode objects owned by this Plugin exist, so handleDeletion evicts the cache entries now.
 	err := r.handleDeletion(context.Background(), plugin)
 	require.NoError(t, err)
 
-	_, ok := r.cache.Lookup(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
+	_, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
 	assert.False(t, ok)
 	_, err = os.Stat(ownBlob)
 	assert.True(t, os.IsNotExist(err), "exclusively-referenced blob must be removed from disk")
 
-	got, ok := r.cache.Lookup(string(artifact.TypePlugin), testutil.TestNamespace, "other-plugin", "")
+	got, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, "other-plugin", "")
 	require.True(t, ok, "other CR's entry for the shared blob must survive")
 	assert.Equal(t, sharedBlob, got)
 	_, err = os.Stat(sharedBlob)
@@ -961,12 +961,12 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o755))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
 
 	err := r.handleDeletion(context.Background(), plugin)
 	require.NoError(t, err)
 
-	got, ok := r.cache.Lookup(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
+	got, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
 	require.True(t, ok, "cache entry must survive while a node object still exists")
 	assert.Equal(t, blobPath, got)
 }
@@ -1585,9 +1585,9 @@ func TestFetchAndCacheBinaries_FastPath(t *testing.T) {
 
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
 	const digest = testPluginDigest
-	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypePlugin), ref, digest, "linux", "amd64")
+	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.KindPlugin), ref, digest, "linux", "amd64")
 	require.NoError(t, r.cache.Store(blobPath, []byte("fake-plugin"), 0o755))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64", blobPath))
 
 	plugin.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: digest}
 
@@ -1597,7 +1597,7 @@ func TestFetchAndCacheBinaries_FastPath(t *testing.T) {
 	assert.Empty(t, mockPuller.ResolveDigestCalls)
 	assert.Empty(t, mockPuller.PullCalls)
 
-	idx, ok := r.cache.Lookup(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
+	idx, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
 	require.True(t, ok)
 	assert.Equal(t, blobPath, idx)
 }
@@ -1624,7 +1624,7 @@ func TestFetchAndCacheBinaries_SlowPath(t *testing.T) {
 	assert.Equal(t, "linux", mockPuller.PullCalls[0].OS)
 	assert.Equal(t, "amd64", mockPuller.PullCalls[0].Arch)
 
-	_, ok := r.cache.Lookup(string(artifact.TypePlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
+	_, ok := r.cache.Lookup(string(artifact.KindPlugin), testutil.TestNamespace, testPluginName, "linux-amd64")
 	require.True(t, ok)
 }
 
@@ -1742,7 +1742,7 @@ func TestReconcile_NewNodesKeepResolvedRevision(t *testing.T) {
 				mockPuller.PullErr = fmt.Errorf("platform unavailable")
 				_, reconcileErr := r.Reconcile(ctx, testutil.Request(plugin.Name))
 				require.ErrorContains(t, reconcileErr, "platform unavailable")
-				_, ok := r.cache.Lookup("plugin", plugin.Namespace, plugin.Name, "linux-"+arm64Arch)
+				_, ok := r.cache.Lookup("Plugin", plugin.Namespace, plugin.Name, "linux-"+arm64Arch)
 				require.False(t, ok, "a failed pull must not publish a cache entry")
 				mockPuller.PullErr = nil
 			}
@@ -1894,9 +1894,9 @@ func TestReconcile_CacheOwnershipSurvivesLastNodeRemoval(t *testing.T) {
 	cacheDir := t.TempDir()
 	r := newTestReconcilerWithCacheAndPuller(t, nil, cacheDir, plugin)
 	ref := artifact.ResolveReference(plugin.Spec.OCIArtifact)
-	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypePlugin), ref, testPluginDigest, "linux", "amd64")
+	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.KindPlugin), ref, testPluginDigest, "linux", "amd64")
 	require.NoError(t, r.cache.Store(blobPath, []byte("previously-installed-plugin"), 0o755))
-	require.NoError(t, r.cache.Set(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, "linux-amd64", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindPlugin), plugin.Namespace, plugin.Name, "linux-amd64", blobPath))
 
 	_, err = r.Reconcile(ctx, testutil.Request(testPluginName))
 	require.NoError(t, err)
@@ -1909,6 +1909,6 @@ func TestReconcile_CacheOwnershipSurvivesLastNodeRemoval(t *testing.T) {
 	removed, err := r.cache.Sweep(ctx)
 	require.NoError(t, err)
 	t.Logf("deleted parent; cache sweep removed=%d", removed)
-	_, cached := r.cache.Lookup(string(artifact.TypePlugin), plugin.Namespace, plugin.Name, "linux-amd64")
+	_, cached := r.cache.Lookup(string(artifact.KindPlugin), plugin.Namespace, plugin.Name, "linux-amd64")
 	require.False(t, cached, "deleting the parent must release its cache reference even after its selector stopped matching nodes")
 }

@@ -22,6 +22,17 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+// ArtifactKind is the kind of an artifact, spelled as the Kubernetes API Kind of its CRD.
+// +kubebuilder:validation:Enum=Rulesfile;Plugin;Config
+type ArtifactKind string
+
+// The Kubernetes API Kind of each artifact CRD.
+const (
+	KindRulesfile ArtifactKind = "Rulesfile"
+	KindPlugin    ArtifactKind = "Plugin"
+	KindConfig    ArtifactKind = "Config"
+)
+
 var (
 	// GroupVersion is group version used to register these objects.
 	GroupVersion = schema.GroupVersion{Group: "artifact.falcosecurity.dev", Version: "v1alpha1"}

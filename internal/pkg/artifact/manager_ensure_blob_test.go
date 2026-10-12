@@ -134,9 +134,9 @@ func TestManager_EnsureBlob_PinsDigest(t *testing.T) {
 			if digest == "" {
 				digest = tt.resolvedDigest
 			}
-			wantPath := artifactcache.BlobPath(cache.Dir(), string(TypePlugin), ResolveReference(ociArt), digest, "linux", "arm64")
+			wantPath := artifactcache.BlobPath(cache.Dir(), string(KindPlugin), ResolveReference(ociArt), digest, "linux", "arm64")
 
-			path, err := manager.EnsureBlob(context.Background(), "test-artifact", ociArt, TypePlugin, "linux", "arm64", cache, tt.knownDigest)
+			path, err := manager.EnsureBlob(context.Background(), "test-artifact", ociArt, KindPlugin, "linux", "arm64", cache, tt.knownDigest)
 			if tt.wantErr != "" {
 				require.ErrorContains(t, err, tt.wantErr)
 				assert.Empty(t, path)
@@ -178,15 +178,15 @@ func TestManager_EnsureBlob_PinnedPlatformsAndCacheHits(t *testing.T) {
 	}
 	tests := []struct {
 		name         string
-		artifactType Type
+		artifactType Kind
 		ociType      puller.ArtifactType
 		os, arch     string
 		pullOS       string
 		pullArch     string
 	}{
-		{"amd64 plugin", TypePlugin, puller.Plugin, "linux", "amd64", "linux", "amd64"},
-		{"arm64 plugin", TypePlugin, puller.Plugin, "linux", "arm64", "linux", "arm64"},
-		{"platform-agnostic rulesfile", TypeRulesfile, puller.Rulesfile, "", "", runtime.GOOS, runtime.GOARCH},
+		{"amd64 plugin", KindPlugin, puller.Plugin, "linux", "amd64", "linux", "amd64"},
+		{"arm64 plugin", KindPlugin, puller.Plugin, "linux", "arm64", "linux", "arm64"},
+		{"platform-agnostic rulesfile", KindRulesfile, puller.Rulesfile, "", "", runtime.GOOS, runtime.GOARCH},
 	}
 	paths := make(map[string]bool)
 	for _, tt := range tests {
@@ -229,19 +229,19 @@ func TestManager_EnsureBlob_ReacquiresBeforeSweep(t *testing.T) {
 	cache := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(time.Nanosecond))
 	require.NoError(t, cache.Load())
 	ociArt := &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "test/plugin", Tag: "latest"}}
-	path := artifactcache.BlobPath(cache.Dir(), string(TypePlugin), ResolveReference(ociArt), testDigest, "linux", "arm64")
+	path := artifactcache.BlobPath(cache.Dir(), string(KindPlugin), ResolveReference(ociArt), testDigest, "linux", "arm64")
 	require.NoError(t, cache.Store(path, []byte("cached plugin"), 0o755))
-	require.NoError(t, cache.Set(string(TypePlugin), "test-namespace", "old", "linux-arm64", path))
-	require.NoError(t, cache.RemoveAll(string(TypePlugin), "test-namespace", "old"))
+	require.NoError(t, cache.Set(string(KindPlugin), "test-namespace", "old", "linux-arm64", path))
+	require.NoError(t, cache.RemoveAll(string(KindPlugin), "test-namespace", "old"))
 	mockPuller := &pullerfake.MockOCIPuller{}
 	manager := NewManagerWithOptions(fake.NewClientBuilder().WithScheme(createTestScheme(t)).Build(), "test-namespace", WithOCIPuller(mockPuller))
-	reused, err := manager.EnsureBlob(t.Context(), "new", ociArt, TypePlugin, "linux", "arm64", cache, testDigest)
+	reused, err := manager.EnsureBlob(t.Context(), "new", ociArt, KindPlugin, "linux", "arm64", cache, testDigest)
 	require.NoError(t, err)
 	require.Equal(t, path, reused)
 	removed, err := cache.Sweep(t.Context())
 	require.NoError(t, err)
 	require.Zero(t, removed)
-	indexed, ok := cache.Lookup(string(TypePlugin), "test-namespace", "new", "linux-arm64")
+	indexed, ok := cache.Lookup(string(KindPlugin), "test-namespace", "new", "linux-arm64")
 	require.True(t, ok)
 	require.FileExists(t, indexed)
 	require.Empty(t, mockPuller.PullCalls)

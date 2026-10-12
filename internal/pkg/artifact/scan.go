@@ -22,19 +22,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
-	"regexp"
-	"strings"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
-	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
-// yamlFilenamePattern matches the "PP-SS-{name}-{medium}.yaml" convention produced by
-// priority.NameFromPriorityAndSubPriority, recovering priority, name, and medium from the
-// filename alone. Anchored so it only matches the exact convention this package writes.
-var yamlFilenamePattern = regexp.MustCompile(`^(\d{2})-\d{2}-(.+)-(oci|inline|configmap)\.yaml$`)
-
-// ScanAll discovers every artifact file on disk for artifactType by listing the relevant
+// ScanAll discovers every artifact file on disk for kind by listing the relevant
 // directory and parsing each filename back into name, medium, and priority. Unlike a per-name
 // lookup, this does not require already knowing which artifact names exist: it is the primitive
 // that lets a caller (e.g. a restart-time warm sync) discover names it has no other record of,
@@ -43,71 +35,39 @@ var yamlFilenamePattern = regexp.MustCompile(`^(\d{2})-\d{2}-(.+)-(oci|inline|co
 // since a foreign or partially-written (e.g. leftover ".tmp") file is not this artifact type's
 // concern. Returned entries have ContentHash from disk; SpecHash is always empty, since it isn't
 // recoverable from file content alone.
-func (s *LocalStore) ScanAll(_ context.Context, artifactType Type) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
-	switch artifactType {
-	case TypeRulesfile:
-		return s.scanYAMLDir(s.Dirs.Rulesfile)
-	case TypeConfig:
-		return s.scanYAMLDir(s.Dirs.Config)
-	case TypePlugin:
-		return s.scanPluginDir(s.Dirs.Plugin)
-	default:
-		return nil, nil
+//
+// An unregistered kind is an error. Returning no files for it would make it indistinguishable from
+// a kind with nothing installed: warm sync would conclude the node was clean and never recover the
+// files that are actually on disk.
+func (s *LocalStore) ScanAll(_ context.Context, kind Kind) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
+	info, err := InfoForKind(kind)
+	if err != nil {
+		return nil, err
 	}
+	return s.scanDir(&info)
 }
 
-// scanYAMLDir globs every "*.yaml" file directly under dir and groups the ones matching the
-// naming convention by artifact name.
-func (s *LocalStore) scanYAMLDir(dir string) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
-	matches, err := s.FS.Glob(filepath.Join(dir, "*.yaml"))
+// scanDir globs the kind's directory and groups the files it can parse by artifact name.
+func (s *LocalStore) scanDir(info *KindInfo) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
+	dir := info.Dir(s.Dirs)
+	matches, err := s.FS.Glob(filepath.Join(dir, info.Glob))
 	if err != nil {
 		return nil, fmt.Errorf("glob %s: %w", dir, err)
 	}
 	result := map[string][]artifactv1alpha1.InstalledArtifact{}
 	for _, match := range matches {
-		sub := yamlFilenamePattern.FindStringSubmatch(filepath.Base(match))
-		if sub == nil {
+		parsed, ok := info.ParseName(filepath.Base(match))
+		if !ok {
 			continue
 		}
-		var prio int32
-		if _, err := fmt.Sscanf(sub[1], "%d", &prio); err != nil {
-			continue
-		}
-		name, medium := sub[2], sub[3]
 		hash, err := s.hashFile(match)
 		if err != nil {
 			return nil, err
 		}
-		result[name] = append(result[name], artifactv1alpha1.InstalledArtifact{
+		result[parsed.Name] = append(result[parsed.Name], artifactv1alpha1.InstalledArtifact{
 			Path:        match,
-			Medium:      medium,
-			Priority:    prio,
-			ContentHash: hash,
-		})
-	}
-	return result, nil
-}
-
-// scanPluginDir globs every "*.so" file directly under dir. Plugin filenames encode only the
-// name (see ArtifactPath's TypePlugin case): priority isn't part of the filename because plugin
-// binaries are always installed at priority.DefaultPriority, and medium is always MediumOCI
-// (plugins have no other source today).
-func (s *LocalStore) scanPluginDir(dir string) (map[string][]artifactv1alpha1.InstalledArtifact, error) {
-	matches, err := s.FS.Glob(filepath.Join(dir, "*.so"))
-	if err != nil {
-		return nil, fmt.Errorf("glob %s: %w", dir, err)
-	}
-	result := map[string][]artifactv1alpha1.InstalledArtifact{}
-	for _, match := range matches {
-		name := strings.TrimSuffix(filepath.Base(match), ".so")
-		hash, err := s.hashFile(match)
-		if err != nil {
-			return nil, err
-		}
-		result[name] = append(result[name], artifactv1alpha1.InstalledArtifact{
-			Path:        match,
-			Medium:      string(MediumOCI),
-			Priority:    priority.DefaultPriority,
+			Medium:      string(parsed.Medium),
+			Priority:    parsed.Priority,
 			ContentHash: hash,
 		})
 	}

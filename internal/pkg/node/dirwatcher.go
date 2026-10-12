@@ -342,7 +342,11 @@ func pluginFilesHashes(dirs artifact.ArtifactDirs) (map[string]string, error) {
 		}
 		hashes[path] = hash
 	}
-	path := artifact.ArtifactPath(dirs, pluginConfigFileName, priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig)
+	path, err := artifact.ArtifactPath(dirs, pluginConfigFileName, priority.MaxPriority,
+		artifact.MediumInline, artifact.KindConfig)
+	if err != nil {
+		return nil, err
+	}
 	hash, err := fileSHA256(path)
 	if os.IsNotExist(err) {
 		return hashes, nil

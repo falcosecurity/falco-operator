@@ -554,7 +554,7 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 	}
 
 	if !synced {
-		result, err := r.fetcher.FetchOCI(ctx, rulesfile.Namespace, rulesfile.Name, artifact.TypeRulesfile, expectedDigest)
+		result, err := r.fetcher.FetchOCI(ctx, rulesfile.Namespace, rulesfile.Name, artifact.KindRulesfile, expectedDigest)
 		if err != nil {
 			logger.Error(err, "unable to fetch Rulesfile OCI artifact")
 			artifact.RecordWarning(r.recorder, rulesfile, artifact.ReasonOCIArtifactStoreFailed, artifact.MessageFormatOCIArtifactStoreFailed, err.Error())

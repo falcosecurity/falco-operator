@@ -97,7 +97,7 @@ func (r *PluginAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	plugin := &artifactv1alpha1.Plugin{}
 	if err := r.Get(ctx, req.NamespacedName, plugin); err != nil {
 		if k8serrors.IsNotFound(err) && r.cache != nil {
-			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypePlugin), req.Namespace, req.Name)
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.KindPlugin), req.Namespace, req.Name)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -337,7 +337,7 @@ func (r *PluginAggregatorReconciler) handleDeletion(ctx context.Context, plugin 
 	// Evicts this CR's cache entries here, in the last reconcile before the finalizer is
 	// released and the object is removed from etcd.
 	if !nodesRemaining && r.cache != nil {
-		if err := r.cache.RemoveAll(string(artifact.TypePlugin), plugin.Namespace, plugin.Name); err != nil {
+		if err := r.cache.RemoveAll(string(artifact.KindPlugin), plugin.Namespace, plugin.Name); err != nil {
 			return fmt.Errorf("evict plugin cache entries: %w", err)
 		}
 	}
@@ -356,7 +356,7 @@ func (r *PluginAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// Queue their persisted owners too; workers wait for informer synchronization.
 		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			if r.cache != nil {
-				for _, owner := range r.cache.Owners(string(artifact.TypePlugin)) {
+				for _, owner := range r.cache.Owners(string(artifact.KindPlugin)) {
 					queue.Add(reconcile.Request{NamespacedName: owner})
 				}
 			}
@@ -431,7 +431,7 @@ func (r *PluginAggregatorReconciler) fetchAndCacheBlobs(ctx context.Context, plu
 			knownDigest = meta.Digest
 		}
 		logger.Info("Ensuring plugin blob is cached", "os", p.goos, "arch", p.goarch)
-		_, err := am.EnsureBlob(ctx, plugin.Name, plugin.Spec.OCIArtifact, artifact.TypePlugin, p.goos, p.goarch, r.cache, knownDigest)
+		_, err := am.EnsureBlob(ctx, plugin.Name, plugin.Spec.OCIArtifact, artifact.KindPlugin, p.goos, p.goarch, r.cache, knownDigest)
 		if err != nil {
 			return fmt.Errorf("cache plugin blob (%s/%s): %w", p.goos, p.goarch, err)
 		}

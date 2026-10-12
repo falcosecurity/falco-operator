@@ -92,11 +92,11 @@ func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *art
 	kinds := []struct {
 		ownerKind    string
 		cacheKind    Kind
-		artifactType artifact.Type
+		artifactType artifact.Kind
 	}{
-		{controllerhelper.KindRulesfile, KindRulesfile, artifact.TypeRulesfile},
-		{controllerhelper.KindConfig, KindConfig, artifact.TypeConfig},
-		{controllerhelper.KindPlugin, KindPlugin, artifact.TypePlugin},
+		{controllerhelper.KindRulesfile, KindRulesfile, artifact.KindRulesfile},
+		{controllerhelper.KindConfig, KindConfig, artifact.KindConfig},
+		{controllerhelper.KindPlugin, KindPlugin, artifact.KindPlugin},
 	}
 
 	liveNames := map[string]map[string]bool{}
@@ -125,8 +125,12 @@ func seedInstalledCacheFromDisk(ctx context.Context, mgr *Manager, nodeList *art
 		// Config ArtifactNode, and must never be treated as orphaned.
 		if kt.ownerKind == controllerhelper.KindConfig {
 			if files, ok := disk[pluginConfigFileName]; ok {
-				sharedName := filepath.Base(artifact.ArtifactPath(artifact.DefaultArtifactDirs(), pluginConfigFileName,
-					priority.MaxPriority, artifact.MediumInline, artifact.TypeConfig))
+				sharedPath, err := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), pluginConfigFileName,
+					priority.MaxPriority, artifact.MediumInline, artifact.KindConfig)
+				if err != nil {
+					return nil, err
+				}
+				sharedName := filepath.Base(sharedPath)
 				var ordinary []artifactv1alpha1.InstalledArtifact
 				for _, file := range files {
 					if filepath.Base(file.Path) == sharedName {

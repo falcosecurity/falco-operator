@@ -32,6 +32,10 @@ import (
 
 const snapshotFile = "index.json"
 
+// legacyArtifactTypes maps the artifact types older builds indexed entries under to the kind names used since.
+// Load renames them, so that a snapshot written before the change keeps its owners and reference counts.
+var legacyArtifactTypes = map[string]string{"plugin": "Plugin", "rulesfile": "Rulesfile"}
+
 const snapshotVersion = 1
 
 // DefaultEvictionGracePeriod is how long a dereferenced blob lingers on disk, still servable via
@@ -142,7 +146,11 @@ func (c *Cache) Load() error {
 		if !filepath.IsAbs(blobPath) {
 			blobPath = filepath.Join(c.cacheDir, blobPath)
 		}
-		index[indexKey{e.ArtifactType, e.Namespace, e.Name, e.PlatformKey}] = blobPath
+		artifactType := e.ArtifactType
+		if renamed, ok := legacyArtifactTypes[artifactType]; ok {
+			artifactType = renamed
+		}
+		index[indexKey{artifactType, e.Namespace, e.Name, e.PlatformKey}] = blobPath
 		refs[blobPath]++
 	}
 

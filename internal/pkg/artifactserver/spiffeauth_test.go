@@ -175,13 +175,13 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 	t.Run("each request is restricted to the certificate namespace", func(t *testing.T) {
 		const otherNamespace = "tenant-b"
 		const artifactName = "scope-test"
-		const pluginKind = "plugin"
+		const pluginKind = "Plugin"
 		const rootDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		require.NoError(t, fakeClient.Create(ctx, &instancev1alpha1.Falco{
 			ObjectMeta: metav1.ObjectMeta{Name: "other-falco", Namespace: otherNamespace},
 		}))
 		for _, namespace := range []string{"default", otherNamespace} {
-			for _, kind := range []string{pluginKind, "rulesfile"} {
+			for _, kind := range []string{pluginKind, "Rulesfile"} {
 				goos, goarch, platform := "", "", ""
 				if kind == pluginKind {
 					goos, goarch, platform = "linux", "amd64", "linux-amd64"
@@ -201,7 +201,7 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 		t.Cleanup(transport.CloseIdleConnections)
 		client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 
-		for _, kind := range []string{pluginKind, "rulesfile"} {
+		for _, kind := range []string{pluginKind, "Rulesfile"} {
 			t.Run(kind, func(t *testing.T) {
 				for _, tc := range []struct {
 					name, namespace, artifactName, query string
@@ -223,7 +223,7 @@ func TestServer_SPIFFEAuthorizer(t *testing.T) {
 						if name == "" {
 							name = artifactName
 						}
-						requestURL := "https://" + addr + "/v1/artifacts/" + kind + "s/" + tc.namespace + "/" + name + "?os=linux&arch=amd64" + tc.query
+						requestURL := "https://" + addr + artifact.ServerPath(artifact.Kind(kind)) + tc.namespace + "/" + name + "?os=linux&arch=amd64" + tc.query
 						req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, requestURL, http.NoBody)
 						require.NoError(t, err)
 						for name, value := range tc.headers {

@@ -56,7 +56,7 @@ func (m *Manager) StoreRulesfile(ctx context.Context, namespace, name string, ar
 	}
 	key := Key{Kind: KindRulesfile, Namespace: namespace, Name: name}
 	revision := rulesfileRevision{ContentHash: result.ContentHash, Metadata: metadata}
-	action, file, err := m.storeLocked(ctx, namespace, name, artifactPriority, artifact.TypeRulesfile, medium, result)
+	action, file, err := m.storeLocked(ctx, namespace, name, artifactPriority, artifact.KindRulesfile, medium, result)
 	if err != nil {
 		return action, file, err
 	}

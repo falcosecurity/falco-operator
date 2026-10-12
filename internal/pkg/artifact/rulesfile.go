@@ -52,7 +52,7 @@ func ResolveRulesfileSources(ctx context.Context, fetcher ConfigMapFetcher,
 	}
 	if rulesfile.Spec.ConfigMapRef != nil {
 		sources.ConfigMapName = rulesfile.Spec.ConfigMapRef.Name
-		result, err := fetcher.FetchConfigMap(ctx, rulesfile.Namespace, rulesfile.Spec.ConfigMapRef, TypeRulesfile)
+		result, err := fetcher.FetchConfigMap(ctx, rulesfile.Namespace, rulesfile.Spec.ConfigMapRef, KindRulesfile)
 		if err != nil {
 			return nil, fmt.Errorf("fetch ConfigMap %q: %w", sources.ConfigMapName, err)
 		}

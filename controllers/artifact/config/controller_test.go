@@ -63,7 +63,7 @@ func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, _ string) (artifact.FetchResult, error) {
 	if f.ociErr != nil {
 		return artifact.FetchResult{}, f.ociErr
 	}
@@ -84,7 +84,7 @@ func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact
 }
 
 func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Type,
+	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
 ) (artifact.FetchResult, error) {
 	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
 }
@@ -477,7 +477,7 @@ func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
 					nextMedium, nextContent = artifact.MediumConfigMap, testConfigData
 				}
 				require.NoError(t, cl.Update(ctx, config))
-				nextPath := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), config.Name, config.Spec.Priority, nextMedium, artifact.TypeConfig)
+				nextPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), config.Name, config.Spec.Priority, nextMedium, artifact.KindConfig)
 				removeErr := fmt.Errorf("injected stale config removal failure")
 				fs.RemoveErr = removeErr
 				for range 2 {
@@ -893,7 +893,7 @@ func TestEnsureConfig_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *testing.T
 	mockFS := fsfake.NewMockFileSystem()
 	r.store = node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 
-	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), testConfigName, 50, artifact.MediumInline, artifact.TypeConfig)
+	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), testConfigName, 50, artifact.MediumInline, artifact.KindConfig)
 	content := []byte(testConfigYAML)
 	hash := sha256hexForTest(content)
 	mockFS.Files[path] = content

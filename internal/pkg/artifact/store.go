@@ -30,7 +30,6 @@ import (
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/filesystem"
 	"github.com/falcosecurity/falco-operator/internal/pkg/mounts"
-	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
 // ArtifactDirs holds the on-disk directories where each artifact type is stored.
@@ -60,14 +59,14 @@ type ArtifactStore interface {
 	// current is the previously installed file (nil = nothing tracked for this medium).
 	// A non-nil File describes installed state, even on error after a priority move.
 	Store(ctx context.Context, current *File, name string, artifactPriority int32,
-		artifactType Type, medium Medium, result FetchResult) (StoreAction, *File, error)
+		kind Kind, medium Medium, result FetchResult) (StoreAction, *File, error)
 
 	// Remove deletes every path listed in installed from disk.
 	Remove(ctx context.Context, installed []artifactv1alpha1.InstalledArtifact) error
 
-	// ScanAll discovers every artifact file on disk for artifactType, grouped by artifact name,
+	// ScanAll discovers every artifact file on disk for kind, grouped by artifact name,
 	// by listing the type's directory and parsing each filename. See scan.go's doc comment.
-	ScanAll(ctx context.Context, artifactType Type) (map[string][]artifactv1alpha1.InstalledArtifact, error)
+	ScanAll(ctx context.Context, kind Kind) (map[string][]artifactv1alpha1.InstalledArtifact, error)
 
 	// Read returns the installed bytes at path, including not-found and I/O errors.
 	Read(ctx context.Context, path string) ([]byte, error)
@@ -90,7 +89,7 @@ func NewLocalStore() *LocalStore {
 // Store idempotently writes artifact content to the final on-disk path.
 // It uses a write-then-rename pattern so the file is never partially visible.
 func (s *LocalStore) Store(ctx context.Context, current *File, name string, artifactPriority int32,
-	artifactType Type, medium Medium, result FetchResult) (StoreAction, *File, error) {
+	kind Kind, medium Medium, result FetchResult) (StoreAction, *File, error) {
 	logger := log.FromContext(ctx)
 
 	// If status points to a file no longer on disk, treat as fresh install.
@@ -103,7 +102,10 @@ func (s *LocalStore) Store(ctx context.Context, current *File, name string, arti
 		}
 	}
 
-	newPath := ArtifactPath(s.Dirs, name, artifactPriority, medium, artifactType)
+	newPath, err := ArtifactPath(s.Dirs, name, artifactPriority, medium, kind)
+	if err != nil {
+		return StoreActionNone, nil, err
+	}
 
 	// A remembered hash identifies the intended content, not the file's current bytes.
 	// Only skip the write when that content is still present at the desired path.
@@ -202,40 +204,25 @@ func (s *LocalStore) Remove(ctx context.Context, installed []artifactv1alpha1.In
 	return nil
 }
 
-// ArtifactPath computes the on-disk path for an artifact.
-func ArtifactPath(dirs ArtifactDirs, name string, artifactPriority int32, medium Medium, artifactType Type) string {
-	switch artifactType {
-	case TypeRulesfile:
-		var sub int32
-		switch medium {
-		case MediumOCI:
-			sub = priority.OCISubPriority
-		case MediumInline:
-			sub = priority.InLineRulesSubPriority
-		case MediumConfigMap:
-			sub = priority.CMSubPriority
-		default:
-			sub = priority.MaxPriority
-		}
-		return filepath.Clean(filepath.Join(dirs.Rulesfile,
-			priority.NameFromPriorityAndSubPriority(artifactPriority, sub, fmt.Sprintf("%s-%s.yaml", name, medium))))
-	case TypePlugin:
-		return filepath.Clean(filepath.Join(dirs.Plugin, fmt.Sprintf("%s.so", name)))
-	case TypeConfig:
-		var sub int32
-		switch medium {
-		case MediumInline:
-			sub = priority.InLineRulesSubPriority
-		case MediumConfigMap:
-			sub = priority.CMSubPriority
-		default:
-			sub = priority.MaxPriority
-		}
-		return filepath.Clean(filepath.Join(dirs.Config,
-			priority.NameFromPriorityAndSubPriority(artifactPriority, sub, fmt.Sprintf("%s-%s.yaml", name, medium))))
-	default:
-		return priority.NameFromPriority(artifactPriority, name)
+// ArtifactPath computes the on-disk path for an artifact from its kind's registration: the
+// directory, the filename convention, and the sub-priority its medium loads at.
+//
+// Both ways of getting it wrong are errors: an unregistered kind has no directory to write into,
+// and a medium the kind does not accept has no load order, so any path returned for either would
+// be invented.
+func ArtifactPath(dirs ArtifactDirs, name string, artifactPriority int32, medium Medium, kind Kind) (string, error) {
+	info, err := InfoForKind(kind)
+	if err != nil {
+		return "", err
 	}
+	if !info.Accepts(medium) {
+		return "", fmt.Errorf("artifact kind %q cannot be installed from medium %q", info.Kind, medium)
+	}
+	base, err := info.FileName(name, medium, artifactPriority)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(filepath.Join(info.Dir(dirs), base)), nil
 }
 
 // FindInstalled returns a File copy for the given medium, or nil.

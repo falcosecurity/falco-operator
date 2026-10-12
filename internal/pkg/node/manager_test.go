@@ -50,7 +50,7 @@ func TestManager_ScanAllPassesThroughToUnderlyingStore(t *testing.T) {
 	_, _, err := m.StoreConfig(context.Background(), "", "myfile", 50, artifact.MediumInline, result)
 	require.NoError(t, err)
 
-	found, err := m.ScanAll(context.Background(), artifact.TypeConfig)
+	found, err := m.ScanAll(context.Background(), artifact.KindConfig)
 
 	require.NoError(t, err)
 	require.Len(t, found["myfile"], 1)

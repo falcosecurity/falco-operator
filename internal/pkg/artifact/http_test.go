@@ -102,7 +102,7 @@ func TestArtifactHTTPClient_DownloadTimeoutAndRetry(t *testing.T) {
 				// releases FetchOCI if the production timeout is accidentally removed.
 				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				result, err := fetcher.FetchOCI(ctx, "ns", "slow", TypeRulesfile, testFetchDigest)
+				result, err := fetcher.FetchOCI(ctx, "ns", "slow", KindRulesfile, testFetchDigest)
 				require.ErrorIs(t, err, context.DeadlineExceeded)
 				require.NoError(t, ctx.Err(), "the client, not the test watchdog, must cancel the request")
 				assert.Empty(t, result.Content, "partial response bytes must never be installable")
@@ -116,11 +116,11 @@ func TestArtifactHTTPClient_DownloadTimeoutAndRetry(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("server did not observe client cancellation")
 				}
-				result, err = fetcher.FetchOCI(ctx, "ns", "healthy", TypeRulesfile, testFetchDigest)
+				result, err = fetcher.FetchOCI(ctx, "ns", "healthy", KindRulesfile, testFetchDigest)
 				require.NoError(t, err, "a later request must succeed with the same client")
 				assert.Equal(t, "complete rules", string(result.Content))
 				stalled.Store(false)
-				result, err = fetcher.FetchOCI(ctx, "ns", "slow", TypeRulesfile, testFetchDigest)
+				result, err = fetcher.FetchOCI(ctx, "ns", "slow", KindRulesfile, testFetchDigest)
 				require.NoError(t, err, "the original artifact must recover without recreating the client")
 				assert.Equal(t, "complete rules", string(result.Content))
 			})

@@ -35,11 +35,6 @@ const (
 	InLineRulesSubPriority = 3
 )
 
-// NameFromPriority generates a name by combining the priority and original name.
-func NameFromPriority(priority int32, originalName string) string {
-	return fmt.Sprintf("%0*d-%s", 2, priority, originalName)
-}
-
 // NameFromPriorityAndSubPriority generates a name by combining the priority, sub-priority, and original name.
 // It takes priority, subPriority and originalName as inputs and returns a string formatted as "priority-subPriority-originalName".
 func NameFromPriorityAndSubPriority(priority, subPriority int32, originalName string) string {

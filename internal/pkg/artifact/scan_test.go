@@ -29,9 +29,9 @@ import (
 func TestLocalStore_ScanAll_Rulesfile_GroupsByName(t *testing.T) {
 	store, mockFS := newTestStore()
 
-	myRulesOCI := ArtifactPath(store.Dirs, "my-rules", 50, MediumOCI, TypeRulesfile)
-	myRulesInline := ArtifactPath(store.Dirs, "my-rules", 50, MediumInline, TypeRulesfile)
-	otherOCI := ArtifactPath(store.Dirs, "other", 20, MediumOCI, TypeRulesfile)
+	myRulesOCI := mustArtifactPath(t, store.Dirs, "my-rules", 50, MediumOCI, KindRulesfile)
+	myRulesInline := mustArtifactPath(t, store.Dirs, "my-rules", 50, MediumInline, KindRulesfile)
+	otherOCI := mustArtifactPath(t, store.Dirs, "other", 20, MediumOCI, KindRulesfile)
 
 	mockFS.Files[myRulesOCI] = []byte("oci content")
 	mockFS.Files[myRulesInline] = []byte("inline content")
@@ -39,7 +39,7 @@ func TestLocalStore_ScanAll_Rulesfile_GroupsByName(t *testing.T) {
 	// Unrelated file in the same directory must be ignored.
 	mockFS.Files[store.Dirs.Rulesfile+"/notes.txt"] = []byte("not an artifact")
 
-	found, err := store.ScanAll(context.Background(), TypeRulesfile)
+	found, err := store.ScanAll(context.Background(), KindRulesfile)
 	require.NoError(t, err)
 
 	require.Len(t, found["my-rules"], 2)
@@ -61,12 +61,12 @@ func TestLocalStore_ScanAll_Rulesfile_GroupsByName(t *testing.T) {
 func TestLocalStore_ScanAll_Plugin_OneFilePerName(t *testing.T) {
 	store, mockFS := newTestStore()
 
-	containerPath := ArtifactPath(store.Dirs, "container", 50, MediumOCI, TypePlugin)
+	containerPath := mustArtifactPath(t, store.Dirs, "container", 50, MediumOCI, KindPlugin)
 	mockFS.Files[containerPath] = []byte("binary")
 	// Unrelated file must be ignored.
 	mockFS.Files[store.Dirs.Plugin+"/README.md"] = []byte("not a plugin")
 
-	found, err := store.ScanAll(context.Background(), TypePlugin)
+	found, err := store.ScanAll(context.Background(), KindPlugin)
 	require.NoError(t, err)
 
 	require.Len(t, found, 1)
@@ -79,7 +79,7 @@ func TestLocalStore_ScanAll_Plugin_OneFilePerName(t *testing.T) {
 func TestLocalStore_ScanAll_NoFiles_ReturnsEmpty(t *testing.T) {
 	store, _ := newTestStore()
 
-	found, err := store.ScanAll(context.Background(), TypeConfig)
+	found, err := store.ScanAll(context.Background(), KindConfig)
 	require.NoError(t, err)
 	assert.Empty(t, found)
 }

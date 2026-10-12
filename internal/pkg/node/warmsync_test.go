@@ -821,7 +821,7 @@ func TestWarmSync_AssignmentScopePreservesOnlyLocalFiles(t *testing.T) {
 				WithIndex(&artifactv1alpha1.ArtifactNode{}, index.ArtifactNodeNodeName, index.ArtifactNodeNodeNameIndexer).Build()
 			fs := fsfake.NewMockFileSystem()
 			dirs := artifact.DefaultArtifactDirs()
-			path := artifact.ArtifactPath(dirs, "rules", 50, artifact.MediumInline, artifact.TypeRulesfile)
+			path := testutil.MustArtifactPath(t, dirs, "rules", 50, artifact.MediumInline, artifact.KindRulesfile)
 			fs.Files[path] = []byte("installed rules")
 			mgr := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: dirs}, compatfake.NewMockVersionsFetcher(nil))
 
@@ -843,7 +843,7 @@ type warmSyncPluginFetcher struct {
 	calls atomic.Int32
 }
 
-func (f *warmSyncPluginFetcher) FetchOCI(ctx context.Context, _, name string, _ artifact.Type, _ string) (artifact.FetchResult, error) {
+func (f *warmSyncPluginFetcher) FetchOCI(ctx context.Context, _, name string, _ artifact.Kind, _ string) (artifact.FetchResult, error) {
 	f.calls.Add(1)
 	return f.FetchInline(ctx, []byte(name+" binary"))
 }
@@ -1016,7 +1016,7 @@ func TestWarmSync_BeforeControllerStartup(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, original, contents, "A's write must retain B's exact installed configuration")
 			assert.NotZero(t, fetcher.calls.Load(), "the production controller must actually reconcile")
-			binary, err := os.ReadFile(artifact.ArtifactPath(store.Dirs, "b-pending", 50, artifact.MediumOCI, artifact.TypePlugin))
+			binary, err := os.ReadFile(testutil.MustArtifactPath(t, store.Dirs, "b-pending", 50, artifact.MediumOCI, artifact.KindPlugin))
 			require.NoError(t, err)
 			assert.Equal(t, "b-pending binary", string(binary))
 

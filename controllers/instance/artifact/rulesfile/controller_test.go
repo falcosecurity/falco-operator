@@ -239,11 +239,11 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			platforms := []string{""}
 			paths := make([]string, 0, len(platforms))
 			for _, platform := range platforms {
-				path := artifactcache.BlobPath(cacheDir, "rulesfile", "repo:tag", testRulesfileDigest, "", "")
+				path := artifactcache.BlobPath(cacheDir, "Rulesfile", "repo:tag", testRulesfileDigest, "", "")
 				require.NoError(t, r.cache.Store(path, []byte("retained content"), 0o644))
-				require.NoError(t, r.cache.Set("rulesfile", testutil.TestNamespace, testRulesfileName, platform, path))
+				require.NoError(t, r.cache.Set("Rulesfile", testutil.TestNamespace, testRulesfileName, platform, path))
 				if scenario == shared {
-					require.NoError(t, r.cache.Set("rulesfile", testutil.TestNamespace, "other", platform, path))
+					require.NoError(t, r.cache.Set("Rulesfile", testutil.TestNamespace, "other", platform, path))
 				}
 				paths = append(paths, path)
 			}
@@ -264,7 +264,7 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 			_, err := r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
 			if scenario == readError || scenario == persistError {
 				require.Error(t, err)
-				require.NotEmpty(t, r.cache.Owners("rulesfile"), "failed cleanup must retain the live index")
+				require.NotEmpty(t, r.cache.Owners("Rulesfile"), "failed cleanup must retain the live index")
 				for _, path := range paths {
 					require.FileExists(t, path)
 				}
@@ -275,18 +275,18 @@ func TestReconcile_MissingCacheOwner(t *testing.T) {
 				}
 				reloaded := artifactcache.NewCache(cacheDir)
 				require.NoError(t, reloaded.Load())
-				require.Contains(t, reloaded.Owners("rulesfile"), types.NamespacedName{
+				require.Contains(t, reloaded.Owners("Rulesfile"), types.NamespacedName{
 					Namespace: testutil.TestNamespace, Name: testRulesfileName,
 				}, "failed cleanup must retain the durable index")
 				_, err = r.Reconcile(t.Context(), testutil.Request(testRulesfileName))
 			}
 			require.NoError(t, err)
-			require.NotContains(t, r.cache.Owners("rulesfile"), types.NamespacedName{
+			require.NotContains(t, r.cache.Owners("Rulesfile"), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testRulesfileName,
 			})
 			reloaded := artifactcache.NewCache(cacheDir)
 			require.NoError(t, reloaded.Load())
-			require.NotContains(t, reloaded.Owners("rulesfile"), types.NamespacedName{
+			require.NotContains(t, reloaded.Owners("Rulesfile"), types.NamespacedName{
 				Namespace: testutil.TestNamespace, Name: testRulesfileName,
 			}, "successful cleanup must survive restart")
 			removed, err := r.cache.Sweep(t.Context())
@@ -351,13 +351,13 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 
 			seed := artifactcache.NewCache(t.TempDir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, seed.Load())
-			missingPath := artifactcache.BlobPath(seed.Dir(), "rulesfile", "deleted:tag", testRulesfileDigest, "", "")
-			sharedPath := artifactcache.BlobPath(seed.Dir(), "rulesfile", "shared:tag", testRulesfileDigest, "", "")
+			missingPath := artifactcache.BlobPath(seed.Dir(), "Rulesfile", "deleted:tag", testRulesfileDigest, "", "")
+			sharedPath := artifactcache.BlobPath(seed.Dir(), "Rulesfile", "shared:tag", testRulesfileDigest, "", "")
 			require.NoError(t, seed.Store(missingPath, []byte("deleted content"), 0o644))
 			require.NoError(t, seed.Store(sharedPath, []byte("surviving content"), 0o644))
-			require.NoError(t, seed.Set("rulesfile", tc.namespace, "missing", "", missingPath))
-			require.NoError(t, seed.Set("rulesfile", tc.namespace, "missing-shared", "", sharedPath))
-			require.NoError(t, seed.Set("rulesfile", tc.namespace, survivor.Name, "", sharedPath))
+			require.NoError(t, seed.Set("Rulesfile", tc.namespace, "missing", "", missingPath))
+			require.NoError(t, seed.Set("Rulesfile", tc.namespace, "missing-shared", "", sharedPath))
+			require.NoError(t, seed.Set("Rulesfile", tc.namespace, survivor.Name, "", sharedPath))
 			cache := artifactcache.NewCache(seed.Dir(), artifactcache.WithEvictionGracePeriod(0))
 			require.NoError(t, cache.Load())
 			r := NewRulesfileAggregatorReconciler(mgr.GetClient(), scheme, events.NewFakeRecorder(100), cache)
@@ -381,8 +381,8 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 			// Neither missing name has ever existed in this API server. Only the controller's
 			// persisted-owner source can enqueue it; this test never invokes Reconcile or a queue.
 			require.Eventually(t, func() bool {
-				_, missing := cache.Lookup("rulesfile", tc.namespace, "missing", "")
-				_, shared := cache.Lookup("rulesfile", tc.namespace, "missing-shared", "")
+				_, missing := cache.Lookup("Rulesfile", tc.namespace, "missing", "")
+				_, shared := cache.Lookup("Rulesfile", tc.namespace, "missing-shared", "")
 				return !missing && !shared
 			}, 10*time.Second, 20*time.Millisecond)
 			require.Eventually(t, func() bool {
@@ -393,12 +393,12 @@ func TestSetupWithManager_ReconcilesPersistedCacheOwners(t *testing.T) {
 				condition := apimeta.FindStatusCondition(current.Status.Conditions, commonv1alpha1.ConditionProgrammed.String())
 				return condition != nil && condition.Status == metav1.ConditionFalse
 			}, 10*time.Second, 20*time.Millisecond, "the existing owner must also reconcile through the synced informer")
-			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("rulesfile"))
+			require.Equal(t, []types.NamespacedName{{Namespace: tc.namespace, Name: survivor.Name}}, cache.Owners("Rulesfile"))
 			require.NoFileExists(t, missingPath)
 			require.FileExists(t, sharedPath)
 			reloaded := artifactcache.NewCache(seed.Dir())
 			require.NoError(t, reloaded.Load())
-			require.Equal(t, cache.Owners("rulesfile"), reloaded.Owners("rulesfile"))
+			require.Equal(t, cache.Owners("Rulesfile"), reloaded.Owners("Rulesfile"))
 
 			for _, name := range []string{"missing", "missing-shared", survivor.Name} {
 				response := httptest.NewRecorder()
@@ -991,13 +991,13 @@ func TestHandleDeletion_EvictsCacheEntry(t *testing.T) {
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
-	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	// No ArtifactNode objects are owned by this Rulesfile, so handleDeletion evicts the cache entry now.
 	err := r.handleDeletion(context.Background(), rf)
 	require.NoError(t, err)
 
-	_, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "")
+	_, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	assert.False(t, ok)
 	_, statErr := os.Stat(blobPath)
 	assert.True(t, os.IsNotExist(statErr), "exclusively-referenced blob must be removed from disk")
@@ -1012,16 +1012,16 @@ func TestHandleDeletion_SharedBlobSurvivesEviction(t *testing.T) {
 	// the refcount and leaves the file in place.
 	sharedBlob := filepath.Join(cacheDir, "blobs", "shared")
 	require.NoError(t, r.cache.Store(sharedBlob, []byte("y"), 0o644))
-	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", sharedBlob))
-	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, "other-rulesfile", "", sharedBlob))
+	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", sharedBlob))
+	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, "other-rulesfile", "", sharedBlob))
 
 	err := r.handleDeletion(context.Background(), rf)
 	require.NoError(t, err)
 
-	_, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "")
+	_, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	assert.False(t, ok)
 
-	got, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, "other-rulesfile", "")
+	got, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, "other-rulesfile", "")
 	require.True(t, ok, "other CR's entry for the shared blob must survive")
 	assert.Equal(t, sharedBlob, got)
 	_, statErr := os.Stat(sharedBlob)
@@ -1036,12 +1036,12 @@ func TestHandleDeletion_NodesRemaining_DoesNotEvictCache(t *testing.T) {
 
 	blobPath := filepath.Join(cacheDir, "blobs", "own")
 	require.NoError(t, r.cache.Store(blobPath, []byte("x"), 0o644))
-	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	err := r.handleDeletion(context.Background(), rf)
 	require.NoError(t, err)
 
-	got, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "")
+	got, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	require.True(t, ok, "cache entry must survive while a node object still exists")
 	assert.Equal(t, blobPath, got)
 }
@@ -2097,9 +2097,9 @@ func TestFetchAndCacheBinary_FastPath(t *testing.T) {
 
 	ref := artifact.ResolveReference(rf.Spec.OCIArtifact)
 	const digest = testRulesfileDigest
-	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.TypeRulesfile), ref, digest, "", "")
+	blobPath := artifactcache.BlobPath(cacheDir, string(artifact.KindRulesfile), ref, digest, "", "")
 	require.NoError(t, r.cache.Store(blobPath, []byte("rule content"), 0o644))
-	require.NoError(t, r.cache.Set(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
+	require.NoError(t, r.cache.Set(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "", blobPath))
 
 	rf.Status.ArtifactMeta = &commonv1alpha1.ArtifactMeta{Digest: digest}
 
@@ -2108,7 +2108,7 @@ func TestFetchAndCacheBinary_FastPath(t *testing.T) {
 	assert.Empty(t, mockPuller.ResolveDigestCalls)
 	assert.Empty(t, mockPuller.PullCalls)
 
-	idx, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "")
+	idx, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	require.True(t, ok)
 	assert.Equal(t, blobPath, idx)
 }
@@ -2132,7 +2132,7 @@ func TestFetchAndCacheBinary_SlowPath(t *testing.T) {
 
 	assert.Len(t, mockPuller.PullCalls, 1)
 
-	_, ok := r.cache.Lookup(string(artifact.TypeRulesfile), testutil.TestNamespace, testRulesfileName, "")
+	_, ok := r.cache.Lookup(string(artifact.KindRulesfile), testutil.TestNamespace, testRulesfileName, "")
 	require.True(t, ok)
 }
 
@@ -2192,7 +2192,7 @@ func TestReconcile_NewNodeKeepsResolvedRevision(t *testing.T) {
 				mockPuller.PullErr = fmt.Errorf("revision unavailable")
 				_, reconcileErr := r.Reconcile(ctx, testutil.Request(rf.Name))
 				require.ErrorContains(t, reconcileErr, "revision unavailable")
-				_, ok := r.cache.Lookup("rulesfile", rf.Namespace, rf.Name, "")
+				_, ok := r.cache.Lookup("Rulesfile", rf.Namespace, rf.Name, "")
 				require.False(t, ok)
 				mockPuller.PullErr = nil
 			}

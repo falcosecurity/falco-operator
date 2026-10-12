@@ -98,7 +98,7 @@ func (r *RulesfileAggregatorReconciler) Reconcile(ctx context.Context, req ctrl.
 	rulesfile := &artifactv1alpha1.Rulesfile{}
 	if err := r.Get(ctx, req.NamespacedName, rulesfile); err != nil {
 		if k8serrors.IsNotFound(err) && r.cache != nil {
-			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.TypeRulesfile), req.Namespace, req.Name)
+			return ctrl.Result{}, r.cache.RemoveAll(string(artifact.KindRulesfile), req.Namespace, req.Name)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
@@ -414,7 +414,7 @@ func (r *RulesfileAggregatorReconciler) handleDeletion(ctx context.Context, rule
 	// Evicts this CR's cache entry here, in the last reconcile before the finalizer is
 	// released and the object is removed from etcd.
 	if r.cache != nil {
-		if err := r.cache.RemoveAll(string(artifact.TypeRulesfile), rulesfile.Namespace, rulesfile.Name); err != nil {
+		if err := r.cache.RemoveAll(string(artifact.KindRulesfile), rulesfile.Namespace, rulesfile.Name); err != nil {
 			return fmt.Errorf("evict rulesfile cache entries: %w", err)
 		}
 	}
@@ -433,7 +433,7 @@ func (r *RulesfileAggregatorReconciler) SetupWithManager(mgr ctrl.Manager) error
 		// Queue their persisted owners too; workers wait for informer synchronization.
 		WatchesRawSource(source.Func(func(_ context.Context, queue workqueue.TypedRateLimitingInterface[reconcile.Request]) error {
 			if r.cache != nil {
-				for _, owner := range r.cache.Owners(string(artifact.TypeRulesfile)) {
+				for _, owner := range r.cache.Owners(string(artifact.KindRulesfile)) {
 					queue.Add(reconcile.Request{NamespacedName: owner})
 				}
 			}
@@ -496,7 +496,7 @@ func (r *RulesfileAggregatorReconciler) fetchAndCacheBlob(ctx context.Context, r
 		knownDigest = meta.Digest
 	}
 	logger.V(2).Info("Ensuring rulesfile blob is cached", "digest", knownDigest)
-	_, err := am.EnsureBlob(ctx, rulesfile.Name, rulesfile.Spec.OCIArtifact, artifact.TypeRulesfile, "", "", r.cache, knownDigest)
+	_, err := am.EnsureBlob(ctx, rulesfile.Name, rulesfile.Spec.OCIArtifact, artifact.KindRulesfile, "", "", r.cache, knownDigest)
 	if err != nil {
 		return fmt.Errorf("cache rulesfile blob: %w", err)
 	}

@@ -39,6 +39,7 @@ import (
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 // removeConfig removes plugin's entry, resolved via ResolveConfigName. Test-only: production
@@ -52,8 +53,9 @@ func (pc *pluginsConfig) isEmpty() bool {
 	return len(pc.Configs) == 0 && len(pc.LoadPlugins) == 0
 }
 
-func defaultLibraryPath(name string) string {
-	return artifact.ArtifactPath(artifact.DefaultArtifactDirs(), name, priority.DefaultPriority, artifact.MediumOCI, artifact.TypePlugin)
+func defaultLibraryPath(t *testing.T, name string) string {
+	t.Helper()
+	return testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), name, priority.DefaultPriority, artifact.MediumOCI, artifact.KindPlugin)
 }
 
 func TestManager_ObservationPreservesDesiredPluginConfig(t *testing.T) {
@@ -108,7 +110,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "json"},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("json")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "json")},
 			},
 			expectedLoad: []string{"json"},
 		},
@@ -124,7 +126,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("my-json-plugin")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "my-json-plugin")},
 			},
 			expectedLoad: []string{"json"},
 		},
@@ -162,7 +164,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "json"},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("json")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "json")},
 			},
 			expectedLoad: []string{"json"},
 		},
@@ -172,7 +174,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				Configs: []pluginConfig{
 					{
 						Name:        "json",
-						LibraryPath: defaultLibraryPath("json"),
+						LibraryPath: defaultLibraryPath(t, "json"),
 						InitConfig:  &initConfig{JSON: &apiextensionsv1.JSON{Raw: []byte(`{"sssURL": "https://initial.example.com"}`)}},
 					},
 				},
@@ -189,7 +191,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 			expectedConfigs: []pluginConfig{
 				{
 					Name:        "json",
-					LibraryPath: defaultLibraryPath("json"),
+					LibraryPath: defaultLibraryPath(t, "json"),
 					InitConfig:  &initConfig{JSON: &apiextensionsv1.JSON{Raw: []byte(`{"sssURL": "https://updated.example.com"}`)}},
 				},
 			},
@@ -198,7 +200,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 		{
 			name: "update existing config when openParams changes",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("json"), OpenParams: "old-params"}},
+				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "json"), OpenParams: "old-params"}},
 				LoadPlugins: []string{"json"},
 			},
 			plugin: &artifactv1alpha1.Plugin{
@@ -210,29 +212,29 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("json"), OpenParams: "new-params"},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "json"), OpenParams: "new-params"},
 			},
 			expectedLoad: []string{"json"},
 		},
 		{
 			name: "add second plugin preserves existing",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("json")}},
+				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "json")}},
 				LoadPlugins: []string{"json"},
 			},
 			plugin: &artifactv1alpha1.Plugin{
 				ObjectMeta: metav1.ObjectMeta{Name: "k8saudit"},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("json")},
-				{Name: "k8saudit", LibraryPath: defaultLibraryPath("k8saudit")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "json")},
+				{Name: "k8saudit", LibraryPath: defaultLibraryPath(t, "k8saudit")},
 			},
 			expectedLoad: []string{"json", "k8saudit"},
 		},
 		{
 			name: "loadPlugins uses config.Name not CR name",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "existing", LibraryPath: defaultLibraryPath("existing")}},
+				Configs:     []pluginConfig{{Name: "existing", LibraryPath: defaultLibraryPath(t, "existing")}},
 				LoadPlugins: []string{"existing"},
 			},
 			plugin: &artifactv1alpha1.Plugin{
@@ -244,8 +246,8 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "existing", LibraryPath: defaultLibraryPath("existing")},
-				{Name: "json", LibraryPath: defaultLibraryPath("my-json-cr")},
+				{Name: "existing", LibraryPath: defaultLibraryPath(t, "existing")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "my-json-cr")},
 			},
 			expectedLoad: []string{"existing", "json"},
 		},
@@ -261,7 +263,7 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 				},
 			},
 			expectedConfigs: []pluginConfig{
-				{Name: "json", LibraryPath: defaultLibraryPath("json")},
+				{Name: "json", LibraryPath: defaultLibraryPath(t, "json")},
 			},
 			expectedLoad: []string{"json"},
 		},
@@ -272,9 +274,9 @@ func TestPluginsConfig_AddConfig(t *testing.T) {
 			pc := tt.initial
 
 			if tt.callTwice {
-				pc.addConfig(artifact.DefaultArtifactDirs().Plugin, tt.plugin)
+				require.NoError(t, pc.addConfig(artifact.DefaultArtifactDirs().Plugin, tt.plugin))
 			}
-			pc.addConfig(artifact.DefaultArtifactDirs().Plugin, tt.plugin)
+			require.NoError(t, pc.addConfig(artifact.DefaultArtifactDirs().Plugin, tt.plugin))
 
 			assert.Equal(t, tt.expectedConfigs, pc.Configs)
 			assert.Equal(t, tt.expectedLoad, pc.LoadPlugins)
@@ -294,7 +296,7 @@ func TestPluginsConfig_RemoveConfig(t *testing.T) {
 		{
 			name: "remove plugin by CR name",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("json")}},
+				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "json")}},
 				LoadPlugins: []string{"json"},
 			},
 			plugin:          &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}},
@@ -305,7 +307,7 @@ func TestPluginsConfig_RemoveConfig(t *testing.T) {
 		{
 			name: "remove plugin when spec.config.name differs from CR name",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("my-json-plugin")}},
+				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "my-json-plugin")}},
 				LoadPlugins: []string{"json"},
 			},
 			plugin: &artifactv1alpha1.Plugin{
@@ -321,11 +323,11 @@ func TestPluginsConfig_RemoveConfig(t *testing.T) {
 		{
 			name: "remove non-existent plugin is a no-op",
 			initial: &pluginsConfig{
-				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("json")}},
+				Configs:     []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "json")}},
 				LoadPlugins: []string{"json"},
 			},
 			plugin:          &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "nonexistent"}},
-			expectedConfigs: []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath("json")}},
+			expectedConfigs: []pluginConfig{{Name: "json", LibraryPath: defaultLibraryPath(t, "json")}},
 			expectedLoad:    []string{"json"},
 			expectedEmpty:   false,
 		},
@@ -333,13 +335,13 @@ func TestPluginsConfig_RemoveConfig(t *testing.T) {
 			name: "remove one plugin preserves others",
 			initial: &pluginsConfig{
 				Configs: []pluginConfig{
-					{Name: "json", LibraryPath: defaultLibraryPath("json")},
-					{Name: "k8saudit", LibraryPath: defaultLibraryPath("k8saudit")},
+					{Name: "json", LibraryPath: defaultLibraryPath(t, "json")},
+					{Name: "k8saudit", LibraryPath: defaultLibraryPath(t, "k8saudit")},
 				},
 				LoadPlugins: []string{"json", "k8saudit"},
 			},
 			plugin:          &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "json"}},
-			expectedConfigs: []pluginConfig{{Name: "k8saudit", LibraryPath: defaultLibraryPath("k8saudit")}},
+			expectedConfigs: []pluginConfig{{Name: "k8saudit", LibraryPath: defaultLibraryPath(t, "k8saudit")}},
 			expectedLoad:    []string{"k8saudit"},
 			expectedEmpty:   false,
 		},
@@ -368,7 +370,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 
-		pc.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
+		require.NoError(t, pc.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin))
 		assert.Len(t, pc.Configs, 1)
 		assert.Equal(t, "json", pc.Configs[0].Name)
 		assert.Equal(t, []string{"json"}, pc.LoadPlugins)
@@ -425,7 +427,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 			},
 		}
 
-		pc.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin)
+		require.NoError(t, pc.addConfig(artifact.DefaultArtifactDirs().Plugin, plugin))
 		var initialConfig map[string]any
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &initialConfig))
 		assert.Equal(t, "https://initial.example.com", initialConfig["sssURL"])
@@ -438,7 +440,7 @@ func TestPluginsConfig_AddThenRemove_RoundTrip(t *testing.T) {
 				},
 			},
 		}
-		pc.addConfig(artifact.DefaultArtifactDirs().Plugin, pluginUpdated)
+		require.NoError(t, pc.addConfig(artifact.DefaultArtifactDirs().Plugin, pluginUpdated))
 		require.Len(t, pc.Configs, 1)
 		var updatedConfig map[string]any
 		require.NoError(t, json.Unmarshal(pc.Configs[0].InitConfig.Raw, &updatedConfig))
@@ -820,7 +822,7 @@ func TestManager_PluginConfigYAMLRoundTripPreservesNoOpAndOrder(t *testing.T) {
 	require.NotNil(t, file)
 	content := string(fs.Files[file.Path])
 	after := NewManager(store, versions)
-	disk, err := after.ScanAll(ctx, artifact.TypeConfig)
+	disk, err := after.ScanAll(ctx, artifact.KindConfig)
 	require.NoError(t, err)
 	after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
 	writes := len(fs.WriteCalls)
@@ -881,7 +883,7 @@ func TestManager_RestorePluginsConfig_UsesCurrentAliasesAndObservedSettings(t *t
 	}
 	after := NewManager(store, versions)
 	after.OnFalcoVersionsObserved(versions.Result)
-	disk, err := after.ScanAll(ctx, artifact.TypeConfig)
+	disk, err := after.ScanAll(ctx, artifact.KindConfig)
 	require.NoError(t, err)
 	after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
 
@@ -1172,10 +1174,10 @@ func TestManager_Remove_ProtectsSharedPluginConfig(t *testing.T) {
 			require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, plugin), &blocked)
 
 			after := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
-			disk, err := after.ScanAll(ctx, artifact.TypeConfig)
+			disk, err := after.ScanAll(ctx, artifact.KindConfig)
 			require.NoError(t, err)
 			after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
-			disk, err = after.ScanAll(ctx, artifact.TypeRulesfile)
+			disk, err = after.ScanAll(ctx, artifact.KindRulesfile)
 			require.NoError(t, err)
 			after.SeedInstalled(Key{Kind: KindRulesfile, Namespace: plugin.Namespace, Name: "rules"}, disk["rules"])
 			require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{plugin, unrelated}))
@@ -1198,7 +1200,7 @@ func TestManager_RemovePluginPreservesEquivalentLibraryPaths(t *testing.T) {
 			plugin := &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "a", UID: "uid-a"}}
 			content, err := fetcher.FetchInline(ctx, []byte("shared binary"))
 			require.NoError(t, err)
-			content.Perm = artifact.PermFor(artifact.TypePlugin)
+			content.Perm = testutil.MustPermFor(t, artifact.KindPlugin)
 			_, binary, err := before.StorePlugin(ctx, plugin, content)
 			require.NoError(t, err)
 			_, _, err = before.AddPluginConfig(ctx, plugin, fetcher)
@@ -1212,10 +1214,10 @@ func TestManager_RemovePluginPreservesEquivalentLibraryPaths(t *testing.T) {
 			require.NoError(t, before.RemovePluginConfig(ctx, fetcher, plugin))
 			key := KeyFromObj(KindPlugin, plugin)
 			after := NewManager(store, compatfake.NewMockVersionsFetcher(nil))
-			disk, err := after.ScanAll(ctx, artifact.TypePlugin)
+			disk, err := after.ScanAll(ctx, artifact.KindPlugin)
 			require.NoError(t, err)
 			after.SeedInstalled(key, disk[plugin.Name])
-			disk, err = after.ScanAll(ctx, artifact.TypeConfig)
+			disk, err = after.ScanAll(ctx, artifact.KindConfig)
 			require.NoError(t, err)
 			after.SeedInstalled(PluginConfigKey, disk[pluginConfigFileName])
 			require.NoError(t, after.restorePluginsConfig(ctx, []*artifactv1alpha1.Plugin{other}))

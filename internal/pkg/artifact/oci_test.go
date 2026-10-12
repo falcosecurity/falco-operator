@@ -92,15 +92,15 @@ func TestFetchOCIAuthSecret(t *testing.T) {
 func TestIsExpectedOCIArtifactType(t *testing.T) {
 	tests := []struct {
 		name     string
-		expected Type
+		expected Kind
 		actual   puller.ArtifactType
 		want     bool
 	}{
-		{name: "rulesfile matches", expected: TypeRulesfile, actual: puller.Rulesfile, want: true},
-		{name: "plugin matches", expected: TypePlugin, actual: puller.Plugin, want: true},
-		{name: "rulesfile rejects plugin", expected: TypeRulesfile, actual: puller.Plugin},
-		{name: "plugin rejects rulesfile", expected: TypePlugin, actual: puller.Rulesfile},
-		{name: "unsupported expected type", expected: TypeConfig, actual: puller.Rulesfile},
+		{name: "rulesfile matches", expected: KindRulesfile, actual: puller.Rulesfile, want: true},
+		{name: "plugin matches", expected: KindPlugin, actual: puller.Plugin, want: true},
+		{name: "rulesfile rejects plugin", expected: KindRulesfile, actual: puller.Plugin},
+		{name: "plugin rejects rulesfile", expected: KindPlugin, actual: puller.Rulesfile},
+		{name: "unsupported expected type", expected: KindConfig, actual: puller.Rulesfile},
 	}
 
 	for _, tt := range tests {

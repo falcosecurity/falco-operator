@@ -148,7 +148,7 @@ func newTestFetcher(cl client.Client) *testFetcher {
 	return &testFetcher{delegate: &artifact.Fetcher{K8sClient: cl}}
 }
 
-func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Type, expectedDigest string) (artifact.FetchResult, error) {
+func (f *testFetcher) FetchOCI(_ context.Context, _, _ string, _ artifact.Kind, expectedDigest string) (artifact.FetchResult, error) {
 	f.ociCallCount++
 	f.ociDigest = expectedDigest
 	if f.onFetchOCI != nil {
@@ -174,7 +174,7 @@ func (f *testFetcher) FetchInline(ctx context.Context, content []byte) (artifact
 }
 
 func (f *testFetcher) FetchConfigMap(
-	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Type,
+	ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType artifact.Kind,
 ) (artifact.FetchResult, error) {
 	f.configMapCallCount++
 	return f.delegate.FetchConfigMap(ctx, namespace, cmRef, artifactType)
@@ -415,7 +415,8 @@ func testConfigMapUpdate(t *testing.T, instanceFirst, installed, compatible bool
 	// The first sidecar reconcile only adds its finalizer to the assignment created above.
 	_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
 	require.NoError(t, err)
-	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority, artifact.MediumConfigMap, artifact.TypeRulesfile)
+	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority,
+		artifact.MediumConfigMap, artifact.KindRulesfile)
 	var previousContent []byte
 	if installed {
 		_, err = r.Reconcile(ctx, testutil.Request(artifactNode.Name))
@@ -565,10 +566,11 @@ func TestReconcile_ConfigMapSnapshot(t *testing.T) {
 			require.NoError(t, cl.Get(ctx, client.ObjectKeyFromObject(artifactNode), artifactNode))
 			if tt.wantWrite {
 				require.Equal(t, 1, fetcher.configMapCallCount, "install must consume the checked content without refetching")
-				installed, err := r.store.ScanAll(ctx, artifact.TypeRulesfile)
+				installed, err := r.store.ScanAll(ctx, artifact.KindRulesfile)
 				require.NoError(t, err)
 				require.Len(t, installed[parent.Name], 3)
-				path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority, artifact.MediumConfigMap, artifact.TypeRulesfile)
+				path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), parent.Name, parent.Spec.Priority,
+					artifact.MediumConfigMap, artifact.KindRulesfile)
 				require.Equal(t, []byte(content), fs.Files[path])
 				require.Equal(t, 1, fetcher.ociCallCount)
 				require.Equal(t, parent.Status.ArtifactMeta.Digest, fetcher.ociDigest, "floating tags must retain the resolved digest")
@@ -968,7 +970,7 @@ func TestReconcile_StaleSourceCleanupFailure(t *testing.T) {
 					}
 					setCurrentRulesfileMetadata(t, rf, cl)
 					require.NoError(t, cl.Update(ctx, rf))
-					nextPath := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), rf.Name, rf.Spec.Priority, nextMedium, artifact.TypeRulesfile)
+					nextPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), rf.Name, rf.Spec.Priority, nextMedium, artifact.KindRulesfile)
 					removeErr := fmt.Errorf("injected stale rulesfile removal failure")
 					fs.RemoveErr = removeErr
 					for range 2 {
@@ -1413,7 +1415,7 @@ func TestEnsureRulesfile(t *testing.T) {
 				if tt.writeErr != nil {
 					mockFS.WriteErrFor = make(map[string]error)
 					for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap} {
-						path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority, medium, artifact.TypeRulesfile)
+						path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority, medium, artifact.KindRulesfile)
 						mockFS.WriteErrFor[filepath.Join(filepath.Dir(path), ".tmp", filepath.Base(path)+".tmp")] = tt.writeErr
 					}
 				}
@@ -1461,12 +1463,12 @@ func TestEnsureRulesfile(t *testing.T) {
 				require.NotNil(t, ociEntry, "expected OCI entry in InstalledArtifacts")
 				assert.Equal(t, tt.rf.Status.ArtifactMeta.SpecHash, ociEntry.SpecHash, "OCI InstalledArtifact.SpecHash mismatch")
 				assert.Equal(t, tt.rf.Spec.Priority, ociEntry.Priority)
-				assert.Equal(t, artifact.ArtifactPath(artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority,
-					artifact.MediumOCI, artifact.TypeRulesfile), ociEntry.Path)
+				assert.Equal(t, testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.rf.Spec.Priority,
+					artifact.MediumOCI, artifact.KindRulesfile), ociEntry.Path)
 				assert.Equal(t, tt.rf.Status.ArtifactMeta.Digest, tf.ociDigest, "fetch must use the resolved digest")
 				if tt.preRf != nil && tt.preRf.Spec.Priority != tt.rf.Spec.Priority {
-					oldPath := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), tt.rf.Name, tt.preRf.Spec.Priority,
-						artifact.MediumOCI, artifact.TypeRulesfile)
+					oldPath := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), tt.rf.Name, tt.preRf.Spec.Priority,
+						artifact.MediumOCI, artifact.KindRulesfile)
 					assert.NotContains(t, mockFS.Files, oldPath, "priority move must not leave a second active file")
 					assert.Equal(t, tt.preRf.Status.ArtifactMeta.Digest, tt.rf.Status.ArtifactMeta.Digest)
 					assert.Equal(t, sha256hexForTest(mockFS.Files[ociEntry.Path]), ociEntry.ContentHash)
@@ -1474,7 +1476,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			}
 
 			if tt.wantFiles != nil {
-				installed, err := r.store.ScanAll(t.Context(), artifact.TypeRulesfile)
+				installed, err := r.store.ScanAll(t.Context(), artifact.KindRulesfile)
 				require.NoError(t, err)
 				require.Len(t, installed[tt.rf.Name], len(tt.wantFiles), "unexpected number of installed rulesfiles")
 				gotContents := make([]string, 0, len(installed[tt.rf.Name]))
@@ -1485,7 +1487,7 @@ func TestEnsureRulesfile(t *testing.T) {
 			}
 
 			if tt.wantDirEmpty {
-				installed, err := r.store.ScanAll(t.Context(), artifact.TypeRulesfile)
+				installed, err := r.store.ScanAll(t.Context(), artifact.KindRulesfile)
 				require.NoError(t, err)
 				assert.Empty(t, installed, "expected no installed rulesfiles after cleanup")
 			}
@@ -1549,7 +1551,7 @@ func TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *te
 
 	content := []byte("- rule: test\n  condition: true\n")
 	hash := sha256hexForTest(content)
-	path := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), testRulesfileName, 50, artifact.MediumOCI, artifact.TypeRulesfile)
+	path := testutil.MustArtifactPath(t, artifact.DefaultArtifactDirs(), testRulesfileName, 50, artifact.MediumOCI, artifact.KindRulesfile)
 
 	key := node.Key{Kind: node.KindRulesfile, Namespace: testutil.TestNamespace, Name: testRulesfileName}
 
@@ -1564,7 +1566,7 @@ func TestEnsureRulesfile_OCI_SyncsStatusFromCacheEvenWhenStatusStartsEmpty(t *te
 	}
 	setCurrentRulesfileMetadata(t, rf, nil)
 	_, _, err := r.store.StoreRulesfile(t.Context(), rf.Namespace, rf.Name, rf.Spec.Priority, artifact.MediumOCI,
-		artifact.FetchResult{Content: content, ContentHash: hash, Perm: artifact.PermFor(artifact.TypeRulesfile)}, rf.Status.ArtifactMeta, false)
+		artifact.FetchResult{Content: content, ContentHash: hash, Perm: testutil.MustPermFor(t, artifact.KindRulesfile)}, rf.Status.ArtifactMeta, false)
 	require.NoError(t, err)
 	r.store.UpdateInstalledSpecHash(key, artifact.MediumOCI, rf.Status.ArtifactMeta.SpecHash)
 	nodeObj := newTestNodeObj() // Status.InstalledArtifacts starts nil, unlike the cache.
@@ -2829,10 +2831,10 @@ func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
 			goos, goarch, platform := "", "", ""
 			oldDigest := digest.FromString("old OCI manifest").String()
 			newDigest := digest.FromString("new OCI manifest").String()
-			oldPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", "artifact:old", oldDigest, goos, goarch)
-			newPath := artifactcache.BlobPath(cache.Dir(), "rulesfile", "artifact:new", newDigest, goos, goarch)
+			oldPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", "artifact:old", oldDigest, goos, goarch)
+			newPath := artifactcache.BlobPath(cache.Dir(), "Rulesfile", "artifact:new", newDigest, goos, goarch)
 			require.NoError(t, cache.Store(oldPath, []byte("old artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("rulesfile", "default", "artifact", platform, oldPath))
+			require.NoError(t, cache.Set("Rulesfile", "default", "artifact", platform, oldPath))
 
 			srv := httptest.NewServer(artifactserver.New(cache).Handler())
 			defer srv.Close()
@@ -2881,7 +2883,7 @@ func TestEnsureRulesfile_WaitsForExpectedOCIDigest(t *testing.T) {
 
 			// Once the expected digest is available, the retry installs it and records its spec.
 			require.NoError(t, cache.Store(newPath, []byte("new artifact bytes"), 0o755))
-			require.NoError(t, cache.Set("rulesfile", "default", "artifact", platform, newPath))
+			require.NoError(t, cache.Set("Rulesfile", "default", "artifact", platform, newPath))
 			require.NoError(t, reconciler.ensureOCIRulesfile(ctx, parent, artifactNode, parent.Status.ArtifactMeta))
 			require.Len(t, artifactNode.Status.InstalledArtifacts, 1)
 			installed := artifactNode.Status.InstalledArtifacts[0]

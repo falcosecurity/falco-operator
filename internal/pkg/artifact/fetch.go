@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/opencontainers/go-digest"
@@ -84,12 +85,12 @@ type FetchResult struct {
 // The sidecar never touches the OCI registry directly; the server handles that.
 // Only content belonging to expectedDigest may be returned successfully.
 type OCIFetcher interface {
-	FetchOCI(ctx context.Context, namespace, name string, artifactType Type, expectedDigest string) (FetchResult, error)
+	FetchOCI(ctx context.Context, namespace, name string, kind Kind, expectedDigest string) (FetchResult, error)
 }
 
 // ConfigMapFetcher retrieves artifact content from a Kubernetes ConfigMap.
 type ConfigMapFetcher interface {
-	FetchConfigMap(ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType Type) (FetchResult, error)
+	FetchConfigMap(ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, kind Kind) (FetchResult, error)
 }
 
 // InlineFetcher materializes inline spec content into a FetchResult.
@@ -127,6 +128,13 @@ type Fetcher struct {
 	NodeName string
 }
 
+// ServerPath is the path under which the artifact server serves the artifacts of kind, followed by
+// {namespace}/{name}: /v1/artifacts/plugins/ for a Plugin. The client builds its requests from it
+// and the server registers its routes with it, so the two cannot drift apart.
+func ServerPath(kind Kind) string {
+	return "/v1/artifacts/" + strings.ToLower(string(kind)) + "s/"
+}
+
 // FetchOCI streams the pre-extracted artifact binary for (namespace, name, type) from the
 // central artifact server, computes a SHA-256 content hash, and returns a FetchResult. It makes
 // exactly one attempt, requiring the server to confirm expectedDigest. Missing metadata or
@@ -134,20 +142,17 @@ type Fetcher struct {
 // A transient failure is returned as a *RetryableError for the caller to requeue via
 // ctrl.Result{RequeueAfter: ...} (see RequeueDelay); a permanent failure (a non-503 error
 // status, or a request-build/body-read failure) is returned as a plain error.
-func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifactType Type, expectedDigest string) (FetchResult, error) {
-	var rawURL string
+func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, kind Kind, expectedDigest string) (FetchResult, error) {
+	info, err := InfoForKind(kind)
+	if err != nil || !info.Accepts(MediumOCI) {
+		return FetchResult{}, fmt.Errorf("artifact server does not serve %s artifacts", kind)
+	}
 	query := url.Values{"digest": {expectedDigest}}
-	switch artifactType {
-	case TypePlugin:
-		rawURL = fmt.Sprintf("%s/v1/artifacts/plugins/%s/%s", f.ServerURL, namespace, name)
+	if info.PlatformSpecific {
 		query.Set("os", runtime.GOOS)
 		query.Set("arch", runtime.GOARCH)
-	case TypeRulesfile:
-		rawURL = fmt.Sprintf("%s/v1/artifacts/rulesfiles/%s/%s",
-			f.ServerURL, namespace, name)
-	default:
-		return FetchResult{}, fmt.Errorf("artifact server does not support type %q", artifactType)
 	}
+	rawURL := f.ServerURL + ServerPath(kind) + namespace + "/" + name
 
 	if expectedDigest == "" {
 		return FetchResult{}, &RetryableError{Err: fmt.Errorf("OCI digest for %s/%s is not yet resolved", namespace, name)}
@@ -164,7 +169,11 @@ func (f *Fetcher) FetchOCI(ctx context.Context, namespace, name string, artifact
 	if err != nil && retryable {
 		return FetchResult{}, &RetryableError{Err: err, RetryAfter: retryAfter}
 	}
-	result.Perm = PermFor(artifactType)
+	perm, permErr := PermFor(kind)
+	if permErr != nil {
+		return FetchResult{}, permErr
+	}
+	result.Perm = perm
 	return result, err
 }
 
@@ -215,17 +224,13 @@ func (f *Fetcher) fetchOCIOnce(ctx context.Context, rawURL, namespace, name, exp
 	}, 0, false, nil
 }
 
-// FetchConfigMap fetches the content for artifactType from the referenced ConfigMap.
-func (f *Fetcher) FetchConfigMap(ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, artifactType Type) (FetchResult, error) {
-	var dataKey string
-	switch artifactType {
-	case TypeConfig:
-		dataKey = commonv1alpha1.ConfigMapConfigKey
-	case TypeRulesfile:
-		dataKey = commonv1alpha1.ConfigMapRulesKey
-	default:
-		return FetchResult{}, fmt.Errorf("unsupported artifact type for ConfigMap fetch: %q", artifactType)
+// FetchConfigMap fetches the content for kind from the referenced ConfigMap.
+func (f *Fetcher) FetchConfigMap(ctx context.Context, namespace string, cmRef *commonv1alpha1.ConfigMapRef, kind Kind) (FetchResult, error) {
+	info, err := InfoForKind(kind)
+	if err != nil || info.ConfigMapKey == "" {
+		return FetchResult{}, fmt.Errorf("a %s cannot be read from a ConfigMap", kind)
 	}
+	dataKey := info.ConfigMapKey
 
 	cm := &corev1.ConfigMap{}
 	if err := f.K8sClient.Get(ctx, client.ObjectKey{Name: cmRef.Name, Namespace: namespace}, cm); err != nil {
@@ -237,12 +242,17 @@ func (f *Fetcher) FetchConfigMap(ctx context.Context, namespace string, cmRef *c
 		return FetchResult{}, fmt.Errorf("ConfigMap %s/%s missing expected key %q", namespace, cmRef.Name, dataKey)
 	}
 
+	perm, err := PermFor(kind)
+	if err != nil {
+		return FetchResult{}, err
+	}
+
 	content := []byte(data)
 	h := sha256.Sum256(content)
 	return FetchResult{
 		Content:     content,
 		ContentHash: hex.EncodeToString(h[:]),
-		Perm:        PermFor(artifactType),
+		Perm:        perm,
 	}, nil
 }
 

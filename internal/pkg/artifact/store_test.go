@@ -66,17 +66,17 @@ func (f interruptedWriteFS) WriteFile(name string, data []byte, perm os.FileMode
 }
 
 func TestLocalStore_InterruptedWrite(t *testing.T) {
-	for _, artifactType := range []Type{TypeConfig, TypeRulesfile, TypePlugin} {
+	for _, artifactType := range []Kind{KindConfig, KindRulesfile, KindPlugin} {
 		for _, installed := range []bool{false, true} {
 			for _, partial := range []bool{false, true} {
 				t.Run(fmt.Sprintf("%s/installed=%t/partial=%t", artifactType, installed, partial), func(t *testing.T) {
 					dir := t.TempDir()
 					store := &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: ArtifactDirs{Config: dir, Rulesfile: dir, Plugin: dir}}
 					medium := MediumInline
-					if artifactType == TypePlugin {
+					if artifactType == KindPlugin {
 						medium = MediumOCI
 					}
-					old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: PermFor(artifactType)}
+					old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: mustPermFor(t, artifactType)}
 					updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: old.Perm}
 					reference := filepath.Join(t.TempDir(), "permissions")
 					require.NoError(t, os.WriteFile(reference, old.Content, old.Perm))
@@ -93,7 +93,7 @@ func TestLocalStore_InterruptedWrite(t *testing.T) {
 						_, _, _ = store.Store(t.Context(), current, "test", 50, artifactType, medium, updated)
 					})
 
-					finalPath := ArtifactPath(store.Dirs, "test", 50, medium, artifactType)
+					finalPath := mustArtifactPath(t, store.Dirs, "test", 50, medium, artifactType)
 					stagedPath := filepath.Join(dir, ".tmp", filepath.Base(finalPath)+".tmp")
 					staged, err := os.ReadFile(stagedPath)
 					require.NoError(t, err)
@@ -147,17 +147,17 @@ func TestLocalStore_InterruptedWrite(t *testing.T) {
 func TestLocalStore_RemoveAfterInterruptedWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
-		artifactType Type
+		artifactType Kind
 		medium       Medium
 	}{
-		{name: "configuration", artifactType: TypeConfig, medium: MediumInline},
-		{name: "rulesfile", artifactType: TypeRulesfile, medium: MediumInline},
-		{name: "plugin", artifactType: TypePlugin, medium: MediumOCI},
+		{name: "configuration", artifactType: KindConfig, medium: MediumInline},
+		{name: "rulesfile", artifactType: KindRulesfile, medium: MediumInline},
+		{name: "plugin", artifactType: KindPlugin, medium: MediumOCI},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			store := &LocalStore{FS: filesystem.NewOSFileSystem(), Dirs: ArtifactDirs{Config: dir, Rulesfile: dir, Plugin: dir}}
-			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: PermFor(tc.artifactType)}
+			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: mustPermFor(t, tc.artifactType)}
 			_, current, err := store.Store(t.Context(), nil, "test", 50, tc.artifactType, tc.medium, old)
 			require.NoError(t, err)
 			store.FS = interruptedWriteFS{FileSystem: store.FS}
@@ -193,18 +193,18 @@ func TestLocalStore_StagingDirectoryFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store, mockFS := newTestStore()
 			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: 0o644}
-			_, current, err := store.Store(t.Context(), nil, "test", 50, TypeConfig, MediumInline, old)
+			_, current, err := store.Store(t.Context(), nil, "test", 50, KindConfig, MediumInline, old)
 			require.NoError(t, err)
 			mockFS.MkdirErr = assert.AnError
 			updated := FetchResult{Content: []byte("new"), ContentHash: sha256hex([]byte("new")), Perm: old.Perm}
-			action, file, err := store.Store(t.Context(), current, "test", tc.priority, TypeConfig, MediumInline, updated)
+			action, file, err := store.Store(t.Context(), current, "test", tc.priority, KindConfig, MediumInline, updated)
 			require.ErrorIs(t, err, assert.AnError)
 			assert.Equal(t, StoreActionNone, action)
 			assert.Nil(t, file)
 			assert.Equal(t, old.Content, mockFS.Files[current.Path])
 			assert.Len(t, mockFS.Files, 1)
 			mockFS.MkdirErr = nil
-			_, file, err = store.Store(t.Context(), current, "test", tc.priority, TypeConfig, MediumInline, updated)
+			_, file, err = store.Store(t.Context(), current, "test", tc.priority, KindConfig, MediumInline, updated)
 			require.NoError(t, err)
 			require.NotNil(t, file)
 			if tc.priority != current.Priority {
@@ -253,15 +253,15 @@ func TestLocalStore_Store_PriorityChange(t *testing.T) {
 
 	oldPriority := int32(50)
 	newPriority := int32(10)
-	oldPath := ArtifactPath(store.Dirs, "test", oldPriority, MediumOCI, TypeRulesfile)
-	newPath := ArtifactPath(store.Dirs, "test", newPriority, MediumOCI, TypeRulesfile)
+	oldPath := mustArtifactPath(t, store.Dirs, "test", oldPriority, MediumOCI, KindRulesfile)
+	newPath := mustArtifactPath(t, store.Dirs, "test", newPriority, MediumOCI, KindRulesfile)
 	require.NotEqual(t, oldPath, newPath)
 
 	mockFS.Files[oldPath] = content
 
 	current := &File{Path: oldPath, Medium: MediumOCI, Priority: oldPriority, ContentHash: hash}
 
-	action, newFile, err := store.Store(context.Background(), current, "test", newPriority, TypeRulesfile, MediumOCI, FetchResult{
+	action, newFile, err := store.Store(context.Background(), current, "test", newPriority, KindRulesfile, MediumOCI, FetchResult{
 		Content:     content,
 		ContentHash: hash,
 		Perm:        0o644,
@@ -289,15 +289,15 @@ func TestLocalStore_Store_ContentAndPriorityChangeTogether(t *testing.T) {
 
 	oldPriority := int32(50)
 	newPriority := int32(20)
-	oldPath := ArtifactPath(store.Dirs, "test", oldPriority, MediumOCI, TypeRulesfile)
-	newPath := ArtifactPath(store.Dirs, "test", newPriority, MediumOCI, TypeRulesfile)
+	oldPath := mustArtifactPath(t, store.Dirs, "test", oldPriority, MediumOCI, KindRulesfile)
+	newPath := mustArtifactPath(t, store.Dirs, "test", newPriority, MediumOCI, KindRulesfile)
 	require.NotEqual(t, oldPath, newPath)
 
 	mockFS.Files[oldPath] = oldContent
 
 	current := &File{Path: oldPath, Medium: MediumOCI, Priority: oldPriority, ContentHash: oldHash}
 
-	action, newFile, err := store.Store(context.Background(), current, "test", newPriority, TypeRulesfile, MediumOCI, FetchResult{
+	action, newFile, err := store.Store(context.Background(), current, "test", newPriority, KindRulesfile, MediumOCI, FetchResult{
 		Content:     newContent,
 		ContentHash: newHash,
 		Perm:        0o644,
@@ -315,7 +315,7 @@ func TestLocalStore_Store_ContentAndPriorityChangeTogether(t *testing.T) {
 }
 
 func TestLocalStore_Store_PriorityChangeDoesNotLeaveOldPath(t *testing.T) {
-	for _, artifactType := range []Type{TypeRulesfile, TypeConfig} {
+	for _, artifactType := range []Kind{KindRulesfile, KindConfig} {
 		t.Run(string(artifactType), func(t *testing.T) {
 			store, mockFS := newTestStore()
 			old := FetchResult{Content: []byte("old"), ContentHash: sha256hex([]byte("old")), Perm: 0o644}
@@ -336,13 +336,13 @@ func TestLocalStore_Store_PriorityChangeDoesNotLeaveOldPath(t *testing.T) {
 
 func TestLocalStore_StoreRepairsTrackedContent(t *testing.T) {
 	for _, source := range []struct {
-		artifactType Type
+		artifactType Kind
 		medium       Medium
-	}{{TypePlugin, MediumOCI}, {TypeConfig, MediumInline}, {TypeRulesfile, MediumConfigMap}} {
+	}{{KindPlugin, MediumOCI}, {KindConfig, MediumInline}, {KindRulesfile, MediumConfigMap}} {
 		for _, state := range []string{"intact", "corrupt", "missing", "unreadable"} {
 			t.Run(string(source.artifactType)+"/"+state, func(t *testing.T) {
 				store, mockFS := newTestStore()
-				result := FetchResult{Content: []byte("expected"), ContentHash: sha256hex([]byte("expected")), Perm: PermFor(source.artifactType)}
+				result := FetchResult{Content: []byte("expected"), ContentHash: sha256hex([]byte("expected")), Perm: mustPermFor(t, source.artifactType)}
 				_, current, err := store.Store(t.Context(), nil, "artifact", 10, source.artifactType, source.medium, result)
 				require.NoError(t, err)
 				switch state {

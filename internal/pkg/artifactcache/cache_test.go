@@ -40,7 +40,7 @@ func TestBlobPath(t *testing.T) {
 		{
 			name:         "platform-specific artifact includes os/arch suffix",
 			cacheDir:     "cache",
-			artifactType: "plugin",
+			artifactType: "Plugin",
 			ref:          "ghcr.io/falcosecurity/plugins/json:0.7.0",
 			digest:       "sha256:abcdef",
 			goos:         "linux",
@@ -51,7 +51,7 @@ func TestBlobPath(t *testing.T) {
 		{
 			name:         "platform-agnostic artifact has no os/arch suffix",
 			cacheDir:     "cache",
-			artifactType: "rulesfile",
+			artifactType: "Rulesfile",
 			ref:          "ghcr.io/falcosecurity/rules/default:1.0.0",
 			digest:       "sha256:123456",
 			want: filepath.Join("cache", "blobs", "rulesfile",
