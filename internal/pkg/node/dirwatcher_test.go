@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -33,7 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 // threeAlike returns ArtifactDirs where all three paths point to the same temp dir.
@@ -44,7 +44,7 @@ func threeAlike(dir string) artifact.ArtifactDirs {
 // startDirWatcher creates a DirWatcher for dirs, starts it in a background goroutine, and returns cancel.
 func startDirWatcher(t *testing.T, dirs artifact.ArtifactDirs, falcoURL string, calls *atomic.Int32) context.CancelFunc {
 	t.Helper()
-	dw, err := nodeartifacts.NewDirWatcher(dirs, falcoURL, func() { calls.Add(1) })
+	dw, err := node.NewDirWatcher(dirs, falcoURL, func() { calls.Add(1) })
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -100,7 +100,7 @@ func TestNewDirWatcher(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			dw, err := nodeartifacts.NewDirWatcher(tc.dirs(t), "", func() {})
+			dw, err := node.NewDirWatcher(tc.dirs(t), "", func() {})
 			if tc.wantErr {
 				require.Error(t, err)
 				if tc.errContains != "" {
@@ -115,7 +115,7 @@ func TestNewDirWatcher(t *testing.T) {
 }
 
 func TestDirWatcher_NeedLeaderElection(t *testing.T) {
-	dw, err := nodeartifacts.NewDirWatcher(threeAlike(t.TempDir()), "", func() {})
+	dw, err := node.NewDirWatcher(threeAlike(t.TempDir()), "", func() {})
 	require.NoError(t, err)
 	assert.False(t, dw.NeedLeaderElection())
 }
@@ -164,7 +164,7 @@ func TestDirWatcher_Events(t *testing.T) {
 			name: "stops on context cancel and returns nil",
 			fn: func(t *testing.T) {
 				dir := t.TempDir()
-				dw, err := nodeartifacts.NewDirWatcher(threeAlike(dir), "", func() {})
+				dw, err := node.NewDirWatcher(threeAlike(dir), "", func() {})
 				require.NoError(t, err)
 				ctx, cancel := context.WithCancel(context.Background())
 				errCh := make(chan error, 1)
@@ -189,7 +189,7 @@ func TestDirWatcher_StartupReload(t *testing.T) {
 	srv := falcoVersionsSrvWith("", `{"plugin_versions":{"external":"1.0"}}`)
 	defer srv.Close()
 	var calls atomic.Int32
-	dw, err := nodeartifacts.NewDirWatcher(threeAlike(t.TempDir()), srv.URL, func() { calls.Add(1) })
+	dw, err := node.NewDirWatcher(threeAlike(t.TempDir()), srv.URL, func() { calls.Add(1) })
 	require.NoError(t, err)
 	dw.WithVerifyInterval(20 * time.Millisecond)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -205,7 +205,7 @@ func TestDirWatcher_StartupReload(t *testing.T) {
 func TestDirWatcher_Verify(t *testing.T) {
 	startVerifying := func(t *testing.T, dirs artifact.ArtifactDirs, srv *httptest.Server, calls *atomic.Int32) context.CancelFunc {
 		t.Helper()
-		dw, err := nodeartifacts.NewDirWatcher(dirs, srv.URL, func() { calls.Add(1) })
+		dw, err := node.NewDirWatcher(dirs, srv.URL, func() { calls.Add(1) })
 		require.NoError(t, err)
 		dw.WithVerifyInterval(50 * time.Millisecond)
 		ctx, cancel := context.WithCancel(context.Background())

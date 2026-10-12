@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -31,7 +31,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 const (
@@ -39,7 +39,7 @@ const (
 	mutatedMetadataValue = "mutated"
 )
 
-func installTestRulesfile(t *testing.T, m *nodeartifacts.Manager, key nodeartifacts.Key,
+func installTestRulesfile(t *testing.T, m *node.Manager, key node.Key,
 	dependencies []commonv1alpha1.ArtifactMetaDependency,
 ) {
 	t.Helper()
@@ -55,7 +55,7 @@ func TestManager_StoreRulesfile_ReplacesDependencies(t *testing.T) {
 	fetcher := &artifact.Fetcher{}
 	_, _, err := m.AddPluginConfig(context.Background(), testPlugin("container"), fetcher)
 	require.NoError(t, err)
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
 	require.Error(t, m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container")),
@@ -70,7 +70,7 @@ func TestManager_StoreRulesfile_PreservesOtherSourcesAndFailedWrites(t *testing.
 		t.Run(failure, func(t *testing.T) {
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
-			m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 			_, _, addErr := m.AddPluginConfig(ctx, testPlugin("container"), &artifact.Fetcher{})
 			require.NoError(t, addErr)
 			m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
@@ -79,7 +79,7 @@ func TestManager_StoreRulesfile_PreservesOtherSourcesAndFailedWrites(t *testing.
 			require.NoError(t, err)
 			newContent, err := fetcher.FetchInline(ctx, []byte("new rules"))
 			require.NoError(t, err)
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+			key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 			metadata := &commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}}
 			for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap} {
 				_, _, err := m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, medium, oldContent, metadata, true)
@@ -102,9 +102,9 @@ func TestManager_StoreRulesfile_PreservesOtherSourcesAndFailedWrites(t *testing.
 			intact, err := m.Verify(ctx, oldInline)
 			require.NoError(t, err)
 			require.True(t, intact)
-			var blocked *nodeartifacts.BlockedError
+			var blocked *node.BlockedError
 			require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked)
-			assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy, "report the CR once, even when two sources still require the plugin")
+			assert.Equal(t, []node.Key{key}, blocked.BlockedBy, "report the CR once, even when two sources still require the plugin")
 
 			_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumInline, newContent, &commonv1alpha1.ArtifactMeta{}, true)
 			require.NoError(t, err)
@@ -132,7 +132,7 @@ func TestManager_StoreRulesfile_ChecksAndOwnsDependencies(t *testing.T) {
 	}
 	content, err := (&artifact.Fetcher{}).FetchInline(ctx, []byte("rules"))
 	require.NoError(t, err)
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 	requires := []commonv1alpha1.ArtifactMetaDependency{{
 		Name: "container", Version: "1.0.0",
 		Alternatives: []commonv1alpha1.ArtifactMetaDependencyVariant{{Name: "container-alt", Version: "1.0.0"}},
@@ -142,7 +142,7 @@ func TestManager_StoreRulesfile_ChecksAndOwnsDependencies(t *testing.T) {
 		&commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{}}}, true)
 	require.Error(t, err, "an empty dependency is invalid")
 	_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content, metadata, true)
-	var dependencyErr *nodeartifacts.DependencyError
+	var dependencyErr *node.DependencyError
 	require.ErrorAs(t, err, &dependencyErr)
 	assert.Nil(t, m.FindInstalled(key, artifact.MediumOCI), "failed check must not install a file")
 
@@ -150,7 +150,7 @@ func TestManager_StoreRulesfile_ChecksAndOwnsDependencies(t *testing.T) {
 	_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content, metadata, true)
 	require.NoError(t, err)
 	requires[0].Name = mutatedMetadataValue
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(ctx, &artifact.Fetcher{}, testPlugin("container")), &blocked,
 		"mutating the caller's input must not change the installed dependencies")
 	requires[0].Alternatives[0].Version = "2.0.0"
@@ -176,7 +176,7 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				ctx := t.Context()
 				fs := fsfake.NewMockFileSystem()
 				store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-				m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+				m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 				_, _, addErr := m.AddPluginConfig(ctx, testPlugin("container"), &artifact.Fetcher{})
 				require.NoError(t, addErr)
 				m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
@@ -185,7 +185,7 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				require.NoError(t, err)
 				newContent, err := fetcher.FetchInline(ctx, []byte("new rules"))
 				require.NoError(t, err)
-				key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+				key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 				_, oldFile, err := m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, oldContent,
 					&commonv1alpha1.ArtifactMeta{Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}}, true)
 				require.NoError(t, err)
@@ -219,7 +219,7 @@ func TestManager_StoreRulesfile_PriorityFailureKeepsInstalledState(t *testing.T)
 				disk, err := m.ScanAll(ctx, artifact.TypeRulesfile)
 				require.NoError(t, err)
 				require.Len(t, disk[key.Name], 1, "there must never be two active revisions of one source")
-				var blocked *nodeartifacts.BlockedError
+				var blocked *node.BlockedError
 				require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked)
 
 				if recovery == "retry" {
@@ -245,13 +245,13 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				ctx := t.Context()
 				fs := fsfake.NewMockFileSystem()
 				store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-				m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+				m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 				fetcher := &artifact.Fetcher{}
 				for _, name := range []string{"container", "json", "unrelated"} {
 					_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
 					require.NoError(t, err)
 				}
-				key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+				key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 				oldContent, err := fetcher.FetchInline(ctx, []byte("old rules"))
 				require.NoError(t, err)
 				_, oldFile, err := m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, oldContent,
@@ -289,9 +289,9 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				assert.NotContains(t, fs.Files, duplicates[0], "cleanup removed one duplicate before failing")
 				assert.Equal(t, oldContent.Content, fs.Files[duplicates[1]])
 				for _, name := range []string{"container", "json"} {
-					var blocked *nodeartifacts.BlockedError
+					var blocked *node.BlockedError
 					require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin(name)), &blocked)
-					assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+					assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
 				}
 				require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("unrelated")))
 
@@ -302,7 +302,7 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 20, artifact.MediumOCI, failedContent, &commonv1alpha1.ArtifactMeta{}, false)
 				require.ErrorIs(t, err, ioErr)
 				for _, name := range []string{"container", "json"} {
-					var blocked *nodeartifacts.BlockedError
+					var blocked *node.BlockedError
 					require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin(name)), &blocked)
 				}
 				fs.WriteErrFor, fs.RemoveErrFor = nil, nil
@@ -319,7 +319,7 @@ func TestManager_StoreRulesfile_DuplicateCleanupFailurePreservesDependencies(t *
 				assert.Equal(t, content.Content, fs.Files[file.Path])
 				require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")),
 					"successful cleanup must release only the old revision")
-				var blocked *nodeartifacts.BlockedError
+				var blocked *node.BlockedError
 				require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("json")), &blocked)
 				require.NoError(t, m.Remove(ctx, key))
 				require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("json")))
@@ -335,7 +335,7 @@ func TestManager_SyncRulesfileDependencies_PreservesOtherSources(t *testing.T) {
 	require.NoError(t, addErr)
 	content, err := (&artifact.Fetcher{}).FetchInline(ctx, []byte("rules"))
 	require.NoError(t, err)
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 	metadata := &commonv1alpha1.ArtifactMeta{Digest: digest.FromString("installed").String(), Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}}}
 	m.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcherWithPlugins(map[string]string{"container": "1.0.0"}).Result)
 	for _, medium := range []artifact.Medium{artifact.MediumOCI, artifact.MediumInline} {
@@ -343,11 +343,11 @@ func TestManager_SyncRulesfileDependencies_PreservesOtherSources(t *testing.T) {
 		require.NoError(t, err)
 	}
 	missing := &commonv1alpha1.ArtifactMeta{Digest: metadata.Digest, Dependencies: []commonv1alpha1.ArtifactMetaDependency{{Name: "missing", Version: "1.0.0"}}}
-	var dependencyErr *nodeartifacts.DependencyError
+	var dependencyErr *node.DependencyError
 	synced, err := m.SyncRulesfileDependencies(ctx, key, artifact.MediumOCI, missing, true)
 	require.ErrorAs(t, err, &dependencyErr)
 	assert.False(t, synced)
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(ctx, &artifact.Fetcher{}, testPlugin("container")), &blocked)
 	synced, err = m.SyncRulesfileDependencies(ctx, key, artifact.MediumOCI, &commonv1alpha1.ArtifactMeta{Digest: metadata.Digest}, true)
 	require.NoError(t, err)
@@ -366,10 +366,10 @@ func TestManager_StoreRulesfile_MissingMetadata(t *testing.T) {
 				ctx := t.Context()
 				fs := fsfake.NewMockFileSystem()
 				store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-				m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+				m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 				_, _, addErr := m.AddPluginConfig(ctx, testPlugin("unrelated"), &artifact.Fetcher{})
 				require.NoError(t, addErr)
-				key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+				key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 				content, err := (&artifact.Fetcher{}).FetchInline(ctx, []byte("rules"))
 				require.NoError(t, err)
 				if existing {
@@ -411,7 +411,7 @@ func TestManager_StoreRulesfile_UnknownMetadataPreservesKnownDependenciesForSame
 				_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
 				require.NoError(t, err)
 			}
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+			key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 			content, err := fetcher.FetchInline(ctx, []byte("installed rules"))
 			require.NoError(t, err)
 			_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content,
@@ -422,10 +422,10 @@ func TestManager_StoreRulesfile_UnknownMetadataPreservesKnownDependenciesForSame
 
 			require.NoError(t, err)
 			assert.Equal(t, artifact.StoreActionUnchanged, action)
-			var blocked *nodeartifacts.BlockedError
+			var blocked *node.BlockedError
 			require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked,
 				"known dependencies for unchanged bytes must survive missing metadata")
-			assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+			assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
 			require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("unrelated")),
 				"retaining known dependencies must not invent other dependencies")
 
@@ -456,10 +456,10 @@ func TestManager_SyncRulesfileDependencies_RequiresVerifiedIdentity(t *testing.T
 			ctx := t.Context()
 			fs := fsfake.NewMockFileSystem()
 			store := &artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}
-			m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 			_, _, addErr := m.AddPluginConfig(ctx, testPlugin("container"), &artifact.Fetcher{})
 			require.NoError(t, addErr)
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+			key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 			content, err := (&artifact.Fetcher{}).FetchInline(ctx, []byte("rules"))
 			require.NoError(t, err)
 			medium := artifact.MediumOCI
@@ -510,7 +510,7 @@ func TestManager_SyncRulesfileDependencies_RequiresVerifiedIdentity(t *testing.T
 			assert.Equal(t, before, m.GetInstalled(key), "fallback must not replace installed files")
 			assert.Len(t, fs.WriteCalls, writes)
 			if installed != nil && metadata != nil {
-				var blocked *nodeartifacts.BlockedError
+				var blocked *node.BlockedError
 				require.ErrorAs(t, m.RemovePluginConfig(ctx, &artifact.Fetcher{}, testPlugin("container")), &blocked,
 					"fallback must preserve the known installed dependency")
 			} else {
@@ -527,7 +527,7 @@ func TestManager_RulesfileMetadata_IsOwned(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			ctx := t.Context()
 			store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
-			m := nodeartifacts.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
+			m := node.NewManager(store, compatfake.NewMockVersionsFetcher(nil))
 			fetcher := &artifact.Fetcher{}
 			for _, name := range []string{"container", "container-alt"} {
 				_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
@@ -541,7 +541,7 @@ func TestManager_RulesfileMetadata_IsOwned(t *testing.T) {
 			}
 			content, err := (&artifact.Fetcher{}).FetchInline(ctx, []byte("rules"))
 			require.NoError(t, err)
-			key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+			key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 			_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content, metadata, false)
 			require.NoError(t, err)
 			if operation == "sync" {
@@ -565,7 +565,7 @@ func TestManager_RulesfileMetadata_IsOwned(t *testing.T) {
 			m.OnFalcoVersionsObserved(versions)
 			require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")),
 				"the copied alternative must remain compatible")
-			var blocked *nodeartifacts.BlockedError
+			var blocked *node.BlockedError
 			require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container-alt")), &blocked)
 			expected.Dependencies = nil
 			synced, err := m.SyncRulesfileDependencies(ctx, key, artifact.MediumOCI, expected, true)
@@ -579,15 +579,15 @@ func TestManager_RulesfileMetadata_IsOwned(t *testing.T) {
 func TestManager_RemoveIfInstalled_ClearsDependenciesWhenFileIsMissing(t *testing.T) {
 	ctx := t.Context()
 	fs := fsfake.NewMockFileSystem()
-	m := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	m := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	_, _, addErr := m.AddPluginConfig(ctx, testPlugin("container"), &artifact.Fetcher{})
 	require.NoError(t, addErr)
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 	installTestRulesfile(t, m, key, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "1.0.0"}})
 	installed := m.FindInstalled(key, artifact.MediumOCI)
 	require.NotNil(t, installed)
 	require.NoError(t, fs.Remove(installed.Path))
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(ctx, &artifact.Fetcher{}, testPlugin("container")), &blocked)
 	_, removed, err := m.RemoveIfInstalled(ctx, key, artifact.MediumOCI)
 	require.NoError(t, err)
@@ -623,24 +623,24 @@ func TestManager_StoreRulesfile_ConcurrentPluginRemoval(t *testing.T) {
 		close(start)
 		storeErr, removeErr := <-stored, <-removed
 		if storeErr == nil {
-			var blocked *nodeartifacts.BlockedError
+			var blocked *node.BlockedError
 			require.ErrorAs(t, removeErr, &blocked, "installed rules must protect their provider")
 		} else {
-			var dependencyErr *nodeartifacts.DependencyError
+			var dependencyErr *node.DependencyError
 			require.ErrorAs(t, storeErr, &dependencyErr)
 			require.NoError(t, removeErr, "removal won: installation must be rejected")
-			assert.Nil(t, m.FindInstalled(nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}, artifact.MediumOCI))
+			assert.Nil(t, m.FindInstalled(node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}, artifact.MediumOCI))
 		}
 	}
 }
 
 func TestManager_StoreRepairsCorruptionWithoutChangingInstalledIdentity(t *testing.T) {
 	fs := fsfake.NewMockFileSystem()
-	manager := nodeartifacts.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
+	manager := node.NewManager(&artifact.LocalStore{FS: fs, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil))
 	fetcher := &artifact.Fetcher{}
 	result, err := fetcher.FetchInline(t.Context(), []byte("expected rules"))
 	require.NoError(t, err)
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "test", Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "test", Name: "rules"}
 	_, file, err := manager.StoreRulesfile(t.Context(), key.Namespace, key.Name, 10, artifact.MediumOCI, result, &commonv1alpha1.ArtifactMeta{}, true)
 	require.NoError(t, err)
 	manager.UpdateInstalledSpecHash(key, artifact.MediumOCI, "pinned-revision")

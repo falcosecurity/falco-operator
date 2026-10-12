@@ -48,7 +48,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 const (
@@ -70,7 +70,7 @@ func NewRulesfileReconciler(
 	nodeName, namespace string,
 	enforceRequirements bool,
 	fetcher artifact.ArtifactFetcher,
-	nodeManager *nodeartifacts.Manager,
+	nodeManager *node.Manager,
 ) *RulesfileReconciler {
 	return &RulesfileReconciler{
 		Client:              cl,
@@ -90,7 +90,7 @@ type RulesfileReconciler struct {
 	Scheme              *runtime.Scheme
 	recorder            events.EventRecorder
 	fetcher             artifact.ArtifactFetcher
-	store               *nodeartifacts.Manager
+	store               *node.Manager
 	nodeName            string
 	namespace           string
 	enforceRequirements bool
@@ -133,7 +133,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Programmed is derived here as a gateway: True only when all other conditions are True.
 	// In advise mode DependenciesSatisfied is excluded from the gate; it's advisory only.
 	defer func() {
-		key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+		key := node.KeyFromObj(node.KindRulesfile, rulesfile)
 		r.store.SyncAllInstalledStatus(key,
 			[]artifact.Medium{artifact.MediumOCI, artifact.MediumInline, artifact.MediumConfigMap},
 			&nodeObj.Status.InstalledArtifacts)
@@ -199,7 +199,7 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		// False. Without this they are absent, which lets another node's True status win in
 		// AggregateConditions and makes the Rulesfile-level status show e.g.
 		// OCIArtifactProgrammed=True even when DependenciesSatisfied=False.
-		if len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) == 0 {
+		if len(r.store.GetInstalled(node.KeyFromObj(node.KindRulesfile, rulesfile))) == 0 {
 			reason, msg := artifact.DependenciesNotSatisfiedReasonFromCondition(nodeObj.Status.Conditions)
 			gen := rulesfile.GetGeneration()
 			if rulesfile.Spec.OCIArtifact != nil {
@@ -226,8 +226,8 @@ func (r *RulesfileReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// instead of returning a reconcile error, avoiding tying up the worker for controller-runtime's
 	// own retry backoff.
 	if err := r.ensureRulesfile(ctx, rulesfile, nodeObj, sources, metadata); err != nil {
-		if dependencyErr, ok := errors.AsType[*nodeartifacts.DependencyError](err); ok {
-			installed := len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) > 0
+		if dependencyErr, ok := errors.AsType[*node.DependencyError](err); ok {
+			installed := len(r.store.GetInstalled(node.KeyFromObj(node.KindRulesfile, rulesfile))) > 0
 			_, reason, message := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, installed, dependencyErr.Error())
 			apimeta.SetStatusCondition(&nodeObj.Status.Conditions, common.NewDependenciesSatisfiedCondition(
 				metav1.ConditionFalse, reason, message, rulesfile.Generation,
@@ -263,7 +263,7 @@ func (r *RulesfileReconciler) handleDeletion(ctx context.Context, nodeObj *artif
 	}
 	// OwnerReferences never carry a namespace (they're always same-namespace by k8s convention);
 	// nodeObj's own namespace is the rulesfile's.
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: nodeObj.Namespace, Name: rulesfileName}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: nodeObj.Namespace, Name: rulesfileName}
 
 	if err := r.store.Remove(ctx, key); err != nil {
 		logger.Error(err, "unable to remove installed rulesfile artifacts from disk")
@@ -318,7 +318,7 @@ func verifiedRulesfileMetadata(rulesfile *artifactv1alpha1.Rulesfile, sources *a
 }
 
 // SetupWithManager registers the controller with the Manager.
-// versionEvents is the channel produced by nodeartifacts.Manager; a GenericEvent on this
+// versionEvents is the channel produced by node.Manager; a GenericEvent on this
 // channel causes all RulesfileNodes on this node to be re-enqueued so they re-evaluate
 // their plugin/engine dependencies against the updated Falco capability set.
 func (r *RulesfileReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
@@ -503,7 +503,7 @@ func (r *RulesfileReconciler) cleanupStaleMedium(
 		return nil
 	}
 	logger := log.FromContext(ctx)
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	key := node.KeyFromObj(node.KindRulesfile, rulesfile)
 	path, removed, err := r.store.RemoveIfInstalled(ctx, key, medium)
 	if err != nil {
 		logger.Error(err, "unable to remove stale rulesfile", "medium", medium)
@@ -541,7 +541,7 @@ func (r *RulesfileReconciler) ensureOCIRulesfile(
 	if artifact.ArtifactMetaCacheHit(rulesfile.Status.ArtifactMeta, parentSpecHash) {
 		expectedDigest = rulesfile.Status.ArtifactMeta.Digest
 	}
-	key := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	key := node.KeyFromObj(node.KindRulesfile, rulesfile)
 	current := r.store.FindInstalled(key, artifact.MediumOCI)
 
 	// Spec equality alone cannot identify the resolved revision of a floating tag.
@@ -632,7 +632,7 @@ func (r *RulesfileReconciler) ensureInlineRulesfile(
 			return err
 		}
 		r.store.SyncInstalledStatus(
-			nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
+			node.KeyFromObj(node.KindRulesfile, rulesfile),
 			artifact.MediumInline, &nodeObj.Status.InstalledArtifacts,
 		)
 		artifact.RecordStoreEvent(r.recorder, rulesfile, inlineAction, artifact.MediumInline)
@@ -688,7 +688,7 @@ func (r *RulesfileReconciler) ensureConfigMapRulesfile(
 		return err
 	}
 	r.store.SyncInstalledStatus(
-		nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile),
+		node.KeyFromObj(node.KindRulesfile, rulesfile),
 		artifact.MediumConfigMap, &nodeObj.Status.InstalledArtifacts,
 	)
 	artifact.RecordStoreEvent(r.recorder, rulesfile, cmAction, artifact.MediumConfigMap)
@@ -751,7 +751,7 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 		if r.enforceRequirements {
 			baseMsg := "artifact metadata declares no requirements; installation blocked in enforce mode"
 			reason, msg := artifact.ReasonDependenciesUnknown, baseMsg
-			if len(r.store.GetInstalled(nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile))) > 0 {
+			if len(r.store.GetInstalled(node.KeyFromObj(node.KindRulesfile, rulesfile))) > 0 {
 				reason = artifact.ReasonDependenciesNotSatisfiedUpdateRejected
 				msg = baseMsg + artifact.MessageSuffixUpdateRejected
 			}
@@ -800,7 +800,7 @@ func (r *RulesfileReconciler) enforceRulesfileCompatibility(
 	if len(unsatisfied) > 0 {
 		baseMsg := strings.Join(unsatisfied, "; ")
 		logger.Info("Rulesfile plugin dependencies not satisfied", "count", len(unsatisfied), "unsatisfied", unsatisfied)
-		rfKey := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+		rfKey := node.KeyFromObj(node.KindRulesfile, rulesfile)
 		alreadyInstalled := len(r.store.GetInstalled(rfKey)) > 0
 		skip, reason, msg := artifact.DependenciesNotSatisfiedOutcome(r.enforceRequirements, alreadyInstalled, baseMsg)
 		artifact.RecordWarning(r.recorder, rulesfile, reason, msg)
@@ -829,7 +829,7 @@ func (r *RulesfileReconciler) checkEngineRequirement(
 	gen int64,
 ) (skip, satisfied bool, err error) {
 	logger := log.FromContext(ctx)
-	rfKey := nodeartifacts.KeyFromObj(nodeartifacts.KindRulesfile, rulesfile)
+	rfKey := node.KeyFromObj(node.KindRulesfile, rulesfile)
 	alreadyInstalled := len(r.store.GetInstalled(rfKey)) > 0
 	provided, found, ok, semverErr := r.store.CheckRequirement(name, requiredVersion)
 	if semverErr != nil {

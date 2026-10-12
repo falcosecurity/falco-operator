@@ -26,7 +26,7 @@ spec:
          node running Falco refuses to remove the plugin's config/binary (and
          therefore its own ArtifactNode finalizer) because the Rulesfile still
          structurally depends on it: tracked authoritatively in-memory by that
-         node's nodeartifacts.Manager, not by any status field on the Plugin CR.
+         node's node.Manager, not by any status field on the Plugin CR.
          That keeps the ArtifactNode around, which in turn keeps the Plugin's own
          artifact.falcosecurity.dev/node-objects-in-use finalizer in place. The
          block is also surfaced as a DeletionBlocked=True condition on the Plugin,

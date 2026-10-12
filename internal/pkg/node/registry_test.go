@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package nodeartifacts_test
+package node_test
 
 import (
 	"context"
@@ -26,7 +26,7 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
 func TestManager_PluginRemovalUsesOnlyKnownRulesfileDependencies(t *testing.T) {
@@ -37,7 +37,7 @@ func TestManager_PluginRemovalUsesOnlyKnownRulesfileDependencies(t *testing.T) {
 		_, _, err := m.AddPluginConfig(ctx, testPlugin(name), fetcher)
 		require.NoError(t, err)
 	}
-	key := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Namespace: "ns", Name: "rules"}
+	key := node.Key{Kind: node.KindRulesfile, Namespace: "ns", Name: "rules"}
 	content, err := fetcher.FetchInline(ctx, []byte("rules"))
 	require.NoError(t, err)
 	_, _, err = m.StoreRulesfile(ctx, key.Namespace, key.Name, 50, artifact.MediumOCI, content, nil, false)
@@ -48,10 +48,10 @@ func TestManager_PluginRemovalUsesOnlyKnownRulesfileDependencies(t *testing.T) {
 
 	require.NoError(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("unrelated")),
 		"an unknown source must not block an unrelated plugin")
-	var blocked *nodeartifacts.BlockedError
+	var blocked *node.BlockedError
 	require.ErrorAs(t, m.RemovePluginConfig(ctx, fetcher, testPlugin("container")), &blocked,
 		"the other source's known dependency must remain protected")
-	assert.Equal(t, []nodeartifacts.Key{key}, blocked.BlockedBy)
+	assert.Equal(t, []node.Key{key}, blocked.BlockedBy)
 	_, removed, err := m.RemoveIfInstalled(ctx, key, artifact.MediumInline)
 	require.NoError(t, err)
 	require.True(t, removed)
@@ -325,7 +325,7 @@ func TestManager_OnFalcoVersionsObserved_PreservesExistingKeyUpdatesVersion(t *t
 	assert.True(t, found)
 	assert.Equal(t, "0.7.1", provided)
 
-	rfKey := nodeartifacts.Key{Kind: nodeartifacts.KindRulesfile, Name: "my-rulesfile"}
+	rfKey := node.Key{Kind: node.KindRulesfile, Name: "my-rulesfile"}
 	installTestRulesfile(t, m, rfKey, []commonv1alpha1.ArtifactMetaDependency{{Name: "container", Version: "0.4.0"}})
 	err = m.RemovePluginConfig(context.Background(), fetcher, testPlugin("container"))
 	require.Error(t, err, "the PluginConfigKey-registered entry must still be tracked for removal-blocking after a version observation merged into it")

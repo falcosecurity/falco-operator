@@ -37,7 +37,7 @@ import (
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
@@ -64,7 +64,7 @@ func newIntegrationReconciler() *RulesfileReconciler {
 		Scheme:    k8sClient.Scheme(),
 		recorder:  events.NewFakeRecorder(100),
 		fetcher:   &artifact.Fetcher{K8sClient: k8sClient},
-		store:     nodeartifacts.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
+		store:     node.NewManager(&artifact.LocalStore{FS: mockFS, Dirs: artifact.DefaultArtifactDirs()}, compatfake.NewMockVersionsFetcher(nil)),
 		nodeName:  testutil.TestNodeName,
 		namespace: testutil.TestNamespace,
 	}

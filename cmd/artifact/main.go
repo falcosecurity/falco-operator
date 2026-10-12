@@ -49,7 +49,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/envutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/logging"
-	"github.com/falcosecurity/falco-operator/internal/pkg/nodeartifacts"
+	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/pkg/tlsutil"
 	"github.com/falcosecurity/falco-operator/internal/pkg/version"
 )
@@ -99,7 +99,7 @@ func main() {
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
 	flag.StringVar(&falcoBaseURL, "falco-url", compat.DefaultBaseURL,
 		"Base URL for the Falco REST API used to verify plugin compatibility")
-	flag.DurationVar(&falcoReloadCooldown, "falco-reload-cooldown", nodeartifacts.DefaultReloadCooldown,
+	flag.DurationVar(&falcoReloadCooldown, "falco-reload-cooldown", node.DefaultReloadCooldown,
 		"Minimum pause after SIGHUP before checking Falco's HTTP endpoint or sending another signal. "+
 			"Must be positive. Reloads are best effort; this delay does not guarantee reload completion.")
 	flag.BoolVar(&enforceRequirements, "enforce-requirements", true,
@@ -305,7 +305,7 @@ func main() {
 
 	// falcoFetcher is shared by nodeManager (post-install refresh) and versionsWatcher (periodic
 	// refresh); both call the same Falco /versions endpoint on different triggers. See
-	// nodeartifacts.Manager's doc comment.
+	// node.Manager's doc comment.
 	falcoFetcher := compat.NewHTTPVersionsFetcher(falcoBaseURL)
 
 	// nodeManager coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below,
@@ -314,10 +314,10 @@ func main() {
 	// require a live HTTP call. WarmSync observes installed files and current assignments using
 	// the synced manager cache, before any reconcilers start. Dependency metadata is rebuilt during
 	// reconciliation, without restoring historical state from disk or ArtifactNode status.
-	nodeManager := nodeartifacts.NewManager(artifact.NewLocalStore(), falcoFetcher)
+	nodeManager := node.NewManager(artifact.NewLocalStore(), falcoFetcher)
 	nodeManager.OnFalcoVersionsObserved(initialFalcoVersions) // seeds the cache from the fetch above
 	mgr, err = controllerhelper.WithStartup(mgr, func(ctx context.Context) error {
-		if err := nodeartifacts.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
+		if err := node.WarmSync(ctx, mgr.GetClient(), nodeManager, namespace, nodeName); err != nil {
 			return err
 		}
 		setupLog.Info("Node artifact manager observed installed files and current plugin assignments")
@@ -328,13 +328,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	reloadCoordinator := nodeartifacts.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
+	reloadCoordinator := node.NewReloadCoordinator(falcoBaseURL).WithCooldown(falcoReloadCooldown)
 	if err := mgr.Add(reloadCoordinator); err != nil {
 		setupLog.Error(err, "unable to add reload coordinator to manager")
 		os.Exit(1)
 	}
 
-	dirWatcher, err := nodeartifacts.NewDirWatcher(artifact.DefaultArtifactDirs(), falcoBaseURL, reloadCoordinator.NotifyWrite)
+	dirWatcher, err := node.NewDirWatcher(artifact.DefaultArtifactDirs(), falcoBaseURL, reloadCoordinator.NotifyWrite)
 	if err != nil {
 		setupLog.Error(err, "unable to create Falco dir watcher")
 		os.Exit(1)
