@@ -14,5 +14,5 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package testutil provides shared test helpers for controller tests.
+// Package testutil provides the helpers shared by the tests of the controllers and of the internal packages.
 package testutil
