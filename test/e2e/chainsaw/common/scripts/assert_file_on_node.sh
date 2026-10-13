@@ -29,10 +29,19 @@ for ATTEMPT in $(seq 1 "$MAX_RETRIES"); do
     continue
   fi
 
-  # Explicit output distinguishes a missing file from a failed exec.
-  if ! FILE_EXISTS=$(kubectl exec -n "$NAMESPACE" "$POD" -c falco -- \
-      sh -c 'if [ -e "$1" ]; then printf true; else printf false; fi' sh "$DIR/$EXPECTED_FILE" 2>&1); then
-    LAST_ERROR="kubectl exec failed: $FILE_EXISTS"
+  # Explicit output distinguishes a missing file from a failed exec. The falco container is tried first; when it
+  # is down (a rules file Falco rejects makes it crash-loop), the netshoot container is, where the Falco of the
+  # test mounts the artifact directories too (see _step_templates/apply-assert-falco.yaml).
+  FILE_EXISTS=""
+  for CONTAINER in falco netshoot; do
+    if FILE_EXISTS=$(kubectl exec -n "$NAMESPACE" "$POD" -c "$CONTAINER" -- \
+        sh -c 'if [ -e "$1" ]; then printf true; else printf false; fi' sh "$DIR/$EXPECTED_FILE" 2>&1); then
+      break
+    fi
+    LAST_ERROR="kubectl exec in $CONTAINER failed: $FILE_EXISTS"
+    FILE_EXISTS=""
+  done
+  if [ -z "$FILE_EXISTS" ]; then
     sleep "$RETRY_DELAY"
     continue
   fi
