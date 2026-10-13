@@ -1,0 +1,314 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-recreated-while-rulesfile-requires
+spec:
+  description: |
+    A Plugin deleted and created again under the same name, while its sidecar is running and a Rulesfile on the
+    node still requires it, is taken over by its new incarnation.
+
+    The sidecar removes what a previous incarnation installed before installing the new one. Here that removal
+    is refused, since the rules need the plugin, and it would be refused for as long as they do: waiting for it
+    would keep the new Plugin from ever being installed, and its status at Pending with no reason. The new
+    incarnation takes over the binary and the configuration entry that are there instead.
+
+    The state is reached by deleting the Plugin with its finalizer stripped, as a forced deletion does, and
+    applying it again.
+
+    Scenarios:
+    1. The rules and the container plugin they require are installed, and Falco loads the plugin.
+    2. The Plugin has a new uid. The ArtifactNode reports it Programmed under that uid, with no DeletionBlocked,
+       the Plugin is Programmed, and the binary, the configuration entry and the rules never left the node.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-takeover-test
+    - name: rulesfile_name
+      value: plugin-takeover-rules
+    - name: plugin_name
+      value: container
+    - name: plugin_config_path
+      value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+    - name: oci_file
+      value: 50-01-plugin-takeover-rules-oci.yaml
+    - name: test_name
+      value: plugin-recreated-while-rulesfile-requires
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: |
+        The Falco distribution rules, which require the container plugin.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Install-container-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Assert-plugin-loaded-and-rules-installed"
+      try:
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+
+    - name: "Step 05: Recreate-the-plugin-and-assert-the-new-incarnation-took-over"
+      description: |
+        The Plugin goes with its finalizer stripped, so nothing waits for the node, and comes back with a new
+        uid. The entry then names the uid the spec names and is Programmed, and stays so: on a build that waits
+        for the removal, the entry keeps the old uid and a DeletionBlocked condition, and the Plugin stays
+        Pending.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/get_resource_uid.sh
+            check:
+              (json_parse($stdout).status): success
+            outputs:
+              - name: old_uid
+                value: (json_parse($stdout).uid)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+            content: bash ../../common/scripts/force_delete_resource.sh
+            check:
+              (json_parse($stdout).status): success
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                ociArtifact:
+                  image:
+                    repository: falco-test/plugin-container
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RESOURCE
+                value: plugins.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($plugin_name)
+              - name: OLD_UID
+                value: ($old_uid)
+            content: bash ../../common/scripts/wait_for_resource_uid_changed.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              (status.artifacts[?kind == 'Plugin' && name == $plugin_name].uid == spec.artifacts[?kind == 'Plugin' && name == $plugin_name].uid): true
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name].uid != [$old_uid]): true
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - sleep:
+            duration: 15s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              (status.artifacts[?kind == 'Plugin' && name == $plugin_name].uid == spec.artifacts[?kind == 'Plugin' && name == $plugin_name].uid): true
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name].uid != [$old_uid]): true
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 06: Assert-the-rules-never-left"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Delete-the-rulesfile"
+      description: |
+        The cleanup deletes the Plugin first, which the rules would block until it timed out.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

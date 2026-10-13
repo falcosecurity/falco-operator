@@ -60,6 +60,15 @@ spec:
                 (length(artifacts[?kind == 'Config'])): 10
               status:
                 (length(artifacts[?kind == 'Config' && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`])): 10
+        # The assert above is satisfied by one node. Every node must hold all ten.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: CHECK
+                value: >-
+                  ([.spec.artifacts[]? | select(.kind == "Config")] | length) == 10 and ([.status.artifacts[]? | select(.kind == "Config") | select(any(.conditions[]?; .type == "Programmed" and .status == "True"))] | length) == 10
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
 
     - name: "Step 04: Assert-a-file-on-filesystem"
       use:
@@ -100,6 +109,14 @@ spec:
               reason: BulkRemoval
               regarding:
                 kind: ArtifactNode
+        # Each sidecar warns, on its own node's ArtifactNode: one Event does not show that the others did.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: REASON
+                value: BulkRemoval
+            content: bash ../../common/scripts/assert_event_on_every_artifactnode.sh
 
     - name: "Step 07: Assert-everything-is-back"
       try:
@@ -113,6 +130,15 @@ spec:
                 (length(artifacts[?kind == 'Config'])): 10
               status:
                 (length(artifacts[?kind == 'Config' && length((conditions || `[]`)[?type == 'Programmed' && status == 'True']) > `0`])): 10
+        # The assert above is satisfied by one node. Every node must hold all ten.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: CHECK
+                value: >-
+                  ([.spec.artifacts[]? | select(.kind == "Config")] | length) == 10 and ([.status.artifacts[]? | select(.kind == "Config") | select(any(.conditions[]?; .type == "Programmed" and .status == "True"))] | length) == 10
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
         - script:
             env:
               - name: NAMESPACE

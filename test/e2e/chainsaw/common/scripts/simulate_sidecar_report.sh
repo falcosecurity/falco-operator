@@ -18,6 +18,9 @@
 #                on an aggregated condition's message set a per-scenario value here, since the parent
 #                aggregate propagates the per-node condition message verbatim.
 #   GENERATION:  observedGeneration of the conditions (default 1).
+#   GENERATION_OF: Optional "resource/name" in NAMESPACE, e.g. "rulesfiles.artifact.falcosecurity.dev/my-rules".
+#                When set, GENERATION is that object's current metadata.generation, as a live artifact operator
+#                reports it.
 #   WITHDRAW:    "true" removes the entries instead of writing them (default false).
 set -o errexit
 set -o nounset
@@ -29,6 +32,9 @@ KINDS="${KINDS}"
 CONDITIONS="${CONDITIONS:-}"
 MESSAGE="${MESSAGE:-Simulated by the e2e test}"
 GENERATION="${GENERATION:-1}"
+if [ -n "${GENERATION_OF:-}" ]; then
+  GENERATION=$(kubectl get "${GENERATION_OF}" -n "${NAMESPACE}" -o jsonpath='{.metadata.generation}')
+fi
 WITHDRAW="${WITHDRAW:-false}"
 
 RESOURCE="artifactnodes.artifact.falcosecurity.dev"

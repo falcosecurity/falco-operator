@@ -95,10 +95,13 @@ spec:
 
     - name: "Step 04: Assert-the-inline-source-is-not-claimed-programmed"
       description: |
-        The apply never got past the OCI source, so the inline source must not be reported
-        programmed. This is the assertion that fails on the pre-fix build.
+        The apply never got past the OCI source, so nothing is reported about the inline source, and the artifact
+        is not programmed. This is the assertion that fails on the pre-fix build. It is one assertion on the whole
+        entry, so that it cannot pass on an entry the node has yet to fill, and it is made again after several
+        retries of the failing fetch, any of which would claim the inline source on the pre-fix build. The
+        Rulesfile says the same.
       try:
-        - error:
+        - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
               kind: ArtifactNode
@@ -106,8 +109,37 @@ spec:
                 namespace: ($namespace)
               status:
                 (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
-                  - (conditions[?type == 'InlineArtifactProgrammed' && status == 'True']):
-                      - type: InlineArtifactProgrammed
+                  - (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'False'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+        - sleep:
+            duration: 12s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (conditions[?type == 'OCIArtifactProgrammed']):
+                      - status: 'False'
+                    (conditions[?type == 'Programmed']):
+                      - status: 'False'
+                    (length(conditions[?type == 'InlineArtifactProgrammed'])): 0
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                (length(conditions[?type == 'InlineArtifactProgrammed' && status == 'True'])): 0
 
     - name: "Step 05: Assert-no-inline-file-was-written"
       description: Nothing claimed programmed, and nothing on disk either.

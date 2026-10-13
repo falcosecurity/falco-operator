@@ -1,0 +1,385 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-deselected-removal-blocked
+spec:
+  description: |
+    A Plugin whose selector stops matching a node cannot be removed from it while a Rulesfile there requires it.
+    The node is no longer one the Plugin is assigned to, and the Plugin still says what it left behind.
+
+    Scenarios:
+    1. The rules and the container plugin they require are installed, and Falco loads the plugin.
+    2. The Plugin's selector matches no node. The node's ArtifactNode no longer lists it, and keeps reporting it,
+       with DeletionBlocked. The Plugin reports DeletionBlocked=True beside Programmed=Unknown/NoNodesAssigned,
+       and the plugin stays installed, configured and loaded.
+    3. The sidecar restarts. The plugin is not assigned, so nothing owns its configuration entry, but the rules
+       still need it: the entry survives the restart, and the removal is blocked as before.
+    4. The Rulesfile is deleted. The plugin is removed from the node and the Plugin is no longer blocked.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-deselected-test
+    - name: rulesfile_name
+      value: plugin-deselected-rules
+    - name: plugin_name
+      value: container
+    - name: plugin_config_path
+      value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+    - name: oci_file
+      value: 50-01-plugin-deselected-rules-oci.yaml
+    - name: test_name
+      value: plugin-deselected-removal-blocked
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: |
+        The Falco distribution rules, which require the container plugin.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Install-container-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Assert-plugin-loaded-and-rules-installed"
+      try:
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+
+    - name: "Step 05: Deselect-the-plugin"
+      description: |
+        Scenario 2. The block is on a node the Plugin no longer selects, and reaches the Plugin all the same. It
+        is asserted again after a while: the removal is retried every few seconds and must keep being refused.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw.falcosecurity.dev/no-such-node: "true"
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length((artifacts || `[]`)[?kind == 'Plugin' && name == $plugin_name])): 0
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+                        reason: PluginConfigStillRequired
+        - sleep:
+            duration: 15s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length((artifacts || `[]`)[?kind == 'Plugin' && name == $plugin_name])): 0
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+                        reason: PluginConfigStillRequired
+        - script:
+            env:
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 06: Assert-the-rules-are-still-installed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($oci_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 07: Restart-the-sidecar"
+      description: |
+        Scenario 3. A restarted sidecar rebuilds the plugin configuration from the plugins assigned to the node,
+        and this one is not. Dropping its entry would reload Falco without a plugin its rules require, and let
+        the binary be removed next.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/restart_artifact_operator_container.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/wait_artifact_operator_ready.sh
+            check:
+              (json_parse($stdout).status): success
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length((artifacts || `[]`)[?kind == 'Plugin' && name == $plugin_name])): 0
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+                        reason: PluginConfigStillRequired
+        - sleep:
+            duration: 15s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length((artifacts || `[]`)[?kind == 'Plugin' && name == $plugin_name])): 0
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+                        reason: PluginConfigStillRequired
+        - script:
+            env:
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_plugin_config_on_node.sh
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: "Step 08: Delete-the-rulesfile"
+      description: |
+        Scenario 4. Nothing requires the plugin any more, so the next retry removes it.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - script:
+            env:
+              - name: FILE_PATH
+                value: ($plugin_config_path)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_plugin_config_entry_absent.sh
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

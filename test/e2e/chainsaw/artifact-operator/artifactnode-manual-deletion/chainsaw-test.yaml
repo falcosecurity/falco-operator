@@ -80,6 +80,17 @@ spec:
                 (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
                   - (conditions[?type == 'Programmed']):
                       - status: 'True'
+        # The assert above is satisfied by one node. Every node must list the Rulesfile and report it programmed.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: CHECK
+                value: >-
+                  .metadata.deletionTimestamp == null and any(.metadata.finalizers[]?; . == "artifactnode.artifact.falcosecurity.dev/sidecar") and any(.spec.artifacts[]?; .kind == "Rulesfile" and .name == env.RULESFILE_NAME) and any(.status.artifacts[]?; .kind == "Rulesfile" and .name == env.RULESFILE_NAME and any(.conditions[]?; .type == "Programmed" and .status == "True"))
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
 
     - name: "Step 04: Delete-every-ArtifactNode"
       description: The objects are terminating while their sidecars clean up, then created again by the assignment controller.
@@ -106,6 +117,17 @@ spec:
                 (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
                   - (conditions[?type == 'Programmed']):
                       - status: 'True'
+        # The assert above is satisfied by one node. Every node must list the Rulesfile and report it programmed.
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: CHECK
+                value: >-
+                  .metadata.deletionTimestamp == null and any(.metadata.finalizers[]?; . == "artifactnode.artifact.falcosecurity.dev/sidecar") and any(.spec.artifacts[]?; .kind == "Rulesfile" and .name == env.RULESFILE_NAME) and any(.status.artifacts[]?; .kind == "Rulesfile" and .name == env.RULESFILE_NAME and any(.conditions[]?; .type == "Programmed" and .status == "True"))
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
         - assert:
             resource:
               apiVersion: artifact.falcosecurity.dev/v1alpha1
