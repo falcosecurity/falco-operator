@@ -679,8 +679,11 @@ spec:
                 value: Rulesfile
               - name: CONDITIONS
                 value: Programmed:True:SimulatedHealthy
-            content: |
-              bash ../../common/scripts/simulate_sidecar_report.sh
+              - name: RULESFILE_NAME
+                value: ($rulesfile_name)
+              - name: GENERATION_OF
+                value: (join('', ['rulesfiles.artifact.falcosecurity.dev/', $rulesfile_name]))
+            content: bash ../../common/scripts/simulate_sidecar_report.sh
 
     - name: "Step 21: Delete-the-parent-without-waiting"
       description: |

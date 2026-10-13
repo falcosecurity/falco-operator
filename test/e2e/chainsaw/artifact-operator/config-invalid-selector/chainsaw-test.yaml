@@ -1,0 +1,186 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: config-invalid-selector
+spec:
+  description: |
+    A selector the API server admits but that is no valid label selector selects no node. The artifact says so:
+    left alone, its status would keep the conditions it had, Programmed=True, while every node removes it.
+
+    Scenarios:
+    1. A Config with no selector is installed.
+    2. Its selector is given an operator that does not exist. The Config reports Programmed=False with reason
+       InvalidSelector as its only condition, the node drops it and its file is removed.
+    3. The selector is removed. The Config is installed again.
+
+  bindings:
+    - name: falco_name
+      value: falco-invalid-selector-test
+    - name: config_name
+      value: invalid-selector-config
+    - name: config_file
+      value: 50-03-invalid-selector-config-inline.yaml
+    - name: test_name
+      value: config-invalid-selector
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-config"
+      try:
+        - apply:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                config:
+                  json_output: false
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 03: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: ($config_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 04: Break-the-selector"
+      description: |
+        Scenario 2.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchExpressions:
+                    - key: kubernetes.io/os
+                      operator: NoSuchOperator
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (length(conditions)): 1
+                (conditions[?type == 'Programmed']):
+                  - status: 'False'
+                    reason: InvalidSelector
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Config' && name == $config_name]):
+                  - kind: Config
+
+    - name: "Step 05: Assert-file-removed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: ($config_file)
+            - name: should_exist
+              value: "false"
+
+    - name: "Step 06: Remove-the-selector"
+      description: |
+        Scenario 3.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: CONFIG_NAME
+                value: ($config_name)
+              - name: RESOURCE
+                value: configs.artifact.falcosecurity.dev
+              - name: NAME
+                value: ($config_name)
+              - name: PATCH
+                value: '[{"op": "remove", "path": "/spec/selector"}]'
+            content: bash ../../common/scripts/json_patch_resource.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              metadata:
+                name: ($config_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+
+    - name: "Step 07: Assert-file-is-back"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/config.d
+            - name: expected_file
+              value: ($config_file)
+            - name: should_exist
+              value: "true"
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,292 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-status-capacity-lingering-removal
+spec:
+  description: |
+    An ArtifactNode's status holds at most 100 entries. A node can have more to say: the 100 artifacts its spec
+    lists, plus the ones it no longer lists and has yet to remove. The entry of one of those is all that holds
+    the artifact: it keeps a deleted parent from going while its files are still on the node, and carries a
+    blocked removal to the parent. So it is published first, and an assigned artifact whose entry does not fit
+    waits for the removal.
+
+    Scenarios:
+    1. The rules, the container plugin they require and 98 Configs are installed: 100 artifacts, the cap.
+    2. The Plugin's selector matches no node, and its removal is blocked by the rules. Two more Configs are
+       created, so the node is assigned 100 artifacts again and still holds the plugin: 101 entries to report.
+       The status holds 100, the plugin's among them, and the Plugin reports DeletionBlocked=True.
+    3. The Rulesfile is deleted. The plugin goes, and every one of the 100 Configs ends up reported.
+
+  bindings:
+    - name: falco_name
+      value: falco-status-cap-test
+    - name: rulesfile_name
+      value: status-cap-rules
+    - name: plugin_name
+      value: container
+    - name: test_name
+      value: artifactnode-status-capacity-lingering-removal
+
+  steps:
+    - name: "Step 01: Create-falco"
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 02: Create-rulesfile"
+      description: |
+        The Falco distribution rules, which require the container plugin.
+      use:
+        template: ../../common/_step_templates/apply-rulesfile.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+            - name: rulesfile_spec
+              value:
+                ociArtifact:
+                  image:
+                    repository: falco-test/rulesfile-official
+                    tag: latest
+                  registry:
+                    name: registry.oci-registry.svc.cluster.local:5000
+                    plainHTTP: true
+
+    - name: "Step 03: Install-container-plugin"
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_name
+              value: ($plugin_name)
+            - name: namespace
+              value: ($namespace)
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+
+    - name: "Step 04: Assert-plugin-loaded-and-rules-installed"
+      try:
+        - script:
+            env:
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/check_falco_plugin_loaded.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DependenciesSatisfied']):
+                  - status: 'True'
+                (conditions[?type == 'Programmed']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'Programmed']):
+                      - status: 'True'
+
+    - name: "Step 05: Create-98-configs"
+      description: |
+        Scenario 1. With the Rulesfile and the Plugin the node is assigned 100 artifacts, and reports each programmed.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: KIND
+                value: Config
+              - name: PREFIX
+                value: status-cap-config-
+              - name: FIRST
+                value: "1"
+              - name: LAST
+                value: "98"
+            content: bash ../../common/scripts/apply_numbered_artifacts.sh
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: MAX_RETRIES
+                value: "300"
+              - name: CHECK
+                value: >-
+                  ([.spec.artifacts[]?] | length) == 100 and ([.status.artifacts[]? | select(any(.conditions[]?; .type == "Programmed" and .status == "True"))] | length) == 100
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
+
+    - name: "Step 06: Deselect-the-plugin-and-fill-the-node-again"
+      description: |
+        Scenario 2. 101 artifacts now want the node: the operator assigns 100 and leaves one Config out. With
+        the plugin still held, the node has 101 entries for 100 places. The plugin's is kept, and stays kept: on
+        a build that publishes the assigned artifacts first, it is the one cut, and the Plugin loses its
+        DeletionBlocked while the plugin is still installed.
+      try:
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw.falcosecurity.dev/no-such-node: "true"
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: KIND
+                value: Config
+              - name: PREFIX
+                value: status-cap-config-
+              - name: FIRST
+                value: "99"
+              - name: LAST
+                value: "100"
+            content: bash ../../common/scripts/apply_numbered_artifacts.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length(artifacts || `[]`)): 100
+                (length((artifacts || `[]`)[?kind == 'Plugin'])): 0
+              status:
+                (length(artifacts || `[]`)): 100
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+        - sleep:
+            duration: 15s
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length(artifacts || `[]`)): 100
+                (length((artifacts || `[]`)[?kind == 'Plugin'])): 0
+              status:
+                (length(artifacts || `[]`)): 100
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+                    (conditions[?type == 'DeletionBlocked']):
+                      - status: 'True'
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'DeletionBlocked']):
+                  - status: 'True'
+                    reason: PluginConfigStillRequired
+
+    - name: "Step 07: Delete-the-rulesfile"
+      description: |
+        Scenario 3. The removal that was blocked goes through and makes room: all 100 Configs are assigned and reported.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              name: ($rulesfile_name)
+              namespace: ($namespace)
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: MAX_RETRIES
+                value: "300"
+              - name: CHECK
+                value: >-
+                  ([.spec.artifacts[]? | select(.kind == "Config")] | length) == 100 and ([.status.artifacts[]?] | length) == 100 and ([.status.artifacts[]? | select(.kind == "Config") | select(any(.conditions[]?; .type == "Programmed" and .status == "True"))] | length) == 100
+            content: bash ../../common/scripts/assert_every_artifactnode.sh
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (length((conditions || `[]`)[?type == 'DeletionBlocked'])): 0
+
+    - name: "Step 08: Delete-the-configs"
+      description: |
+        A hundred removals take longer than the namespace cleanup allows for.
+      try:
+        - delete:
+            timeout: 280s
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Config
+              namespace: ($namespace)
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -1,0 +1,44 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: artifactnode-release-candidate-leftover
+spec:
+  description: |
+    The v0.5.0 release candidates created one ArtifactNode per artifact and node, each held by a finalizer of
+    the artifact operator of the time. An object left behind by an upgrade is named after no node, so the
+    assignment controller deletes it, and it must also release that finalizer: no artifact operator of this
+    version knows the object, and it, and its namespace, would stay Terminating for good.
+
+    Scenario: an ArtifactNode of each release-candidate kind, with its finalizer, is gone shortly after it is
+    created. No Falco runs in the namespace: nothing but the instance operator acts on these objects.
+
+  bindings:
+    - name: node_name
+      value: no-such-node
+    - name: test_name
+      value: artifactnode-release-candidate-leftover
+
+  steps:
+    - name: "Step 01: Create-the-leftovers-and-wait-for-them-to-go"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: NODE_NAME
+                value: ($node_name)
+            content: bash ../../common/scripts/create_legacy_artifactnodes_and_wait_deleted.sh
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

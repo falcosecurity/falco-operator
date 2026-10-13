@@ -1,0 +1,194 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: rulesfile-deselected-during-sidecar-outage
+spec:
+  description: |
+    A Rulesfile whose selector stops matching a node while that node's sidecar is down stays installed there
+    until the sidecar is back, and keeps its finalizer for as long: the node's entry, which only the sidecar
+    withdraws, is what says the file is still on the node.
+
+    Scenarios:
+    1. An inline Rulesfile is installed.
+    2. The sidecar is down and the Rulesfile's selector matches no node. The ArtifactNode no longer lists it and
+       still reports its file; the Rulesfile keeps its in-use finalizer.
+    3. The sidecar is back. It removes the file and withdraws the entry, and the Rulesfile's finalizer is released.
+
+  bindings:
+    - name: falco_name
+      value: falco-deselect-outage-test
+    - name: rulesfile_name
+      value: deselect-outage-rules
+    - name: inline_file
+      value: 50-03-deselect-outage-rules-inline.yaml
+    - name: test_name
+      value: rulesfile-deselected-during-sidecar-outage
+
+  steps:
+    - name: "Step 01: Create-falco"
+      description: |
+        One Deployment pod, so that the sidecar taken down is the only one.
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: falco_type
+              value: Deployment
+
+    - name: "Step 02: Create-rulesfile"
+      use:
+        template: ../../common/_step_templates/apply-assert-rulesfile-inline.yaml
+        with:
+          bindings:
+            - name: rulesfile_name
+              value: ($rulesfile_name)
+            - name: namespace
+              value: ($namespace)
+
+    - name: "Step 03: Assert-file-on-filesystem"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "true"
+
+    - name: "Step 04: Deselect-while-the-sidecar-is-down"
+      description: |
+        Scenario 2. The sidecar must still be down once this is done, or the test did not exercise a deselect
+        behind its back.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/stop_artifact_operator_container.sh
+            check:
+              (json_parse($stdout).status): success
+        - patch:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              spec:
+                selector:
+                  matchLabels:
+                    chainsaw.falcosecurity.dev/no-such-node: "true"
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (length((artifacts || `[]`)[?kind == 'Rulesfile' && name == $rulesfile_name])): 0
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - (length(installedArtifacts || `[]`)): 1
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (contains(metadata.finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): true
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: RESOURCE
+                value: pods
+              - name: SELECTOR
+                value: (join('', ['app.kubernetes.io/name=', $falco_name]))
+              - name: JSONPATH
+                value: '{.items[0].status.containerStatuses[?(@.name=="artifact-operator")].state.waiting.reason}'
+            content: bash ../../common/scripts/get_jsonpath.sh
+            check:
+              ($stdout): CrashLoopBackOff
+
+    - name: "Step 05: Wait-for-the-sidecar"
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+            content: bash ../../common/scripts/wait_artifact_operator_ready.sh
+            check:
+              (json_parse($stdout).status): success
+
+    - name: "Step 06: Assert-the-node-is-clean"
+      description: |
+        Scenario 3.
+      try:
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              status:
+                (artifacts[?kind == 'Rulesfile' && name == $rulesfile_name]):
+                  - kind: Rulesfile
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Rulesfile
+              metadata:
+                name: ($rulesfile_name)
+                namespace: ($namespace)
+              (contains(metadata.finalizers || `[]`, 'artifact.falcosecurity.dev/node-objects-in-use')): false
+              status:
+                (conditions[?type == 'Programmed']):
+                  - status: 'Unknown'
+                    reason: NoNodesAssigned
+
+    - name: "Step 07: Assert-file-removed"
+      use:
+        template: ../../common/_step_templates/assert-file-on-node.yaml
+        with:
+          bindings:
+            - name: falco_name
+              value: ($falco_name)
+            - name: namespace
+              value: ($namespace)
+            - name: dir
+              value: /etc/falco/rules.d
+            - name: expected_file
+              value: ($inline_file)
+            - name: should_exist
+              value: "false"
+
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

@@ -5,7 +5,9 @@
 # again once they are gone, from the artifacts themselves.
 #
 # Env vars:
-#   NAMESPACE:   Namespace of the ArtifactNodes.
+#   NAMESPACE:        Namespace of the ArtifactNodes.
+#   STRIP_FINALIZERS: "true" also removes the finalizers of the deleted objects (default false), for when the
+#                     artifact operator that would release its own is down.
 #   MAX_RETRIES: Default: 120.
 #   RETRY_DELAY: Seconds between polls. Default: 1.
 set -o errexit
@@ -29,6 +31,11 @@ if [ "${count}" -eq 0 ]; then
 fi
 
 kubectl delete "${RESOURCE}" --all -n "${NAMESPACE}" --wait=false
+if [ "${STRIP_FINALIZERS:-false}" = "true" ]; then
+  for node in $(kubectl get "${RESOURCE}" -n "${NAMESPACE}" -o name); do
+    kubectl patch "${node}" -n "${NAMESPACE}" --type=merge -p '{"metadata":{"finalizers":null}}' || true
+  done
+fi
 
 for _ in $(seq 1 "${MAX_RETRIES}"); do
   now=$(uids)
