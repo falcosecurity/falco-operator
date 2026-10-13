@@ -226,6 +226,46 @@ dnsConfig: {}
   #   - name: ndots
   #     value: "2"
 
+# API Priority and Fairness for the artifact API (flowcontrol.apiserver.k8s.io/v1, Kubernetes 1.29+). Off by
+# default: installing it needs permission to create cluster-scoped flow-control objects. In a large cluster it puts
+# the artifact-operator sidecars, one per node, in a bounded priority level, so that a burst of their requests
+# queues instead of competing with the rest of the cluster, while the operator's own requests keep their priority.
+apiPriorityAndFairness:
+  # -- Create the PriorityLevelConfiguration and FlowSchemas.
+  enabled: false
+  artifactOperators:
+    # -- FlowSchema precedence: lower matches first. Above the cluster's catch-all, below system schemas.
+    matchingPrecedence: 1000
+    # -- Share of the API server's concurrency the sidecars are entitled to.
+    nominalConcurrencyShares: 20
+    # -- Part of that share other levels may borrow while the sidecars do not use it.
+    lendablePercent: 50
+    # -- Queues requests wait in once the level is busy; more queues isolate Falco instances better.
+    queues: 64
+    # -- Queues each Falco instance's requests are spread over (shuffle sharding).
+    handSize: 6
+    # -- Requests a queue holds before further ones are rejected with 429.
+    queueLengthLimit: 50
+    # -- Namespaces of the Falco instances, whose ServiceAccounts are the sidecars'. Empty matches the
+    # ServiceAccounts of every namespace, so any other workload using the artifact API shares the sidecars' level.
+    namespaces: []
+  operator:
+    # -- Precedence of the operator's own schema; it must match before the sidecars' one.
+    matchingPrecedence: 900
+    # -- Priority level for the operator's own artifact API requests.
+    priorityLevel: workload-high
+
+# Admission policy for ArtifactNodes (admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy, Kubernetes 1.30+).
+# Off by default: installing it needs permission to create cluster-scoped admission objects. The artifact-operator
+# sidecars of one Falco instance share a ServiceAccount, whose Role lets each of them patch every ArtifactNode of
+# the namespace. With the policy, a sidecar can only change the ArtifactNode of the node it runs on, and never
+# its spec, so a compromised node cannot take the rules away from the others. It relies on the node name the API
+# server puts in a pod's ServiceAccount token (ServiceAccountTokenPodNodeInfo, on by default since Kubernetes
+# 1.30): a request without it is not restricted.
+artifactNodeAdmissionPolicy:
+  # -- Create the ValidatingAdmissionPolicy and its binding.
+  enabled: false
+
 # -- Array of extra Kubernetes manifests to deploy alongside the operator. Each
 # entry is rendered with `tpl`, so Helm templating (e.g. `{{ .Release.Name }}`)
 # is supported within values. mTLS's own cert-manager/trust-manager resources are templated

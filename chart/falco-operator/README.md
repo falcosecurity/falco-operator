@@ -48,6 +48,17 @@ The following table lists the configurable parameters of the falco-operator char
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity rules |
+| apiPriorityAndFairness.artifactOperators.handSize | int | `6` | Queues each Falco instance's requests are spread over (shuffle sharding). |
+| apiPriorityAndFairness.artifactOperators.lendablePercent | int | `50` | Part of that share other levels may borrow while the sidecars do not use it. |
+| apiPriorityAndFairness.artifactOperators.matchingPrecedence | int | `1000` | FlowSchema precedence: lower matches first. Above the cluster's catch-all, below system schemas. |
+| apiPriorityAndFairness.artifactOperators.namespaces | list | `[]` | Namespaces of the Falco instances, whose ServiceAccounts are the sidecars'. Empty matches the ServiceAccounts of every namespace, so any other workload using the artifact API shares the sidecars' level. |
+| apiPriorityAndFairness.artifactOperators.nominalConcurrencyShares | int | `20` | Share of the API server's concurrency the sidecars are entitled to. |
+| apiPriorityAndFairness.artifactOperators.queueLengthLimit | int | `50` | Requests a queue holds before further ones are rejected with 429. |
+| apiPriorityAndFairness.artifactOperators.queues | int | `64` | Queues requests wait in once the level is busy; more queues isolate Falco instances better. |
+| apiPriorityAndFairness.enabled | bool | `false` | Create the PriorityLevelConfiguration and FlowSchemas. |
+| apiPriorityAndFairness.operator.matchingPrecedence | int | `900` | Precedence of the operator's own schema; it must match before the sidecars' one. |
+| apiPriorityAndFairness.operator.priorityLevel | string | `"workload-high"` | Priority level for the operator's own artifact API requests. |
+| artifactNodeAdmissionPolicy.enabled | bool | `false` | Create the ValidatingAdmissionPolicy and its binding. |
 | clusterDomain | string | `"cluster.local"` | Cluster DNS domain, used for the artifact server URL and its TLS certificate. |
 | dnsConfig | object | `{}` | Pod DNS config. Requires dnsPolicy to be set to None to take full effect. |
 | dnsPolicy | string | `""` | Pod DNS policy. One of ClusterFirst, ClusterFirstWithHostNet, Default or None. |

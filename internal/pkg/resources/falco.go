@@ -17,6 +17,7 @@
 package resources
 
 import (
+	"strconv"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -329,6 +330,17 @@ func SetArtifactDownloadTimeout(timeout time.Duration) {
 		Name:  "ARTIFACT_DOWNLOAD_TIMEOUT",
 		Value: timeout.String(),
 	})
+}
+
+// SetArtifactOperatorKubeAPILimits sets the rate limit of every artifact-operator sidecar's requests to the API
+// server. There is one sidecar per node, so the cluster-wide ceiling is the number of nodes times qps. Call this once
+// during falco-operator startup.
+func SetArtifactOperatorKubeAPILimits(qps float64, burst int) {
+	sidecar := &FalcoDefaults.SidecarContainers[0]
+	sidecar.Env = append(sidecar.Env,
+		corev1.EnvVar{Name: "KUBE_API_QPS", Value: strconv.FormatFloat(qps, 'f', -1, 64)},
+		corev1.EnvVar{Name: "KUBE_API_BURST", Value: strconv.Itoa(burst)},
+	)
 }
 
 // artifactClientCertsMountPath is the mount path for the client cert Secret in the
