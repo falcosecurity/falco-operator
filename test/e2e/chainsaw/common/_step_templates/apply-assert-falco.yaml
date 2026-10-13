@@ -79,6 +79,18 @@ spec:
                     command: ["sleep", "infinity"]
                     stdin: true
                     tty: true
+                    # The artifact directories, so that a file can be checked while the falco container is down:
+                    # a rules file Falco rejects makes it crash-loop, and nothing can be exec'd in it then.
+                    volumeMounts:
+                      - name: falco-rulesfiles
+                        mountPath: /etc/falco/rules.d
+                        readOnly: true
+                      - name: falco-configs
+                        mountPath: /etc/falco/config.d
+                        readOnly: true
+                      - name: falco-plugins
+                        mountPath: /usr/share/falco/plugins
+                        readOnly: true
     - assert:
         resource:
           apiVersion: instance.falcosecurity.dev/v1alpha1
