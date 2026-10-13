@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -79,6 +80,8 @@ func main() {
 	var falcoBaseURL string
 	var falcoReloadCooldown time.Duration
 	var enforceRequirements bool
+	var kubeAPIQPS float64
+	var kubeAPIBurst int
 
 	var tlsOpts []func(*tls.Config)
 	var opts zap.Options
@@ -109,6 +112,14 @@ func main() {
 		"Block artifact installation when OCI-declared requirements are not satisfied by the running "+
 			"Falco instance, or when they cannot be verified. When false, the operator installs the "+
 			"artifact anyway and records the unmet requirement in status and logs instead of blocking.")
+
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", 5,
+		"Sustained rate of requests this operator may send to the Kubernetes API server, shared by all of its clients. "+
+			"There is one such operator per node, so the cluster-wide ceiling is the number of nodes times this value. "+
+			"controller-runtime disables client-side limiting by default; zero or less does the same here.")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 10,
+		"Burst of requests this operator may send to the Kubernetes API server above --kube-api-qps, shared by all "+
+			"of its clients.")
 
 	// artifactServerURL, artifactClientCertPath and artifactServerCAFile are normally set via the
 	// ARTIFACT_SERVER_URL/ARTIFACT_CLIENT_CERT_PATH/ARTIFACT_SERVER_CA_FILE env vars (see
@@ -269,7 +280,12 @@ func main() {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	if kubeAPIQPS > 0 {
+		restConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(float32(kubeAPIQPS), kubeAPIBurst)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,

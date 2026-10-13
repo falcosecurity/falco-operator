@@ -80,6 +80,18 @@ func TestSetArtifactOperatorEnforceRequirements(t *testing.T) {
 	})
 }
 
+func TestSetArtifactOperatorKubeAPILimits(t *testing.T) {
+	saveSidecarEnv(t)
+	before := append([]corev1.EnvVar(nil), FalcoDefaults.SidecarContainers[0].Env...)
+
+	SetArtifactOperatorKubeAPILimits(2.5, 7)
+
+	assert.Equal(t, append(before,
+		corev1.EnvVar{Name: "KUBE_API_QPS", Value: "2.5"},
+		corev1.EnvVar{Name: "KUBE_API_BURST", Value: "7"},
+	), FalcoDefaults.SidecarContainers[0].Env, "the sidecar binds these to --kube-api-qps and --kube-api-burst")
+}
+
 func TestSetArtifactDownloadTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

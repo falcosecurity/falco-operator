@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	"k8s.io/client-go/util/flowcontrol"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -102,6 +103,8 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
+	var kubeAPIQPS float64
+	var kubeAPIBurst int
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var excludedLabels stringSliceFlag
@@ -111,6 +114,12 @@ func main() {
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.Float64Var(&kubeAPIQPS, "kube-api-qps", 50,
+		"Sustained rate of requests this operator may send to the Kubernetes API server, shared by all of its clients. "+
+			"One change of an artifact can mean a write to the ArtifactNode of every node, so this spreads such a burst "+
+			"out instead of sending it at once. Zero or less disables client-side limiting.")
+	flag.IntVar(&kubeAPIBurst, "kube-api-burst", 100,
+		"Burst of requests this operator may send to the Kubernetes API server above --kube-api-qps.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -135,6 +144,8 @@ func main() {
 	var artifactServerURL string
 	var clusterDomain string
 	var artifactDownloadTimeout time.Duration
+	var artifactOperatorKubeAPIQPS float64
+	var artifactOperatorKubeAPIBurst int
 	var artifactServerCertPath, artifactServerCertName, artifactServerCertKey string
 	var artifactServerClientCAFile string
 	var artifactClientCertIssuerName string
@@ -159,6 +170,12 @@ func main() {
 	flag.StringVar(&clusterDomain, "cluster-domain", "cluster.local", "Cluster DNS domain used for the default artifact server URL.")
 	flag.DurationVar(&artifactDownloadTimeout, "artifact-download-timeout", artifact.DefaultDownloadTimeout,
 		"Maximum duration of one complete download from the artifact server, injected into artifact-operator sidecars. Must be positive.")
+	flag.Float64Var(&artifactOperatorKubeAPIQPS, "artifact-operator-kube-api-qps", 5,
+		"Sustained rate of requests each artifact-operator sidecar may send to the Kubernetes API server, injected into "+
+			"the sidecars. There is one per node, so the cluster-wide ceiling is the number of nodes times this value. "+
+			"Zero or less disables their client-side limiting.")
+	flag.IntVar(&artifactOperatorKubeAPIBurst, "artifact-operator-kube-api-burst", 10,
+		"Burst of requests each artifact-operator sidecar may send above --artifact-operator-kube-api-qps.")
 	flag.StringVar(&artifactServerCertPath, "artifact-server-cert-path", "",
 		"The directory that contains the artifact server's TLS certificate. When set, the artifact "+
 			"HTTP server serves over HTTPS instead of plain HTTP.")
@@ -213,6 +230,7 @@ func main() {
 	}
 	resources.SetArtifactOperatorEnforceRequirements(artifactOperatorEnforceRequirements)
 	resources.SetArtifactDownloadTimeout(artifactDownloadTimeout)
+	resources.SetArtifactOperatorKubeAPILimits(artifactOperatorKubeAPIQPS, artifactOperatorKubeAPIBurst)
 
 	ctrl.SetLogger(logging.FilterEventRejectionOnTerminatingNamespace(zap.New(zap.UseFlagOptions(&opts))))
 
@@ -363,7 +381,12 @@ func main() {
 	labelFilter := instance.NewLabelFilter(excludedLabels)
 	setupLog.V(4).Info("Label propagation filter", "excludedLabels", []string(excludedLabels))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+	if kubeAPIQPS > 0 {
+		restConfig.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(float32(kubeAPIQPS), kubeAPIBurst)
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme: scheme,
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{

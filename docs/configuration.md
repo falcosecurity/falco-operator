@@ -385,7 +385,35 @@ a different revision. It needs access to the registry and the configured credent
 sidecars retry while the cache is being populated. Already-installed artifacts are
 not removed because the server is temporarily unavailable.
 
-## Unreachable nodes
+## Large clusters
+
+Each node running Falco has its own artifact operator, so their requests to the
+API server add up with the number of nodes. Two limits apply:
+
+| Flag on the operator | Default | Limits |
+|----------------------|---------|--------|
+| `--kube-api-qps` / `--kube-api-burst` | 50 / 100 | The operator itself. One new artifact can mean a write to every node's ArtifactNode; the limit spreads such a burst out. |
+| `--artifact-operator-kube-api-qps` / `--artifact-operator-kube-api-burst` | 5 / 10 | Each node's artifact operator. The cluster-wide ceiling is the number of nodes times this value. |
+
+Set them with `extraArgs` in the Helm values. Per-pod limits alone do not bound
+what thousands of sidecars send together. For that, the chart can install API
+Priority and Fairness objects (Kubernetes 1.29 or later), which put the
+sidecars in a bounded priority level while the operator keeps its usual one:
+
+```yaml
+apiPriorityAndFairness:
+  enabled: true
+```
+
+Installing them needs permission to create cluster-scoped
+`flowcontrol.apiserver.k8s.io` objects. See the chart README for the tunable
+shares and queues.
+
+By default the sidecars' level matches the ServiceAccounts of every namespace
+that use the artifact API, so another workload that does, a GitOps controller
+for instance, shares it. List the namespaces of your Falco instances in
+`apiPriorityAndFairness.artifactOperators.namespaces` to match only their
+ServiceAccounts.
 
 A node that is unreachable keeps its ArtifactNode, and its artifact operator
 cannot report. A deleted artifact waits for every node that holds it, except
@@ -426,6 +454,22 @@ While an artifact is being deleted, a Plugin keeps aggregating, so that a
 conditions it had: their removal cannot be blocked, and a deletion that does not
 finish is waiting for a node, whose ArtifactNode still lists or reports the
 artifact.
+
+## Restricting artifact operators to their own node
+
+All the artifact operators of a Falco instance share one ServiceAccount, and
+its Role lets each of them patch every ArtifactNode of the namespace. The chart
+can install an admission policy (Kubernetes 1.30 or later) that only lets an
+artifact operator update the ArtifactNode of the node it runs on, and never its
+spec:
+
+```yaml
+artifactNodeAdmissionPolicy:
+  enabled: true
+```
+
+Installing it needs permission to create cluster-scoped
+`admissionregistration.k8s.io` objects.
 
 ## Artifact server CA renewal
 
