@@ -30,10 +30,13 @@ client Certificate. The chart supplies the server Certificate and trust settings
 
 The Artifact Operator is a regular container in `spec.containers`, not a
 restartable init container. Falco starts alongside it with the base configuration.
-The sidecar waits for Falco's `/versions` API before starting its four
-controllers: one per artifact kind and one for its node's ArtifactNode. Before any
-of them acts, it recovers what is already installed from the pod's volumes and the
-ArtifactNode status, and it reports Ready only once that is done.
+The sidecar starts its four controllers, one per artifact kind and one for its
+node's ArtifactNode, without waiting for Falco. Before any of them acts, it
+recovers what is already installed from the pod's volumes and the ArtifactNode
+status. Config resources are delivered as soon as that is done, so a Config can
+carry settings Falco needs to start, such as `engine.kind`. Rules files and
+plugins declare requirements on Falco, so they are installed only once Falco's
+`/versions` API has answered, and the sidecar reports Ready only after that.
 
 The sidecar reads its node's [ArtifactNode](crds/artifactnode.md), whose spec lists
 the artifacts assigned to the node, and reconciles each of them from the artifact

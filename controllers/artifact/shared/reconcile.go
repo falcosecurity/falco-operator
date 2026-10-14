@@ -184,6 +184,13 @@ func ApplyAndPublish(
 	if err != nil {
 		return reconcile.Result{}, err
 	}
+	// Requirements are checked against the capabilities Falco reports, so an artifact that declares them waits
+	// for the first observation. Config does not: it may carry what Falco needs to start at all.
+	if info.DeclaresRequirements {
+		if err := n.WaitFalcoVersions(ctx); err != nil {
+			return reconcile.Result{}, err
+		}
+	}
 	kind := info.Kind
 	defer func() {
 		advisory := info.DeclaresRequirements && !n.EnforceRequirements()
