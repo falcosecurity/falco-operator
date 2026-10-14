@@ -133,3 +133,38 @@ func TestNode_AddToManager(t *testing.T) {
 	require.NotNil(t, n.warmSync)
 	require.Error(t, n.checkWarmSynced(nil), "registered, and not run yet")
 }
+
+func TestNode_WaitFalcoVersions_IsImmediateForANodeWithoutTheWatcher(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
+	n := newWarmupNode(t, cl)
+
+	require.NoError(t, n.WaitFalcoVersions(t.Context()), "no versions watcher is going to run, so there is nothing to wait for")
+	require.NoError(t, n.checkFalcoObserved(nil))
+}
+
+func TestNode_WaitFalcoVersions_WaitsForTheFirstObservation(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
+	n := newWarmupNode(t, cl)
+	n.armFalcoVersions()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, n.WaitFalcoVersions(ctx), context.DeadlineExceeded, "rules files and plugins must not be installed ahead of the observation")
+	require.Error(t, n.checkFalcoObserved(nil), "the pod must not be Ready ahead of the observation")
+
+	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
+	require.NoError(t, n.WaitFalcoVersions(t.Context()))
+	require.NoError(t, n.checkFalcoObserved(nil))
+	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
+	require.NoError(t, n.WaitFalcoVersions(t.Context()), "later observations are harmless")
+}
+
+func TestNode_WaitFalcoVersions_IsImmediateForASeededNode(t *testing.T) {
+	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
+	n := newWarmupNode(t, cl)
+	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
+	n.armFalcoVersions()
+
+	require.NoError(t, n.WaitFalcoVersions(t.Context()), "Config.FalcoVersions seeds the observation before the watcher is registered")
+	require.NoError(t, n.checkFalcoObserved(nil))
+}

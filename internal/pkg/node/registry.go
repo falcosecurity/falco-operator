@@ -106,6 +106,12 @@ func (n *Node) Events() <-chan event.GenericEvent {
 func (n *Node) OnFalcoVersionsObserved(v *compat.Versions) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if !n.falcoSeen {
+		n.falcoSeen = true
+		if n.falcoObserved != nil {
+			close(n.falcoObserved)
+		}
+	}
 	observed := v.All()
 	changed := false
 	for name, existing := range n.provides {

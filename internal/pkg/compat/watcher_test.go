@@ -126,6 +126,22 @@ func TestVersionsWatcher_Start(t *testing.T) {
 		}
 	})
 
+	t.Run("polls once at start before the first tick", func(t *testing.T) {
+		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
+		w := NewVersionsWatcher(m, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		w.SetSink(func(*Versions) { cancel() })
+		done := make(chan error, 1)
+		go func() { done <- w.Start(ctx) }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("the first poll must not wait for the ticker")
+		}
+	})
+
 	t.Run("forwards observation to sink", func(t *testing.T) {
 		m := &mockVersionsFetcher{Result: versionsWithPlugins(map[string]string{"container": "0.7.1"})}
 		w := NewVersionsWatcher(m, time.Millisecond)
