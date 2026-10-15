@@ -57,14 +57,29 @@ func (w *VersionsWatcher) Start(ctx context.Context) error {
 	logger := ctrllog.FromContext(ctx)
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
+	// The first poll runs at once: the sidecar starts alongside Falco and the artifacts that declare
+	// requirements wait for this observation.
+	observed, waiting := false, false
+	poll := func() {
+		err := w.poll(ctx)
+		switch {
+		case err == nil && !observed:
+			observed = true
+			logger.Info("Falco versions fetched successfully")
+		case err != nil && !observed && !waiting:
+			waiting = true
+			logger.Info("Waiting for Falco to be available", "err", err)
+		case err != nil:
+			logger.V(4).Info("Falco versions poll failed, will retry", "err", err)
+		}
+	}
+	poll()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := w.poll(ctx); err != nil {
-				logger.V(4).Info("Falco versions poll failed, will retry", "err", err)
-			}
+			poll()
 		}
 	}
 }

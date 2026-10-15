@@ -187,18 +187,6 @@ func main() {
 
 	ctx := ctrl.SetupSignalHandler()
 
-	// Waits for Falco to be available before starting the controllers; Falco starts in idle mode
-	// (no plugins, no rules) as a regular container alongside the artifact operator. The fetched
-	// snapshot seeds the node's Falco-capability cache below, which compatibility checks read
-	// instead of querying Falco live on every reconcile.
-	setupLog.Info("Waiting for Falco to be available", "url", falcoBaseURL)
-	initialFalcoVersions, err := compat.WaitAndFetch(ctx, falcoBaseURL)
-	if err != nil {
-		setupLog.Error(err, "failed to fetch Falco versions at startup")
-		os.Exit(1)
-	}
-	setupLog.Info("Falco versions fetched successfully")
-
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
 	// due to its vulnerabilities. More specifically, disabling http/2 will
 	// prevent from being vulnerable to the HTTP/2 Stream Cancellation and
@@ -372,9 +360,13 @@ func main() {
 	// the capabilities Falco reports and the status published back to the node's ArtifactNode. It
 	// coordinates disk writes across the Plugin/Rulesfile/Config reconcilers below, keeping a
 	// plugin's config entry until no rules file on this node still requires it, and it caches
-	// Falco's reported capabilities so compatibility checks never require a live HTTP call. Its warm
-	// sync recovers the installed files, and what the installed rules require, from disk, and the
-	// status entries a previous process published from the ArtifactNode.
+	// Falco's reported capabilities so compatibility checks never require a live HTTP call. Its
+	// versions watcher makes the first observation once Falco answers /versions; Falco starts in
+	// idle mode (no plugins, no rules) alongside the artifact operator, and a Config may carry what
+	// it needs to start at all, so Config is delivered without waiting for it while rules files and
+	// plugins wait for that observation. Its warm sync recovers the installed files, and what the
+	// installed rules require, from disk, and the status entries a previous process published from
+	// the ArtifactNode.
 	falcoNode, err := node.New(&node.Config{
 		Client:         mgr.GetClient(),
 		NodeName:       nodeName,
@@ -383,7 +375,6 @@ func main() {
 		ReloadCooldown: falcoReloadCooldown,
 		Fetcher:        artifactFetcher,
 		Recorder:       mgr.GetEventRecorder("artifact-node/" + nodeName),
-		FalcoVersions:  initialFalcoVersions, // seeds the capability cache from the fetch above
 		// Whether unmet requirements block an install is the node's policy: every reconciler reads it there.
 		EnforceRequirements: enforceRequirements,
 	})
