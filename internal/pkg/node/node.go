@@ -112,10 +112,11 @@ type Node struct {
 	// without the runnable has no warm sync to wait for, and is ready as soon as New returns.
 	warmSynced   chan struct{}
 	warmSyncDone sync.Once
-	// falcoObserved is closed once Falco's capabilities have been observed. It is nil until AddToManager arms
-	// it: a Node without the versions watcher has no observation to wait for, and is ready as soon as New returns.
-	falcoObserved chan struct{}
-	// falcoSeen records that OnFalcoVersionsObserved has run, so arming after a seeded observation is a no-op.
+	// waitForFalco is set by AddToManager when it registers the versions watcher: from then on artifacts that
+	// declare requirements on Falco are installed only once falcoSeen is set. A Node without the watcher, such as
+	// a test's, has no observation to wait for.
+	waitForFalco bool
+	// falcoSeen records that OnFalcoVersionsObserved has run at least once.
 	falcoSeen bool
 
 	// removals carries the ArtifactNode controller's requests to remove an artifact to the
@@ -155,9 +156,6 @@ type Config struct {
 	FalcoFetcher compat.VersionsFetcher
 	// WatchInterval is the Falco versions polling cadence. Zero means compat.DefaultWatchInterval.
 	WatchInterval time.Duration
-	// FalcoVersions seeds the capability registry with an observation already made, so that the
-	// first reconciles do not have to wait for the first poll. Nil skips the seed.
-	FalcoVersions *compat.Versions
 	// StatusTimings replaces the status publisher's default delays; tests use it to shorten them. Nil keeps
 	// the defaults.
 	StatusTimings *StatusTimings
@@ -165,8 +163,8 @@ type Config struct {
 
 // New returns the Node for the node cfg describes, with every collaborator and runnable wired.
 //
-// It does not reach the network and does not block: the Falco handshake belongs to the caller,
-// which passes its result as Config.FalcoVersions. It also does not touch the filesystem: the
+// It does not reach the network and does not block: the versions watcher registered by
+// AddToManager makes the first Falco observation. It also does not touch the filesystem: the
 // directory watcher is created by AddToManager, since registering its watches requires the Falco
 // artifact directories to exist.
 func New(cfg *Config) (*Node, error) {
@@ -229,10 +227,6 @@ func New(cfg *Config) (*Node, error) {
 	// without anything consuming what it observes.
 	n.versions = compat.NewVersionsWatcher(cfg.FalcoFetcher, cfg.WatchInterval)
 	n.versions.SetSink(n.OnFalcoVersionsObserved)
-
-	if cfg.FalcoVersions != nil {
-		n.OnFalcoVersionsObserved(cfg.FalcoVersions)
-	}
 	return n, nil
 }
 
@@ -284,9 +278,6 @@ func (n *Node) AddToManager(mgr ctrl.Manager) error {
 	if err := mgr.AddReadyzCheck("warm-sync", n.checkWarmSynced); err != nil {
 		return fmt.Errorf("add warm sync readiness check: %w", err)
 	}
-	if err := mgr.AddReadyzCheck("falco-versions", n.checkFalcoObserved); err != nil {
-		return fmt.Errorf("add falco versions readiness check: %w", err)
-	}
 	return nil
 }
 
@@ -335,55 +326,23 @@ func (n *Node) WaitWarmSync(ctx context.Context) error {
 	}
 }
 
-// armFalcoVersions makes WaitFalcoVersions wait until Falco's capabilities have been observed. AddToManager
-// calls it when it registers the versions watcher, which makes that observation. A Node seeded through
-// Config.FalcoVersions has already observed them, and stays ready.
+// armFalcoVersions makes FalcoObserved report false until Falco's capabilities have been observed.
+// AddToManager calls it when it registers the versions watcher, which makes that observation.
 func (n *Node) armFalcoVersions() {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.falcoObserved == nil && !n.falcoSeen {
-		n.falcoObserved = make(chan struct{})
-	}
+	n.waitForFalco = true
 }
 
-// WaitFalcoVersions blocks until Falco's capabilities have been observed once, or ctx ends. The install flow
-// of an artifact that declares requirements on Falco calls it: those requirements are checked against the
-// observed capabilities, so without an observation the check could only fail. Config does not wait, since a
-// Config may carry what Falco needs to start at all, such as engine.kind.
-//
-// A Node whose versions watcher was never registered, such as a test's, has nothing to wait for and is
-// ready at once.
-func (n *Node) WaitFalcoVersions(ctx context.Context) error {
+// FalcoObserved reports whether Falco's capabilities have been observed at least once. The install flow of an
+// artifact that declares requirements on Falco checks it and returns until then: the requirements are checked
+// against the observed capabilities, and the first observation fires an event on Events that re-enqueues the
+// artifact. Config does not check it, since a Config may carry what Falco needs to start at all, such as
+// engine.kind. A Node whose versions watcher was never registered, such as a test's, has nothing to wait for.
+func (n *Node) FalcoObserved() bool {
 	n.mu.Lock()
-	observed := n.falcoObserved
-	n.mu.Unlock()
-	if observed == nil {
-		return nil
-	}
-	select {
-	case <-observed:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// checkFalcoObserved is a readiness check: it fails until Falco's capabilities have been observed, as the
-// sidecar used to report Ready only once Falco answered /versions. Like WaitFalcoVersions, a Node without
-// the versions watcher is ready at once.
-func (n *Node) checkFalcoObserved(_ *http.Request) error {
-	n.mu.Lock()
-	observed := n.falcoObserved
-	n.mu.Unlock()
-	if observed == nil {
-		return nil
-	}
-	select {
-	case <-observed:
-		return nil
-	default:
-		return errors.New("the node has not observed Falco's capabilities")
-	}
+	defer n.mu.Unlock()
+	return !n.waitForFalco || n.falcoSeen
 }
 
 // checkWarmSynced is a readiness check: it fails until the node's warm sync has run. Like WaitWarmSync, a

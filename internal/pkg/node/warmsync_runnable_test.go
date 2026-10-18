@@ -134,37 +134,31 @@ func TestNode_AddToManager(t *testing.T) {
 	require.Error(t, n.checkWarmSynced(nil), "registered, and not run yet")
 }
 
-func TestNode_WaitFalcoVersions_IsImmediateForANodeWithoutTheWatcher(t *testing.T) {
+func TestNode_FalcoObserved_IsTrueForANodeWithoutTheWatcher(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
 	n := newWarmupNode(t, cl)
 
-	require.NoError(t, n.WaitFalcoVersions(t.Context()), "no versions watcher is going to run, so there is nothing to wait for")
-	require.NoError(t, n.checkFalcoObserved(nil))
+	require.True(t, n.FalcoObserved(), "no versions watcher is going to run, so there is nothing to wait for")
 }
 
-func TestNode_WaitFalcoVersions_WaitsForTheFirstObservation(t *testing.T) {
+func TestNode_FalcoObserved_WaitsForTheFirstObservation(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
 	n := newWarmupNode(t, cl)
 	n.armFalcoVersions()
 
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
-	defer cancel()
-	require.ErrorIs(t, n.WaitFalcoVersions(ctx), context.DeadlineExceeded, "rules files and plugins must not be installed ahead of the observation")
-	require.Error(t, n.checkFalcoObserved(nil), "the pod must not be Ready ahead of the observation")
+	require.False(t, n.FalcoObserved(), "rules files and plugins must not be installed ahead of the observation")
 
 	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
-	require.NoError(t, n.WaitFalcoVersions(t.Context()))
-	require.NoError(t, n.checkFalcoObserved(nil))
+	require.True(t, n.FalcoObserved())
 	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
-	require.NoError(t, n.WaitFalcoVersions(t.Context()), "later observations are harmless")
+	require.True(t, n.FalcoObserved(), "later observations are harmless")
 }
 
-func TestNode_WaitFalcoVersions_IsImmediateForASeededNode(t *testing.T) {
+func TestNode_FalcoObserved_KeepsAnObservationMadeBeforeArming(t *testing.T) {
 	cl := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).Build()
 	n := newWarmupNode(t, cl)
 	n.OnFalcoVersionsObserved(compatfake.NewMockVersionsFetcher(nil).Result)
 	n.armFalcoVersions()
 
-	require.NoError(t, n.WaitFalcoVersions(t.Context()), "Config.FalcoVersions seeds the observation before the watcher is registered")
-	require.NoError(t, n.checkFalcoObserved(nil))
+	require.True(t, n.FalcoObserved())
 }
