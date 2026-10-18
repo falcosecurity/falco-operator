@@ -36,7 +36,7 @@ recovers what is already installed from the pod's volumes and the ArtifactNode
 status. Config resources are delivered as soon as that is done, so a Config can
 carry settings Falco needs to start, such as `engine.kind`. Rules files and
 plugins declare requirements on Falco, so they are installed only once Falco's
-`/versions` API has answered, and the sidecar reports Ready only after that.
+`/versions` API has answered; the first answer re-enqueues them.
 
 The sidecar reads its node's [ArtifactNode](crds/artifactnode.md), whose spec lists
 the artifacts assigned to the node, and reconciles each of them from the artifact
