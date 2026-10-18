@@ -1,8 +1,9 @@
 # Repo-local tool binaries: every non-Go-toolchain CLI the Makefile shells out to is downloaded
 # here, into a gitignored bin/ directory, instead of assumed to be on the system PATH. This keeps
 # `make` reproducible (everyone gets the exact pinned version) and never touches anything outside
-# the repo. Go-based tools (controller-gen, golangci-lint, etc.) don't need this: they're already
-# tracked via go.mod's native `tool` directive and fetched with `go tool <name>`.
+# the repo. Go-based tools (controller-gen, golangci-lint, etc.) are built with `go install
+# <pkg>@<version>` instead of tracked in go.mod's `tool` block, so their dependency trees don't
+# end up in (and bump) the operator's own module graph.
 #
 # Pattern (same as kubebuilder's scaffolded Makefile / cert-manager's makefile-modules "tools"
 # module): each tool is downloaded once to a version-suffixed path
@@ -30,18 +31,6 @@ endif
 
 include hack/make/versions.mk
 
-## Go-toolchain-tracked tools — pinned via go.mod's `tool` directive (go.sum), not curl-downloaded
-## like the ones above. No .PHONY fetch target or $(LOCALBIN) entry needed: `go tool <name>`
-## builds and caches these itself on first use. Defined here anyway, alongside everything else,
-## so every tool this Makefile shells out to has its variable in one single place.
-CONTROLLER_GEN ?= go tool controller-gen
-DEADCODE ?= go tool deadcode
-GOLANGCI_LINT ?= go tool golangci-lint
-GCI ?= go tool gci
-ADDLICENSE ?= go tool addlicense
-SETUP_ENVTEST ?= go tool setup-envtest
-HELM_DOCS ?= go tool helm-docs
-
 ## Tool Binaries — always the bare-name symlink; scripts under hack/ can rely on the same path
 ## by putting $(LOCALBIN) on PATH.
 HELM ?= $(LOCALBIN)/helm
@@ -50,9 +39,17 @@ KIND ?= $(LOCALBIN)/kind
 CHAINSAW ?= $(LOCALBIN)/chainsaw
 TELEPRESENCE ?= $(LOCALBIN)/telepresence
 FALCOCTL ?= $(LOCALBIN)/falcoctl
+CONTROLLER_GEN ?= $(LOCALBIN)/controller-gen
+DEADCODE ?= $(LOCALBIN)/deadcode
+GOLANGCI_LINT ?= $(LOCALBIN)/golangci-lint
+GCI ?= $(LOCALBIN)/gci
+ADDLICENSE ?= $(LOCALBIN)/addlicense
+SETUP_ENVTEST ?= $(LOCALBIN)/setup-envtest
+HELM_DOCS ?= $(LOCALBIN)/helm-docs
 
 .PHONY: tools
-tools: helm kubectl kind chainsaw telepresence falcoctl ## Download all repo-local tool binaries into ./bin.
+tools: helm kubectl kind chainsaw telepresence falcoctl \
+	controller-gen $(DEADCODE) golangci-lint gci addlicense setup-envtest helm-docs ## Download all repo-local tool binaries into ./bin.
 
 .PHONY: tools.clean
 tools.clean: ## Remove all repo-local tool binaries.
@@ -140,3 +137,60 @@ $(LOCALBIN)/telepresence-$(TELEPRESENCE_VERSION): | $(LOCALBIN)
 	chmod +x "$@"
 $(TELEPRESENCE): $(LOCALBIN)/telepresence-$(TELEPRESENCE_VERSION)
 	ln -sf $(LOCALBIN)/telepresence-$(TELEPRESENCE_VERSION) $(TELEPRESENCE)
+
+# go-install-tool builds Go package $(1) at version $(2) into the rule's target ($@). The binary is
+# built into a temp GOBIN and renamed, so a failed build never leaves a half-written tool behind.
+define go-install-tool
+@echo "Installing $(1)@$(2)"
+@set -e; tmpdir=$$(mktemp -d); trap 'rm -rf "$$tmpdir"' EXIT; \
+GOBIN="$$tmpdir" go install "$(1)@$(2)"; \
+mv "$$tmpdir/$(notdir $(1))" "$@"
+endef
+
+.PHONY: controller-gen
+controller-gen: $(CONTROLLER_GEN) ## Install controller-gen locally if necessary.
+$(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,sigs.k8s.io/controller-tools/cmd/controller-gen,$(CONTROLLER_GEN_VERSION))
+$(CONTROLLER_GEN): $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION)
+	ln -sf $(LOCALBIN)/controller-gen-$(CONTROLLER_GEN_VERSION) $(CONTROLLER_GEN)
+
+# No phony alias: `deadcode` is already the Makefile target that runs it.
+$(LOCALBIN)/deadcode-$(DEADCODE_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,golang.org/x/tools/cmd/deadcode,$(DEADCODE_VERSION))
+$(DEADCODE): $(LOCALBIN)/deadcode-$(DEADCODE_VERSION)
+	ln -sf $(LOCALBIN)/deadcode-$(DEADCODE_VERSION) $(DEADCODE)
+
+.PHONY: golangci-lint
+golangci-lint: $(GOLANGCI_LINT) ## Install golangci-lint locally if necessary.
+$(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
+$(GOLANGCI_LINT): $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION)
+	ln -sf $(LOCALBIN)/golangci-lint-$(GOLANGCI_LINT_VERSION) $(GOLANGCI_LINT)
+
+.PHONY: gci
+gci: $(GCI) ## Install gci locally if necessary.
+$(LOCALBIN)/gci-$(GCI_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,github.com/daixiang0/gci,$(GCI_VERSION))
+$(GCI): $(LOCALBIN)/gci-$(GCI_VERSION)
+	ln -sf $(LOCALBIN)/gci-$(GCI_VERSION) $(GCI)
+
+.PHONY: addlicense
+addlicense: $(ADDLICENSE) ## Install addlicense locally if necessary.
+$(LOCALBIN)/addlicense-$(ADDLICENSE_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,github.com/google/addlicense,$(ADDLICENSE_VERSION))
+$(ADDLICENSE): $(LOCALBIN)/addlicense-$(ADDLICENSE_VERSION)
+	ln -sf $(LOCALBIN)/addlicense-$(ADDLICENSE_VERSION) $(ADDLICENSE)
+
+.PHONY: setup-envtest
+setup-envtest: $(SETUP_ENVTEST) ## Install setup-envtest locally if necessary.
+$(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,sigs.k8s.io/controller-runtime/tools/setup-envtest,$(SETUP_ENVTEST_VERSION))
+$(SETUP_ENVTEST): $(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION)
+	ln -sf $(LOCALBIN)/setup-envtest-$(SETUP_ENVTEST_VERSION) $(SETUP_ENVTEST)
+
+.PHONY: helm-docs
+helm-docs: $(HELM_DOCS) ## Install helm-docs locally if necessary.
+$(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION): | $(LOCALBIN)
+	$(call go-install-tool,github.com/norwoodj/helm-docs/cmd/helm-docs,$(HELM_DOCS_VERSION))
+$(HELM_DOCS): $(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION)
+	ln -sf $(LOCALBIN)/helm-docs-$(HELM_DOCS_VERSION) $(HELM_DOCS)

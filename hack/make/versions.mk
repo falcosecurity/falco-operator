@@ -4,10 +4,6 @@
 # above each line below — that comment is what tells Renovate which upstream repo/release feed
 # to check, since it can't infer that from a bare "HELM_VERSION" variable name).
 #
-# Go-based tools (controller-gen, golangci-lint, gci, addlicense, helm-docs, setup-envtest)
-# don't need an entry here: they're pinned in go.mod's own `tool` block instead, which
-# Dependabot/Renovate already understand natively as part of the Go module graph.
-#
 # All versions here keep their "v" prefix (even ones like KWOK/telepresence whose own docs
 # often show it bare) so every line has the exact same shape for the regex above, and so a
 # Renovate-driven bump can never accidentally double up or drop the prefix. Exception:
@@ -38,3 +34,18 @@ TRUST_MANAGER_VERSION ?= v0.13.0
 KWOK_VERSION ?= v0.8.0
 # renovate: datasource=github-releases depName=falcosecurity/falco
 FALCO_VERSION ?= 0.44.1
+# renovate: datasource=go depName=sigs.k8s.io/controller-tools
+CONTROLLER_GEN_VERSION ?= v0.17.0
+# renovate: datasource=go depName=golang.org/x/tools
+DEADCODE_VERSION ?= v0.49.0
+# Keep in sync with the golangci-lint-action version in .github/workflows/lint.yml.
+# renovate: datasource=go depName=github.com/golangci/golangci-lint/v2
+GOLANGCI_LINT_VERSION ?= v2.11.1
+# renovate: datasource=go depName=github.com/daixiang0/gci
+GCI_VERSION ?= v0.13.7
+# renovate: datasource=go depName=github.com/google/addlicense
+ADDLICENSE_VERSION ?= v1.1.1
+# renovate: datasource=go depName=sigs.k8s.io/controller-runtime/tools/setup-envtest
+SETUP_ENVTEST_VERSION ?= v0.0.0-20260305142021-f9589b9f2b9d
+# renovate: datasource=go depName=github.com/norwoodj/helm-docs
+HELM_DOCS_VERSION ?= v1.11.0

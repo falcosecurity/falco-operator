@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   manifests-check:
     name: manifests-check
@@ -27,7 +30,8 @@ jobs:
           TMPDIR=$(mktemp -d)
           echo "TMPDIR=$TMPDIR" >> "$GITHUB_ENV"
           mkdir -p "$TMPDIR/crds" "$TMPDIR/files"
-          go tool controller-gen \
+          make controller-gen
+          ./bin/controller-gen \
             rbac:roleName=falco-operator-role \
             crd:generateEmbeddedObjectMeta=true \
             paths="./..." \
