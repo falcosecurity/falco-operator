@@ -41,6 +41,31 @@ func TestFalcoDefaults_ShareProcessNamespace(t *testing.T) {
 	}
 }
 
+func TestFalcoDefaults_MountsSysKernel(t *testing.T) {
+	const (
+		volumeName = "sys-kernel-fs"
+		sysKernel  = "/sys/kernel"
+	)
+
+	var mountPath string
+	var readOnly bool
+	for _, m := range FalcoDefaults.VolumeMounts {
+		if m.Name == volumeName {
+			mountPath, readOnly = m.MountPath, m.ReadOnly
+		}
+	}
+	assert.Equal(t, sysKernel, mountPath, "/sys/kernel must be mounted: the modern eBPF probe needs tracefs for its tracepoints")
+	assert.True(t, readOnly, "/sys/kernel only needs to be read (tracepoint ids), so it must be mounted read-only")
+
+	var hostPath string
+	for _, v := range FalcoDefaults.Volumes {
+		if v.Name == volumeName && v.HostPath != nil {
+			hostPath = v.HostPath.Path
+		}
+	}
+	assert.Equal(t, sysKernel, hostPath, "sys-kernel-fs must be a hostPath volume for /sys/kernel")
+}
+
 func TestFalcoDefaults_SidecarRunsAsRoot(t *testing.T) {
 	containers := FalcoDefaults.SidecarContainers
 	assert.NotEmpty(t, containers, "at least one sidecar container must be defined")
