@@ -172,6 +172,9 @@ var FalcoDefaults = &InstanceDefaults{
 		{Name: "etc-fs", MountPath: "/host/etc", ReadOnly: true},
 		{Name: "dev-fs", MountPath: "/host/dev", ReadOnly: true},
 		{Name: "sys-fs", MountPath: "/sys/module"},
+		// tracefs (/sys/kernel/tracing) and debugfs: the modern eBPF probe attaches the TOCTOU mitigation
+		// programs to syscalls/sys_enter_* tracepoints, which fail with ENOENT without it.
+		{Name: "sys-kernel-fs", MountPath: "/sys/kernel", ReadOnly: true},
 		{Name: "docker-socket", MountPath: "/host/var/run/"},
 		{Name: "containerd-socket", MountPath: "/host/run/containerd/"},
 		{Name: "crio-socket", MountPath: "/host/run/crio/"},
@@ -189,6 +192,7 @@ var FalcoDefaults = &InstanceDefaults{
 		{Name: "etc-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/etc"}}},
 		{Name: "dev-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/dev"}}},
 		{Name: "sys-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/module"}}},
+		{Name: "sys-kernel-fs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/sys/kernel"}}},
 		{Name: "docker-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/run"}}},
 		{Name: "containerd-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/containerd"}}},
 		{Name: "crio-socket", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/run/crio"}}},
