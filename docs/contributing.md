@@ -25,8 +25,9 @@ Download the repository-local CLI tools:
 make tools
 ```
 
-Go tools such as controller-gen, setup-envtest and golangci-lint are pinned in
-`go.mod`; Make invokes them through `go tool` without separate install targets.
+This includes the Go tools (controller-gen, setup-envtest, golangci-lint, ...),
+which are built with `go install` at the versions pinned in `hack/make/versions.mk`
+rather than tracked in `go.mod`. Make targets install whatever they need on first use.
 
 ## Project Structure
 

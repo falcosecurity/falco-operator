@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   IMG_INSTANCE: falco-operator:e2e
   IMG_ARTIFACT: docker.io/falcosecurity/artifact-operator:e2e

@@ -6,6 +6,9 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   unit-tests:
     name: unit-tests
@@ -23,7 +26,8 @@ jobs:
         run: |
           ENVTEST_K8S_VERSION=$(go list -m -f '{{ .Version }}' k8s.io/api \
             | awk -F'[v.]' '{printf "1.%d", $3}')
-          KUBEBUILDER_ASSETS="$(go tool setup-envtest use "${ENVTEST_K8S_VERSION}" -p path)"
+          make setup-envtest
+          KUBEBUILDER_ASSETS="$(./bin/setup-envtest use "${ENVTEST_K8S_VERSION}" -p path)"
           echo "KUBEBUILDER_ASSETS=${KUBEBUILDER_ASSETS}" >> "$GITHUB_ENV"
 
       - name: Run tests
