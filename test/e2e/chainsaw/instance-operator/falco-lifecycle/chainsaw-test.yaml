@@ -71,7 +71,7 @@ spec:
             - name: expected_resource_type
               value: DaemonSet
             - name: expected_version
-              value: "0.44.1"
+              value: "0.45.1"
 
     - name: Reapply-identical-falco-spec
       description: Re-applying the same spec must be a no-op reconcile, not a pod restart.
@@ -464,7 +464,7 @@ spec:
             - name: expected_resource_type
               value: Deployment
             - name: expected_version
-              value: "0.44.1"
+              value: "0.45.1"
 
     - name: Delete-falco
       description: Delete the Falco CR to trigger cleanup of its managed resources.

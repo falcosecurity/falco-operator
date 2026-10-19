@@ -103,7 +103,7 @@ jobs:
       # renovate: datasource=github-releases depName=kubernetes-sigs/kwok
       KWOK_VERSION: v0.8.0
       # renovate: datasource=github-releases depName=falcosecurity/falco
-      FALCO_VERSION: "0.44.1"
+      FALCO_VERSION: "0.45.1"
       NAMESPACE: falco-operator
     steps:
       - name: Clone the code

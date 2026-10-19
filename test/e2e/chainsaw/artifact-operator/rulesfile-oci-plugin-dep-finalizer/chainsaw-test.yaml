@@ -9,7 +9,7 @@ spec:
 
     The OCI artifact (falco-test/rulesfile-official) carries the Falco distribution
     rules (falco-rules 5.1.0 release), which declares:
-      - required_engine_version: 0.57.0  (met: real Falco 0.44.1 reports engine 0.62.0)
+      - required_engine_version: 0.57.0  (met: real Falco 0.45.1 reports engine 0.65.0)
       - required_plugin_versions: [{container, 0.4.0}]  (met only once the container
         plugin is installed and loaded by Falco)
 
