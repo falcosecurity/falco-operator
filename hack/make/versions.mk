@@ -33,7 +33,7 @@ TRUST_MANAGER_VERSION ?= v0.13.0
 # renovate: datasource=github-releases depName=kubernetes-sigs/kwok
 KWOK_VERSION ?= v0.8.0
 # renovate: datasource=github-releases depName=falcosecurity/falco
-FALCO_VERSION ?= 0.44.1
+FALCO_VERSION ?= 0.45.1
 # renovate: datasource=go depName=sigs.k8s.io/controller-tools
 CONTROLLER_GEN_VERSION ?= v0.17.0
 # renovate: datasource=go depName=golang.org/x/tools

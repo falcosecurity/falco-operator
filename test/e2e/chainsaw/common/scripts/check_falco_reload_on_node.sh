@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Observe Falco 0.44.1's reload epoch through /metrics in the netshoot container.
+# Observe Falco 0.45.1's reload epoch through /metrics in the netshoot container.
 # A changed epoch proves a new Falco run, not which watcher initiated it or every
 # artifact that run loaded. Optional rules name/hash checks use the same snapshot.
 # Required env vars: NAMESPACE, FALCO_NAME.

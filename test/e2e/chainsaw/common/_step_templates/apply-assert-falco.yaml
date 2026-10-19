@@ -17,7 +17,7 @@
 #
 # Optional bindings:
 #   - falco_type:              "DaemonSet" or "Deployment". Default: "DaemonSet".
-#   - falco_version:           Falco version to report in status. Default: "0.44.1".
+#   - falco_version:           Falco version to report in status. Default: "0.45.1".
 #   - falco_image:             Falco container image. Default: $CHAINSAW_FALCO_IMAGE env var.
 #   - artifact_operator_image: artifact-operator sidecar image. Default: $CHAINSAW_ARTIFACT_OPERATOR_IMAGE env var.
 #   - enforce_requirements:    Full --enforce-requirements flag. Default: "--enforce-requirements=true".
@@ -37,7 +37,7 @@ spec:
     - name: falco_type
       value: DaemonSet
     - name: falco_version
-      value: "0.44.1"
+      value: "0.45.1"
     - name: falco_image
       value: (env('CHAINSAW_FALCO_IMAGE'))
     - name: artifact_operator_image
