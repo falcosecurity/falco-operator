@@ -25,6 +25,7 @@ import (
 	"io"
 	"net/http"
 	"runtime"
+	"sync"
 
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2"
@@ -65,6 +66,49 @@ func NewOciPuller(defaults *RegistryOptions) *OciPuller {
 	return &OciPuller{defaults: defaults}
 }
 
+// insecureTransport is the transport shared by every registry client that skips TLS
+// verification. It is built once so that connections are pooled across pulls instead of
+// being left behind by a new transport on every request.
+var insecureTransport = sync.OnceValue(newInsecureTransport)
+
+// newInsecureTransport returns a retrying transport that skips TLS verification. It clones
+// http.DefaultTransport so proxy environment variables, dial and TLS handshake timeouts,
+// idle connection limits and HTTP/2 keep working.
+func newInsecureTransport() http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-configured
+	return retry.NewTransport(transport)
+}
+
+// newRepository returns a repository client for ref configured with creds and the registry
+// options. When opts is non-nil it overrides the puller defaults entirely. A missing tag
+// defaults to DefaultTag.
+func (p *OciPuller) newRepository(ref string, creds auth.CredentialFunc, opts *RegistryOptions) (*remote.Repository, error) {
+	options := p.defaults
+	if opts != nil {
+		options = opts
+	}
+
+	repo, err := remote.NewRepository(ref)
+	if err != nil {
+		return nil, err
+	}
+
+	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
+	if options != nil {
+		if options.InsecureSkipVerify {
+			clientOpts = append(clientOpts, client.WithTransport(insecureTransport()))
+		}
+		repo.PlainHTTP = options.PlainHTTP
+	}
+	repo.Client = client.NewClient(clientOpts...)
+
+	if repo.Reference.Reference == "" {
+		repo.Reference.Reference = DefaultTag
+	}
+	return repo, nil
+}
+
 // Pull resolves ref to its artifact layer and copies the compressed layer payload into dst.
 //
 // Ref format follows: REGISTRY/REPO[:TAG|@DIGEST]. Ex. localhost:5000/hello:latest.
@@ -74,33 +118,11 @@ func (p *OciPuller) Pull(ctx context.Context, ref, os, arch string, creds auth.C
 		return nil, fmt.Errorf("nil destination writer")
 	}
 
-	options := p.defaults
-	if opts != nil {
-		options = opts
-	}
-
-	repo, err := remote.NewRepository(ref)
+	repo, err := p.newRepository(ref, creds, opts)
 	if err != nil {
 		return nil, fmt.Errorf("unable to create new repository with ref %s: %w", ref, err)
 	}
 
-	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
-
-	if options != nil {
-		if options.InsecureSkipVerify {
-			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
-			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
-			retryTransport := retry.NewTransport(httpTransport)
-			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
-		}
-		repo.PlainHTTP = options.PlainHTTP
-	}
-
-	repo.Client = client.NewClient(clientOpts...)
-
-	if repo.Reference.Reference == "" {
-		repo.Reference.Reference = DefaultTag
-	}
 	copyRef := repo.Reference.String()
 
 	refDesc, err := repo.Resolve(ctx, repo.Reference.Reference)
@@ -203,30 +225,9 @@ func copyAndClose(dst io.Writer, reader io.ReadCloser) error {
 // downloading the artifact binary layers. It returns the parsed ArtifactConfig and
 // the root manifest digest, which callers may use as a stable cache key.
 func (p *OciPuller) FetchConfig(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (*ArtifactConfig, string, error) {
-	options := p.defaults
-	if opts != nil {
-		options = opts
-	}
-
-	repo, err := remote.NewRepository(ref)
+	repo, err := p.newRepository(ref, creds, opts)
 	if err != nil {
 		return nil, "", fmt.Errorf("unable to create repository for %q: %w", ref, err)
-	}
-
-	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
-	if options != nil {
-		if options.InsecureSkipVerify {
-			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
-			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
-			retryTransport := retry.NewTransport(httpTransport)
-			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
-		}
-		repo.PlainHTTP = options.PlainHTTP
-	}
-	repo.Client = client.NewClient(clientOpts...)
-
-	if repo.Reference.Reference == "" {
-		repo.Reference.Reference = DefaultTag
 	}
 
 	rootDesc, err := repo.Resolve(ctx, repo.Reference.Reference)
@@ -307,30 +308,9 @@ func fetchManifestConfigDescriptor(ctx context.Context, target descriptorFetcher
 
 // ResolveDigest resolves the current OCI manifest digest for ref without downloading any content.
 func (p *OciPuller) ResolveDigest(ctx context.Context, ref string, creds auth.CredentialFunc, opts *RegistryOptions) (string, error) {
-	options := p.defaults
-	if opts != nil {
-		options = opts
-	}
-
-	repo, err := remote.NewRepository(ref)
+	repo, err := p.newRepository(ref, creds, opts)
 	if err != nil {
 		return "", fmt.Errorf("unable to create repository for %q: %w", ref, err)
-	}
-
-	clientOpts := []client.Option{client.WithCredentialFunc(creds)}
-	if options != nil {
-		if options.InsecureSkipVerify {
-			tlsConfig := &tls.Config{InsecureSkipVerify: options.InsecureSkipVerify} //nolint:gosec // user-configured
-			httpTransport := &http.Transport{TLSClientConfig: tlsConfig}
-			retryTransport := retry.NewTransport(httpTransport)
-			clientOpts = append(clientOpts, client.WithTransport(retryTransport))
-		}
-		repo.PlainHTTP = options.PlainHTTP
-	}
-	repo.Client = client.NewClient(clientOpts...)
-
-	if repo.Reference.Reference == "" {
-		repo.Reference.Reference = DefaultTag
 	}
 
 	desc, err := repo.Resolve(ctx, repo.Reference.Reference)
