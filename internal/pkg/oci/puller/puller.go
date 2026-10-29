@@ -67,15 +67,18 @@ func NewOciPuller(defaults *RegistryOptions) *OciPuller {
 }
 
 // insecureTransport is the transport shared by every registry client that skips TLS
-// verification. It clones http.DefaultTransport so proxy environment variables, dial and
-// TLS handshake timeouts, idle connection limits and HTTP/2 keep working, and it is built
-// once so that connections are pooled across pulls instead of being left behind by a new
-// transport on every request.
-var insecureTransport = sync.OnceValue(func() http.RoundTripper {
+// verification. It is built once so that connections are pooled across pulls instead of
+// being left behind by a new transport on every request.
+var insecureTransport = sync.OnceValue(newInsecureTransport)
+
+// newInsecureTransport returns a retrying transport that skips TLS verification. It clones
+// http.DefaultTransport so proxy environment variables, dial and TLS handshake timeouts,
+// idle connection limits and HTTP/2 keep working.
+func newInsecureTransport() http.RoundTripper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-configured
 	return retry.NewTransport(transport)
-})
+}
 
 // newRepository returns a repository client for ref configured with creds and the registry
 // options. When opts is non-nil it overrides the puller defaults entirely. A missing tag
