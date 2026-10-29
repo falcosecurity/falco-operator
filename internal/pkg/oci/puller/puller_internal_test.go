@@ -42,6 +42,7 @@ import (
 	orascontent "oras.land/oras-go/v2/content"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
+	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
 type memoryDescriptorFetcher map[string][]byte
@@ -274,6 +275,39 @@ func TestRegistryTLSIsolation(t *testing.T) {
 				"explicit secure options must not inherit another client's transport")
 		})
 	}
+}
+
+func TestNewRepositoryInsecureTransport(t *testing.T) {
+	puller := NewOciPuller(nil)
+	transportFor := func(opts *RegistryOptions) http.RoundTripper {
+		t.Helper()
+		repo, err := puller.newRepository("registry.example/test/rules:1.0.0", nil, opts)
+		require.NoError(t, err)
+		authClient, ok := repo.Client.(*auth.Client)
+		require.True(t, ok)
+		return authClient.Client.Transport
+	}
+
+	insecure := transportFor(&RegistryOptions{InsecureSkipVerify: true})
+	retryTransport, ok := insecure.(*retry.Transport)
+	require.True(t, ok, "insecure transport must keep retrying failed requests")
+	base, ok := retryTransport.Base.(*http.Transport)
+	require.True(t, ok)
+	defaults := http.DefaultTransport.(*http.Transport)
+
+	require.NotNil(t, base.TLSClientConfig)
+	assert.True(t, base.TLSClientConfig.InsecureSkipVerify)
+	assert.NotNil(t, base.Proxy, "proxy environment variables must be honored")
+	assert.NotNil(t, base.DialContext, "dials must be bounded by the default timeout")
+	assert.Equal(t, defaults.TLSHandshakeTimeout, base.TLSHandshakeTimeout)
+	assert.Equal(t, defaults.IdleConnTimeout, base.IdleConnTimeout)
+	assert.Equal(t, defaults.MaxIdleConns, base.MaxIdleConns)
+	assert.True(t, base.ForceAttemptHTTP2)
+
+	assert.Same(t, retryTransport, transportFor(&RegistryOptions{InsecureSkipVerify: true}),
+		"insecure clients must share one connection pool")
+	assert.NotSame(t, retryTransport, transportFor(nil))
+	assert.NotSame(t, retryTransport, transportFor(&RegistryOptions{}))
 }
 
 const testRegistryRules = "- required_engine_version: 0.0.1\n"
