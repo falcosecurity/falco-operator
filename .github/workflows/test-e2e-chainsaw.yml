@@ -149,6 +149,12 @@ jobs:
           cp bin/linux/amd64/artifact-manager bin/linux/amd64/manager
           docker build -t "${IMG_ARTIFACT}" -f build/Dockerfile .
 
+      # ubuntu-26.04 doesn't apply the image's /etc/sysctl.conf at boot, leaving the kernel
+      # defaults that kind nodes and pods share. Remove once the image sets these itself:
+      # https://github.com/actions/runner-images/issues/15108
+      - name: Raise inotify limits
+        run: sudo sysctl -w fs.inotify.max_user_instances=1280 fs.inotify.max_user_watches=655360
+
       - name: Create kind cluster
         uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:
