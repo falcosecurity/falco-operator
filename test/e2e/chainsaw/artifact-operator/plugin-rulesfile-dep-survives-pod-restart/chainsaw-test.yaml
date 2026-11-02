@@ -131,9 +131,12 @@ spec:
             content: |
               bash ../../common/scripts/rollout_restart_daemonset.sh
 
-    - name: "Step 07: Wait-artifact-operator-sidecar-ready"
+    - name: "Step 07: Wait-rulesfile-reinstalled"
       description: |
         Wait for the replacement Pods' artifact-operator containers to report ready.
+        Readiness only completes warm sync; new volumes still need their artifacts
+        installed. Wait for the rules file on every replacement Pod before deleting
+        its plugin, rather than relying on status left by the previous Pods.
         The following deletion checks verify that installed dependencies are protected.
       try:
         - assert:
@@ -146,6 +149,17 @@ spec:
                   app.kubernetes.io/instance: ($falco_name)
               status:
                 (containerStatuses[?name == 'artifact-operator'].ready): [true]
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: (join('', ['/etc/falco/rules.d/50-01-', $rulesfile_name, '-oci.yaml']))
+            content: bash ../../common/scripts/check_file_checksum_on_node.sh
+            check:
+              (to_string(json_parse($stdout).status) == 'success'): true
 
     - name: "Step 08: Delete-plugin-blocked"
       description: |
