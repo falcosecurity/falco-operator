@@ -51,7 +51,7 @@ Supported component types:
 
 | Setting | Value |
 |---------|-------|
-| Image | `docker.io/falcosecurity/falcosidekick:2.32.0` |
+| Image | `docker.io/falcosecurity/falcosidekick:2.35.1` |
 | Default replicas | 2 |
 | Port | 2801 (http) |
 | Probes | `/ping` on port 2801, initialDelay 10s, period 5s |
@@ -98,7 +98,7 @@ metadata:
 spec:
   component:
     type: falcosidekick
-    version: "2.32.0"
+    version: "2.35.1"
   replicas: 2
 ```
 

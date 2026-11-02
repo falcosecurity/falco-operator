@@ -99,7 +99,7 @@ spec:
     spec:
       containers:
         - name: falco
-          image: falcosecurity/falco:0.45.1
+          image: falcosecurity/falco:0.45.2
           resources:
             requests:
               cpu: 200m

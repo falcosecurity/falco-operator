@@ -49,11 +49,11 @@ const (
 
 const (
 	// FalcoTag the default tag used for Falco.
-	FalcoTag = "0.45.1"
+	FalcoTag = "0.45.2"
 	// MetacollectorTag the default tag used for k8s-metacollector.
 	MetacollectorTag = "0.1.2"
 	// FalcosidekickTag the default tag used for Falcosidekick.
-	FalcosidekickTag = "2.32.0"
+	FalcosidekickTag = "2.35.1"
 	// FalcosidekickUITag the default tag used for Falcosidekick UI.
 	FalcosidekickUITag = "2.2.0"
 
