@@ -69,6 +69,7 @@ func TestArtifactHTTPClient_DownloadTimeoutAndRetry(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				started, disconnected := make(chan struct{}), make(chan struct{})
+				releaseHandler := make(chan struct{})
 				var stalled atomic.Bool
 				stalled.Store(true)
 				server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +82,10 @@ func TestArtifactHTTPClient_DownloadTimeoutAndRetry(t *testing.T) {
 						close(started)
 						<-r.Context().Done()
 						close(disconnected)
+						// Returning here could finish the chunked body while the client
+						// timeout races with EOF. Keep this response incomplete until
+						// the test has observed the client's timeout.
+						<-releaseHandler
 						return
 					}
 					_, _ = io.WriteString(w, "complete rules")
@@ -91,6 +96,7 @@ func TestArtifactHTTPClient_DownloadTimeoutAndRetry(t *testing.T) {
 					server.Start()
 				}
 				t.Cleanup(server.Close)
+				t.Cleanup(func() { close(releaseHandler) })
 				var ca *tlsutil.CAWatcher
 				if secure {
 					ca = newArtifactTestCAWatcher(t, server.Certificate().Raw)
