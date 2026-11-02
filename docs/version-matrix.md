@@ -6,13 +6,15 @@ When a `Falco` resource does not pin a version (via `spec.version` or an explici
 
 Each row marks the operator version that introduced a given default; `+` means that default applies from that version onward, until the next row.
 
-| Falco Operator | Default Falco |
-|----------------|---------------|
-| v0.0.1+        | 0.41.0        |
-| v0.2.0+        | 0.43.0        |
-| v0.3.0+        | 0.44.0        |
-| v0.4.0+        | 0.44.1        |
-| v0.5.0+        | 0.45.1        |
+| Falco Operator       | Default Falco |
+|----------------------|---------------|
+| v0.0.1+              | 0.41.0        |
+| v0.2.0+              | 0.43.0        |
+| v0.3.0+              | 0.44.0        |
+| v0.4.0+              | 0.44.1        |
+| v0.5.0+ (unreleased) | 0.45.2        |
+
+The unreleased row describes the defaults on `main`; it does not change existing operator releases.
 
 > The operator version is the released operator image tag (which matches the Helm chart `appVersion`). You can always override the Falco version per instance — see [Configuration](configuration.md) and the [Falco CRD reference](crds/falco.md).
 
