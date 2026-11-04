@@ -59,6 +59,7 @@ The following table lists the configurable parameters of the falco-operator char
 | apiPriorityAndFairness.operator.matchingPrecedence | int | `900` | Precedence of the operator's own schema; it must match before the sidecars' one. |
 | apiPriorityAndFairness.operator.priorityLevel | string | `"workload-high"` | Priority level for the operator's own artifact API requests. |
 | artifactNodeAdmissionPolicy.enabled | bool | `false` | Create the ValidatingAdmissionPolicy and its binding. |
+| artifactOperatorAppArmorUnconfined | bool | `false` | When true, the artifact-operator sidecar runs with the Unconfined AppArmor profile. Enable on nodes where the container runtime's default AppArmor profile blocks SIGHUP to Falco with permission denied. Requires Kubernetes 1.30 or later. Enabling it rolls the Falco pods. |
 | clusterDomain | string | `"cluster.local"` | Cluster DNS domain, used for the artifact server URL and its TLS certificate. |
 | dnsConfig | object | `{}` | Pod DNS config. Requires dnsPolicy to be set to None to take full effect. |
 | dnsPolicy | string | `""` | Pod DNS policy. One of ClusterFirst, ClusterFirstWithHostNet, Default or None. |

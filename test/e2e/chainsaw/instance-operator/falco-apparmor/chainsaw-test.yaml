@@ -1,0 +1,133 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: falco-apparmor
+spec:
+  description: |
+    An AppArmor profile set on the artifact-operator container through spec.podTemplateSpec
+    reaches the DaemonSet and the running pods, and the sidecar can still signal Falco: a
+    Config forces a reload, and every pod must report a completed SIGHUP with no failed one.
+    Unconfined needs no AppArmor support on the host, so this passes on nodes with and
+    without AppArmor. The suite's operator runs with --artifact-operator-apparmor-unconfined
+    off, its default, so the profile here can only come from the podTemplateSpec.
+
+  bindings:
+    - name: falco_name
+      value: falco-apparmor-test
+    - name: test_name
+      value: falco-apparmor
+    - name: config_name
+      value: falco-apparmor-reload
+
+  steps:
+    - name: Create-falco-with-unconfined-sidecar
+      try:
+        - apply:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Falco
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                type: DaemonSet
+                podTemplateSpec:
+                  spec:
+                    containers:
+                      - name: falco
+                        image: (env('CHAINSAW_FALCO_IMAGE'))
+                        tty: true
+                      - name: artifact-operator
+                        image: (env('CHAINSAW_ARTIFACT_OPERATOR_IMAGE'))
+                        imagePullPolicy: Never
+                        securityContext:
+                          appArmorProfile:
+                            type: Unconfined
+
+    - name: Assert-profile-on-daemonset
+      try:
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: DaemonSet
+              metadata:
+                name: ($falco_name)
+                namespace: ($namespace)
+              spec:
+                template:
+                  spec:
+                    (containers[?name == 'artifact-operator']):
+                      - securityContext:
+                          runAsUser: 0
+                          appArmorProfile:
+                            type: Unconfined
+                    # Only the sidecar is overridden: Falco stays privileged, with no profile of its own.
+                    (containers[?name == 'falco']):
+                      - securityContext:
+                          privileged: true
+                          (appArmorProfile == null): true
+
+    - name: Wait-for-falco-pods-ready
+      use:
+        template: ../../common/_step_templates/wait-falco-pod-ready.yaml
+
+    - name: Assert-profile-on-pods
+      try:
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: Pod
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (containers[?name == 'artifact-operator']):
+                  - securityContext:
+                      appArmorProfile:
+                        type: Unconfined
+
+    - name: Apply-config-to-force-a-reload
+      use:
+        template: ../../common/_step_templates/apply-assert-config.yaml
+        with:
+          bindings:
+            - name: config_spec
+              value:
+                config:
+                  log_level: info
+
+    - name: Assert-sidecar-can-signal-falco
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+            content: |
+              set -o nounset
+              pods=$(kubectl get pods -n "$NAMESPACE" -o jsonpath='{.items[*].metadata.name}')
+              [ -n "$pods" ] || { echo "no pods found in $NAMESPACE" >&2; exit 1; }
+              for pod in $pods; do
+                for _ in $(seq 1 120); do
+                  logs=$(kubectl logs -n "$NAMESPACE" "$pod" -c artifact-operator)
+                  if printf '%s' "$logs" | grep -q 'failed to send SIGHUP'; then
+                    echo "$pod: failed to send SIGHUP to Falco" >&2
+                    exit 1
+                  fi
+                  printf '%s' "$logs" | grep -q 'available after SIGHUP' && continue 2
+                  sleep 1
+                done
+                echo "$pod: no completed SIGHUP observed" >&2
+                exit 1
+              done
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

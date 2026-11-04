@@ -153,6 +153,7 @@ func main() {
 	var artifactClientCertDuration, artifactClientCertRenewBefore time.Duration
 	var imageRegistry string
 	var artifactOperatorEnforceRequirements bool
+	var artifactOperatorAppArmorUnconfined bool
 	var artifactServerMaxConcurrentRequests int
 	flag.StringVar(&artifactServeAddr, "artifact-serve-addr", ":8082",
 		"Address the artifact HTTP server binds to. Per-node artifact-operators download OCI artifacts from this server.")
@@ -207,6 +208,10 @@ func main() {
 	flag.BoolVar(&artifactOperatorEnforceRequirements, "enforce-requirements", true,
 		"Whether the artifact-operator sidecar enforces artifact compatibility requirements. "+
 			"Set to false to install artifacts regardless of Falco version or plugin dependency constraints.")
+	flag.BoolVar(&artifactOperatorAppArmorUnconfined, "artifact-operator-apparmor-unconfined", false,
+		"Run the artifact-operator sidecar with the Unconfined AppArmor profile. Enable on nodes where the "+
+			"container runtime's default AppArmor profile blocks SIGHUP to Falco with permission denied. "+
+			"Requires Kubernetes 1.30 or later.")
 	flag.IntVar(&artifactServerMaxConcurrentRequests, "artifact-server-max-concurrent-requests", 0,
 		"Maximum number of concurrent artifact blob transfers the server handles simultaneously. "+
 			"Excess requests receive 503 with a jittered Retry-After so retries spread out. "+
@@ -229,6 +234,7 @@ func main() {
 		os.Exit(1)
 	}
 	resources.SetArtifactOperatorEnforceRequirements(artifactOperatorEnforceRequirements)
+	resources.SetArtifactOperatorAppArmorUnconfined(artifactOperatorAppArmorUnconfined)
 	resources.SetArtifactDownloadTimeout(artifactDownloadTimeout)
 	resources.SetArtifactOperatorKubeAPILimits(artifactOperatorKubeAPIQPS, artifactOperatorKubeAPIBurst)
 

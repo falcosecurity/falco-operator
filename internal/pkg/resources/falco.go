@@ -326,6 +326,20 @@ func SetArtifactOperatorEnforceRequirements(enforce bool) {
 	})
 }
 
+// SetArtifactOperatorAppArmorUnconfined propagates the --artifact-operator-apparmor-unconfined flag to
+// every artifact-operator sidecar. Falco is privileged and therefore unconfined, and the container
+// runtimes' default AppArmor profiles only allow sending signals to their own profile, so SIGHUP to
+// Falco fails with EACCES even as root. Nodes without AppArmor are unaffected: Unconfined does not
+// require host support. The field requires Kubernetes 1.30 or later. Call this once during
+// falco-operator startup.
+func SetArtifactOperatorAppArmorUnconfined(unconfined bool) {
+	if !unconfined {
+		return
+	}
+	sidecar := &FalcoDefaults.SidecarContainers[0]
+	sidecar.SecurityContext.AppArmorProfile = &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
+}
+
 // SetArtifactDownloadTimeout sets the download limit injected into every artifact-operator
 // sidecar. Call this once during falco-operator startup.
 func SetArtifactDownloadTimeout(timeout time.Duration) {

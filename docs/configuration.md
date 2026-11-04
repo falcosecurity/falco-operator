@@ -249,6 +249,50 @@ variable. Changing the Pod template follows the workload's update strategy; this
 is not a live adjustment to an already-running sidecar. Falco metrics are not
 required for the cooldown or the HTTP availability check.
 
+### Reloads on AppArmor nodes
+
+On nodes where the container runtime applies its default AppArmor profile, such as
+containerd's `cri-containerd.apparmor.d`, the Artifact Operator cannot signal Falco. It
+logs `failed to send SIGHUP to Falco; will retry` with `permission denied` every 5 seconds,
+and the `Falco` object and its pods still look healthy. Falco is privileged and therefore
+unconfined, and the default profile only allows sending signals to its own profile.
+
+To fix this for every Falco instance, set the Helm value
+`artifactOperatorAppArmorUnconfined: true`. For installations without Helm, use
+`--artifact-operator-apparmor-unconfined` on the instance operator. It is disabled by
+default and rolls the Falco pods when changed. Nodes without AppArmor ignore the setting.
+
+It requires Kubernetes 1.30 or later: on 1.29 the API server rejects the workload with
+`appArmorProfile: field not declared in schema`.
+
+Without leader election, the old and new operator pods run together while the Helm upgrade
+rolls out, and they overwrite each other's workload spec until the old pod exits. This
+settles on its own, but replaces the Falco pods several times instead of once. To get a
+single rollout, run the operator with `--leader-elect=true` before changing this setting.
+
+To fix this for a single instance, or to use your own profile, set it on the container:
+
+```yaml
+apiVersion: instance.falcosecurity.dev/v1alpha1
+kind: Falco
+metadata:
+  name: falco
+spec:
+  podTemplateSpec:
+    spec:
+      containers:
+        - name: artifact-operator
+          securityContext:
+            appArmorProfile:
+              type: Unconfined
+```
+
+A profile set this way takes precedence over the flag. Only `Unconfined` works on nodes
+without AppArmor: the kubelet rejects pods using `RuntimeDefault` or `Localhost` there with
+`Cannot enforce AppArmor: AppArmor is not enabled on the host`. On AppArmor nodes, `RuntimeDefault`
+brings back the SIGHUP failure above, and a `Localhost` profile must allow signals to an
+unconfined peer.
+
 ## Artifact Downloads
 
 The Artifact Operator limits each download from the central artifact server to

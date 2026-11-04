@@ -10,6 +10,7 @@ release numbering uses [semantic versioning](http://semver.org).
 * Fix the artifact Service selector to target only the active leader when leader election is enabled.
 * Keep the bootstrap CA private key during certificate renewal so existing mTLS certificates remain trusted.
 * Add `clusterDomain` to configure the artifact server hostname and its TLS certificate for non-default cluster DNS domains.
+* Add `artifactOperatorAppArmorUnconfined` to run the artifact-operator sidecar with the Unconfined AppArmor profile on nodes where the default profile blocks SIGHUP to Falco; disabled by default.
 
 ## v0.4.0-rc2
 
