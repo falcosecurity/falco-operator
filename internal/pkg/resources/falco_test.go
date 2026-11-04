@@ -80,6 +80,26 @@ func TestFalcoDefaults_SidecarRunsAsRoot(t *testing.T) {
 	}
 }
 
+func TestSetArtifactOperatorAppArmorUnconfined(t *testing.T) {
+	securityContext := FalcoDefaults.SidecarContainers[0].SecurityContext
+	t.Cleanup(func() { securityContext.AppArmorProfile = nil })
+
+	assert.Nil(t, securityContext.AppArmorProfile, "the sidecar must not set an AppArmor profile by default")
+
+	t.Run("false is a no-op", func(t *testing.T) {
+		SetArtifactOperatorAppArmorUnconfined(false)
+		assert.Nil(t, securityContext.AppArmorProfile)
+	})
+
+	t.Run("true sets the Unconfined profile", func(t *testing.T) {
+		SetArtifactOperatorAppArmorUnconfined(true)
+		if assert.NotNil(t, securityContext.AppArmorProfile) {
+			assert.Equal(t, corev1.AppArmorProfileTypeUnconfined, securityContext.AppArmorProfile.Type)
+		}
+		assert.Equal(t, int64(0), *securityContext.RunAsUser, "runAsUser must be preserved")
+	})
+}
+
 func TestSetArtifactOperatorEnforceRequirements(t *testing.T) {
 	t.Run("true is a no-op", func(t *testing.T) {
 		saveSidecarEnv(t)

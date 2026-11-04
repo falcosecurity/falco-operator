@@ -676,6 +676,96 @@ func TestGenerateApplyConfigurationSidecarProbes(t *testing.T) {
 	assert.NotEmpty(t, sidecarVolumeMounts, "sidecar should have volumeMounts")
 }
 
+// TestGenerateApplyConfigurationSidecarAppArmorProfile verifies that the sidecar sets no AppArmor profile
+// unless the flag enables it, that a user-supplied profile replaces the flag's, and that the rest of the
+// security context survives.
+func TestGenerateApplyConfigurationSidecarAppArmorProfile(t *testing.T) {
+	tests := []struct {
+		name          string
+		unconfined    bool
+		userProfile   *corev1.AppArmorProfile
+		userReadOnly  bool
+		wantType      string
+		wantLocalhost string
+	}{
+		{
+			name: "no profile when the flag is off",
+		},
+		{
+			name:       "unconfined when the flag is on",
+			unconfined: true,
+			wantType:   string(corev1.AppArmorProfileTypeUnconfined),
+		},
+		{
+			name:       "user profile overrides the flag",
+			unconfined: true,
+			userProfile: &corev1.AppArmorProfile{
+				Type:             corev1.AppArmorProfileTypeLocalhost,
+				LocalhostProfile: new("artifact-operator"),
+			},
+			wantType:      string(corev1.AppArmorProfileTypeLocalhost),
+			wantLocalhost: "artifact-operator",
+		},
+		{
+			name:        "user RuntimeDefault overrides the flag",
+			unconfined:  true,
+			userProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeRuntimeDefault},
+			wantType:    string(corev1.AppArmorProfileTypeRuntimeDefault),
+		},
+		{
+			name:         "flag profile is kept when the user changes other securityContext fields",
+			unconfined:   true,
+			userReadOnly: true,
+			wantType:     string(corev1.AppArmorProfileTypeUnconfined),
+		},
+		{
+			name:        "user profile applies when the flag is off",
+			userProfile: &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined},
+			wantType:    string(corev1.AppArmorProfileTypeUnconfined),
+		},
+	}
+
+	for _, resourceType := range []string{resources.ResourceTypeDaemonSet, resources.ResourceTypeDeployment} {
+		for _, tt := range tests {
+			t.Run(resourceType+"/"+tt.name, func(t *testing.T) {
+				t.Cleanup(func() { falcoDefs.SidecarContainers[0].SecurityContext.AppArmorProfile = nil })
+				resources.SetArtifactOperatorAppArmorUnconfined(tt.unconfined)
+
+				falco := newTestFalcoName()
+				falco.Spec.Type = new(resourceType)
+				if tt.userProfile != nil || tt.userReadOnly {
+					securityContext := &corev1.SecurityContext{AppArmorProfile: tt.userProfile}
+					if tt.userReadOnly {
+						securityContext.ReadOnlyRootFilesystem = new(true)
+					}
+					falco.Spec.PodTemplateSpec = &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name:            falcoDefs.SidecarContainerName,
+								SecurityContext: securityContext,
+							}},
+						},
+					}
+				}
+
+				result, err := generateApplyConfiguration(falco, resourceType, "", "")
+				require.NoError(t, err)
+				require.Equal(t, resourceType, result.GetKind())
+
+				sidecar := mustFindContainer(t, mustGetContainers(t, result), falcoDefs.SidecarContainerName)
+				gotType, _, _ := unstructured.NestedString(sidecar, "securityContext", "appArmorProfile", "type")
+				assert.Equal(t, tt.wantType, gotType)
+				gotLocalhost, _, _ := unstructured.NestedString(sidecar, "securityContext", "appArmorProfile", "localhostProfile")
+				assert.Equal(t, tt.wantLocalhost, gotLocalhost)
+				_, hasRunAsUser, _ := unstructured.NestedFieldNoCopy(sidecar, "securityContext", "runAsUser")
+				assert.True(t, hasRunAsUser, "runAsUser default should survive the merge")
+				gotReadOnly, _, _ := unstructured.NestedBool(sidecar, "securityContext", "readOnlyRootFilesystem")
+				assert.Equal(t, tt.userReadOnly, gotReadOnly)
+			})
+		}
+	}
+}
+
 // TestGenerateApplyConfigurationMTLSWithUserSidecarOverride verifies that applyArtifactClientCertOverlay
 // merges mTLS volume mounts into an existing, user-customized artifact-operator sidecar container
 // rather than appending a duplicate entry.

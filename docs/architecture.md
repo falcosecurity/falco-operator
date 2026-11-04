@@ -151,4 +151,5 @@ treating a successful API write as proof of installed files or loaded Falco stat
 | Image | Fixed `falcosecurity/artifact-operator` repository; registry selected by `IMAGE_REGISTRY`, tag embedded in the Instance Operator build |
 | Default image | Matching release tag embedded at build time; development Make targets use `dev`, plain Go builds fall back to `latest` |
 | Probes | Startup (`/readyz`, 3s delay), Readiness (`/readyz`, 5s delay), Liveness (`/healthz`, 15s delay) — all on port 8081 |
+| Security context | Runs as root (UID 0) so it can send SIGHUP to Falco; AppArmor `Unconfined` is opt-in, see [Artifact Reloads](configuration.md#artifact-reloads) |
 | Volumes | 3 shared `emptyDir` volumes (config, rulesfiles, plugins) |

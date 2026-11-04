@@ -181,6 +181,11 @@ excludedLabels: []
 # or plugin dependency constraints. Useful when compatibility metadata is unavailable or incorrect.
 enforceRequirements: true
 
+# -- When true, the artifact-operator sidecar runs with the Unconfined AppArmor profile. Enable on nodes
+# where the container runtime's default AppArmor profile blocks SIGHUP to Falco with permission denied.
+# Requires Kubernetes 1.30 or later. Enabling it rolls the Falco pods.
+artifactOperatorAppArmorUnconfined: false
+
 # -- Additional CLI arguments passed to the operator binary. mTLS's own flags are added
 # natively when mtls.enabled is true; no need to list them here.
 extraArgs: []
