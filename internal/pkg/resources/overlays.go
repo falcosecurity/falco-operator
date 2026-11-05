@@ -23,6 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -165,7 +166,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 			dep.Spec.Template = corev1.PodTemplateSpec{}
 		}
 		if cfg.labels != nil {
-			dep.Spec.Template.Labels = forgePodTemplateSpecLabels(name, cfg.labels)
+			dep.Spec.Template.Labels = podTemplateLabels(name, cfg.labels, dep.Spec.Template.Labels)
 		}
 		if cfg.strategy != nil {
 			dep.Spec.Strategy = *cfg.strategy
@@ -188,7 +189,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 			ds.Spec.Template = corev1.PodTemplateSpec{}
 		}
 		if cfg.labels != nil {
-			ds.Spec.Template.Labels = forgePodTemplateSpecLabels(name, cfg.labels)
+			ds.Spec.Template.Labels = podTemplateLabels(name, cfg.labels, ds.Spec.Template.Labels)
 		}
 		if cfg.updateStrategy != nil {
 			ds.Spec.UpdateStrategy = *cfg.updateStrategy
@@ -212,6 +213,14 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 	}
 
 	return resource, nil
+}
+
+// podTemplateLabels returns the pod template labels of the overlay for the instance name: the labels
+// propagated from the instance resource, the labels set in spec.podTemplateSpec.metadata.labels, which
+// take precedence as the more specific ones, and the selector labels, which win over both because the
+// workload's selector must match its pods.
+func podTemplateLabels(name string, resourceLabels, templateLabels map[string]string) map[string]string {
+	return forgePodTemplateSpecLabels(name, labels.Merge(resourceLabels, templateLabels))
 }
 
 // artifactServerTrustMountPath is the mount path for the CA trust bundle ConfigMap in the
