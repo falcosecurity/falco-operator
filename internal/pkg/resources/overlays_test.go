@@ -400,9 +400,20 @@ func TestGenerateUserOverlayPodTemplateLabels(t *testing.T) {
 		want           map[string]string
 	}{
 		{
+			name: "pod template without labels and without resource labels",
+			want: map[string]string{
+				"app.kubernetes.io/name":     "falco",
+				"app.kubernetes.io/instance": "falco",
+			},
+		},
+		{
 			name:           "pod template labels without resource labels",
 			templateLabels: map[string]string{"team": "security"},
-			want:           map[string]string{"team": "security"},
+			want: map[string]string{
+				"team":                       "security",
+				"app.kubernetes.io/name":     "falco",
+				"app.kubernetes.io/instance": "falco",
+			},
 		},
 		{
 			name:           "pod template labels are kept next to resource labels",
@@ -435,28 +446,52 @@ func TestGenerateUserOverlayPodTemplateLabels(t *testing.T) {
 				"app.kubernetes.io/instance": "falco",
 			},
 		},
+		{
+			name:           "selector labels take precedence over pod template labels without resource labels",
+			templateLabels: map[string]string{"app.kubernetes.io/name": "custom", "app.kubernetes.io/instance": "custom"},
+			want: map[string]string{
+				"app.kubernetes.io/name":     "falco",
+				"app.kubernetes.io/instance": "falco",
+			},
+		},
 	}
 
-	for _, kind := range []string{ResourceTypeDeployment, ResourceTypeDaemonSet} {
+	newFalco := func(meta metav1.ObjectMeta, template *corev1.PodTemplateSpec) client.Object {
+		return &instancev1alpha1.Falco{ObjectMeta: meta, Spec: instancev1alpha1.FalcoSpec{PodTemplateSpec: template}}
+	}
+	newComponent := func(meta metav1.ObjectMeta, template *corev1.PodTemplateSpec) client.Object {
+		return &instancev1alpha1.Component{
+			ObjectMeta: meta,
+			Spec: instancev1alpha1.ComponentSpec{
+				Component:       instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+				PodTemplateSpec: template,
+			},
+		}
+	}
+
+	for _, target := range []struct {
+		name string
+		kind string
+		defs *InstanceDefaults
+		obj  func(metav1.ObjectMeta, *corev1.PodTemplateSpec) client.Object
+	}{
+		{name: "Falco/" + ResourceTypeDeployment, kind: ResourceTypeDeployment, defs: FalcoDefaults, obj: newFalco},
+		{name: "Falco/" + ResourceTypeDaemonSet, kind: ResourceTypeDaemonSet, defs: FalcoDefaults, obj: newFalco},
+		{name: "Component/" + ResourceTypeDeployment, kind: ResourceTypeDeployment, defs: MetacollectorDefaults, obj: newComponent},
+	} {
 		for _, tt := range tests {
-			t.Run(kind+"/"+tt.name, func(t *testing.T) {
-				obj := &instancev1alpha1.Falco{
-					ObjectMeta: metav1.ObjectMeta{Name: "falco", Namespace: testNamespace, Labels: tt.resourceLabels},
-					Spec: instancev1alpha1.FalcoSpec{
-						PodTemplateSpec: &corev1.PodTemplateSpec{
-							ObjectMeta: metav1.ObjectMeta{Labels: tt.templateLabels},
-						},
-					},
-				}
-				before := obj.DeepCopy()
+			t.Run(target.name+"/"+tt.name, func(t *testing.T) {
+				obj := target.obj(
+					metav1.ObjectMeta{Name: "falco", Namespace: testNamespace, Labels: tt.resourceLabels},
+					&corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: tt.templateLabels}},
+				)
+				before := obj.DeepCopyObject()
 
-				overlay, err := GenerateUserOverlay(kind, obj.Name, FalcoDefaults, GenerateOverlayOptions(obj)...)
+				overlay, err := GenerateUserOverlay(target.kind, obj.GetName(), target.defs, GenerateOverlayOptions(obj)...)
 				require.NoError(t, err)
 
-				templateLabels, _, err := unstructured.NestedStringMap(overlay.Object, "spec", "template", "metadata", "labels")
-				require.NoError(t, err)
-				assert.Equal(t, tt.want, templateLabels)
-				assert.Equal(t, before, obj, "the Falco resource must not be mutated")
+				assert.Equal(t, tt.want, mustGetPodTemplateLabels(t, overlay))
+				assert.Equal(t, before, obj, "the input resource must not be mutated")
 			})
 		}
 	}

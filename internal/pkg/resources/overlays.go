@@ -165,7 +165,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 		} else {
 			dep.Spec.Template = corev1.PodTemplateSpec{}
 		}
-		if cfg.labels != nil {
+		if cfg.labels != nil || cfg.podTemplateSpec != nil {
 			dep.Spec.Template.Labels = podTemplateLabels(name, cfg.labels, dep.Spec.Template.Labels)
 		}
 		if cfg.strategy != nil {
@@ -188,7 +188,7 @@ func GenerateUserOverlay(resourceType, name string, defs *InstanceDefaults, opts
 		} else {
 			ds.Spec.Template = corev1.PodTemplateSpec{}
 		}
-		if cfg.labels != nil {
+		if cfg.labels != nil || cfg.podTemplateSpec != nil {
 			ds.Spec.Template.Labels = podTemplateLabels(name, cfg.labels, ds.Spec.Template.Labels)
 		}
 		if cfg.updateStrategy != nil {
