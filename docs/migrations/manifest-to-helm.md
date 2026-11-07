@@ -36,7 +36,7 @@ follow the applicable [version migration](../migration-guide.md) and
 
 CRDs and custom resources are preserved. A packaging-only swap need not restart
 Falco pods, but operator version or configuration changes can update their pod
-templates and trigger a rollout. In particular, v0.4.x to v0.5.0 requires the
+templates and trigger a rollout. In particular, an upgrade to v0.5.0 requires the
 [dedicated migration steps](v0.4.x-to-v0.5.0.md).
 
 ## Selector compatibility check

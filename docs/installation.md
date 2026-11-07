@@ -85,11 +85,11 @@ helm show crds falcosecurity/falco-operator --version "$CHART_VERSION" > "$CRD_F
 After checking that the chart targets the desired operator version, apply the CRDs and wait for every CRD in that file to be established:
 
 ```bash
-kubectl apply --server-side -f "$CRD_FILE" &&
+kubectl apply --server-side --force-conflicts -f "$CRD_FILE" &&
 kubectl wait --for=condition=Established --timeout=120s -f "$CRD_FILE"
 ```
 
-If either command fails, stop before upgrading. For ownership conflicts, inspect the existing CRD and its field managers; do not add `--force-conflicts` blindly. Do not delete CRDs to resolve an upgrade conflict, because that also deletes their custom resources.
+`--force-conflicts` is required for CRDs that Helm installed: Helm recorded itself as their field manager, and without the flag the apply stops with `conflict with "helm": .spec.versions`. Taking ownership is safe because Helm never updates or removes CRDs from `crds/` afterwards. If the CRDs are managed by another tool, such as a GitOps controller, update them through that tool instead. If either command fails, stop before upgrading. Do not delete CRDs to resolve an upgrade conflict, because that also deletes their custom resources.
 
 Once the CRD update succeeds, upgrade using your reviewed values file:
 
@@ -101,7 +101,7 @@ helm upgrade falco-operator falcosecurity/falco-operator \
   --wait --timeout 5m
 ```
 
-> **Important**: Also check the [operator release notes](https://github.com/falcosecurity/falco-operator/releases) and [chart CHANGELOG](../chart/falco-operator/CHANGELOG.md). Minor releases may include changes that require updating custom resources. For v0.4.x to v0.5.0, follow the [dedicated migration steps](migrations/v0.4.x-to-v0.5.0.md), including verification of the managed Falco workloads after Helm finishes.
+> **Important**: Also check the [operator release notes](https://github.com/falcosecurity/falco-operator/releases) and [chart CHANGELOG](../chart/falco-operator/CHANGELOG.md). Minor releases may include changes that require updating custom resources. For an upgrade to v0.5.0, follow the [dedicated migration steps](migrations/v0.4.x-to-v0.5.0.md), including verification of the managed Falco workloads after Helm finishes.
 
 ### Uninstall
 
