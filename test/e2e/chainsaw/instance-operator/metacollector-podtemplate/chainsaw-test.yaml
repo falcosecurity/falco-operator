@@ -72,9 +72,8 @@ spec:
               value: ($namespace)
             - name: expected_replicas
               value: 1
-            # Must track internal/pkg/image/const.go's MetacollectorTag.
             - name: expected_version
-              value: "0.1.2"
+              value: (env('CHAINSAW_DEFAULT_METACOLLECTOR_VERSION'))
 
     - name: Patch-deployment-strategy-to-recreate
       try:

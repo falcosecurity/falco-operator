@@ -111,8 +111,12 @@ registry.setup: kubectl falcoctl ## Deploy the local OCI registry and push test 
 # CHAINSAW_ARTIFACT_OPERATOR_IMAGE defaults to IMG_ARTIFACT (the same dev image cluster.load.artifact
 # builds/loads) so tests actually use what's already in the cluster. CHAINSAW_FALCO_IMAGE defaults
 # to the real, official Falco image at FALCO_VERSION (hack/make/versions.mk) — Falco itself isn't
-# built by this repo, so there's no local dev equivalent to point at.
-CHAINSAW_FALCO_IMAGE ?= docker.io/falcosecurity/falco:$(FALCO_VERSION)
+# built by this repo, so there's no local dev equivalent to point at. CHAINSAW_FALCO_VERSION is the
+# version the tests expect that image to report. The tests also compare other components with the
+# versions the operator deploys by default, which hack/e2e-default-versions.sh reads from
+# internal/pkg/image/defaults.go.
+CHAINSAW_FALCO_VERSION ?= $(FALCO_VERSION)
+CHAINSAW_FALCO_IMAGE ?= docker.io/falcosecurity/falco:$(CHAINSAW_FALCO_VERSION)
 CHAINSAW_ARTIFACT_OPERATOR_IMAGE ?= $(IMG_ARTIFACT)
 CHAINSAW_ARGS ?=
 # The HA fixture temporarily changes the installed operator Deployment.
@@ -120,7 +124,9 @@ CHAINSAW_HA_EXCLUDE = $(if $(filter true,$(CHAINSAW_ENABLE_HA_TEST)),,--selector
 
 .PHONY: test.chainsaw
 test.chainsaw: chainsaw ## Run chainsaw e2e tests. Requires a running cluster with falco-operator deployed and KWOK installed (see `make kwok.install`).
-	CHAINSAW_FALCO_IMAGE=$(CHAINSAW_FALCO_IMAGE) CHAINSAW_ARTIFACT_OPERATOR_IMAGE=$(CHAINSAW_ARTIFACT_OPERATOR_IMAGE) \
+	default_versions="$$(bash hack/e2e-default-versions.sh)"; \
+	env $$default_versions CHAINSAW_FALCO_VERSION=$(CHAINSAW_FALCO_VERSION) CHAINSAW_FALCO_IMAGE=$(CHAINSAW_FALCO_IMAGE) \
+		CHAINSAW_ARTIFACT_OPERATOR_IMAGE=$(CHAINSAW_ARTIFACT_OPERATOR_IMAGE) \
 		$(CHAINSAW) test ./test/e2e/chainsaw/ --quiet --config ./test/e2e/chainsaw/.chainsaw.yaml --repeat-count 1 $(CHAINSAW_HA_EXCLUDE) $(CHAINSAW_ARGS)
 
 .PHONY: lint

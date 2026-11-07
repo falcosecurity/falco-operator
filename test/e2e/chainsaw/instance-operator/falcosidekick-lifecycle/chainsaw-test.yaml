@@ -60,9 +60,8 @@ spec:
               value: ($namespace)
             - name: expected_replicas
               value: 2
-            # Must track internal/pkg/image/defaults.go's FalcosidekickTag.
             - name: expected_version
-              value: "2.35.1"
+              value: (env('CHAINSAW_DEFAULT_FALCOSIDEKICK_VERSION'))
 
     - name: Assert-sub-resources-exist
       try:
