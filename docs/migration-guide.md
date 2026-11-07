@@ -7,8 +7,20 @@ This page is the index of migration chapters for the Falco Operator. Each chapte
 | Chapter | Description |
 |---------|-------------|
 | [v0.1.x → v0.2.0](migrations/v0.1.x-to-v0.2.0.md) | Upgrade from Falco Operator v0.1.x to v0.2.0 — breaking API changes to `Rulesfile`, `Plugin`, `Config`, and `Falco` CRs, plus new conditions and print columns. |
-| [v0.4.x → v0.5.0](migrations/v0.4.x-to-v0.5.0.md) | Update CRDs and Artifact Operator container overrides, then verify existing artifacts after the upgrade. |
+| [v0.2.x–v0.4.x and release candidates → v0.5.0](migrations/v0.4.x-to-v0.5.0.md) | Upgrade to v0.5.0 from v0.2.x, v0.3.x, v0.4.x or a v0.5.0 release candidate — new artifact delivery through `ArtifactNode`s, compatibility enforcement, Falco pod template changes, and the CRD update. |
 | [YAML manifest → Helm](migrations/manifest-to-helm.md) | Move an existing installation from the bundled YAML manifest (`install.yaml`) to the official Helm chart, keeping CRDs and custom resources intact. |
+
+## Upgrade paths
+
+Find the release you run today and follow the chapters in order. Releases not listed as a step have no breaking changes between them.
+
+| From | To v0.5.0 |
+|------|-----------|
+| v0.1.x | [v0.1.x → v0.2.0](migrations/v0.1.x-to-v0.2.0.md), then [→ v0.5.0](migrations/v0.4.x-to-v0.5.0.md) |
+| v0.2.x, v0.3.x, v0.4.x | [→ v0.5.0](migrations/v0.4.x-to-v0.5.0.md) |
+| v0.5.0-rc1 to rc4 | [→ v0.5.0](migrations/v0.4.x-to-v0.5.0.md#upgrading-from-a-release-candidate) |
+
+Upgrade directly to the target release: there is no need to install each intermediate release.
 
 ## How to pick the right chapter
 

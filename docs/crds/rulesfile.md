@@ -50,8 +50,9 @@ plugin requirements in rules YAML or OCI metadata; see
 [artifact compatibility](../configuration.md#artifact-compatibility). The inline
 and ConfigMap examples below extend the default rules installed in
 [Getting Started](../getting-started.md), including its container plugin and macros.
-They target engine version `0.62.0`, reported by the default Falco 0.44.1;
-engine versions are distinct from Falco release versions.
+They require engine version `0.62.0`, reported by Falco 0.44.1, or later; the
+default Falco 0.45.2 reports `0.65.0`. Engine versions are distinct from Falco
+release versions.
 
 ### From OCI registry
 

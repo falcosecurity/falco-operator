@@ -219,12 +219,12 @@ the generated URL and requires a certificate matching that URL when using TLS.
 
 ## Artifact Reloads
 
-Artifact reloads are **best effort** with the default Falco 0.44.1. By default,
+Artifact reloads are **best effort**. By default,
 the Artifact Operator sends SIGHUP and waits at least **5 seconds** before checking Falco's HTTP
 endpoint or sending another signal. This cooldown reduces repeated signals; it
 does not confirm that a reload completed or prevent every conflict with Falco's
 own file watcher. A future reload API requires separate integration and validation;
-selecting Falco 0.45 or later does not itself enable a different reload mechanism.
+selecting a newer Falco version does not itself enable a different reload mechanism.
 
 Configure the cooldown per instance on the `artifact-operator` container:
 
