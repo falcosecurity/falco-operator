@@ -222,8 +222,12 @@ jobs:
       - name: Push OCI test artifacts
         run: bash .github/e2e/oci-artifacts/push-artifacts.sh
 
+      - name: Export default component versions
+        run: bash hack/e2e-default-versions.sh >> "$GITHUB_ENV"
+
       - name: Run chainsaw e2e tests
         env:
+          CHAINSAW_FALCO_VERSION: ${{ env.FALCO_VERSION }}
           CHAINSAW_FALCO_IMAGE: docker.io/falcosecurity/falco:${{ env.FALCO_VERSION }}
           CHAINSAW_ARTIFACT_OPERATOR_IMAGE: ${{ env.IMG_ARTIFACT }}
           CHAINSAW_ENABLE_HA_TEST: ${{ matrix.category.name == 'instance-operator' && 'true' || 'false' }}
