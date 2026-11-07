@@ -51,11 +51,11 @@ const (
 	// FalcoTag the default tag used for Falco.
 	FalcoTag = "0.45.2"
 	// MetacollectorTag the default tag used for k8s-metacollector.
-	MetacollectorTag = "0.1.2"
+	MetacollectorTag = "0.1.5"
 	// FalcosidekickTag the default tag used for Falcosidekick.
 	FalcosidekickTag = "2.35.1"
 	// FalcosidekickUITag the default tag used for Falcosidekick UI.
-	FalcosidekickUITag = "2.2.0"
+	FalcosidekickUITag = "2.3.1"
 
 	// RedisNamespace the namespace used for Redis.
 	RedisNamespace = "redis"

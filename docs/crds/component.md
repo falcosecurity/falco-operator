@@ -41,7 +41,7 @@ Supported component types:
 
 | Setting | Value |
 |---------|-------|
-| Image | `docker.io/falcosecurity/k8s-metacollector:0.1.1` |
+| Image | `docker.io/falcosecurity/k8s-metacollector:0.1.5` |
 | Ports | 8080 (metrics), 8081 (health), 45000 (broker-grpc) |
 | Resources | Requests: 100m CPU, 128Mi memory; Limits: 250m CPU, 256Mi memory |
 | Security | Non-root (uid 1000), drop all capabilities |
@@ -62,7 +62,7 @@ Supported component types:
 
 | Setting | Value |
 |---------|-------|
-| Image | `docker.io/falcosecurity/falcosidekick-ui:2.2.0` |
+| Image | `docker.io/falcosecurity/falcosidekick-ui:2.3.1` |
 | Default replicas | 2 |
 | Port | 2802 (http) |
 | Probes | `/api/v1/healthz` on port 2802, initialDelay 10s, period 5s |
@@ -84,7 +84,7 @@ metadata:
 spec:
   component:
     type: metacollector
-    version: "0.1.1"
+    version: "0.1.5"
   replicas: 1
 ```
 
@@ -114,7 +114,7 @@ metadata:
 spec:
   component:
     type: falcosidekick-ui
-    version: "2.2.0"
+    version: "2.3.1"
   replicas: 2
   podTemplateSpec:
     spec:
@@ -198,7 +198,7 @@ metadata:
 spec:
   component:
     type: falcosidekick-ui
-    version: "2.2.0"
+    version: "2.3.1"
   replicas: 2
 ```
 
