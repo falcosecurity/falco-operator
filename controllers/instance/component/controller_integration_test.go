@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,11 +37,15 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -605,4 +610,112 @@ func TestReconcile_RecoveryAfterSubResourceDeletion(t *testing.T) {
 	assert.Equal(t, comp.Name, recreated.Name)
 	require.Len(t, recreated.OwnerReferences, 1)
 	assert.Equal(t, "Component", recreated.OwnerReferences[0].Kind)
+}
+
+// TestSetupWithManager_RecoversOwnedRBAC verifies that the controller watches the Role and
+// RoleBinding it owns, so that their deletion or drift is repaired without a Component edit.
+func TestSetupWithManager_RecoversOwnedRBAC(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	// A long resync period ensures that only watch events can trigger the recovery.
+	syncPeriod := 24 * time.Hour
+	mgr, err := ctrl.NewManager(testEnv.Config, ctrl.Options{
+		Scheme:     k8sClient.Scheme(),
+		Metrics:    metricsserver.Options{BindAddress: "0"},
+		Cache:      cache.Options{SyncPeriod: &syncPeriod},
+		Controller: controllerconfig.Controller{SkipNameValidation: new(true)},
+	})
+	require.NoError(t, err)
+
+	// Count parent reads to establish quiescence before each mutation, so that residual
+	// reconciles triggered by the Component itself cannot masquerade as watch recovery.
+	base, err := client.NewWithWatch(testEnv.Config, client.Options{
+		Scheme: k8sClient.Scheme(),
+		Cache:  &client.CacheOptions{Reader: mgr.GetCache()},
+	})
+	require.NoError(t, err)
+	var parentReads atomic.Uint64
+	cl := interceptor.NewClient(base, interceptor.Funcs{
+		Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if _, ok := obj.(*instancev1alpha1.Component); ok {
+				parentReads.Add(1)
+			}
+			return cl.Get(ctx, key, obj, opts...)
+		},
+	})
+	reconciler := NewReconciler(cl, mgr.GetScheme(), mgr.GetEventRecorder("component-rbac-watch-test"))
+	require.NoError(t, reconciler.SetupWithManager(mgr))
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.Start(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(10 * time.Second):
+			t.Error("manager did not stop")
+		}
+	})
+
+	comp := createComponent(t, context.Background(), &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rbac-watch",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	})
+	key := client.ObjectKeyFromObject(comp)
+
+	role := &rbacv1.Role{}
+	roleBinding := &rbacv1.RoleBinding{}
+	require.Eventually(t, func() bool {
+		return k8sClient.Get(ctx, key, role) == nil && k8sClient.Get(ctx, key, roleBinding) == nil
+	}, 10*time.Second, 20*time.Millisecond, "Role and RoleBinding must be created")
+
+	waitForQuiet := func() {
+		t.Helper()
+		previous, lastChange := parentReads.Load(), time.Now()
+		require.Eventually(t, func() bool {
+			current := parentReads.Load()
+			if current != previous {
+				previous, lastChange = current, time.Now()
+			}
+			return time.Since(lastChange) >= 300*time.Millisecond
+		}, 10*time.Second, 20*time.Millisecond, "controller must settle before testing an isolated RBAC event")
+	}
+
+	t.Run("Role deletion", func(t *testing.T) {
+		waitForQuiet()
+		require.NoError(t, k8sClient.Get(ctx, key, role))
+		originalUID := role.UID
+		require.NoError(t, k8sClient.Delete(ctx, role))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, role) == nil && role.UID != originalUID
+		}, 10*time.Second, 20*time.Millisecond, "Role deletion must recover without a Component edit")
+	})
+
+	t.Run("Role drift", func(t *testing.T) {
+		waitForQuiet()
+		require.NoError(t, k8sClient.Get(ctx, key, role))
+		role.Rules[0].Verbs = []string{"get", "list"}
+		require.NoError(t, k8sClient.Update(ctx, role))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, role) == nil && len(role.Rules) == 1 &&
+				slices.Equal(role.Rules[0].Verbs, []string{"get"})
+		}, 10*time.Second, 20*time.Millisecond, "Role drift must recover without a Component edit")
+	})
+
+	t.Run("RoleBinding deletion", func(t *testing.T) {
+		waitForQuiet()
+		require.NoError(t, k8sClient.Get(ctx, key, roleBinding))
+		originalUID := roleBinding.UID
+		require.NoError(t, k8sClient.Delete(ctx, roleBinding))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, roleBinding) == nil && roleBinding.UID != originalUID
+		}, 10*time.Second, 20*time.Millisecond, "RoleBinding deletion must recover without a Component edit")
+	})
 }
