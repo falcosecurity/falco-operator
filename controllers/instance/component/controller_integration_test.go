@@ -606,3 +606,91 @@ func TestReconcile_RecoveryAfterSubResourceDeletion(t *testing.T) {
 	require.Len(t, recreated.OwnerReferences, 1)
 	assert.Equal(t, "Component", recreated.OwnerReferences[0].Kind)
 }
+
+// TestReconcile_TypeChangeDeletesStaleRBAC verifies that changing spec.component.type deletes the RBAC
+// resources generated for the previous type that the new one does not require.
+func TestReconcile_TypeChangeDeletesStaleRBAC(t *testing.T) {
+	ctx := context.Background()
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-type-change",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeMetacollector},
+		},
+	})
+
+	key := types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}
+	clusterKey := types.NamespacedName{Name: resources.GenerateUniqueName(comp.Name, testutil.TestNamespace)}
+	exists := func(key types.NamespacedName, obj client.Object) bool {
+		t.Helper()
+		err := k8sClient.Get(ctx, key, obj)
+		if err != nil {
+			require.True(t, errors.IsNotFound(err), "unexpected error: %v", err)
+		}
+		return err == nil
+	}
+	setType := func(componentType instancev1alpha1.ComponentType) {
+		t.Helper()
+		current := &instancev1alpha1.Component{}
+		require.NoError(t, k8sClient.Get(ctx, key, current))
+		current.Spec.Component.Type = componentType
+		require.NoError(t, k8sClient.Update(ctx, current))
+	}
+
+	reconciler := newTestReconciler()
+	reconcileN(t, ctx, reconciler, comp.Name, 3)
+	require.True(t, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole should exist for metacollector")
+	require.True(t, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding should exist for metacollector")
+
+	setType(instancev1alpha1.ComponentTypeFalcosidekick)
+	reconcileN(t, ctx, reconciler, comp.Name, 3)
+	assert.False(t, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole of metacollector should be deleted")
+	assert.False(t, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding of metacollector should be deleted")
+	assert.True(t, exists(key, &rbacv1.Role{}), "Role should exist for falcosidekick")
+	assert.True(t, exists(key, &rbacv1.RoleBinding{}), "RoleBinding should exist for falcosidekick")
+
+	setType(instancev1alpha1.ComponentTypeMetacollector)
+	reconcileN(t, ctx, reconciler, comp.Name, 3)
+	assert.False(t, exists(key, &rbacv1.Role{}), "Role of falcosidekick should be deleted")
+	assert.False(t, exists(key, &rbacv1.RoleBinding{}), "RoleBinding of falcosidekick should be deleted")
+	assert.True(t, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole should exist again for metacollector")
+	assert.True(t, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding should exist again for metacollector")
+}
+
+// TestReconcile_KeepsForeignClusterRBAC verifies that cluster-scoped RBAC with the name the Component
+// would generate is not deleted when another field manager created it, such as the Falco controller
+// for a Falco instance with the same name and namespace.
+func TestReconcile_KeepsForeignClusterRBAC(t *testing.T) {
+	ctx := context.Background()
+	name := "test-foreign-rbac"
+	clusterKey := types.NamespacedName{Name: resources.GenerateUniqueName(name, testutil.TestNamespace)}
+
+	foreign := []client.Object{
+		&rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: clusterKey.Name},
+			RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "ClusterRole", Name: clusterKey.Name},
+		},
+		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: clusterKey.Name}},
+	}
+	for _, obj := range foreign {
+		require.NoError(t, k8sClient.Create(ctx, obj, client.FieldOwner("falco-controller")))
+		t.Cleanup(func() { _ = k8sClient.Delete(ctx, obj) })
+	}
+
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	})
+
+	reconcileN(t, ctx, newTestReconciler(), comp.Name, 3)
+
+	require.NoError(t, k8sClient.Get(ctx, clusterKey, &rbacv1.ClusterRole{}), "foreign ClusterRole should be kept")
+	require.NoError(t, k8sClient.Get(ctx, clusterKey, &rbacv1.ClusterRoleBinding{}), "foreign ClusterRoleBinding should be kept")
+}

@@ -66,6 +66,12 @@ const (
 	ReasonDualDeploymentCleanup = "DualDeploymentCleanup"
 )
 
+// Stale resource cleanup reasons.
+const (
+	// ReasonStaleResourceCleanup indicates a sub-resource no longer required by the instance was deleted.
+	ReasonStaleResourceCleanup = "StaleResourceCleanup"
+)
+
 // Available condition reasons (Deployment).
 const (
 	// ReasonDeploymentNotFound indicates the deployment was not found.
@@ -150,4 +156,6 @@ const (
 	MessageFormatDeletionError = "Unable to delete %s during cleanup: %s"
 	// MessageFormatDualDeploymentCleanup is the format for dual deployment cleanup message.
 	MessageFormatDualDeploymentCleanup = "Deleted %s due to resource type switch"
+	// MessageFormatStaleResourceCleanup is the format for stale sub-resource cleanup message.
+	MessageFormatStaleResourceCleanup = "Deleted %s %s, no longer required by the instance type"
 )

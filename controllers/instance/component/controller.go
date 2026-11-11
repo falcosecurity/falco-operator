@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 	appsv1 "k8s.io/api/apps/v1"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -168,6 +170,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 		if err := r.ensureClusterRoleBinding(ctx, comp); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	// Delete the RBAC resources a previous spec.component.type required and the current one does not.
+	if err := r.cleanupStaleRBAC(ctx, comp, defs); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Ensure the service is created.
@@ -408,6 +415,72 @@ func (r *Reconciler) ensureClusterRoleBinding(ctx context.Context, comp *instanc
 	return instance.EnsureResource(ctx, r.Client, r.recorder, comp, fieldManager,
 		resources.GenerateClusterRoleBinding(comp),
 		instance.GenerateOptions{SetControllerRef: false, IsClusterScoped: true})
+}
+
+// cleanupStaleRBAC deletes the RBAC resources generated for comp that its component type does not
+// require. They are left behind when spec.component.type changes: switching from metacollector to
+// falcosidekick, for example, would otherwise keep the cluster-wide read permissions of metacollector
+// bound to the ServiceAccount. Bindings are deleted before the roles they grant.
+func (r *Reconciler) cleanupStaleRBAC(ctx context.Context, comp *instancev1alpha1.Component, defs *resources.InstanceDefaults) error {
+	var stale []client.Object
+	if len(defs.RoleRules) == 0 {
+		meta := metav1.ObjectMeta{Name: comp.Name, Namespace: comp.Namespace}
+		stale = append(stale, &rbacv1.RoleBinding{ObjectMeta: meta}, &rbacv1.Role{ObjectMeta: meta})
+	}
+	if len(defs.ClusterRoleRules) == 0 {
+		meta := metav1.ObjectMeta{Name: resources.GenerateUniqueName(comp.Name, comp.Namespace)}
+		stale = append(stale, &rbacv1.ClusterRoleBinding{ObjectMeta: meta}, &rbacv1.ClusterRole{ObjectMeta: meta})
+	}
+
+	for _, obj := range stale {
+		if err := r.deleteStaleResource(ctx, comp, obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteStaleResource deletes obj if it exists and was generated for comp. Namespaced resources must
+// be controlled by comp. Cluster-scoped resources cannot reference a namespaced owner, so they must be
+// managed by this controller's field manager: a resource of the same name created by anyone else, such
+// as a Falco instance with the same name and namespace, is left untouched.
+func (r *Reconciler) deleteStaleResource(ctx context.Context, comp *instancev1alpha1.Component, obj client.Object) error {
+	logger := log.FromContext(ctx)
+
+	gvk, err := apiutil.GVKForObject(obj, r.Scheme)
+	if err != nil {
+		return fmt.Errorf("unable to resolve kind of stale resource: %w", err)
+	}
+
+	if err := r.Get(ctx, client.ObjectKeyFromObject(obj), obj); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("unable to fetch stale %s: %w", gvk.Kind, err)
+	}
+
+	generated := metav1.IsControlledBy(obj, comp)
+	if obj.GetNamespace() == "" {
+		generated = slices.ContainsFunc(obj.GetManagedFields(), func(entry metav1.ManagedFieldsEntry) bool {
+			return entry.Manager == fieldManager
+		})
+	}
+	if !generated {
+		return nil
+	}
+
+	logger.Info("Deleting resource no longer required by the component type", "kind", gvk.Kind, "name", obj.GetName())
+	uid := obj.GetUID()
+	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil && !k8serrors.IsNotFound(err) {
+		logger.Error(err, "unable to delete stale resource", "kind", gvk.Kind, "name", obj.GetName())
+		r.recorder.Eventf(comp, nil, corev1.EventTypeWarning, instance.ReasonDeletionError,
+			instance.ReasonDeletionError, instance.MessageFormatDeletionError, gvk.Kind, err.Error())
+		return fmt.Errorf("unable to delete stale %s: %w", gvk.Kind, err)
+	}
+	r.recorder.Eventf(comp, nil, corev1.EventTypeNormal, instance.ReasonStaleResourceCleanup,
+		instance.ReasonStaleResourceCleanup, instance.MessageFormatStaleResourceCleanup, gvk.Kind, obj.GetName())
+
+	return nil
 }
 
 // ensureService ensures the Service is created or updated.
