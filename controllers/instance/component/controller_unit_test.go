@@ -457,6 +457,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 	tests := []struct {
 		name                string
 		comp                *instancev1alpha1.Component
+		defs                *resources.InstanceDefaults
 		workload            client.Object
 		wantDesired         int32
 		wantAvailable       int32
@@ -471,6 +472,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 				c.Spec.Replicas = new(int32(2))
 				return c
 			}(),
+			defs: resources.MetacollectorDefaults,
 			workload: &appsv1.Deployment{
 				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
 				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2},
@@ -479,6 +481,32 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionStatus: metav1.ConditionTrue,
 			wantConditionReason: instance.ReasonDeploymentAvailable,
 			wantEventMessage:    instance.MessageDeploymentAvailable,
+		},
+		{
+			name: "replicas unset — desired replicas fall back to the component type default",
+			comp: newFalcosidekickComponent(defaultName),
+			defs: resources.FalcosidekickDefaults,
+			workload: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
+				Status:     appsv1.DeploymentStatus{ReadyReplicas: 2, AvailableReplicas: 2},
+			},
+			wantDesired: 2, wantAvailable: 2,
+			wantConditionStatus: metav1.ConditionTrue,
+			wantConditionReason: instance.ReasonDeploymentAvailable,
+			wantEventMessage:    instance.MessageDeploymentAvailable,
+		},
+		{
+			name: "replicas unset — unavailable until the component type default is ready",
+			comp: newFalcosidekickComponent(defaultName),
+			defs: resources.FalcosidekickDefaults,
+			workload: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
+				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1, UnavailableReplicas: 1},
+			},
+			wantDesired: 2, wantAvailable: 1,
+			wantConditionStatus: metav1.ConditionFalse,
+			wantConditionReason: instance.ReasonDeploymentUnavailable,
+			wantEventMessage:    instance.MessageDeploymentUnavailable,
 		},
 	}
 
@@ -492,7 +520,7 @@ func TestComputeAvailableCondition(t *testing.T) {
 			recorder := events.NewFakeRecorder(10)
 			r := NewReconciler(cl, scheme, recorder)
 
-			err := r.computeAvailableCondition(context.Background(), tt.comp)
+			err := r.computeAvailableCondition(context.Background(), tt.comp, tt.defs)
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.wantDesired, tt.comp.Status.DesiredReplicas)

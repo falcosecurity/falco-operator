@@ -52,8 +52,8 @@ type ComponentSpec struct {
 	Component ComponentInfo `json:"component"`
 
 	// Replicas defines the number of replicas for the Deployment.
-	// Default is 1.
-	// +kubebuilder:default=1
+	// If omitted, the operator uses the default of the component type:
+	// 1 for metacollector, 2 for falcosidekick and falcosidekick-ui.
 	// +kubebuilder:validation:Minimum=1
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
