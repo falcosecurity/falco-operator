@@ -21,7 +21,7 @@ Supported component types:
 |-------|------|---------|-------------|
 | `component.type` | `string` | — | **Required.** Component type: `metacollector`, `falcosidekick`, or `falcosidekick-ui` |
 | `component.version` | `string` | — | Component version. If omitted, uses the version bundled with the operator |
-| `replicas` | `*int32` | `1` | Number of replicas |
+| `replicas` | `*int32` | *(component default)* | Number of replicas. If omitted, uses the default replicas of the component type (see [Component Defaults](#component-defaults)) |
 | `podTemplateSpec` | `*corev1.PodTemplateSpec` | *(operator defaults)* | Custom pod template |
 | `strategy` | `*appsv1.DeploymentStrategy` | — | Deployment update strategy |
 
@@ -42,6 +42,7 @@ Supported component types:
 | Setting | Value |
 |---------|-------|
 | Image | `docker.io/falcosecurity/k8s-metacollector:0.1.5` |
+| Default replicas | 1 |
 | Ports | 8080 (metrics), 8081 (health), 45000 (broker-grpc) |
 | Resources | Requests: 100m CPU, 128Mi memory; Limits: 250m CPU, 256Mi memory |
 | Security | Non-root (uid 1000), drop all capabilities |

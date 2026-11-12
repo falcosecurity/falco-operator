@@ -127,7 +127,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ ctrl.Re
 	oldStatus := comp.Status.DeepCopy()
 	// Compute status even on failure, but only publish changes.
 	defer func() {
-		computeErr := r.computeAvailableCondition(ctx, comp)
+		computeErr := r.computeAvailableCondition(ctx, comp, defs)
 		if computeErr != nil {
 			logger.Error(computeErr, "unable to compute available condition")
 		}
@@ -336,9 +336,15 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, comp *instancev1alpha
 	return nil
 }
 
-// computeAvailableCondition queries the live Deployment state.
-func (r *Reconciler) computeAvailableCondition(ctx context.Context, comp *instancev1alpha1.Component) error {
-	result, err := instance.ComputeDeploymentAvailability(ctx, r.Client, client.ObjectKeyFromObject(comp), comp.Spec.Replicas)
+// computeAvailableCondition queries the live Deployment state. The desired replicas fall back to
+// the default of the component type when the Component does not set them.
+func (r *Reconciler) computeAvailableCondition(ctx context.Context, comp *instancev1alpha1.Component,
+	defs *resources.InstanceDefaults) error {
+	replicas := comp.Spec.Replicas
+	if replicas == nil {
+		replicas = defs.Replicas
+	}
+	result, err := instance.ComputeDeploymentAvailability(ctx, r.Client, client.ObjectKeyFromObject(comp), replicas)
 
 	comp.Status.DesiredReplicas = result.DesiredReplicas
 	comp.Status.AvailableReplicas = result.AvailableReplicas
