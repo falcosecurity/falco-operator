@@ -33,12 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	controllerconfig "sigs.k8s.io/controller-runtime/pkg/config"
-	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	instancev1alpha1 "github.com/falcosecurity/falco-operator/api/instance/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
@@ -289,36 +286,15 @@ func TestEnsureArtifactClientCertificateErrors(t *testing.T) {
 func TestArtifactClientCertificateWatch(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("mtls-%t", enabled), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			syncPeriod := 24 * time.Hour
-			mgr, err := ctrl.NewManager(testEnv.Config, ctrl.Options{
-				Scheme:     k8sClient.Scheme(),
-				Metrics:    metricsserver.Options{BindAddress: "0"},
-				Cache:      cache.Options{SyncPeriod: &syncPeriod, ReaderFailOnMissingInformer: true},
-				Controller: controllerconfig.Controller{SkipNameValidation: new(true)},
-			})
-			require.NoError(t, err)
+			ctx := t.Context()
 			var options []Option
 			if enabled {
 				options = append(options, WithArtifactMTLS("my-cluster-issuer", "my-falco-operator-artifact-ca-bundle", 0, 0))
 			}
-			// Count parent reads to establish quiescence before each Certificate-only
+			// Parent reads are counted to establish quiescence before each Certificate-only
 			// mutation; residual startup events must not masquerade as watch recovery.
-			cl, err := client.NewWithWatch(testEnv.Config, client.Options{
-				Scheme: k8sClient.Scheme(),
-				Cache:  &client.CacheOptions{Reader: mgr.GetCache()},
-			})
-			require.NoError(t, err)
-			var parentReads atomic.Uint64
 			var failCertificateApply atomic.Bool
-			reconciler := NewReconciler(interceptor.NewClient(cl, interceptor.Funcs{
-				Get: func(ctx context.Context, cl client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-					if _, ok := obj.(*instancev1alpha1.Falco); ok {
-						parentReads.Add(1)
-					}
-					return cl.Get(ctx, key, obj, opts...)
-				},
+			mgr := testutil.NewRecoveryManager(t, testEnv.Config, k8sClient.Scheme(), &instancev1alpha1.Falco{}, &interceptor.Funcs{
 				Apply: func(ctx context.Context, cl client.WithWatch, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
 					if resource, ok := obj.(runtime.Object); ok && resource.GetObjectKind().GroupVersionKind().Kind == "Certificate" &&
 						failCertificateApply.CompareAndSwap(true, false) {
@@ -326,19 +302,11 @@ func TestArtifactClientCertificateWatch(t *testing.T) {
 					}
 					return cl.Apply(ctx, obj, opts...)
 				},
-			}), mgr.GetScheme(), mgr.GetEventRecorder("falco-certificate-test"), options...)
-			require.NoError(t, reconciler.SetupWithManager(mgr))
-			done := make(chan error, 1)
-			go func() { done <- mgr.Start(ctx) }()
-			t.Cleanup(func() {
-				cancel()
-				select {
-				case err := <-done:
-					require.NoError(t, err)
-				case <-time.After(10 * time.Second):
-					t.Error("manager did not stop")
-				}
-			})
+			}, &cache.Options{ReaderFailOnMissingInformer: true})
+			cl := mgr.Client
+			reconciler := NewReconciler(cl, mgr.GetScheme(), mgr.GetEventRecorder("falco-certificate-test"), options...)
+			require.NoError(t, reconciler.SetupWithManager(mgr.Manager))
+			mgr.Run(t)
 			falco := createFalco(t, context.Background(), &instancev1alpha1.Falco{
 				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("test-cert-watch-%t", enabled), Namespace: testutil.TestNamespace},
 			})
@@ -356,18 +324,7 @@ func TestArtifactClientCertificateWatch(t *testing.T) {
 				return
 			}
 			require.NoError(t, cl.Get(ctx, key, certificate))
-			waitForQuiet := func() {
-				t.Helper()
-				previous, lastChange := parentReads.Load(), time.Now()
-				require.Eventually(t, func() bool {
-					current := parentReads.Load()
-					if current != previous {
-						previous, lastChange = current, time.Now()
-					}
-					return time.Since(lastChange) >= 300*time.Millisecond
-				}, 10*time.Second, 20*time.Millisecond, "controller must settle before testing an isolated Certificate event")
-			}
-			waitForQuiet()
+			mgr.WaitForQuiet(t)
 			originalUID := certificate.GetUID()
 			failCertificateApply.Store(true)
 			require.NoError(t, cl.Delete(ctx, certificate))
@@ -376,7 +333,7 @@ func TestArtifactClientCertificateWatch(t *testing.T) {
 			}, 10*time.Second, 20*time.Millisecond, "Certificate deletion must recover without a Falco edit")
 			assert.False(t, failCertificateApply.Load(), "recovery must retry the injected Apply failure")
 			assert.Equal(t, falco.UID, metav1.GetControllerOf(certificate).UID)
-			waitForQuiet()
+			mgr.WaitForQuiet(t)
 			require.NoError(t, cl.Get(ctx, key, certificate))
 			require.NoError(t, unstructured.SetNestedField(certificate.Object, "1h0m0s", "spec", "duration"))
 			require.NoError(t, cl.Update(ctx, certificate))
@@ -387,7 +344,7 @@ func TestArtifactClientCertificateWatch(t *testing.T) {
 				duration, _, _ := unstructured.NestedString(certificate.Object, "spec", "duration")
 				return duration == DefaultArtifactClientCertDuration.String()
 			}, 10*time.Second, 20*time.Millisecond, "Certificate drift must recover without a Falco edit")
-			waitForQuiet()
+			mgr.WaitForQuiet(t)
 			require.NoError(t, cl.Get(ctx, key, certificate))
 			certificate.SetOwnerReferences(nil)
 			require.NoError(t, cl.Update(ctx, certificate))
