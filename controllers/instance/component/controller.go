@@ -461,6 +461,8 @@ func (r *Reconciler) deleteStaleResource(ctx context.Context, comp *instancev1al
 
 	generated := metav1.IsControlledBy(obj, comp)
 	if obj.GetNamespace() == "" {
+		// Relies on managedFields being present in the objects returned by r.Get, so the cache must not
+		// strip them (for example with cache.TransformStripManagedFields), or nothing would be deleted.
 		generated = slices.ContainsFunc(obj.GetManagedFields(), func(entry metav1.ManagedFieldsEntry) bool {
 			return entry.Manager == fieldManager
 		})
@@ -471,7 +473,11 @@ func (r *Reconciler) deleteStaleResource(ctx context.Context, comp *instancev1al
 
 	logger.Info("Deleting resource no longer required by the component type", "kind", gvk.Kind, "name", obj.GetName())
 	uid := obj.GetUID()
-	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil && !k8serrors.IsNotFound(err) {
+	if err := r.Delete(ctx, obj, client.Preconditions{UID: &uid}); err != nil {
+		if k8serrors.IsNotFound(err) {
+			// Someone else deleted it first, so there is nothing left to clean up or report.
+			return nil
+		}
 		logger.Error(err, "unable to delete stale resource", "kind", gvk.Kind, "name", obj.GetName())
 		r.recorder.Eventf(comp, nil, corev1.EventTypeWarning, instance.ReasonDeletionError,
 			instance.ReasonDeletionError, instance.MessageFormatDeletionError, gvk.Kind, err.Error())

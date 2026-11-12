@@ -623,6 +623,12 @@ func TestReconcile_TypeChangeDeletesStaleRBAC(t *testing.T) {
 
 	key := types.NamespacedName{Name: comp.Name, Namespace: testutil.TestNamespace}
 	clusterKey := types.NamespacedName{Name: resources.GenerateUniqueName(comp.Name, testutil.TestNamespace)}
+	// Cluster-scoped objects have no owner and envtest has no garbage collector, so remove them explicitly.
+	t.Cleanup(func() {
+		meta := metav1.ObjectMeta{Name: clusterKey.Name}
+		_ = k8sClient.Delete(ctx, &rbacv1.ClusterRoleBinding{ObjectMeta: meta})
+		_ = k8sClient.Delete(ctx, &rbacv1.ClusterRole{ObjectMeta: meta})
+	})
 	exists := func(key types.NamespacedName, obj client.Object) bool {
 		t.Helper()
 		err := k8sClient.Get(ctx, key, obj)
@@ -657,6 +663,11 @@ func TestReconcile_TypeChangeDeletesStaleRBAC(t *testing.T) {
 	assert.False(t, exists(key, &rbacv1.RoleBinding{}), "RoleBinding of falcosidekick should be deleted")
 	assert.True(t, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole should exist again for metacollector")
 	assert.True(t, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding should exist again for metacollector")
+
+	setType(instancev1alpha1.ComponentTypeFalcosidekickUI)
+	reconcileN(t, ctx, reconciler, comp.Name, 3)
+	assert.False(t, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole of metacollector should be deleted for falcosidekick-ui")
+	assert.False(t, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding of metacollector should be deleted for falcosidekick-ui")
 }
 
 // TestReconcile_KeepsForeignClusterRBAC verifies that cluster-scoped RBAC with the name the Component
