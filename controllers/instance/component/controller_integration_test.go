@@ -310,6 +310,64 @@ func TestReconcile_UpdateDeployment(t *testing.T) {
 	assert.Equal(t, int32(3), *dep.Spec.Replicas)
 }
 
+// TestReconcile_DefaultReplicas verifies that a Component without spec.replicas runs the default
+// replicas of its type, and goes back to them when spec.replicas is removed.
+func TestReconcile_DefaultReplicas(t *testing.T) {
+	tests := []struct {
+		name          string
+		componentType instancev1alpha1.ComponentType
+		defs          *resources.InstanceDefaults
+	}{
+		{name: "test-default-replicas-mc", componentType: instancev1alpha1.ComponentTypeMetacollector, defs: resources.MetacollectorDefaults},
+		{name: "test-default-replicas-sk", componentType: instancev1alpha1.ComponentTypeFalcosidekick, defs: resources.FalcosidekickDefaults},
+		{name: "test-default-replicas-ui", componentType: instancev1alpha1.ComponentTypeFalcosidekickUI, defs: resources.FalcosidekickUIDefaults},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.componentType), func(t *testing.T) {
+			ctx := context.Background()
+			key := types.NamespacedName{Name: tt.name, Namespace: testutil.TestNamespace}
+			comp := createComponent(t, ctx, &instancev1alpha1.Component{
+				ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
+				Spec: instancev1alpha1.ComponentSpec{
+					Component: instancev1alpha1.ComponentInfo{Type: tt.componentType},
+				},
+			})
+			require.NotNil(t, tt.defs.Replicas)
+			wantReplicas := *tt.defs.Replicas
+
+			reconciler := newTestReconciler()
+			reconcileN(t, ctx, reconciler, comp.Name, 3)
+
+			fetched := &instancev1alpha1.Component{}
+			require.NoError(t, k8sClient.Get(ctx, key, fetched))
+			assert.Nil(t, fetched.Spec.Replicas, "spec.replicas should remain nil, defaults are resolved at runtime")
+			assert.Equal(t, wantReplicas, fetched.Status.DesiredReplicas)
+
+			dep := &appsv1.Deployment{}
+			require.NoError(t, k8sClient.Get(ctx, key, dep))
+			require.NotNil(t, dep.Spec.Replicas)
+			assert.Equal(t, wantReplicas, *dep.Spec.Replicas)
+
+			// Set replicas explicitly, then remove them again.
+			fetched.Spec.Replicas = new(int32(3))
+			require.NoError(t, k8sClient.Update(ctx, fetched))
+			reconcileN(t, ctx, reconciler, comp.Name, 1)
+			require.NoError(t, k8sClient.Get(ctx, key, dep))
+			require.NotNil(t, dep.Spec.Replicas)
+			assert.Equal(t, int32(3), *dep.Spec.Replicas)
+
+			require.NoError(t, k8sClient.Get(ctx, key, fetched))
+			fetched.Spec.Replicas = nil
+			require.NoError(t, k8sClient.Update(ctx, fetched))
+			reconcileN(t, ctx, reconciler, comp.Name, 1)
+			require.NoError(t, k8sClient.Get(ctx, key, dep))
+			require.NotNil(t, dep.Spec.Replicas)
+			assert.Equal(t, wantReplicas, *dep.Spec.Replicas)
+		})
+	}
+}
+
 // TestReconcile_StatusPersisted verifies that status conditions are actually persisted to the API server.
 func TestReconcile_StatusPersisted(t *testing.T) {
 	ctx := context.Background()
