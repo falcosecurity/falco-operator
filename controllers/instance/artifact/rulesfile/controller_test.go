@@ -444,14 +444,8 @@ func TestSetupWithManager_ConvergesAfterParentStatusUpdate(t *testing.T) {
 			}
 			waitForQuiet := func() {
 				t.Helper()
-				lastCount, lastChange := statusApplies.Load(), time.Now()
-				require.Eventually(t, func() bool {
-					count := statusApplies.Load()
-					if count != lastCount {
-						lastCount, lastChange = count, time.Now()
-					}
-					return time.Since(lastChange) >= 500*time.Millisecond
-				}, 5*time.Second, 20*time.Millisecond, "status Apply calls must settle")
+				testutil.WaitForQuiet(t, func() uint64 { return uint64(statusApplies.Load()) },
+					500*time.Millisecond, 5*time.Second, "status Apply calls must settle")
 			}
 			require.Eventually(t, func() bool { return healthy(direct) && healthy(mgr.GetClient()) },
 				10*time.Second, 20*time.Millisecond)
