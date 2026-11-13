@@ -59,6 +59,10 @@ spec:
             - --artifact-client-cert-renew-before={{ .Values.mtls.client.certRenewBefore }}
             - --artifact-ca-bundle-configmap-name={{ include "falco-operator.mtlsCABundleConfigMapName" . }}
             {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - --metrics-bind-address=:{{ .Values.metrics.port }}
+            - --metrics-secure={{ .Values.metrics.secure }}
+            {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -73,6 +77,11 @@ spec:
             - name: artifact-server
               containerPort: 8082
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

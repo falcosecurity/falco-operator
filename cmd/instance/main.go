@@ -309,8 +309,8 @@ func main() {
 		TLSOpts: webhookTLSOpts,
 	})
 
-	// Metrics server options. The --metrics-bind-address and --metrics-secure flags
-	// can be set via the Helm chart's `extraArgs` value. See:
+	// Metrics server options. The Helm chart's `metrics.*` values set the --metrics-bind-address
+	// and --metrics-secure flags, and grant the RBAC the secure endpoint needs. See:
 	// https://pkg.go.dev/sigs.k8s.io/controller-runtime/pkg/metrics/server
 	metricsServerOptions := metricsserver.Options{
 		BindAddress:   metricsAddr,
