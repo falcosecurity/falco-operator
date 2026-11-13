@@ -3,6 +3,10 @@
 This file documents all notable changes to the `falco-operator` Helm Chart. The
 release numbering uses [semantic versioning](http://semver.org).
 
+## Unreleased
+
+* Add `metrics.*` values to serve the operator's Prometheus metrics through a dedicated `<fullname>-metrics` Service; disabled by default. The secure endpoint (default) gets the TokenReview and SubjectAccessReview permissions it needs and a `<fullname>-metrics-reader` ClusterRole for scrapers, and `metrics.serviceMonitor.enabled` creates a Prometheus Operator ServiceMonitor.
+
 ## v0.4.0
 
 This section lists every change since 0.3.1. Upgrading from chart 0.3.x or earlier changes how

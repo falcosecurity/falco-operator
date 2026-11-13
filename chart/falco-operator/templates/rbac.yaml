@@ -23,6 +23,23 @@ metadata:
   - patch
   - watch
 {{- end }}
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
+# Also hand-maintained, as only needed when metrics.enabled and metrics.secure are true: the secure
+# metrics endpoint checks the bearer token of each scrape with a TokenReview, and its access to
+# /metrics with a SubjectAccessReview.
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -39,4 +56,20 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "falco-operator.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
+{{- if and .Values.metrics.enabled .Values.metrics.secure }}
+---
+# Bind it to the ServiceAccounts that scrape the secure metrics endpoint, such as Prometheus's.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "falco-operator.fullname" . }}-metrics-reader
+  labels:
+    {{- include "falco-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: falco
+rules:
+- nonResourceURLs:
+  - /metrics
+  verbs:
+  - get
+{{- end }}
 {{- end }}

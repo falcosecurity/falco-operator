@@ -466,6 +466,51 @@ cannot report. A deleted artifact waits for every node that holds it, except
 the ones that have been unreachable for more than 5 minutes: those remove it by
 themselves if they come back.
 
+## Operator metrics
+
+The operator can serve Prometheus metrics: those of its controllers and
+Kubernetes clients, and the `artifactserver_*` request and cache metrics of the
+artifact server. They are disabled by default. Enable them in the Helm values:
+
+```yaml
+metrics:
+  enabled: true
+```
+
+Every replica then serves its metrics on port 8443 (`metrics.port`), and the
+chart creates a `<fullname>-metrics` Service that selects all replicas, unlike the
+artifact Service, which only selects the serving one.
+
+By default (`metrics.secure: true`) the endpoint is served over HTTPS with a
+self-signed certificate, and each scrape must present a bearer token allowed to
+`get` the `/metrics` non-resource URL. The operator checks the token with a
+TokenReview and a SubjectAccessReview; with `rbac.create: true` the chart grants
+it both permissions. It also creates a `<fullname>-metrics-reader` ClusterRole:
+bind it to the ServiceAccount that scrapes the metrics, for example:
+
+```bash
+kubectl create clusterrolebinding falco-operator-metrics-scraper \
+  --clusterrole=falco-operator-metrics-reader \
+  --serviceaccount=monitoring:prometheus
+```
+
+A token without this permission gets `403 Forbidden`. Set `metrics.secure: false`
+to serve the metrics over plain HTTP to any client that can reach the port.
+
+With the Prometheus Operator, set `metrics.serviceMonitor.enabled: true` to create
+a ServiceMonitor for the metrics Service. Add the labels your Prometheus selects
+with `metrics.serviceMonitor.labels`. With `metrics.secure: true`, Prometheus
+authenticates with its own ServiceAccount token, so that ServiceAccount needs
+the binding above, and `metrics.serviceMonitor.tlsConfig` skips the verification
+of the self-signed certificate by default. To serve your own certificate
+instead, mount it with `volumes` and `volumeMounts` and pass
+`--metrics-cert-path` with `extraArgs`.
+
+For installations without Helm, use the `--metrics-bind-address` (for example
+`:8443`) and `--metrics-secure` flags of the operator, and grant its
+ServiceAccount `create` on `tokenreviews.authentication.k8s.io` and
+`subjectaccessreviews.authorization.k8s.io` when the endpoint is secure.
+
 ## Artifact status
 
 The `status.conditions` of a Rulesfile, Plugin or Config aggregate what the

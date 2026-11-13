@@ -323,8 +323,8 @@ and issuance policy remain your responsibility. cert-manager is still required.
 ## Required Permissions
 
 The [generated ClusterRole](../chart/falco-operator/files/ClusterRole.yaml) is the
-authoritative base permission list. The chart adds optional certificate
-permissions in its [RBAC template](../chart/falco-operator/templates/rbac.yaml).
+authoritative base permission list. The chart adds optional certificate and
+metrics permissions in its [RBAC template](../chart/falco-operator/templates/rbac.yaml).
 
 | API group | Resources | Verbs |
 |-----------|-----------|-------|
@@ -343,12 +343,15 @@ permissions in its [RBAC template](../chart/falco-operator/templates/rbac.yaml).
 | `artifact.falcosecurity.dev` | configs/finalizers, plugins/finalizers, rulesfiles/finalizers, artifactnodes/finalizers | update, patch |
 | `coordination.k8s.io` | leases (leader election) | get, create, update |
 | `cert-manager.io` | certificates (mTLS only) | get, list, watch, create, patch |
+| `authentication.k8s.io` | tokenreviews (secure metrics only) | create |
+| `authorization.k8s.io` | subjectaccessreviews (secure metrics only) | create |
 | Non-resource URL | `/metrics` | get |
 
 When `rbac.create: false`, provide equivalent permissions for the enabled features
 and review them on upgrades. In particular, an older role without ArtifactNode
 permissions cannot support current artifact delivery; leader election needs
-Leases, and mTLS needs Certificate access.
+Leases, mTLS needs Certificate access, and secure metrics need TokenReview and
+SubjectAccessReview access.
 
 ## Next Steps
 
