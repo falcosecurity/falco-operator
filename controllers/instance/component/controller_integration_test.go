@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/events"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -605,4 +606,97 @@ func TestReconcile_RecoveryAfterSubResourceDeletion(t *testing.T) {
 	assert.Equal(t, comp.Name, recreated.Name)
 	require.Len(t, recreated.OwnerReferences, 1)
 	assert.Equal(t, "Component", recreated.OwnerReferences[0].Kind)
+}
+
+// TestSetupWithManager_RecoversOwnedRBAC verifies that the controller watches the Role and
+// RoleBinding it owns, so that their deletion or drift is repaired without a Component edit.
+func TestSetupWithManager_RecoversOwnedRBAC(t *testing.T) {
+	ctx := context.Background()
+
+	mgr := testutil.NewRecoveryManager(t, testEnv.Config, k8sClient.Scheme(), &instancev1alpha1.Component{},
+		nil, &cache.Options{ReaderFailOnMissingInformer: true})
+	reconciler := NewReconciler(mgr.Client, mgr.GetScheme(), mgr.GetEventRecorder("component-rbac-watch-test"))
+	require.NoError(t, reconciler.SetupWithManager(mgr.Manager))
+	mgr.Run(t)
+
+	comp := createComponent(t, ctx, &instancev1alpha1.Component{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-rbac-watch",
+			Namespace: testutil.TestNamespace,
+		},
+		Spec: instancev1alpha1.ComponentSpec{
+			Component: instancev1alpha1.ComponentInfo{Type: instancev1alpha1.ComponentTypeFalcosidekick},
+		},
+	})
+	key := client.ObjectKeyFromObject(comp)
+
+	role := &rbacv1.Role{}
+	roleBinding := &rbacv1.RoleBinding{}
+	require.Eventually(t, func() bool {
+		return k8sClient.Get(ctx, key, role) == nil && k8sClient.Get(ctx, key, roleBinding) == nil
+	}, 10*time.Second, 20*time.Millisecond, "Role and RoleBinding must be created")
+
+	// Each step starts from the state restored by the previous one, so it first checks that its object exists.
+	t.Run("Role deletion", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, role), "Role must exist before the step")
+		originalUID := role.UID
+		require.NoError(t, k8sClient.Delete(ctx, role))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, role) == nil && role.UID != originalUID
+		}, 10*time.Second, 20*time.Millisecond, "Role deletion must recover without a Component edit")
+	})
+
+	t.Run("Role drift", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, role), "Role must exist before the step")
+		role.Rules[0].Verbs = []string{"get", "list"}
+		require.NoError(t, k8sClient.Update(ctx, role))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, role) == nil && len(role.Rules) == 1 &&
+				slices.Equal(role.Rules[0].Verbs, []string{"get"})
+		}, 10*time.Second, 20*time.Millisecond, "Role drift must recover without a Component edit")
+	})
+
+	t.Run("Role owner reference removal", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, role), "Role must exist before the step")
+		role.SetOwnerReferences(nil)
+		require.NoError(t, k8sClient.Update(ctx, role))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, role) == nil && metav1.IsControlledBy(role, comp)
+		}, 10*time.Second, 20*time.Millisecond, "Role owner reference removal must recover without a Component edit")
+	})
+
+	t.Run("RoleBinding deletion", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, roleBinding), "RoleBinding must exist before the step")
+		originalUID := roleBinding.UID
+		require.NoError(t, k8sClient.Delete(ctx, roleBinding))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, roleBinding) == nil && roleBinding.UID != originalUID
+		}, 10*time.Second, 20*time.Millisecond, "RoleBinding deletion must recover without a Component edit")
+	})
+
+	t.Run("RoleBinding drift", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, roleBinding), "RoleBinding must exist before the step")
+		wantSubjects := slices.Clone(roleBinding.Subjects)
+		require.NotEmpty(t, wantSubjects)
+		roleBinding.Subjects[0].Name = "drifted"
+		require.NoError(t, k8sClient.Update(ctx, roleBinding))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, roleBinding) == nil && slices.Equal(roleBinding.Subjects, wantSubjects)
+		}, 10*time.Second, 20*time.Millisecond, "RoleBinding drift must recover without a Component edit")
+	})
+
+	t.Run("RoleBinding owner reference removal", func(t *testing.T) {
+		mgr.WaitForQuiet(t)
+		require.NoError(t, k8sClient.Get(ctx, key, roleBinding), "RoleBinding must exist before the step")
+		roleBinding.SetOwnerReferences(nil)
+		require.NoError(t, k8sClient.Update(ctx, roleBinding))
+		require.Eventually(t, func() bool {
+			return k8sClient.Get(ctx, key, roleBinding) == nil && metav1.IsControlledBy(roleBinding, comp)
+		}, 10*time.Second, 20*time.Millisecond, "RoleBinding owner reference removal must recover without a Component edit")
+	})
 }
