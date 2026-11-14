@@ -143,8 +143,8 @@ func (m *RecoveryManager) Run(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- m.Start(ctx) }()
+	// Cleanups run last in, first out: cancel first, then wait for the manager to stop.
 	t.Cleanup(func() {
-		cancel()
 		select {
 		case err := <-done:
 			require.NoError(t, err)
@@ -152,6 +152,7 @@ func (m *RecoveryManager) Run(t *testing.T) {
 			t.Error("manager did not stop")
 		}
 	})
+	t.Cleanup(cancel)
 }
 
 // WaitForQuiet blocks until the controller has stopped reading the parent object, which means it has settled.
