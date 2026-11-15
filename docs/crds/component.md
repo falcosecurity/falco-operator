@@ -25,6 +25,8 @@ Supported component types:
 | `podTemplateSpec` | `*corev1.PodTemplateSpec` | *(operator defaults)* | Custom pod template |
 | `strategy` | `*appsv1.DeploymentStrategy` | — | Deployment update strategy |
 
+> **Note:** Earlier CRD versions defaulted `replicas` to `1`, so Components created before that change have `spec.replicas: 1` stored and keep running one replica. To switch such a Component to the default of its type, remove the field, for example with `kubectl patch component <name> --type=json -p '[{"op":"remove","path":"/spec/replicas"}]'`.
+
 ## Status
 
 | Field | Type | Description |

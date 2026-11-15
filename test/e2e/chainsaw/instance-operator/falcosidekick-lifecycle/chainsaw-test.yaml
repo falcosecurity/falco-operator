@@ -9,7 +9,8 @@ spec:
     ClusterRole/ClusterRoleBinding): FalcosidekickDefaults only sets RoleRules, and the
     Component controller only creates cluster-scoped RBAC when ClusterRoleRules is non-empty
     (see controllers/instance/component/controller.go). Leaves spec.replicas unset, so it also
-    covers the falcosidekick default of 2 replicas, which differs from metacollector's 1.
+    covers the falcosidekick default of 2 replicas, which differs from metacollector's 1, and
+    then scales to a non-default replica count.
 
   bindings:
     - name: component_name
@@ -55,6 +56,31 @@ spec:
               value: 2
             - name: expected_version
               value: (env('CHAINSAW_DEFAULT_FALCOSIDEKICK_VERSION'))
+
+    - name: Scale-to-three-replicas
+      description: Patch spec.replicas to a non-default value and check the Deployment follows.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 3
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 3
+              status:
+                availableReplicas: 3
+                readyReplicas: 3
 
     - name: Assert-sub-resources-exist
       try:

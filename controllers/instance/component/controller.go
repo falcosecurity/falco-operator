@@ -343,7 +343,7 @@ func (r *Reconciler) ensureDeployment(ctx context.Context, comp *instancev1alpha
 func (r *Reconciler) computeAvailableCondition(ctx context.Context, comp *instancev1alpha1.Component,
 	defs *resources.InstanceDefaults) error {
 	replicas := comp.Spec.Replicas
-	if replicas == nil {
+	if replicas == nil && defs != nil {
 		replicas = defs.Replicas
 	}
 	result, err := instance.ComputeDeploymentAvailability(ctx, r.Client, client.ObjectKeyFromObject(comp), replicas)

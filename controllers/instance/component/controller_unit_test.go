@@ -508,6 +508,19 @@ func TestComputeAvailableCondition(t *testing.T) {
 			wantConditionReason: instance.ReasonDeploymentUnavailable,
 			wantEventMessage:    instance.MessageDeploymentUnavailable,
 		},
+		{
+			name: "replicas and defaults unset — falls back to one replica without panicking",
+			comp: newFalcosidekickComponent(defaultName),
+			defs: nil,
+			workload: &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: "test", Namespace: testutil.TestNamespace},
+				Status:     appsv1.DeploymentStatus{ReadyReplicas: 1, AvailableReplicas: 1},
+			},
+			wantDesired: 1, wantAvailable: 1,
+			wantConditionStatus: metav1.ConditionTrue,
+			wantConditionReason: instance.ReasonDeploymentAvailable,
+			wantEventMessage:    instance.MessageDeploymentAvailable,
+		},
 	}
 
 	for _, tt := range tests {
