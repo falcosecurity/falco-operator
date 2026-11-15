@@ -17,6 +17,10 @@
 // Package v1alpha1 contains common types used across apis.
 package v1alpha1
 
+import (
+	corev1 "k8s.io/api/core/v1"
+)
+
 // ConditionType represents a Falco condition type.
 // +kubebuilder:validation:MinLength=1
 type ConditionType string
@@ -106,6 +110,18 @@ const (
 
 	// SecretPasswordKey is the key used for the password (or token) in authentication Secrets.
 	SecretPasswordKey = "password"
+
+	// AzureClientSecretKey is the key used for the client secret in Secrets referenced by
+	// AzureAuth.ClientSecretRef.
+	AzureClientSecretKey = "clientSecret"
+
+	// AzureClientCertificateKey is the key used for the client certificate (PEM or PKCS#12) in
+	// Secrets referenced by AzureAuth.ClientCertificateRef.
+	AzureClientCertificateKey = "certificate"
+
+	// AzureClientCertificatePasswordKey is the key used for the client certificate's password, if
+	// any, in Secrets referenced by AzureAuth.ClientCertificateRef.
+	AzureClientCertificatePasswordKey = "password"
 )
 
 // OCIArtifact defines the structure for specifying an OCI artifact reference.
@@ -148,12 +164,157 @@ type TLSConfig struct {
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 }
 
-// RegistryAuth defines authentication configuration for an OCI registry.
+// RegistryAuth defines authentication configuration for an OCI registry. If both SecretRef and
+// Azure are set, Azure takes precedence and SecretRef is ignored entirely -- not merged, not
+// used as a fallback. Set only one.
 // +kubebuilder:object:generate=true
 type RegistryAuth struct {
-	// SecretRef references a Secret containing registry credentials.
+	// SecretRef references a Secret containing registry credentials. Ignored when Azure is also
+	// set.
 	// +optional
 	SecretRef *SecretRef `json:"secretRef,omitempty"`
+
+	// Azure authenticates using an Azure identity instead of a static Secret. See AzureAuth's
+	// own godoc for the four supported methods and what each requires. Takes precedence over
+	// SecretRef when both are set.
+	// +optional
+	Azure *AzureAuth `json:"azure,omitempty"`
+}
+
+const (
+	// AzureMethodClientSecret authenticates as a Microsoft Entra app registration using a
+	// client secret (AzureAuth.ClientSecretRef).
+	AzureMethodClientSecret = "clientSecret"
+	// AzureMethodClientCertificate authenticates as a Microsoft Entra app registration using a
+	// client certificate (AzureAuth.ClientCertificateRef).
+	AzureMethodClientCertificate = "clientCertificate"
+	// AzureMethodManagedIdentity authenticates via the Azure Instance Metadata Service (IMDS)
+	// using the node's system-assigned identity, or a user-assigned identity when
+	// AzureAuth.ClientID is set.
+	AzureMethodManagedIdentity = "managedIdentity"
+	// AzureMethodWorkloadIdentity authenticates using a Kubernetes ServiceAccount token
+	// (AzureAuth.ServiceAccountRef), federated to an Entra app or managed identity via OIDC
+	// trust.
+	AzureMethodWorkloadIdentity = "workloadIdentity"
+)
+
+// AzureAuth configures registry authentication via an Azure identity. Exactly one method is
+// used, selected by Method; the other method-specific fields are ignored.
+//
+// Every field below except Method and ServiceAccountRef is optional in the CR and falls back to
+// the matching AZURE_* environment variable (read from this process's own environment -- the
+// falco-operator Deployment's) when left empty; an explicit CR value always wins when both are
+// set. This lets one cluster-wide default identity be configured once via the operator's
+// Deployment env, with individual AzureAuth resources overriding only what differs. The one
+// field with no environment equivalent is ServiceAccountRef: it identifies which ServiceAccount
+// to federate, not a credential value, so there is nothing meaningful to source from the
+// operator's own environment -- see its own godoc.
+// +kubebuilder:object:generate=true
+// +kubebuilder:validation:XValidation:rule="self.method != 'workloadIdentity' || (has(self.serviceAccountRef) && self.serviceAccountRef.name.size() > 0)",message="serviceAccountRef.name is required when method is workloadIdentity"
+type AzureAuth struct {
+	// Method selects how the Azure identity is obtained.
+	// - clientSecret: a Microsoft Entra app registration authenticated with a client secret.
+	// - clientCertificate: the same, authenticated with a certificate instead.
+	// - managedIdentity: the node's system-assigned identity, or a user-assigned identity when
+	//   clientId is set. Authenticates via the Azure Instance Metadata Service (IMDS) -- there is
+	//   no per-namespace or per-artifact isolation with this method, every AzureAuth using it
+	//   resolves to whichever identity is attached to the node the operator pod is scheduled on.
+	// - workloadIdentity: a Kubernetes ServiceAccount token (serviceAccountRef), federated to an
+	//   Entra app or managed identity via OIDC trust.
+	// +kubebuilder:validation:Enum=clientSecret;clientCertificate;managedIdentity;workloadIdentity
+	// +kubebuilder:validation:Required
+	Method string `json:"method"`
+
+	// TenantID is the Microsoft Entra tenant ID. Required (from this field or AZURE_TENANT_ID)
+	// for clientSecret, clientCertificate, and workloadIdentity; unused for managedIdentity
+	// (IMDS resolves the tenant from the attached identity).
+	// +optional
+	TenantID string `json:"tenantId,omitempty"`
+
+	// ClientID is the application (client) ID to authenticate as. Required (from this field or
+	// AZURE_CLIENT_ID) for clientSecret, clientCertificate, and workloadIdentity. For
+	// managedIdentity, its presence selects a user-assigned identity by client ID; its absence
+	// selects the node's system-assigned identity.
+	//
+	// Warning for managedIdentity: "its presence" includes the AZURE_CLIENT_ID environment
+	// fallback, not just this field. If the operator Deployment sets AZURE_CLIENT_ID as a
+	// cluster-wide default for clientSecret/clientCertificate/workloadIdentity resources (an
+	// Entra app registration's client ID), every managedIdentity resource that leaves this field
+	// empty inherits that same value and silently stops being system-assigned -- it attempts a
+	// user-assigned IMDS lookup with an Entra app ID instead of a managed identity's client ID,
+	// which fails. A managedIdentity resource that wants the node's system-assigned identity
+	// while AZURE_CLIENT_ID is set for other methods must not rely on leaving this field empty;
+	// there is no way to explicitly override it back to "unset" once the environment provides a
+	// value, since an empty string here is indistinguishable from "not set, check the
+	// environment".
+	// +optional
+	ClientID string `json:"clientId,omitempty"`
+
+	// ClientSecretRef references a Secret containing the app registration's client secret, under
+	// the key "clientSecret". Used when method is clientSecret; falls back to the
+	// AZURE_CLIENT_SECRET environment variable when unset.
+	// +optional
+	ClientSecretRef *SecretRef `json:"clientSecretRef,omitempty"`
+
+	// ClientCertificateRef references a Secret containing the client certificate (PEM or PKCS#12,
+	// under the key "certificate") and, if the certificate is password-protected, the password
+	// under the key "password". Used when method is clientCertificate; falls back to reading a
+	// certificate file at the path named by the AZURE_CLIENT_CERTIFICATE_PATH environment
+	// variable (plus AZURE_CLIENT_CERTIFICATE_PASSWORD) when unset.
+	// +optional
+	ClientCertificateRef *SecretRef `json:"clientCertificateRef,omitempty"`
+
+	// SendCertificateChain controls whether the certificate's public chain is sent in the x5c
+	// header of each token request, as required for Subject Name/Issuer (SNI) authentication --
+	// needed when the Microsoft Entra app registration trusts this certificate by subject
+	// name/issuer rather than by exact thumbprint (e.g. because the certificate is reissued
+	// periodically by an intermediate CA without updating the app registration each time). Only
+	// used when method is clientCertificate. A pointer, not a bare bool: nil means "not set,
+	// fall back to the AZURE_CLIENT_SEND_CERTIFICATE_CHAIN environment variable" (itself
+	// defaulting to false), distinct from an explicit false in the CR. Matches azidentity's own
+	// ClientCertificateCredentialOptions.SendCertificateChain default when nothing is set
+	// anywhere.
+	// +optional
+	SendCertificateChain *bool `json:"sendCertificateChain,omitempty"`
+
+	// ServiceAccountRef names the ServiceAccount, in the same namespace as this resource, whose
+	// federated identity is used. Required when method is workloadIdentity -- unlike every other
+	// field on AzureAuth, it has no environment variable fallback, deliberately: it names which
+	// ServiceAccount to federate, not a credential value, so there is nothing meaningful to
+	// source from the operator's own environment (that would collapse every workloadIdentity
+	// AzureAuth cluster-wide onto a single identity, defeating the point of this method). The
+	// Azure-side federated identity credential must trust the subject
+	// system:serviceaccount:<this resource's namespace>:<name>.
+	//
+	// This ServiceAccount does not need the azure.workload.identity/use pod label or the
+	// Azure Workload Identity mutating webhook installed: the operator mints its token itself,
+	// per resolution, via the Kubernetes TokenRequest API, rather than relying on a
+	// webhook-projected token file tied to one pod's one identity. Those are only relevant to
+	// azidentity's own file-based WorkloadIdentityCredential, which this does not use.
+	//
+	// Security note: minting a token for a ServiceAccount is a materially different privilege
+	// than referencing a Secret (as ClientSecretRef/ClientCertificateRef do). A Secret reference
+	// only exposes whatever credential that Secret already contains; naming a ServiceAccount
+	// here actively mints a *fresh* identity assertion for it, and the underlying
+	// serviceaccounts/token permission is granted to the operator as a cluster-wide ClusterRole
+	// (Kubernetes has no finer-grained way to scope it to "only ServiceAccounts referenced by a
+	// resource in their own namespace"). Without a further check, that would let anyone able to
+	// create a Rulesfile/Plugin/Config resource in a namespace get a token minted for *any*
+	// ServiceAccount in it -- including one some unrelated workload already has federated to an
+	// Azure identity, not just one meant for their own resource.
+	//
+	// To narrow that: the named ServiceAccount must separately carry the annotation
+	// azure.falcosecurity.dev/client-id, set to exactly this AzureAuth's ClientID, before the
+	// operator will mint a token for it. Setting that annotation is a deliberate act by whoever
+	// administers ServiceAccounts in the namespace -- not implied by merely being nameable here.
+	// This narrows the trust to "any artifact author can use any ServiceAccount that has opted
+	// in to their specific client ID", still namespace-local and still not a full authorization
+	// system (someone who can both create artifact resources *and* edit ServiceAccounts in the
+	// same namespace can self-authorize) but a real reduction from "any ServiceAccount already
+	// federated to anything, for any reason". See the Reconcile doc comment in
+	// controllers/instance/falco/controller.go for the full reasoning.
+	// +optional
+	ServiceAccountRef *corev1.LocalObjectReference `json:"serviceAccountRef,omitempty"`
 }
 
 // RegistryConfig defines inline registry configuration for an OCI artifact.

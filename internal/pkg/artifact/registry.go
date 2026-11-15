@@ -78,6 +78,13 @@ func authSecretRef(artifact *commonv1alpha1.OCIArtifact) *commonv1alpha1.SecretR
 	return artifact.Registry.Auth.SecretRef
 }
 
+func authAzure(artifact *commonv1alpha1.OCIArtifact) *commonv1alpha1.AzureAuth {
+	if artifact == nil || artifact.Registry == nil || artifact.Registry.Auth == nil {
+		return nil
+	}
+	return artifact.Registry.Auth.Azure
+}
+
 // ResolveRegistryOptions builds a RegistryOptions from the registry configuration of an OCIArtifact.
 // Returns nil when no transport configuration is present (use system defaults: HTTPS with system CAs).
 func ResolveRegistryOptions(artifact *commonv1alpha1.OCIArtifact) *puller.RegistryOptions {
