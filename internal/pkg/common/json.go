@@ -34,3 +34,16 @@ func JSONRawToYAML(raw *apiextensionsv1.JSON) (*string, error) {
 	s := string(b)
 	return &s, nil
 }
+
+// YAMLToJSONRaw converts YAML data to an apiextensionsv1.JSON field, the inverse of JSONRawToYAML.
+// Returns nil if the data holds no value: it is empty, or only a YAML null or comments.
+func YAMLToJSONRaw(data []byte) (*apiextensionsv1.JSON, error) {
+	raw, err := yaml.YAMLToJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	if string(raw) == "null" {
+		return nil, nil
+	}
+	return &apiextensionsv1.JSON{Raw: raw}, nil
+}

@@ -54,9 +54,22 @@ spec:
               config:
                 description: Config specifies the configuration for the plugin.
                 properties:
+                  configMapRef:
+                    description: |-
+                      ConfigMapRef specifies a reference to a ConfigMap holding the initialization configuration for the
+                      plugin, as YAML under the key initConfig.yaml. Mutually exclusive with InitConfig: a plugin that sets
+                      both is not programmed.
+                    properties:
+                      name:
+                        description: Name is the name of the ConfigMap.
+                        type: string
+                    required:
+                    - name
+                    type: object
                   initConfig:
-                    description: InitConfig is the initialization configuration for
-                      the plugin.
+                    description: |-
+                      InitConfig is the initialization configuration for the plugin.
+                      Mutually exclusive with ConfigMapRef.
                     x-kubernetes-preserve-unknown-fields: true
                   libraryPath:
                     description: |-

@@ -68,8 +68,14 @@ func create[T client.Object](t *testing.T, ctx context.Context, obj T) T {
 // reconciles touch the cluster but not the disk. OCI artifacts are served from memory.
 func newTestNode(t *testing.T) *node.Node {
 	t.Helper()
+	return newTestNodeOn(t, &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()})
+}
+
+// newTestNodeOn is newTestNode writing to store, for a test that reads what the node writes.
+func newTestNodeOn(t *testing.T, store *artifact.LocalStore) *node.Node {
+	t.Helper()
 	return nodetest.NewTestNode(t, k8sClient,
-		nodetest.WithStore(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}),
+		nodetest.WithStore(store),
 		nodetest.WithFetcher(testutil.NewFakeFetcher(k8sClient)),
 		nodetest.WithRecorder(events.NewFakeRecorder(100)),
 		nodetest.WithFalcoFetcher(compatfake.NewMockVersionsFetcher(nil)))

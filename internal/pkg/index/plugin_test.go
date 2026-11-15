@@ -114,3 +114,50 @@ func TestPluginBySecretRef_WrongType(t *testing.T) {
 	}
 	assert.Nil(t, index.PluginBySecretRef(rulesfile))
 }
+
+func TestPluginByConfigMapRef(t *testing.T) {
+	tests := []struct {
+		name   string
+		plugin *artifactv1alpha1.Plugin
+		want   []string
+	}{
+		{
+			name: "nil Config returns nil",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+			},
+			want: nil,
+		},
+		{
+			name: "nil ConfigMapRef returns nil",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec:       artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{Name: "my-plugin"}},
+			},
+			want: nil,
+		},
+		{
+			name: "with configmap ref returns index key",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: "my-plugin", Namespace: testNamespace},
+				Spec: artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{
+					ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "my-init-config"},
+				}},
+			},
+			want: []string{testNamespace + "/my-init-config"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, index.PluginByConfigMapRef(tt.plugin))
+		})
+	}
+}
+
+func TestPluginByConfigMapRef_WrongType(t *testing.T) {
+	config := &artifactv1alpha1.Config{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-config", Namespace: testNamespace},
+	}
+	assert.Nil(t, index.PluginByConfigMapRef(config))
+}

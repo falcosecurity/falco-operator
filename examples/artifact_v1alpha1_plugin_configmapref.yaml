@@ -1,0 +1,29 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: container-init-config
+  namespace: default
+data:
+  initConfig.yaml: |
+    label_max_len: 100
+    with_size: false
+---
+apiVersion: artifact.falcosecurity.dev/v1alpha1
+kind: Plugin
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: falco-operator
+  name: plugin-container-configmapref
+  namespace: default
+spec:
+  ociArtifact:
+    image:
+      repository: falcosecurity/plugins/plugin/container
+      tag: latest
+    registry:
+      name: ghcr.io
+  config:
+    name: container
+    configMapRef:
+      name: container-init-config

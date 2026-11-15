@@ -1,0 +1,196 @@
+apiVersion: chainsaw.kyverno.io/v1alpha1
+kind: Test
+metadata:
+  name: plugin-init-config-configmap
+spec:
+  description: |
+    Validates a plugin whose init config is read from a ConfigMap, using the container plugin:
+    1. Create a Falco DaemonSet.
+    2. Create a ConfigMap holding the init config under the key "initConfig.yaml".
+    3. Create a container Plugin CR with spec.config.configMapRef pointing to the ConfigMap
+       and wait for it to be installed (Programmed=True).
+    4. Assert ResolvedRefs=True on the Plugin and the configmap-in-use finalizer on the ConfigMap.
+    5. Assert the plugin's init_config in the shared plugin config file matches the ConfigMap.
+    6. Update the ConfigMap and assert the new init_config reaches the shared plugin config file.
+    7. Assert Falco's /versions REST API reports the container plugin as loaded.
+    8. Delete the Plugin CR and assert the ArtifactNode no longer lists it and the
+       ConfigMap's finalizer is released.
+
+  bindings:
+    - name: falco_name
+      value: falco-plugin-init-config-cm-test
+    - name: plugin_name
+      value: container
+    - name: cm_name
+      value: plugin-init-config-cm
+    - name: test_name
+      value: plugin-init-config-configmap
+
+  steps:
+    - name: Create-falco
+      use:
+        template: ../../common/_step_templates/apply-assert-falco.yaml
+        with:
+          bindings:
+            - name: falco_type
+              value: DaemonSet
+
+    - name: Create-configmap
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($cm_name)
+                namespace: ($namespace)
+              data:
+                initConfig.yaml: |
+                  label_max_len: 100
+                  with_size: false
+
+    - name: Install-container-plugin
+      use:
+        template: ../../common/_step_templates/apply-assert-plugin.yaml
+        with:
+          bindings:
+            - name: plugin_oci_repo
+              value: falco-test/plugin-container
+            - name: plugin_oci_tag
+              value: latest
+            - name: plugin_oci_registry
+              value: registry.oci-registry.svc.cluster.local:5000
+            - name: plugin_plain_http
+              value: true
+            - name: plugin_config
+              value:
+                name: container
+                configMapRef:
+                  name: plugin-init-config-cm
+
+    - name: Assert-reference-resolved-and-protected
+      try:
+        - assert:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              metadata:
+                name: ($plugin_name)
+                namespace: ($namespace)
+              status:
+                (conditions[?type == 'ResolvedRefs']):
+                  - status: 'True'
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($cm_name)
+                namespace: ($namespace)
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/configmap-in-use')): true
+
+    - name: Assert-init-config-on-filesystem
+      description: Verify the plugin's init_config in the shared plugins-config file matches the ConfigMap.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len": 100, "with_size": false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Update-configmap
+      try:
+        - apply:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($cm_name)
+                namespace: ($namespace)
+              data:
+                initConfig.yaml: |
+                  label_max_len: 200
+                  with_size: false
+
+    - name: Assert-updated-init-config-on-filesystem
+      description: Verify the ConfigMap change reaches the shared plugins-config file.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: FILE_PATH
+                value: /etc/falco/config.d/99-03-plugins-config-inline.yaml
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+              - name: EXPECTED_INIT_CONFIG
+                value: '{"label_max_len": 200, "with_size": false}'
+            content: |
+              bash ../../common/scripts/check_plugin_config_on_node.sh
+
+    - name: Assert-plugin-loaded-in-falco
+      description: Verify Falco's /versions REST API reports the container plugin as loaded.
+      try:
+        - script:
+            env:
+              - name: NAMESPACE
+                value: ($namespace)
+              - name: FALCO_NAME
+                value: ($falco_name)
+              - name: PLUGIN_NAME
+                value: ($plugin_name)
+            content: |
+              bash ../../common/scripts/check_falco_plugin_loaded.sh
+
+    - name: Delete-plugin
+      description: |
+        Delete the Plugin CR: it is dropped from the ArtifactNode and the ConfigMap
+        reference is released.
+      try:
+        - delete:
+            ref:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: Plugin
+              name: ($plugin_name)
+              namespace: ($namespace)
+        - error:
+            resource:
+              apiVersion: artifact.falcosecurity.dev/v1alpha1
+              kind: ArtifactNode
+              metadata:
+                namespace: ($namespace)
+              spec:
+                (artifacts[?kind == 'Plugin' && name == $plugin_name]):
+                  - kind: Plugin
+        - assert:
+            resource:
+              apiVersion: v1
+              kind: ConfigMap
+              metadata:
+                name: ($cm_name)
+                namespace: ($namespace)
+                (contains(finalizers || `[]`, 'artifact.falcosecurity.dev/configmap-in-use')): false
+
+  catch:
+    - description: Capture debug snapshot on failure
+      script:
+        env:
+          - name: TEST_NAME
+            value: ($test_name)
+          - name: NAMESPACE
+            value: ($namespace)
+          - name: OPERATOR_NAMESPACE
+            value: falco-operator
+        content: |
+          bash ../../common/scripts/debug_snapshot.sh

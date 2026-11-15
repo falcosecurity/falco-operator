@@ -48,7 +48,7 @@ and reports each artifact's state in the ArtifactNode status.
 | Controller | Sources | Falco path |
 |------------|---------|------------|
 | Rulesfile | OCI, inline YAML, ConfigMap | `/etc/falco/rules.d` |
-| Plugin | OCI binary, plugin configuration | `/usr/share/falco/plugins` and `/etc/falco/config.d` |
+| Plugin | OCI binary, plugin configuration (init config inline or from a ConfigMap) | `/usr/share/falco/plugins` and `/etc/falco/config.d` |
 | Config | Inline YAML, ConfigMap | `/etc/falco/config.d` |
 
 ### Interaction Between Components
@@ -109,7 +109,7 @@ generations, installed files and Falco behavior when verifying an update.
 The operator protects referenced resources with these finalizers:
 
 - `artifact.falcosecurity.dev/secret-in-use`: Secrets holding registry credentials.
-- `artifact.falcosecurity.dev/configmap-in-use`: ConfigMaps referenced by rules or configuration.
+- `artifact.falcosecurity.dev/configmap-in-use`: ConfigMaps referenced by rules, configuration or plugin initialization configuration.
 
 Artifact finalizers also track cleanup. Plugin removal can wait for installed rules that still
 depend on it. Remove artifacts before the Falco workloads that run their cleanup

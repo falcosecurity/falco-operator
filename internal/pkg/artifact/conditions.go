@@ -61,6 +61,8 @@ const (
 	ReasonConfigMapConfigStoreFailed = "ConfigMapConfigStoreFailed"
 	// ReasonInlinePluginConfigStoreFailed indicates the plugin configuration failed to store.
 	ReasonInlinePluginConfigStoreFailed = "InlinePluginConfigStoreFailed"
+	// ReasonConfigMapPluginConfigStoreFailed indicates the plugin init config from a ConfigMap failed to store.
+	ReasonConfigMapPluginConfigStoreFailed = "ConfigMapPluginConfigStoreFailed"
 	// ReasonProgrammed indicates the artifact was programmed successfully.
 	ReasonProgrammed = "Programmed"
 	// ReasonProgramFailed indicates the artifact failed to program.
@@ -158,6 +160,8 @@ const (
 	MessageFormatReferenceResolutionFailed = "Failed to resolve Reference: %s"
 	// MessageFormatInlinePluginConfigStoreFailed is the format for inline plugin config store failure message.
 	MessageFormatInlinePluginConfigStoreFailed = "Failed to store inline plugin config: %v"
+	// MessageFormatConfigMapPluginConfigStoreFailed is the format for ConfigMap plugin init config store failure message.
+	MessageFormatConfigMapPluginConfigStoreFailed = "Failed to store ConfigMap plugin config: %v"
 	// MessageFormatDependenciesNotSatisfied is the format for unmet plugin requirement messages.
 	MessageFormatDependenciesNotSatisfied = "Plugin requires %s >= %s but Falco reports %s"
 	// MessageFormatPluginAPIMajorMismatch is the format when plugin_api_version major versions differ.
