@@ -1,0 +1,64 @@
+{{- if .Values.metrics.enabled }}
+---
+# Unlike the artifact Service, it selects every replica: each one serves its own metrics.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "falco-operator.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "falco-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/part-of: falco
+    app.kubernetes.io/component: metrics
+    control-plane: falco-operator
+spec:
+  selector:
+    {{- include "falco-operator.selectorLabels" . | nindent 4 }}
+    control-plane: falco-operator
+    app.kubernetes.io/part-of: falco
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- with .Values.metrics.serviceMonitor }}
+{{- if .enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "falco-operator.fullname" $ }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "falco-operator.labels" $ | nindent 4 }}
+    app.kubernetes.io/part-of: falco
+    {{- with .labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "falco-operator.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: metrics
+  endpoints:
+    - port: metrics
+      path: /metrics
+      {{- with .interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with .scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+      {{- if $.Values.metrics.secure }}
+      scheme: https
+      bearerTokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
+      {{- with .tlsConfig }}
+      tlsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      scheme: http
+      {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
