@@ -16,7 +16,7 @@
 
 // Package configmap implements the ConfigMap in-use protection controller.
 // It runs in the main falco operator (Deployment) and ensures that ConfigMaps
-// referenced by Rulesfile or Config artifact resources cannot be deleted until
+// referenced by Rulesfile, Config or Plugin artifact resources cannot be deleted until
 // all references are cleared.
 package configmap
 
@@ -50,7 +50,7 @@ func NewConfigMapReconciler(cl client.Client, scheme *runtime.Scheme) *ConfigMap
 	}
 }
 
-// ConfigMapReconciler protects ConfigMaps that are referenced by Rulesfile or Config resources.
+// ConfigMapReconciler protects ConfigMaps that are referenced by Rulesfile, Config or Plugin resources.
 type ConfigMapReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
@@ -101,12 +101,16 @@ func (r *ConfigMapReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			&artifactv1alpha1.Config{},
 			handler.EnqueueRequestsFromMapFunc(r.findConfigMapsForConfig),
 		).
+		Watches(
+			&artifactv1alpha1.Plugin{},
+			handler.EnqueueRequestsFromMapFunc(r.findConfigMapsForPlugin),
+		).
 		Named(ControllerName).
 		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), ControllerName, &corev1.ConfigMap{})).
 		Complete(r)
 }
 
-// isReferenced returns true when at least one Rulesfile or Config references the given ConfigMap.
+// isReferenced returns true when at least one Rulesfile, Config or Plugin references the given ConfigMap.
 func (r *ConfigMapReconciler) isReferenced(ctx context.Context, cm client.Object) (bool, error) {
 	indexKey := cm.GetNamespace() + "/" + cm.GetName()
 
@@ -122,7 +126,15 @@ func (r *ConfigMapReconciler) isReferenced(ctx context.Context, cm client.Object
 	if err := r.List(ctx, cfgList, client.MatchingFields{index.ConfigMapOnConfig: indexKey}); err != nil {
 		return false, err
 	}
-	return len(cfgList.Items) > 0, nil
+	if len(cfgList.Items) > 0 {
+		return true, nil
+	}
+
+	pluginList := &artifactv1alpha1.PluginList{}
+	if err := r.List(ctx, pluginList, client.MatchingFields{index.ConfigMapOnPlugin: indexKey}); err != nil {
+		return false, err
+	}
+	return len(pluginList.Items) > 0, nil
 }
 
 // findConfigMapsForRulesfile enqueues the ConfigMap named in a Rulesfile's spec.configMapRef.
@@ -144,5 +156,16 @@ func (r *ConfigMapReconciler) findConfigMapsForConfig(_ context.Context, obj cli
 	}
 	return []reconcile.Request{
 		{NamespacedName: client.ObjectKey{Namespace: cfg.Namespace, Name: cfg.Spec.ConfigMapRef.Name}},
+	}
+}
+
+// findConfigMapsForPlugin enqueues the ConfigMap named in a Plugin's spec.config.configMapRef.
+func (r *ConfigMapReconciler) findConfigMapsForPlugin(_ context.Context, obj client.Object) []reconcile.Request {
+	plugin, ok := obj.(*artifactv1alpha1.Plugin)
+	if !ok || plugin.Spec.Config == nil || plugin.Spec.Config.ConfigMapRef == nil {
+		return nil
+	}
+	return []reconcile.Request{
+		{NamespacedName: client.ObjectKey{Namespace: plugin.Namespace, Name: plugin.Spec.Config.ConfigMapRef.Name}},
 	}
 }

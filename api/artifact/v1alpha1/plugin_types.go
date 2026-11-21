@@ -42,7 +42,12 @@ type PluginConfig struct {
 	// If omitted, it is set to /usr/share/falco/plugins/plugin-name.so.
 	LibraryPath string `json:"libraryPath,omitempty"`
 	// InitConfig is the initialization configuration for the plugin.
+	// Mutually exclusive with ConfigMapRef.
 	InitConfig *apiextensionsv1.JSON `json:"initConfig,omitempty"`
+	// ConfigMapRef specifies a reference to a ConfigMap holding the initialization configuration for the
+	// plugin, as YAML under the key initConfig.yaml. Mutually exclusive with InitConfig: a plugin that sets
+	// both is not programmed.
+	ConfigMapRef *commonv1alpha1.ConfigMapRef `json:"configMapRef,omitempty"`
 	// OpenParams is the open parameters for the plugin.
 	OpenParams string `json:"openParams,omitempty"`
 }

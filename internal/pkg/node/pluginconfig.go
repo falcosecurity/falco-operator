@@ -26,11 +26,15 @@ import (
 	"slices"
 
 	"gopkg.in/yaml.v3"
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
+	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 )
 
@@ -277,6 +281,42 @@ func (n *Node) restorePluginsConfig(ctx context.Context, plugins []*artifactv1al
 	n.pluginsConfig = observed
 	_, _, err = n.writePluginsConfigLocked(ctx, retained, retainedOwners)
 	return err
+}
+
+// errInitConfigSourcesExclusive is returned for a Plugin that sets both sources of its init config. The CRD cannot
+// reject it: initConfig is schemaless, so a CEL rule of the CRD cannot see it.
+var errInitConfigSourcesExclusive = errors.New("spec.config.initConfig and spec.config.configMapRef are mutually exclusive")
+
+// withConfigMapInitConfig returns plugin with the init config its spec.config.configMapRef names read into
+// spec.config.initConfig, or plugin itself when it references no ConfigMap. The ConfigMap holds the init config as
+// YAML under commonv1alpha1.ConfigMapPluginInitConfigKey; a key holding no value leaves the plugin without one.
+// A plugin that also sets spec.config.initConfig gets errInitConfigSourcesExclusive.
+func (n *Node) withConfigMapInitConfig(ctx context.Context, plugin *artifactv1alpha1.Plugin) (*artifactv1alpha1.Plugin, error) {
+	if plugin.Spec.Config == nil || plugin.Spec.Config.ConfigMapRef == nil {
+		return plugin, nil
+	}
+	if plugin.Spec.Config.InitConfig != nil && len(plugin.Spec.Config.InitConfig.Raw) > 0 {
+		return nil, errInitConfigSourcesExclusive
+	}
+	name := plugin.Spec.Config.ConfigMapRef.Name
+	configMap := &corev1.ConfigMap{}
+	if err := n.cl.Get(ctx, client.ObjectKey{Namespace: plugin.Namespace, Name: name}, configMap); err != nil {
+		return nil, err
+	}
+	data, ok := configMap.Data[commonv1alpha1.ConfigMapPluginInitConfigKey]
+	if !ok {
+		return nil, fmt.Errorf("ConfigMap %s/%s missing expected key %q",
+			plugin.Namespace, name, commonv1alpha1.ConfigMapPluginInitConfigKey)
+	}
+	initConfig, err := common.YAMLToJSONRaw([]byte(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse key %q of ConfigMap %s/%s: %w",
+			commonv1alpha1.ConfigMapPluginInitConfigKey, plugin.Namespace, name, err)
+	}
+	resolved := plugin.DeepCopy()
+	resolved.Spec.Config.InitConfig = initConfig
+	resolved.Spec.Config.ConfigMapRef = nil
+	return resolved, nil
 }
 
 // UnmarshalYAML reads an installed init_config using the same JSON model as the CR.

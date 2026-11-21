@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
@@ -39,6 +41,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	"github.com/falcosecurity/falco-operator/internal/pkg/controllerhelper"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 )
 
@@ -124,12 +127,13 @@ func (r *PluginReconciler) publishDeletionBlocked(ctx context.Context, name stri
 }
 
 // SetupWithManager registers the controller: one reconcile per Plugin, woken by the
-// Plugin itself, by its assignment on this node, and by a change of Falco's
-// reported capabilities (versionEvents), which can satisfy a requirement that blocked an install.
+// Plugin itself, by its assignment on this node, by the ConfigMap holding its init config, and by a change of
+// Falco's reported capabilities (versionEvents), which can satisfy a requirement that blocked an install.
 func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-chan event.GenericEvent) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&artifactv1alpha1.Plugin{}, builder.WithPredicates(shared.ParentChanged())).
 		Watches(&artifactv1alpha1.ArtifactNode{}, shared.AssignmentHandler(kind)).
+		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.findPluginsForConfigMap)).
 		WatchesRawSource(source.Channel(versionEvents, handler.EnqueueRequestsFromMapFunc(shared.AssignedRequests(r.Client, r.node, kind)))).
 		// The node controller asks for the removal of what the node holds for an artifact the spec of its ArtifactNode no
 		// longer lists.
@@ -137,4 +141,9 @@ func (r *PluginReconciler) SetupWithManager(mgr ctrl.Manager, versionEvents <-ch
 		Named("artifact-plugin").
 		WithLogConstructor(controllerhelper.LogConstructorFor(mgr.GetLogger(), mgr.GetScheme(), "artifact-plugin", &artifactv1alpha1.Plugin{})).
 		Complete(r)
+}
+
+// findPluginsForConfigMap maps a ConfigMap event to the Plugins that reference it.
+func (r *PluginReconciler) findPluginsForConfigMap(ctx context.Context, configMap client.Object) []reconcile.Request {
+	return controllerhelper.RequestsReferencing(ctx, r.Client, &artifactv1alpha1.PluginList{}, index.ConfigMapOnPlugin, configMap)
 }

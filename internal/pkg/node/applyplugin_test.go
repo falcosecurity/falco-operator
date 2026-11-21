@@ -22,14 +22,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
+	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
 func TestNode_ApplyPlugin_ProtectsInstalledOwnership(t *testing.T) {
@@ -198,5 +203,133 @@ func TestReportCompatibility_EnforcingRefusesMetadataThatDeclaresNoRequirements(
 				assert.Equal(t, wantMessage, cond.Message)
 			})
 		}
+	}
+}
+
+// pluginWithInitConfigFrom is an installable Plugin whose init config is read from the ConfigMap named configMap.
+func pluginWithInitConfigFrom(name, configMap string) *artifactv1alpha1.Plugin {
+	plugin := testPlugin(name)
+	plugin.Namespace, plugin.UID = testutil.TestNamespace, types.UID(name+"-uid")
+	plugin.Spec.Config = &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: configMap}}
+	return withBinary(plugin, "binary")
+}
+
+// initConfigMap is the ConfigMap a Plugin's spec.config.configMapRef names, holding data under the init config key.
+func initConfigMap(name, data string) *corev1.ConfigMap {
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: name},
+		Data:       map[string]string{commonv1alpha1.ConfigMapPluginInitConfigKey: data},
+	}
+}
+
+func TestNode_ApplyPlugin_InitConfigFromConfigMap(t *testing.T) {
+	ctx := t.Context()
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	configMap := initConfigMap("container-init", "label_max_len: 100\nengines:\n  containerd:\n    enabled: true\n")
+	m := newTestNodeOver(store, compatfake.NewMockVersionsFetcher(nil), configMap)
+	plugin := pluginWithInitConfigFrom("container", configMap.Name)
+	status := &artifactv1alpha1.NodeArtifactStatus{}
+
+	require.NoError(t, m.ApplyArtifact(ctx, plugin, status))
+
+	testutil.RequireCondition(t, status.Conditions, commonv1alpha1.ConditionResolvedRefs.String(),
+		metav1.ConditionTrue, artifact.ReasonReferenceResolved)
+	testutil.RequireCondition(t, status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String(),
+		metav1.ConditionTrue, artifact.ReasonConfigProgrammed)
+	entry := findPluginConfig(m.pluginsConfig.Configs, "container")
+	require.NotNil(t, entry)
+	require.NotNil(t, entry.InitConfig)
+	assert.JSONEq(t, `{"label_max_len":100,"engines":{"containerd":{"enabled":true}}}`, string(entry.InitConfig.Raw))
+	data, err := store.Read(ctx, pluginsConfigFileOf(m).Path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "init_config:")
+	assert.Contains(t, string(data), "label_max_len: 100")
+	require.NotNil(t, plugin.Spec.Config.ConfigMapRef, "the caller's Plugin must not be changed")
+	assert.Nil(t, plugin.Spec.Config.InitConfig, "the caller's Plugin must not be changed")
+
+	// The ConfigMap changes: the next apply writes its new content.
+	configMap.Data[commonv1alpha1.ConfigMapPluginInitConfigKey] = "label_max_len: 200\n"
+	require.NoError(t, m.cl.Update(ctx, configMap))
+	require.NoError(t, m.ApplyArtifact(ctx, plugin, status))
+	entry = findPluginConfig(m.pluginsConfig.Configs, "container")
+	require.NotNil(t, entry)
+	require.NotNil(t, entry.InitConfig)
+	assert.JSONEq(t, `{"label_max_len":200}`, string(entry.InitConfig.Raw))
+
+	// The key is emptied: the entry no longer carries an init config.
+	configMap.Data[commonv1alpha1.ConfigMapPluginInitConfigKey] = ""
+	require.NoError(t, m.cl.Update(ctx, configMap))
+	require.NoError(t, m.ApplyArtifact(ctx, plugin, status))
+	entry = findPluginConfig(m.pluginsConfig.Configs, "container")
+	require.NotNil(t, entry)
+	assert.Nil(t, entry.InitConfig)
+}
+
+func TestNode_ApplyPlugin_InitConfigFromConfigMapFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		configMap *corev1.ConfigMap
+		// inline, when set, is also the Plugin's spec.config.initConfig.
+		inline *apiextensionsv1.JSON
+		// wantResolvedRefs is the ResolvedRefs status the apply leaves.
+		wantResolvedRefs metav1.ConditionStatus
+		// wantConfigProgrammedMessage, when set, is a part of the message of ConfigProgrammed=False.
+		wantConfigProgrammedMessage string
+	}{
+		{
+			name:             "missing ConfigMap",
+			wantResolvedRefs: metav1.ConditionFalse,
+		},
+		{
+			name: "ConfigMap without the init config key",
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Namespace: testutil.TestNamespace, Name: "container-init"},
+				Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: "label_max_len: 100\n"},
+			},
+			wantResolvedRefs:            metav1.ConditionTrue,
+			wantConfigProgrammedMessage: `missing expected key "initConfig.yaml"`,
+		},
+		{
+			name:                        "init config that is not YAML",
+			configMap:                   initConfigMap("container-init", "label_max_len: [100\n"),
+			wantResolvedRefs:            metav1.ConditionTrue,
+			wantConfigProgrammedMessage: `parse key "initConfig.yaml"`,
+		},
+		{
+			name:                        "init config set inline as well",
+			configMap:                   initConfigMap("container-init", "label_max_len: 100\n"),
+			inline:                      &apiextensionsv1.JSON{Raw: []byte(`{"label_max_len":200}`)},
+			wantResolvedRefs:            metav1.ConditionTrue,
+			wantConfigProgrammedMessage: "spec.config.initConfig and spec.config.configMapRef are mutually exclusive",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objs []client.Object
+			if tt.configMap != nil {
+				objs = append(objs, tt.configMap)
+			}
+			m := newTestNodeOver(&artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()},
+				compatfake.NewMockVersionsFetcher(nil), objs...)
+			status := &artifactv1alpha1.NodeArtifactStatus{}
+			plugin := pluginWithInitConfigFrom("container", "container-init")
+			plugin.Spec.Config.InitConfig = tt.inline
+
+			err := m.ApplyArtifact(t.Context(), plugin, status)
+
+			require.Error(t, err)
+			resolvedRefs := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
+			require.NotNil(t, resolvedRefs)
+			assert.Equal(t, tt.wantResolvedRefs, resolvedRefs.Status)
+			if tt.wantConfigProgrammedMessage != "" {
+				configProgrammed := apimeta.FindStatusCondition(status.Conditions, commonv1alpha1.ConditionConfigProgrammed.String())
+				require.NotNil(t, configProgrammed)
+				assert.Equal(t, metav1.ConditionFalse, configProgrammed.Status)
+				assert.Equal(t, artifact.ReasonConfigProgramFailed, configProgrammed.Reason)
+				assert.Contains(t, configProgrammed.Message, tt.wantConfigProgrammedMessage)
+			}
+			assert.Nil(t, findPluginConfig(m.pluginsConfig.Configs, "container"),
+				"no entry is written without the init config the Plugin asks for")
+		})
 	}
 }

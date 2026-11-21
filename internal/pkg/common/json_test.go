@@ -17,6 +17,7 @@
 package common
 
 import (
+	"bytes"
 	"testing"
 
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -74,6 +75,73 @@ func TestJSONRawToYAML(t *testing.T) {
 			}
 			if *got != *tt.want {
 				t.Errorf("got %q, want %q", *got, *tt.want)
+			}
+		})
+	}
+}
+
+func TestYAMLToJSONRaw(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		want    *apiextensionsv1.JSON
+		wantErr bool
+	}{
+		{
+			name: "empty data returns nil",
+			data: "",
+			want: nil,
+		},
+		{
+			name: "null returns nil",
+			data: "null\n",
+			want: nil,
+		},
+		{
+			name: "only comments returns nil",
+			data: "# nothing here\n",
+			want: nil,
+		},
+		{
+			name: "nested YAML object is converted to JSON",
+			data: "label_max_len: 100\nengines:\n  docker:\n    enabled: false\n",
+			want: &apiextensionsv1.JSON{Raw: []byte(`{"engines":{"docker":{"enabled":false}},"label_max_len":100}`)},
+		},
+		{
+			name: "scalar is converted to JSON",
+			data: "some-init-string",
+			want: &apiextensionsv1.JSON{Raw: []byte(`"some-init-string"`)},
+		},
+		{
+			name:    "invalid YAML returns error",
+			data:    "key: [unterminated",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := YAMLToJSONRaw([]byte(tt.data))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tt.want == nil {
+				if got != nil {
+					t.Errorf("expected nil, got %s", got.Raw)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected non-nil result, got nil")
+			}
+			if !bytes.Equal(got.Raw, tt.want.Raw) {
+				t.Errorf("got %s, want %s", got.Raw, tt.want.Raw)
 			}
 		})
 	}

@@ -253,7 +253,19 @@ func (n *Node) ensurePluginConfig(
 	logger := log.FromContext(ctx)
 	logger.V(1).Info("Ensuring plugin configuration")
 
-	configAction, _, err := n.AddPluginConfig(ctx, plugin)
+	resolved, err := n.withConfigMapInitConfig(ctx, plugin)
+	if err != nil {
+		logger.Error(err, "unable to resolve plugin init config from ConfigMap", "configMap", plugin.Spec.Config.ConfigMapRef.Name)
+		artifact.RecordWarning(n.recorder, plugin,
+			artifact.ReasonConfigMapPluginConfigStoreFailed, artifact.MessageFormatConfigMapPluginConfigStoreFailed, err.Error())
+		apimeta.SetStatusCondition(&status.Conditions, common.NewConfigProgrammedCondition(
+			metav1.ConditionFalse, artifact.ReasonConfigProgramFailed,
+			fmt.Sprintf(artifact.MessageFormatConfigMapPluginConfigStoreFailed, err.Error()), gen,
+		))
+		return err
+	}
+
+	configAction, _, err := n.AddPluginConfig(ctx, resolved)
 	if err != nil {
 		if blocked, ok := errors.AsType[*BlockedError](err); ok {
 			n.reportRenameBlocked(ctx, plugin, status, blocked)
@@ -295,8 +307,12 @@ func (n *Node) reportRenameBlocked(
 func (n *Node) resolvePluginReferences(
 	ctx context.Context, plugin *artifactv1alpha1.Plugin, status *artifactv1alpha1.NodeArtifactStatus,
 ) error {
-	// A Plugin's one reference, its registry auth Secret, is the instance operator's: it pulls from the registry
-	// and reports a missing Secret on the Plugin. The node gets the binary from the artifact server and has no
-	// reference to resolve, so it reports none.
-	return resolveReferences(ctx, n.cl, n.recorder, plugin, &status.Conditions, nil)
+	// A Plugin's registry auth Secret is the instance operator's: it pulls from the registry and reports a missing
+	// Secret on the Plugin. The node gets the binary from the artifact server, so the one reference it resolves is
+	// the ConfigMap holding the plugin's init config, when there is one.
+	var configMapRef *commonv1alpha1.ConfigMapRef
+	if plugin.Spec.Config != nil {
+		configMapRef = plugin.Spec.Config.ConfigMapRef
+	}
+	return resolveReferences(ctx, n.cl, n.recorder, plugin, &status.Conditions, configMapRef)
 }
