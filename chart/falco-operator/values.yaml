@@ -186,11 +186,10 @@ enforceRequirements: true
 # Requires Kubernetes 1.30 or later. Enabling it rolls the Falco pods.
 artifactOperatorAppArmorUnconfined: false
 
-# -- Additional CLI arguments passed to the operator binary. mTLS's own flags are added
-# natively when mtls.enabled is true; no need to list them here.
+# -- Additional CLI arguments passed to the operator binary. mTLS's and metrics' own flags are added
+# natively when mtls.enabled or metrics.enabled is true; no need to list them here.
 extraArgs: []
-  # - --metrics-bind-address=:8443
-  # - --metrics-secure=false
+  # - --leader-elect=true
 
 # -- Extra environment variables
 extraEnv: []
@@ -270,6 +269,35 @@ apiPriorityAndFairness:
 artifactNodeAdmissionPolicy:
   # -- Create the ValidatingAdmissionPolicy and its binding.
   enabled: false
+
+# Prometheus metrics of the operator: its controllers, its Kubernetes clients and the artifact server.
+# Every replica serves them, and the chart exposes them through a dedicated `<fullname>-metrics` Service.
+metrics:
+  # -- Serve the operator metrics and create the metrics Service.
+  enabled: false
+  # -- Serve the metrics over HTTPS, only to clients whose bearer token may get the `/metrics`
+  # non-resource URL, such as ServiceAccounts bound to the `<fullname>-metrics-reader` ClusterRole.
+  # The operator checks each token with a TokenReview and a SubjectAccessReview; with rbac.create the
+  # chart grants it both. The certificate is self-signed. When false, the metrics are served over
+  # plain HTTP to any client that can reach the port.
+  secure: true
+  # -- Port of the metrics endpoint, on the manager container and on the metrics Service.
+  port: 8443
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor for the metrics Service. Requires the
+    # monitoring.coreos.com/v1 ServiceMonitor CRD. With metrics.secure, Prometheus authenticates with
+    # its own ServiceAccount token, so bind that ServiceAccount to the `<fullname>-metrics-reader` ClusterRole.
+    enabled: false
+    # -- Additional labels of the ServiceMonitor, for example to match the serviceMonitorSelector of Prometheus.
+    labels: {}
+    # -- Scrape interval. Empty uses the Prometheus default.
+    interval: ""
+    # -- Scrape timeout. Empty uses the Prometheus default.
+    scrapeTimeout: ""
+    # -- TLS configuration of the scrapes when metrics.secure is true. The default skips the verification of
+    # the operator's self-signed certificate.
+    tlsConfig:
+      insecureSkipVerify: true
 
 # -- Array of extra Kubernetes manifests to deploy alongside the operator. Each
 # entry is rendered with `tpl`, so Helm templating (e.g. `{{ .Release.Name }}`)
