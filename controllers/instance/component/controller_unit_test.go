@@ -26,6 +26,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -172,6 +173,115 @@ func TestReconcile_RBACConditionalCreation(t *testing.T) {
 			} else {
 				assert.Error(t, crbErr, "ClusterRoleBinding should NOT exist")
 			}
+		})
+	}
+}
+
+// TestReconcile_TypeChangeCleansUpStaleRBAC covers the namespaced RBAC cleanup on a component type
+// change. The fake client does not record managed fields, so the cleanup of the cluster-scoped RBAC is
+// covered by TestReconcile_TypeChangeDeletesStaleRBAC instead.
+func TestReconcile_TypeChangeCleansUpStaleRBAC(t *testing.T) {
+	scheme := testutil.Scheme(t, instancev1alpha1.AddToScheme)
+	uniqueName := resources.GenerateUniqueName(defaultName, testutil.TestNamespace)
+
+	tests := []struct {
+		name                  string
+		fromType              instancev1alpha1.ComponentType
+		toType                instancev1alpha1.ComponentType
+		existing              []client.Object
+		deleteErr             error
+		wantErr               string
+		wantRoleExists        bool
+		wantClusterRoleExists bool
+	}{
+		{
+			name:                  "falcosidekick to metacollector deletes the Role and RoleBinding",
+			fromType:              instancev1alpha1.ComponentTypeFalcosidekick,
+			toType:                instancev1alpha1.ComponentTypeMetacollector,
+			wantClusterRoleExists: true,
+		},
+		{
+			name:     "falcosidekick to falcosidekick-ui deletes the Role and RoleBinding",
+			fromType: instancev1alpha1.ComponentTypeFalcosidekick,
+			toType:   instancev1alpha1.ComponentTypeFalcosidekickUI,
+		},
+		{
+			name:   "keeps RBAC resources not generated for the Component",
+			toType: instancev1alpha1.ComponentTypeFalcosidekickUI,
+			existing: []client.Object{
+				builders.NewRole().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
+				builders.NewRoleBinding().WithName(defaultName).WithNamespace(testutil.TestNamespace).Build(),
+				builders.NewClusterRole().WithName(uniqueName).Build(),
+				builders.NewClusterRoleBinding().WithName(uniqueName).Build(),
+			},
+			wantRoleExists:        true,
+			wantClusterRoleExists: true,
+		},
+		{
+			name:                  "returns error when deleting a stale resource fails",
+			fromType:              instancev1alpha1.ComponentTypeFalcosidekick,
+			toType:                instancev1alpha1.ComponentTypeMetacollector,
+			deleteErr:             fmt.Errorf("injected delete error"),
+			wantErr:               "unable to delete stale RoleBinding",
+			wantRoleExists:        true,
+			wantClusterRoleExists: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			comp := newMetacollectorComponent(defaultName)
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(append(tt.existing, comp)...).WithStatusSubresource(comp)
+			if tt.deleteErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						return tt.deleteErr
+					},
+				})
+			}
+			cl := builder.Build()
+			r := NewReconciler(cl, scheme, events.NewFakeRecorder(100))
+			req := reconcile.Request{NamespacedName: client.ObjectKeyFromObject(comp)}
+
+			setType := func(componentType instancev1alpha1.ComponentType) {
+				t.Helper()
+				current := &instancev1alpha1.Component{}
+				require.NoError(t, cl.Get(ctx, req.NamespacedName, current))
+				current.Spec.Component.Type = componentType
+				require.NoError(t, cl.Update(ctx, current))
+			}
+
+			if tt.fromType != "" {
+				setType(tt.fromType)
+				_, err := r.Reconcile(ctx, req)
+				require.NoError(t, err)
+			}
+
+			setType(tt.toType)
+			_, err := r.Reconcile(ctx, req)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+
+			exists := func(key client.ObjectKey, obj client.Object) bool {
+				t.Helper()
+				err := cl.Get(ctx, key, obj)
+				if err != nil {
+					require.True(t, k8serrors.IsNotFound(err), "unexpected error: %v", err)
+				}
+				return err == nil
+			}
+			namespacedKey := client.ObjectKey{Name: defaultName, Namespace: testutil.TestNamespace}
+			clusterKey := client.ObjectKey{Name: uniqueName}
+			assert.Equal(t, tt.wantRoleExists, exists(namespacedKey, &rbacv1.Role{}), "Role")
+			assert.Equal(t, tt.wantRoleExists, exists(namespacedKey, &rbacv1.RoleBinding{}), "RoleBinding")
+			assert.Equal(t, tt.wantClusterRoleExists, exists(clusterKey, &rbacv1.ClusterRole{}), "ClusterRole")
+			assert.Equal(t, tt.wantClusterRoleExists, exists(clusterKey, &rbacv1.ClusterRoleBinding{}), "ClusterRoleBinding")
 		})
 	}
 }
