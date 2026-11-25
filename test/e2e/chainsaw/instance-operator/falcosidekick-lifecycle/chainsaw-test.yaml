@@ -8,8 +8,9 @@ spec:
     metacollector-lifecycle, falcosidekick's RBAC is namespace-scoped (Role/RoleBinding, not
     ClusterRole/ClusterRoleBinding): FalcosidekickDefaults only sets RoleRules, and the
     Component controller only creates cluster-scoped RBAC when ClusterRoleRules is non-empty
-    (see controllers/instance/component/controller.go). Runs with 2 replicas throughout, so
-    this also covers a non-default replica count the metacollector tests don't touch.
+    (see controllers/instance/component/controller.go). Leaves spec.replicas unset, so it also
+    covers the falcosidekick default of 2 replicas, which differs from metacollector's 1, and
+    then scales to a non-default replica count.
 
   bindings:
     - name: component_name
@@ -26,18 +27,9 @@ spec:
             - name: component_type
               value: falcosidekick
 
-    - name: Scale-to-two-replicas
-      description: apply-assert-component.yaml doesn't set replicas; do it as a follow-up patch.
+    - name: Assert-default-replicas
+      description: apply-assert-component.yaml doesn't set replicas, so the falcosidekick default applies.
       try:
-        - patch:
-            resource:
-              apiVersion: instance.falcosecurity.dev/v1alpha1
-              kind: Component
-              metadata:
-                name: ($component_name)
-                namespace: ($namespace)
-              spec:
-                replicas: 2
         - assert:
             resource:
               apiVersion: apps/v1
@@ -45,6 +37,8 @@ spec:
               metadata:
                 name: ($component_name)
                 namespace: ($namespace)
+              spec:
+                replicas: 2
               status:
                 availableReplicas: 2
                 readyReplicas: 2
@@ -62,6 +56,31 @@ spec:
               value: 2
             - name: expected_version
               value: (env('CHAINSAW_DEFAULT_FALCOSIDEKICK_VERSION'))
+
+    - name: Scale-to-three-replicas
+      description: Patch spec.replicas to a non-default value and check the Deployment follows.
+      try:
+        - patch:
+            resource:
+              apiVersion: instance.falcosecurity.dev/v1alpha1
+              kind: Component
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 3
+        - assert:
+            resource:
+              apiVersion: apps/v1
+              kind: Deployment
+              metadata:
+                name: ($component_name)
+                namespace: ($namespace)
+              spec:
+                replicas: 3
+              status:
+                availableReplicas: 3
+                readyReplicas: 3
 
     - name: Assert-sub-resources-exist
       try:
