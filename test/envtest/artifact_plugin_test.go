@@ -18,10 +18,12 @@ package envtest
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/events"
@@ -33,6 +35,8 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 	"github.com/falcosecurity/falco-operator/controllers/artifact/plugin"
 	"github.com/falcosecurity/falco-operator/internal/pkg/artifact"
+	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
+	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
 )
 
@@ -78,10 +82,12 @@ func TestIntegration_Plugin_SteadyStateReconcileIsQuiet(t *testing.T) {
 }
 
 // The reconciler wired to a real manager, through the watches registered by SetupWithManager: the Plugin, its
-// assignment on the node, a change of Falco's versions, and the removal the node controller asks for.
+// assignment on the node, the ConfigMap holding its init config, a change of Falco's versions, and the removal the
+// node controller asks for.
 func TestIntegration_Plugin_TheWatchesDriveTheReconciler(t *testing.T) {
 	ctx := context.Background() // t.Context() ends before the cleanups that use it run
-	n := newTestNode(t)
+	store := &artifact.LocalStore{FS: fsfake.NewMockFileSystem(), Dirs: artifact.DefaultArtifactDirs()}
+	n := newTestNodeOn(t, store)
 	r := plugin.NewPluginReconciler(k8sClient, events.NewFakeRecorder(100), n)
 	versions := make(chan event.GenericEvent)
 	testutil.StartManager(t, restConfig, k8sClient.Scheme(), func(mgr ctrl.Manager) error {
@@ -101,19 +107,63 @@ func TestIntegration_Plugin_TheWatchesDriveTheReconciler(t *testing.T) {
 		return false
 	}
 
+	pluginsConfigPath, err := artifact.ArtifactPath(artifact.DefaultArtifactDirs(), "plugins-config", priority.MaxPriority,
+		artifact.MediumInline, artifact.KindConfig)
+	require.NoError(t, err)
+	pluginsConfig := func() string {
+		data, err := store.Read(ctx, pluginsConfigPath)
+		if err != nil {
+			return ""
+		}
+		return string(data)
+	}
+
 	p := create(t, ctx, &artifactv1alpha1.Plugin{ObjectMeta: metav1.ObjectMeta{Name: "wired", Namespace: testutil.TestNamespace}})
 	p.Status.ObservedGeneration = p.Generation
 	require.NoError(t, k8sClient.Status().Update(ctx, p))
+	mapped := create(t, ctx, &artifactv1alpha1.Plugin{
+		ObjectMeta: metav1.ObjectMeta{Name: "mapped", Namespace: testutil.TestNamespace},
+		Spec: artifactv1alpha1.PluginSpec{
+			OCIArtifact: &commonv1alpha1.OCIArtifact{Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/plugin/container"}},
+			Config:      &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "mapped-init"}},
+		},
+	})
+	mapped.Status.ObservedGeneration = mapped.Generation
+	require.NoError(t, k8sClient.Status().Update(ctx, mapped))
 
 	// Assigned to the node: reconciled and reported.
 	artifactNode := create(t, ctx, &artifactv1alpha1.ArtifactNode{
 		ObjectMeta: metav1.ObjectMeta{Name: testutil.TestNodeName, Namespace: testutil.TestNamespace},
 		Spec: artifactv1alpha1.ArtifactNodeSpec{
-			NodeName:  testutil.TestNodeName,
-			Artifacts: []artifactv1alpha1.NodeArtifactRef{{Kind: "Plugin", Name: p.Name, UID: string(p.UID)}},
+			NodeName: testutil.TestNodeName,
+			Artifacts: []artifactv1alpha1.NodeArtifactRef{
+				{Kind: "Plugin", Name: p.Name, UID: string(p.UID)},
+				{Kind: "Plugin", Name: mapped.Name, UID: string(mapped.UID)},
+			},
 		},
 	})
 	require.Eventually(t, func() bool { return reported(p.Name) }, 15*time.Second, 50*time.Millisecond)
+	testutil.RequirePublishedWhere(t, k8sClient, "Plugin", mapped.Name, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.IsStatusConditionFalse(e.Conditions, commonv1alpha1.ConditionResolvedRefs.String())
+	})
+
+	// The ConfigMap holding the init config appears: the plugin is installed with it.
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "mapped-init", Namespace: testutil.TestNamespace},
+		Data:       map[string]string{commonv1alpha1.ConfigMapPluginInitConfigKey: "label_max_len: 100\n"},
+	}
+	require.NoError(t, k8sClient.Create(ctx, cm))
+	t.Cleanup(func() { testutil.CleanupObject(t, ctx, k8sClient, cm) })
+	testutil.RequirePublishedWhere(t, k8sClient, "Plugin", mapped.Name, func(e artifactv1alpha1.NodeArtifactStatus) bool {
+		return apimeta.IsStatusConditionTrue(e.Conditions, commonv1alpha1.ConditionProgrammed.String())
+	})
+	require.Contains(t, pluginsConfig(), "label_max_len: 100")
+
+	// The ConfigMap changes: the new init config is written.
+	cm.Data[commonv1alpha1.ConfigMapPluginInitConfigKey] = "label_max_len: 200\n"
+	require.NoError(t, k8sClient.Update(ctx, cm))
+	require.Eventually(t, func() bool { return strings.Contains(pluginsConfig(), "label_max_len: 200") },
+		15*time.Second, 50*time.Millisecond, "a change of the ConfigMap reaches the plugin configuration")
 
 	// Falco's versions changed: what the node assigns is reconciled again.
 	select {
@@ -139,6 +189,6 @@ func TestIntegration_Plugin_TheWatchesDriveTheReconciler(t *testing.T) {
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(artifactNode), latest))
 	latest.Spec.Artifacts = nil
 	require.NoError(t, k8sClient.Update(ctx, latest))
-	require.Eventually(t, func() bool { return !reported(p.Name) }, 15*time.Second, 50*time.Millisecond,
+	require.Eventually(t, func() bool { return !reported(p.Name) && !reported(mapped.Name) }, 15*time.Second, 50*time.Millisecond,
 		"what the ArtifactNode stops listing is withdrawn")
 }

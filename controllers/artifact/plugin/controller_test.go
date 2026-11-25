@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	artifactv1alpha1 "github.com/falcosecurity/falco-operator/api/artifact/v1alpha1"
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
@@ -48,6 +49,7 @@ import (
 	"github.com/falcosecurity/falco-operator/internal/pkg/common"
 	compatfake "github.com/falcosecurity/falco-operator/internal/pkg/compat/fake"
 	fsfake "github.com/falcosecurity/falco-operator/internal/pkg/filesystem/fake"
+	"github.com/falcosecurity/falco-operator/internal/pkg/index"
 	"github.com/falcosecurity/falco-operator/internal/pkg/node"
 	"github.com/falcosecurity/falco-operator/internal/pkg/priority"
 	"github.com/falcosecurity/falco-operator/internal/testutil"
@@ -804,6 +806,8 @@ func TestEnsurePluginConfig(t *testing.T) {
 	tests := []struct {
 		name string
 
+		// objects, if set, are on the node's client: the ConfigMaps a Plugin reads.
+		objects  []client.Object
 		plugin   *artifactv1alpha1.Plugin
 		writeErr error
 		wantErr  bool
@@ -867,11 +871,62 @@ func TestEnsurePluginConfig(t *testing.T) {
 				"Warning InlinePluginConfigStoreFailed Failed to store inline plugin config: disk full",
 			},
 		},
+		{
+			name: "init config ConfigMap without the init config key sets error conditions",
+			objects: []client.Object{&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "init-cm", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapConfigKey: "label_max_len: 100\n"},
+			}},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/test-plugin", Tag: "latest"},
+					},
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "init-cm"}},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionConfigProgrammed.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonConfigProgramFailed},
+			},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Normal ArtifactStored oci artifact stored successfully",
+				"Warning ConfigMapPluginConfigStoreFailed Failed to store ConfigMap plugin config: " +
+					`ConfigMap default/init-cm missing expected key "initConfig.yaml"`,
+			},
+		},
+		{
+			name: "writes config with init config from a ConfigMap",
+			objects: []client.Object{&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "init-cm", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapPluginInitConfigKey: "label_max_len: 100\n"},
+			}},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					OCIArtifact: &commonv1alpha1.OCIArtifact{
+						Image: commonv1alpha1.ImageSpec{Repository: "falcosecurity/plugins/test-plugin", Tag: "latest"},
+					},
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "init-cm"}},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+				{Type: commonv1alpha1.ConditionConfigProgrammed.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonConfigProgrammed},
+			},
+			wantEvents: []string{
+				"Normal ReferenceResolved All references were resolved successfully",
+				"Normal ArtifactStored oci artifact stored successfully",
+				"Normal ArtifactStored inline artifact stored successfully",
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, cl := newTestReconciler(t)
+			r, cl := newTestReconciler(t, tt.objects...)
 			status := &artifactv1alpha1.NodeArtifactStatus{}
 			if tt.preConditions != nil {
 				status.Conditions = tt.preConditions
@@ -966,6 +1021,35 @@ func TestEnforceReferenceResolution(t *testing.T) {
 				},
 			},
 			wantNoConditions: true,
+		},
+		{
+			name: "init config ConfigMap that exists is resolved",
+			objects: []client.Object{&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: "init-cm", Namespace: testutil.TestNamespace},
+				Data:       map[string]string{commonv1alpha1.ConfigMapPluginInitConfigKey: "label_max_len: 100\n"},
+			}},
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "init-cm"}},
+				},
+			},
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionTrue, Reason: artifact.ReasonReferenceResolved},
+			},
+		},
+		{
+			name: "missing init config ConfigMap fails the resolution",
+			plugin: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Name: testPluginName, Namespace: testutil.TestNamespace},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "missing-cm"}},
+				},
+			},
+			wantErr: true,
+			wantConditions: []testutil.ConditionExpect{
+				{Type: commonv1alpha1.ConditionResolvedRefs.String(), Status: metav1.ConditionFalse, Reason: artifact.ReasonReferenceResolutionFailed},
+			},
 		},
 	}
 
@@ -1817,4 +1901,47 @@ func TestCleanup_ReleasesTheEntryOfARecreatedPluginAfterARestart(t *testing.T) {
 	assert.False(t, present, "the old incarnation's binary must go, whichever UID the entry was filed under")
 	_, held := r.node.StatusEntry(artifact.KindPlugin, testPluginName)
 	assert.False(t, held, "the stale entry goes with the last file")
+}
+
+// A ConfigMap event reconciles the Plugins whose init config it holds, and only those.
+func TestFindPluginsForConfigMap(t *testing.T) {
+	plugin := func(name, configMap string) *artifactv1alpha1.Plugin {
+		p := &artifactv1alpha1.Plugin{}
+		p.Namespace, p.Name = testutil.TestNamespace, name
+		if configMap != "" {
+			p.Spec.Config = &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: configMap}}
+		}
+		return p
+	}
+	tests := []struct {
+		name    string
+		listErr error
+		want    []reconcile.Request
+	}{
+		{name: "the Plugins that reference it", want: []reconcile.Request{testutil.Request("a"), testutil.Request("b")}},
+		{name: "the Plugins cannot be listed", listErr: errors.New("boom")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithScheme(testutil.Scheme(t, artifactv1alpha1.AddToScheme)).
+				WithObjects(plugin("a", "cm"), plugin("b", "cm"), plugin("c", "other"), plugin("d", ""))
+			for _, idx := range index.All {
+				builder = builder.WithIndex(idx.Object, idx.Field, idx.ExtractValueFn)
+			}
+			if tt.listErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error {
+						return tt.listErr
+					},
+				})
+			}
+			r := &PluginReconciler{Client: builder.Build()}
+			cm := &corev1.ConfigMap{}
+			cm.Namespace, cm.Name = testutil.TestNamespace, "cm"
+
+			got := r.findPluginsForConfigMap(t.Context(), cm)
+
+			assert.ElementsMatch(t, tt.want, got)
+		})
+	}
 }

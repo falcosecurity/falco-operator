@@ -103,6 +103,32 @@ func TestConfigMapReconciler_Reconcile(t *testing.T) {
 			wantErr: "config list error",
 		},
 		{
+			name:    "List error for Plugin",
+			objects: []client.Object{newCM("cm-plugin-list")},
+			intercept: interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if _, ok := list.(*artifactv1alpha1.PluginList); ok {
+						return errors.New("plugin list error")
+					}
+					return nil
+				},
+			},
+			request: ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "cm-plugin-list"}},
+			wantErr: "plugin list error",
+		},
+		{
+			name: "Referenced by a Plugin, not deleting, adds finalizer",
+			objects: []client.Object{newCM("cm-plugin"), &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "plugin1"},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "cm-plugin"}},
+				},
+			}},
+			request:              ctrl.Request{NamespacedName: client.ObjectKey{Namespace: "default", Name: "cm-plugin"}},
+			wantFinalizer:        common.ConfigmapInUseFinalizer,
+			finalizerShouldExist: true,
+		},
+		{
 			name: "Referenced, not deleting, adds finalizer",
 			objects: []client.Object{newCM("cm3"), &artifactv1alpha1.Rulesfile{
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "rf1"},
@@ -255,6 +281,26 @@ func TestConfigMapReconciler_isReferenced(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "plugin reference",
+			objects: []client.Object{cm, &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pluginX"},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "cmX"}},
+				},
+			}},
+			want: true,
+		},
+		{
+			name: "plugin reference to another configmap",
+			objects: []client.Object{cm, &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pluginY"},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "cmY"}},
+				},
+			}},
+			want: false,
+		},
+		{
 			name:    "rulesfile list error",
 			objects: []client.Object{cm},
 			listError: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
@@ -275,6 +321,17 @@ func TestConfigMapReconciler_isReferenced(t *testing.T) {
 				return nil
 			},
 			wantErr: "config list error",
+		},
+		{
+			name:    "plugin list error",
+			objects: []client.Object{cm},
+			listError: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, ok := list.(*artifactv1alpha1.PluginList); ok {
+					return errors.New("plugin list error")
+				}
+				return nil
+			},
+			wantErr: "plugin list error",
 		},
 	}
 
@@ -385,6 +442,57 @@ func TestConfigMapReconciler_findConfigMapsForConfig(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := r.findConfigMapsForConfig(context.Background(), tt.obj)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestConfigMapReconciler_findConfigMapsForPlugin(t *testing.T) {
+	s := newScheme(t)
+	r := NewConfigMapReconciler(nil, s)
+
+	tests := []struct {
+		name string
+		obj  client.Object
+		want []ctrl.Request
+	}{
+		{
+			name: "not a Plugin",
+			obj:  newCM("cmX"),
+			want: nil,
+		},
+		{
+			name: "nil Config",
+			obj: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pluginX"},
+			},
+			want: nil,
+		},
+		{
+			name: "nil ConfigMapRef",
+			obj: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pluginX"},
+				Spec:       artifactv1alpha1.PluginSpec{Config: &artifactv1alpha1.PluginConfig{Name: "pluginX"}},
+			},
+			want: nil,
+		},
+		{
+			name: "valid ConfigMapRef",
+			obj: &artifactv1alpha1.Plugin{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "pluginY"},
+				Spec: artifactv1alpha1.PluginSpec{
+					Config: &artifactv1alpha1.PluginConfig{ConfigMapRef: &commonv1alpha1.ConfigMapRef{Name: "cmY"}},
+				},
+			},
+			want: []ctrl.Request{
+				{NamespacedName: client.ObjectKey{Namespace: "default", Name: "cmY"}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := r.findConfigMapsForPlugin(context.Background(), tt.obj)
 			assert.Equal(t, tt.want, got)
 		})
 	}

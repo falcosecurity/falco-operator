@@ -3,6 +3,10 @@
 This file documents all notable changes to the `falco-operator` Helm Chart. The
 release numbering uses [semantic versioning](http://semver.org).
 
+## Unreleased
+
+* Add `spec.config.configMapRef` to the Plugin CRD to read a plugin's initialization config from the `initConfig.yaml` key of a ConfigMap, as an alternative to the inline `spec.config.initConfig`.
+
 ## v0.4.0
 
 This section lists every change since 0.3.1. Upgrading from chart 0.3.x or earlier changes how

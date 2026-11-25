@@ -101,6 +101,10 @@ const (
 	// ConfigMapConfigKey is the standard key used for Falco configuration data in ConfigMaps.
 	ConfigMapConfigKey = "config.yaml"
 
+	// ConfigMapPluginInitConfigKey is the standard key used for plugin initialization configuration data in
+	// ConfigMaps.
+	ConfigMapPluginInitConfigKey = "initConfig.yaml"
+
 	// SecretUsernameKey is the key used for the username in authentication Secrets.
 	SecretUsernameKey = "username"
 

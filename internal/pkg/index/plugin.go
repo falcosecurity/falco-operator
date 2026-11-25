@@ -21,8 +21,12 @@ import (
 	commonv1alpha1 "github.com/falcosecurity/falco-operator/api/common/v1alpha1"
 )
 
-// SecretOnPlugin is the index field name for Plugin resources indexed by their SecretRef.
-const SecretOnPlugin = "SecretOnPlugin"
+const (
+	// SecretOnPlugin is the index field name for Plugin resources indexed by their SecretRef.
+	SecretOnPlugin = "SecretOnPlugin"
+	// ConfigMapOnPlugin is the index field name for Plugin resources indexed by their ConfigMapRef.
+	ConfigMapOnPlugin = "ConfigMapOnPlugin"
+)
 
 // PluginBySecretRef indexes Plugin resources by their .spec.ociArtifact.registry.auth.secretRef.name.
 var PluginBySecretRef = IndexBySecretRef(
@@ -35,11 +39,26 @@ var PluginBySecretRef = IndexBySecretRef(
 	},
 )
 
+// PluginByConfigMapRef indexes Plugin resources by their .spec.config.configMapRef.name.
+var PluginByConfigMapRef = IndexByConfigMapRef(
+	func(pl *artifactv1alpha1.Plugin) *commonv1alpha1.ConfigMapRef {
+		if pl.Spec.Config == nil {
+			return nil
+		}
+		return pl.Spec.Config.ConfigMapRef
+	},
+)
+
 // PluginIndexes holds all field indexes for Plugin resources.
 var PluginIndexes = []Entry{
 	{
 		Object:         &artifactv1alpha1.Plugin{},
 		Field:          SecretOnPlugin,
 		ExtractValueFn: PluginBySecretRef,
+	},
+	{
+		Object:         &artifactv1alpha1.Plugin{},
+		Field:          ConfigMapOnPlugin,
+		ExtractValueFn: PluginByConfigMapRef,
 	},
 }
